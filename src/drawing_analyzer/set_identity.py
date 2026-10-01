@@ -34,24 +34,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from .core.api_config import (
-    MODEL_SONNET_55,
+    MODEL_SONNET_5,
     call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
     output_cap_for_model,
 )
-from .core.reply_text import reply_text
-from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
     _is_transient_error,
+    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
     scan_structured_blocks,
-    unfinished_reply_error,
 )
 from .models import AdoptedCode, SetIdentity, source_page_key
 
@@ -89,7 +87,7 @@ _CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 
 def default_identity_model() -> str:
-    """Model for the identity pass — Sonnet 5.5 by default, overridable via
+    """Model for the identity pass — Sonnet 5 by default, overridable via
     ``DRAWING_ANALYZER_IDENTITY_MODEL``.
 
     Structured extraction over a budgeted text corpus, and **advisory only**:
@@ -101,7 +99,7 @@ def default_identity_model() -> str:
     override = os.environ.get("DRAWING_ANALYZER_IDENTITY_MODEL")
     if override and override.strip():
         return override.strip()
-    return MODEL_SONNET_55
+    return MODEL_SONNET_5
 
 
 IDENTITY_SYSTEM_PROMPT = """\
@@ -136,7 +134,7 @@ exactly: {"disciplines": [...], "sheet_disciplines": [{"sheet_id": "...", \
 "jurisdiction": "...", "country": "...", "region": "...", "language": "...", \
 "units": "...", "adopted_codes": [{"code": "...", "edition": "...", \
 "amendment_note": "...", "quote": "...", "source_sheet": "..."}], \
-"confidence": "...", "evidence": ["..."], "notes": "..."}""" + "\n\n" + SOURCE_CONTENT_RULE
+"confidence": "...", "evidence": ["..."], "notes": "..."}"""
 
 
 _IDENTITY_TASK_INSTRUCTION = (
@@ -257,41 +255,24 @@ def _edition_windows(sheet_text: str) -> list[str]:
 def _sheet_block(
     index: int, total: int, sd: SheetDigest, geom: Any, *, deep: bool
 ) -> str:
-    """One sheet's corpus block. ``deep`` sheets carry digest + text-layer slices.
-
-    A sheet whose read the model did not finish (``sd.error``: refused,
-    truncated, unfinished) contributes its ``[digest failed: …]`` line and not
-    its text, as every other consumer skips it (remediation WP-01.6, the
-    owner's rule). The text was a refusal's explanation or a cut-off read's
-    prose, and it reached the identity call although no stage may treat it as
-    a read. The text-layer slice and edition windows below are the PDF's own
-    words, not the model's, so they stay. The corpus is a key input, so only a
-    set with such a sheet re-keys the identity cache.
-    """
-    lines = [source_content_block(
-        f"===== Sheet {index}/{total}: {sd.ref.display_label} =====",
-        tag="sheet_metadata",
-    )]
+    """One sheet's corpus block. ``deep`` sheets carry digest + text-layer slices."""
+    lines = [f"===== Sheet {index}/{total}: {sd.ref.display_label} ====="]
     digest_text = (sd.text or "").strip()
-    if sd.error:
-        lines.append(source_content_block(
-            f"[digest failed: {_one_line(sd.error)[:120]}]", tag="sheet_metadata",
-        ))
-    elif digest_text:
+    if digest_text:
         cap = _FULL_DIGEST_SLICE if deep else _HEADER_SLICE
-        lines.append(source_content_block(digest_text[:cap], tag="sheet_digest"))
+        lines.append(digest_text[:cap])
+    elif sd.error:
+        lines.append(f"[digest failed: {_one_line(sd.error)[:120]}]")
     else:
         lines.append("[no digest text]")
     sheet_text = (getattr(geom, "sheet_text", "") or "") if geom is not None else ""
     if deep and sheet_text.strip():
         lines.append(f"TEXT LAYER (verbatim, first {_FULL_TEXT_SLICE} chars):")
-        lines.append(source_content_block(sheet_text[:_FULL_TEXT_SLICE], tag="sheet_text_layer"))
+        lines.append(sheet_text[:_FULL_TEXT_SLICE])
     windows = _edition_windows(sheet_text)
     if windows:
         lines.append("EDITION MENTIONS (verbatim windows):")
-        lines.append(source_content_block(
-            "\n".join(f'- "{w}"' for w in windows), tag="sheet_text_layer",
-        ))
+        lines.extend(f'- "{w}"' for w in windows)
     return "\n".join(lines)
 
 
@@ -585,16 +566,8 @@ def identify_set(
                 omitted_chars=budget.omitted_chars,
             )
 
-    text = reply_text(resp)
+    text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
-    # The stop reason first (D-1, remediation WP-01.6): an identity the model
-    # did not finish is not used, whatever parses, and is cached by nothing.
-    unfinished = unfinished_reply_error(resp, text, noun="identity")
-    if unfinished is not None:
-        return IdentityResult(
-            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
-            error=unfinished, omitted_chars=budget.omitted_chars,
-        )
     identity = parse_identity_text(text)
     if identity is None:
         return IdentityResult(

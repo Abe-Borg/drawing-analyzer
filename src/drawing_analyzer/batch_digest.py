@@ -20,9 +20,18 @@ assembled in page order regardless of completion order. Per-sheet failures
 (upload error, batch item ``errored``/``expired``) are captured on that sheet's
 :class:`SheetDigest` and never abort the rest of the set.
 
-Upload failures stay per-sheet errors. Consecutive credential or route failures
-stop further uploads; cached sheets still work. Submission never switches an
-Economy run to full-rate real-time calls.
+Files-API outage fallback: if a sheet's image upload comes back ``404`` (the
+/v1/files route is unavailable for the key/workspace while the Messages/Batches
+API itself is healthy), that sheet is digested *inline* via the real-time path
+(:func:`~drawing_analyzer.digest.digest_sheet`, base64 images in one synchronous
+vision request) and its result is attached straight to the slot — so a dead
+Files API degrades the run to per-sheet inline digests instead of zeroing it
+out. After a few consecutive 404s the doomed upload attempts stop and every
+remaining sheet goes straight to the inline path. The inline digest is the same
+shape (and shares the same cache key) as a batch digest; it just forgoes the
+50% batch discount, which is the right trade when the alternative is no result.
+A 401/403 upload rejection is credential-level — an inline request would fail
+identically — so those keep the original stop-and-skip behavior.
 
 Batch-backend outage fallback: a collected batch's retryable per-item failures
 are resubmitted while the uploaded ``file_id`` references are still alive — a
@@ -55,14 +64,6 @@ recovers every unresolved sheet through the same ``recovery_transport`` — the
 pipeline's ``RECOVERY_BATCH`` resubmits them as fresh batches (never real-time),
 so a stuck Batches backend is retried as a batch instead of degrading the run
 to full-price direct calls or losing it.
-
-Refused-item recovery (remediation WP-01.5, R2): the server-side refusal
-fallback cannot serve a batch item (the API rejects ``fallbacks`` there), so a
-sheet the model refused is resubmitted by the host, through the same recovery
-paths, on the model the registry routes its ``stop_details.category`` to
-(:func:`_refusal_retry_params`; Opus 5 routes ``cyber`` to Opus 4.8), once.
-Every resubmission of a sheet, whatever the reason and wherever it happens,
-spends one retry of a single per-sheet budget (:func:`_within_retry_budget`).
 """
 from __future__ import annotations
 
@@ -72,15 +73,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .core.api_config import (
-    REVIEW_MODEL_DEFAULT,
-    is_registered_model,
-    output_cap_for_model,
-    refusal_fallback_target,
-)
-from .core.reply_text import reply_text
-from .core.stream_interruption import StreamInterrupted
-from .core.terminal_outcome import REFUSED, classify_stop_reason
+from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
@@ -93,18 +86,12 @@ from .digest import (
     _clean_error,
     _get,
     _is_transient_error,
+    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     build_digest_request_params,
-    describe_refusal,
-    digest_cache_admits,
-    digest_terminal_error,
-    is_partial_read,
-    keep_digest_read,
-    note_failed_retry,
-    refusal_details,
-    retarget_digest_request,
-    sheet_digest_from_cache_entry,
+    digest_sheet,
+    findings_from_cache,
     stream_message,
     focus_cache_fragment,
     normalize_focus,
@@ -118,6 +105,7 @@ from .file_upload import (
     delete_files,
     iter_prefetched_sheets,
     run_fatal_upload_status,
+    upload_failure_allows_inline_fallback,
     upload_failure_hint,
     upload_sheet_images,
 )
@@ -343,10 +331,6 @@ class DigestUsageAttempt:
     # estimate is charged per *response-bearing* attempt and must not be
     # multiplied by attempts that never came back.
     billable: bool = True
-    # Remediation WP-01.7: 1 for a direct-rescue attempt whose stream was
-    # interrupted before its final usage arrived (its output was never
-    # reported, so its tokens are a lower bound), else 0.
-    interrupted_attempts: int = 0
 
 
 def _attach_usage_attempt(
@@ -355,7 +339,6 @@ def _attach_usage_attempt(
     transport: str,
     attempt_number: int,
     request_or_custom_id: str = "",
-    interrupted_attempts: int = 0,
 ) -> SheetDigest:
     """Attach this response's usage without changing cache serialization."""
     attempts = list(getattr(digest, "usage_attempts", ()) or ())
@@ -369,7 +352,6 @@ def _attach_usage_attempt(
         terminal_status="FAILED" if digest.error else "COMPLETE",
         attempt_number=max(1, int(attempt_number or 1)),
         request_or_custom_id=request_or_custom_id,
-        interrupted_attempts=int(interrupted_attempts or 0),
     ))
     # SheetDigest intentionally has no slots, so this stays a runtime-only
     # extension and cannot perturb existing cache/export schemas.
@@ -381,77 +363,22 @@ def _replace_result_with_attempt_history(
     results: list,
     slot: "_Slot",
     digest: SheetDigest,
-    *,
-    served_by: str = "",
-) -> SheetDigest:
-    """Fold a new read of a sheet into its result, keeping every attempt.
+) -> None:
+    """Replace a recovery result while retaining every earlier attempt.
 
-    The sheet keeps the better of the read it holds and ``digest``
-    (:func:`~drawing_analyzer.digest.keep_digest_read`, remediation WP-01.3,
-    N16), the one rule the real-time raised-cap retry applies too. A new read
-    used to replace the result wholesale, so a raised-cap resubmission, a
-    fresh-batch round or a direct rescue that came back empty, refused or
-    errored discarded a truncated read's prose and findings that were billed.
-    When the held read wins, its error names the discarded attempt.
-
-    Three histories merge here, oldest first, onto whichever read is kept:
-    responses already recorded on the held result, the non-billable records of
-    any batch abandoned under this slot since (drained from the slot so they
-    are recorded exactly once), and this digest's own response. ``served_by``
-    (the batch, or the direct rescue, that returned ``digest``) is recorded on
-    the slot only when ``digest`` is the read kept. Returns the kept read.
+    Three histories merge here, oldest first: responses already recorded on the
+    result being replaced, the non-billable records of any batch abandoned
+    under this slot since (drained from the slot so they are recorded exactly
+    once), and this digest's own response.
     """
     previous = results[slot.index]
     prior = list(getattr(previous, "usage_attempts", ()) or ()) if previous else []
     abandoned = _drain_abandoned_attempts(slot)
     current = list(getattr(digest, "usage_attempts", ()) or ())
     merged = prior + abandoned + current
-    kept = keep_digest_read(previous, digest)
     if merged:
-        setattr(kept, "usage_attempts", merged)
-    results[slot.index] = kept
-    if kept is digest and served_by:
-        slot.served_by = served_by
-    return kept
-
-
-def _record_interrupted_rescue(
-    results: list, slot: "_Slot", exc: StreamInterrupted, *, cache: Any,
-) -> None:
-    """Record a direct-rescue attempt whose stream was interrupted (WP-01.7).
-
-    It was billed, so it keeps an attempt record either way (the owner's
-    rule, plan WP-14 step 7). With a partial read, the read is folded into the
-    sheet's result like any rescue read (:func:`_replace_result_with_attempt_history`,
-    ``keep_digest_read``): a partial read with content outranks an errored
-    batch read, never a finished one, and is never cached. With nothing held
-    (no ``message_start``), a non-billable REAL_TIME attempt is parked on the
-    slot, counted as interrupted, and drained into the result like an
-    abandoned batch's.
-    """
-    if exc.partial is not None:
-        digest = _digest_from_message(
-            slot, exc.partial, cache=cache, transport="REAL_TIME",
-            attempt_number=slot.attempts_submitted,
-            request_or_custom_id=slot.custom_id or "",
-            interrupted=exc.label,
-        )
-        digest.rescued = True
-        _replace_result_with_attempt_history(
-            results, slot, digest, served_by="direct-call rescue",
-        )
-        return
-    slot.abandoned_attempts = list(getattr(slot, "abandoned_attempts", ()) or []) + [
-        DigestUsageAttempt(
-            transport="REAL_TIME",
-            parse_success=False,
-            terminal_status="FAILED",
-            attempt_number=max(1, int(slot.attempts_submitted or 1)),
-            request_or_custom_id=slot.custom_id or "",
-            billable=False,
-            interrupted_attempts=1,
-        )
-    ]
+        setattr(digest, "usage_attempts", merged)
+    results[slot.index] = digest
 
 
 def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
@@ -554,18 +481,6 @@ class _Slot:
     # Number of Messages attempts accepted/submitted for this sheet. Failed
     # batch-level submits do not increment it; direct-call transient retries do.
     attempts_submitted: int = 0
-    # Remediation WP-01.5 (R2; the owner's rules): the resubmissions of this
-    # sheet so far, whatever the reason (a transient or expired item, a raised
-    # cap, a refusal fallback, an abandoned batch), at every site: a fresh
-    # batch round, the follow-up batch, a direct-call rescue (one per rescued
-    # sheet, however many transient retries its call makes). Bounded by the
-    # one per-sheet retry budget, :func:`_max_batch_resubmit_rounds`.
-    retries: int = 0
-    # The params of this sheet's latest submission (``None``: the primary's,
-    # ``params``). A read parsed from it knows the model it was sent to, so a
-    # refusal fallback's read is worded and named with its model, and a
-    # fallback that refuses too is not retried again.
-    last_params: dict | None = None
 
 
 @dataclass
@@ -645,38 +560,17 @@ def _finish_digest_uploads(
         )
 
 
-def _item_error_type(result_obj: Any) -> str:
-    """An ``errored`` item's error type, read where the API nests it.
-
-    The item's ``error`` is an error *response* (``type: "error"``) whose own
-    ``error`` carries the type (WP-02.3), so ``result.error.type`` is not it.
-    Tolerant of a flat shape (``result.error.type`` holding the type) too.
-    Empty for an item with no error (``canceled``, ``expired``).
-    """
-    error = _get(result_obj, "error", None)
-    if error is None:
-        return ""
-    inner = _get(error, "error", error)
-    return str(_get(inner, "type", "") or "")
-
-
-def _batch_item_error_text(result_obj: Any, *, noun: str = "request") -> str:
-    """Human-readable error for a non-succeeded batch item (no repr noise).
-
-    ``<type>: <message>`` for an errored item, else ``batch <noun> <result
-    type>``. The one helper for both batch transports (remediation WP-01.5):
-    the critique passes ``noun="item"`` and keeps its ``batch item canceled``
-    wording, and gains the type it used to drop.
-    """
+def _batch_item_error_text(result_obj: Any) -> str:
+    """Human-readable error for a non-succeeded batch item (no repr noise)."""
     rtype = _get(result_obj, "type", "errored") or "errored"
     error = _get(result_obj, "error", None)
     if error is not None:
         inner = _get(error, "error", error)
-        etype = _item_error_type(result_obj)
+        etype = str(_get(inner, "type", "") or "")
         emsg = str(_get(inner, "message", "") or "").strip()
         if emsg:
             return f"{etype}: {emsg}" if etype else emsg
-    return f"batch {noun} {rtype}"
+    return f"batch request {rtype}"
 
 
 # Batch-item error types that are PERMANENT: the request itself was rejected,
@@ -684,18 +578,10 @@ def _batch_item_error_text(result_obj: Any, *, noun: str = "request") -> str:
 # on an ``errored`` item — ``api_error``, ``overloaded_error``, and whatever
 # transient types the future brings — is a server-side blip the Batches docs
 # call "safe to retry", and an ``expired`` item is explicitly "resubmit".
-#
-# ``billing_error`` is one of the SDK's nine batch error types (``ErrorObject``)
-# and a rejection of the ACCOUNT: the identical item fails the same way while
-# the account is out of credit, so it is permanent (remediation WP-01.5, the
-# owner's rule; it was resubmitted like a server blip). ``request_too_large``
-# is not one of the nine: it is the API's 413 type, kept as a permanent
-# rejection (the owner's rule), since an item so typed can only fail again.
 _PERMANENT_ITEM_ERROR_TYPES = frozenset(
     {
         "invalid_request_error",
         "authentication_error",
-        "billing_error",
         "permission_error",
         "not_found_error",
         "request_too_large",
@@ -727,94 +613,26 @@ def _item_retry_params(
     doubling starts from it, so evaluating a follow-up-round failure keeps
     raising the cap (2x → 4x, bounded by :data:`MAX_TOKENS_RETRY_CEILING`)
     instead of re-proposing the exact cap that just came back empty.
-
-    A fourth shape since remediation WP-01.5 (R2): a "succeeded" item the model
-    REFUSED is resubmitted on its fallback model when the registry routes its
-    category (:func:`_refusal_retry_params`), once per sheet. Whether any of
-    these is actually resubmitted is also bounded by the sheet's one retry
-    budget, which every site checks before it resubmits
-    (:func:`_within_retry_budget`).
-
-    The decision itself is :func:`_retry_params_for`, which the batch
-    critique asks about each of its failed reads too (remediation WP-01.8,
-    the owner's rule: one predicate for both batch transports).
     """
     params = slot.params if params is None else params
-    return _retry_params_for(
-        result_obj,
-        params=params,
-        requested_model=str((slot.params or {}).get("model") or ""),
-        stop_reason=digest.stop_reason if digest is not None else None,
-        failed=bool(digest is not None and digest.error),
-        label=f"{slot.custom_id} ({slot.ref.display_label})",
-        noun="digest",
-        on_not_retried=(
-            (lambda reason: _note_not_retried(digest, reason)) if digest is not None else None
-        ),
-    )
-
-
-def _retry_params_for(
-    result_obj: Any,
-    *,
-    params: dict | None,
-    requested_model: str,
-    stop_reason: str | None,
-    failed: bool,
-    label: str,
-    noun: str,
-    on_not_retried: Callable[[str], None] | None = None,
-) -> dict | None:
-    """The request to resubmit one failed batch item with, or ``None``.
-
-    The one retry predicate of both batch transports (remediation WP-01.8,
-    the owner's rule): the digest asks it about a sheet's item
-    (:func:`_item_retry_params`) and the batch critique about each of a
-    sheet's reads (``batch_critique``). ``result_obj`` is the item's result
-    (``type`` ``succeeded`` / ``errored`` / ``expired`` / ``canceled``),
-    ``params`` the request the item was last submitted with,
-    ``requested_model`` the model the stage asked for (a refusal from any
-    other model came from a fallback, and ends the chain), ``stop_reason``
-    and ``failed`` the verdict on a ``succeeded`` item's reply, ``label`` and
-    ``noun`` the log's words for the item, and ``on_not_retried`` receives
-    the reason a refusal whose category has no route is not retried, for the
-    item's error.
-
-    * ``expired``: resubmitted as it was;
-    * ``errored``: resubmitted as it was, unless its type is a permanent
-      rejection (:data:`_PERMANENT_ITEM_ERROR_TYPES`);
-    * ``succeeded``, refused: on its registry fallback, once
-      (:func:`_refusal_retry_params`);
-    * ``succeeded``, stopped at ``max_tokens``: at twice the cap, up to
-      :data:`MAX_TOKENS_RETRY_CEILING`, clamped to what the item's model
-      serves; ``None`` once there is no headroom left;
-    * anything else (``canceled``, a finished reply, another stop): ``None``.
-    """
     if params is None:
         return None
     rtype = _get(result_obj, "type", None)
     if rtype == "expired":
         return params
     if rtype == "errored":
-        return None if _item_error_type(result_obj) in _PERMANENT_ITEM_ERROR_TYPES else params
+        error = _get(result_obj, "error", None)
+        inner = _get(error, "error", error) if error is not None else None
+        etype = str(_get(inner, "type", "") or "")
+        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else params
     if (
         rtype == "succeeded"
-        and failed
-        and classify_stop_reason(stop_reason).kind == REFUSED
-    ):
-        return _refusal_retry_params(
-            result_obj, params, requested_model=requested_model, label=label,
-            noun=noun, on_not_retried=on_not_retried,
-        )
-    if (
-        rtype == "succeeded"
-        and failed
-        # Deliberately NOT "and the reply is empty": a partial body is exactly
+        and digest is not None
+        and digest.error
+        # Deliberately NOT ``and not digest.text``: a partial body is exactly
         # the case the raised cap exists to finish, and requiring emptiness let
-        # every nonempty truncation through unretried. Only a ``max_tokens``
-        # stop qualifies: a raised cap cannot finish a refusal, a read that
-        # never reported a stop reason, or a full context window.
-        and classify_stop_reason(stop_reason).raised_cap_may_finish
+        # every nonempty truncation through unretried.
+        and digest.stop_reason == "max_tokens"
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
         raised = min(old * 2, MAX_TOKENS_RETRY_CEILING)
@@ -846,164 +664,10 @@ def _is_retryable_server_failure(result_obj: Any) -> bool:
         return True
     if rtype != "errored":
         return False
-    return _item_error_type(result_obj) not in _PERMANENT_ITEM_ERROR_TYPES
-
-
-def _fallback_model_of(slot: "_Slot") -> str | None:
-    """The model a refusal fallback sent this sheet's latest submission to.
-
-    ``None`` while the sheet is still on its requested model. Read from the
-    latest submission's params, so a read parsed from it is worded with the
-    model that produced it (remediation WP-01.5).
-    """
-    requested = str((slot.params or {}).get("model") or "")
-    submitted = str((slot.last_params or slot.params or {}).get("model") or "")
-    if requested and submitted and submitted != requested:
-        return submitted
-    return None
-
-
-def _note_not_retried(digest: Any, reason: str) -> None:
-    """Say in a refused read's error why it was not retried (WP-01.5).
-
-    Only for a refusal that names a category with no route: the owner's rule
-    words it ``…; not retried: no fallback for category 'bio' on <model>``.
-    Idempotent, so a read judged twice is not annotated twice. ``digest`` is a
-    digest item's :class:`SheetDigest` or a batch critique read's outcome
-    (remediation WP-01.8): anything with an ``error``.
-    """
-    note = f"; not retried: {reason}"
-    if digest.error and note not in digest.error:
-        digest.error += note
-
-
-def _refusal_retry_params(
-    result_obj: Any,
-    params: dict,
-    *,
-    requested_model: str,
-    label: str,
-    noun: str = "digest",
-    on_not_retried: Callable[[str], None] | None = None,
-) -> dict | None:
-    """The fallback request for a refused batch item, or ``None`` (R2).
-
-    Remediation WP-01.5 (the owner's rules). The ``fallbacks`` parameter is
-    rejected on the Batches API, so a batch item gets no server-side
-    fallback; the host resubmits it instead, as a batch item, on the model
-    the registry routes its ``stop_details.category`` to:
-
-    * **The gate** is :func:`~drawing_analyzer.core.api_config.refusal_fallback_target`:
-      a category with no route (for Opus 5, everything but ``cyber``), no
-      category at all (``null``, the model's own decline, or no
-      ``stop_details``) and a model that declares no route are not retried.
-    * **The target** is ``stop_details.recommended_model`` when it names a
-      registered model other than the one that refused, else the route's.
-      The gate decides whether, the target decides where, so the hint never
-      opens an unrouted category. On a batch item the hint is absent in
-      practice: the API sets it only when a server-side fallback attempt
-      could not run.
-    * **Once per sheet.** A refusal from an item that was already sent to a
-      fallback means the whole chain refused, and ends there.
-
-    The request is rebuilt for the target
-    (:func:`~drawing_analyzer.digest.retarget_digest_request`), so it is one
-    the target takes. The decision, the category, the hint, the target and
-    the explanation go to the diagnostics log (:func:`~drawing_analyzer.digest.describe_refusal`);
-    the item's error already names the category, and ``on_not_retried``
-    receives the reason a named category is not retried.
-
-    Slot-agnostic since remediation WP-01.8: ``requested_model`` is the model
-    the stage asked for, ``label`` and ``noun`` word the log (``digest`` for a
-    digest item, ``critique`` for a batch critique read), so the one gate
-    serves both batch transports.
-    """
-    model = str(params.get("model") or "")
-    requested = requested_model
-    details = refusal_details(_get(result_obj, "message"))
-    category = details.category if details is not None else None
-    if requested and model != requested:
-        _log.info(
-            "refused %s for %s on the fallback %s too (%s); not retried",
-            noun, label, model, describe_refusal(details),
-        )
-        return None
-    route = refusal_fallback_target(model, category)
-    if route is None:
-        if category and on_not_retried is not None:
-            on_not_retried(f"no fallback for category {category!r} on {model}")
-        _log.info(
-            "refused %s for %s not retried: no fallback route on %s (%s)",
-            noun, label, model, describe_refusal(details),
-        )
-        return None
-    target = route
-    hint = details.recommended_model if details is not None else None
-    if hint and hint != model and is_registered_model(hint):
-        target = hint
-    elif hint and hint != route:
-        _log.info(
-            "refused %s for %s: recommended_model %r is not a registered "
-            "model other than %s; using the route's %s",
-            noun, label, hint, model, route,
-        )
-    _log.info(
-        "refused %s for %s (%s): retrying on %s",
-        noun, label, describe_refusal(details), target,
-    )
-    return retarget_digest_request(params, target)
-
-
-def _retry_budget_of(item: Any) -> Any:
-    """The object that counts ``item``'s sheet's retries (``.retries``).
-
-    A digest slot is one item per sheet and counts its own; a batch critique
-    read counts against its sheet (``retry_budget``, remediation WP-01.8, the
-    owner's rule: one per-sheet budget, every resubmitted read counts one).
-    """
-    return getattr(item, "retry_budget", item)
-
-
-def _within_retry_budget(items: list, *, where: str) -> list:
-    """The ``(item, params)`` items whose sheet has a retry left (WP-01.5).
-
-    The one per-sheet retry budget (the owner's rule):
-    :func:`_max_batch_resubmit_rounds`, default
-    :data:`DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS`, shared by every reason a sheet
-    is resubmitted and checked at every site before it resubmits. A sheet
-    whose budget is spent keeps the read it has.
-
-    An item is a digest slot or a batch critique read (remediation WP-01.8):
-    several reads of one sheet can be in ``items`` at once, so each one this
-    call keeps counts against its sheet before the next is judged, in order,
-    and a read the budget cannot cover keeps its read. A digest slot appears
-    once per call, so its answer is unchanged.
-    """
-    budget = _max_batch_resubmit_rounds()
-    taken: dict[int, int] = {}
-    kept = []
-    for item, params in items:
-        holder = _retry_budget_of(item)
-        spent = holder.retries + taken.get(id(holder), 0)
-        if spent < budget:
-            kept.append((item, params))
-            taken[id(holder)] = taken.get(id(holder), 0) + 1
-        else:
-            _log.warning(
-                "%s: %s (%s) keeps its read; its retry budget (%d) is spent",
-                where, item.custom_id, item.ref.display_label, budget,
-            )
-    return kept
-
-
-def _count_retry(item: Any, params: dict) -> None:
-    """Record one resubmission of ``item`` with ``params`` (WP-01.5).
-
-    ``item`` is a digest slot or a batch critique read (WP-01.8): its sheet
-    spends one retry and ``item.last_params`` records what was sent.
-    """
-    _retry_budget_of(item).retries += 1
-    item.last_params = params
+    error = _get(result_obj, "error", None)
+    inner = _get(error, "error", error) if error is not None else None
+    etype = str(_get(inner, "type", "") or "")
+    return etype not in _PERMANENT_ITEM_ERROR_TYPES
 
 
 def _rescue_reserve_seconds(max_elapsed_seconds: float) -> float:
@@ -1061,13 +725,12 @@ def _park_usage_attempts(slot: "_Slot", digest: SheetDigest) -> None:
     """Hold a harvested-but-unusable item's BILLED attempt records on the slot.
 
     An item can come back ``succeeded`` from the batch and still yield no
-    usable digest (empty, or refused). That attempt was charged, so dropping
+    usable digest (empty or truncated). That attempt was charged, so dropping
     it because its text is unusable would understate the run — the §15.6 ledger
     describes work that HAPPENED. The slot is not resolved by it, so the sheet
     still goes to the rescue; the records ride along and are merged into
     whatever digest finally lands
-    (:func:`_replace_result_with_attempt_history`). A read with content that
-    did not finish is not parked but held as the sheet's result (N16).
+    (:func:`_replace_result_with_attempt_history`).
     """
     attempts = list(getattr(digest, "usage_attempts", ()) or ())
     if not attempts:
@@ -1130,32 +793,11 @@ class _HarvestOutcome:
     Those still need recovery, but their attempt was **served, not abandoned**,
     so they must be excluded from :func:`_mark_batch_abandoned` — see
     :func:`_park_usage_attempts`.
-
-    Remediation WP-01.5 (the owner's rule: the harvest asks the same
-    predicate). ``final`` names the responded slots the caller must NOT
-    resubmit: a permanent error, or a refusal :func:`_item_retry_params` does
-    not retry. Their read is the sheet's result. ``retry`` maps a responded
-    slot to the params its resubmission must carry when they are not the ones
-    it was submitted with: a refusal's fallback item. Every other unresolved
-    slot is resubmitted as it was submitted, as before.
     """
 
     resolved: frozenset[int] = frozenset()
     responded: frozenset[int] = frozenset()
     elapsed: float = 0.0
-    final: frozenset[int] = frozenset()
-    retry: dict = field(default_factory=dict)
-
-    def rescue_params(self, slot: "_Slot", params: dict) -> dict | None:
-        """What to resubmit ``slot`` with after this harvest, or ``None``.
-
-        ``None`` for a slot the harvest resolved or holds as final; the
-        refusal's fallback params when it has them; else ``params``, the
-        request the caller would have resubmitted anyway.
-        """
-        if slot.index in self.resolved or slot.index in self.final:
-            return None
-        return self.retry.get(slot.index, params)
 
 
 def _harvest_abandoned_batch(
@@ -1195,20 +837,10 @@ def _harvest_abandoned_batch(
     * **Bounded, and never at the rescue's expense.** A batch that does not
       settle, an unreadable ``results()``, or any exception returns an empty set
       and the caller resubmits everything, exactly as it does today.
-    * **Successes only.** An item that came back errored, empty or unfinished
-      does not resolve its slot — it still needs the rescue. Its billed
-      attempt is never dropped, because it really was charged: a read the
-      model did not finish that carries prose or findings is held as the
-      sheet's result (:func:`_replace_result_with_attempt_history`,
-      remediation WP-01.3, N16), so the rescue can only improve on it and a
-      rescue that never lands leaves it rather than "not collected"; any other
-      item's attempt records are parked on the slot
-      (:func:`_park_usage_attempts`). Since remediation WP-01.5 a refusal is
-      held too, and the harvest asks the retry predicate about what it read:
-      a permanent error, or a refusal it does not retry, is ``final`` (held,
-      not resubmitted); a refusal it retries carries its fallback params in
-      ``retry``. The caller builds its list with
-      :meth:`_HarvestOutcome.rescue_params`.
+    * **Successes only.** An item that came back errored or empty does not
+      resolve its slot — it still needs the rescue — but its billed attempt
+      records are parked on the slot (:func:`_park_usage_attempts`) rather than
+      dropped, because that attempt really was charged.
     * **Never fatal.** Recovery is best-effort; a harvest failure can only cost
       the optimization, never the run (I-3).
     """
@@ -1248,8 +880,6 @@ def _harvest_abandoned_batch(
         return _HarvestOutcome(elapsed=time.monotonic() - started)
     harvested: set[int] = set()
     responded: set[int] = set()
-    final: set[int] = set()
-    retry: dict[int, dict] = {}
     billed_but_unusable = 0
     for slot in targets:
         res = raw.get(slot.custom_id)
@@ -1265,55 +895,17 @@ def _harvest_abandoned_batch(
             continue
         responded.add(slot.index)
         if digest.error is not None:
+            _park_usage_attempts(slot, digest)
             billed_but_unusable += 1
-            # Remediation WP-01.5 (the owner's rule): the harvest asks the
-            # retry predicate about what it read. A permanent error, or a
-            # refusal the predicate does not retry, is not resubmitted; a
-            # refusal it retries goes to its fallback. Everything else is
-            # resubmitted as it was submitted, as before (an item this cancel
-            # stopped reads ``canceled`` and must be).
-            rr = _get(res, "result")
-            refused = classify_stop_reason(digest.stop_reason).kind == REFUSED
-            fallback: dict | None = None
-            if refused:
-                fallback = _item_retry_params(
-                    slot, rr, digest, params=slot.last_params or slot.params,
-                )
-                is_final = fallback is None
-            else:
-                is_final = (_get(rr, "type") == "errored"
-                            and _item_error_type(rr) in _PERMANENT_ITEM_ERROR_TYPES)
-            if is_final:
-                # Final: the read is the sheet's result, never "not collected".
-                final.add(slot.index)
-                _replace_result_with_attempt_history(
-                    results, slot, digest, served_by=batch_id,
-                )
-                continue
-            if fallback is not None:
-                retry[slot.index] = fallback
-            if refused or is_partial_read(digest):
-                # A read the model did not finish but that carries prose or
-                # findings is held as the sheet's result (N16), so the rescue
-                # it still gets can only improve on it; one the rescue never
-                # reaches keeps it instead of "not collected". A refusal is
-                # held too (it ranks above nothing), so a fallback that comes
-                # back worse, or never lands, leaves the refusal named. The
-                # slot stays unresolved.
-                _replace_result_with_attempt_history(
-                    results, slot, digest, served_by=batch_id,
-                )
-            else:
-                _park_usage_attempts(slot, digest)
             continue
-        _replace_result_with_attempt_history(results, slot, digest, served_by=batch_id)
+        slot.served_by = batch_id
+        _replace_result_with_attempt_history(results, slot, digest)
         harvested.add(slot.index)
     _log.info(
         "harvested %d/%d completed sheet(s) from abandoned batch %s (status=%s, "
-        "%d returned no usable digest, %d not to be resubmitted); %d sheet(s) "
-        "still need recovery",
+        "%d returned no usable digest); %d sheet(s) still need recovery",
         len(harvested), len(targets), batch_id, status, billed_but_unusable,
-        len(final), len(targets) - len(harvested) - len(final),
+        len(targets) - len(harvested),
     )
     if on_log is not None and harvested:
         on_log(
@@ -1324,79 +916,7 @@ def _harvest_abandoned_batch(
         resolved=frozenset(harvested),
         responded=frozenset(responded),
         elapsed=time.monotonic() - started,
-        final=frozenset(final),
-        retry=retry,
     )
-
-
-def _abandon_after_collect_error(
-    batch: "DrawingBatch",
-    results: list,
-    *,
-    client: Any,
-    cache: Any,
-    status: str | None,
-    sleep: Callable[[float], None],
-    max_elapsed_seconds: float,
-    cleanup_in_background: bool,
-) -> None:
-    """Keep what a batch finished and release what is safe, after a collect error.
-
-    Remediation WP-11.2 (R1; the owner's rule: harvest, then release). Called
-    by :func:`collect_drawing_batch` when an unexpected exception escapes it
-    after the submit: the caller's progress or log callback during the poll,
-    the stalled-batch branch, a parse or cache error. The disposition is the
-    abandon path's (DA-034, DA-035):
-
-    - a batch whose ``status`` (the poll's, or one retrieve's) is terminal
-      releases its files; one that is not is canceled (best effort, like
-      :func:`_cancel_batch` everywhere) and releases its files only once the
-      cancel is accepted. A batch this cannot cancel may still be running and
-      needs them, so they stay;
-    - before the release, :func:`_harvest_abandoned_batch` reads back what the
-      batch finished into ``results`` (and, when a cache is active, the
-      cache): those reads were billed, and the error happened after them.
-
-    No caller callback is used, since it may be what failed. Never raises: the
-    caller propagates its own exception after this returns.
-    """
-    try:
-        if status not in ("ended", "failed", "expired", "canceled"):
-            try:
-                status = _normalize_status(_get(
-                    client.messages.batches.retrieve(batch.batch_id),
-                    "processing_status",
-                ))
-            except Exception as exc:  # noqa: BLE001 - treated as still running
-                _log.warning(
-                    "batch %s status unknown after a collection error: %s",
-                    batch.batch_id, summarize_exc(exc),
-                )
-                status = None
-        settled = status in ("ended", "failed", "expired", "canceled") or _cancel_batch(
-            client, batch.batch_id,
-        )
-        if not settled:
-            _log.warning(
-                "batch %s may still be running after a collection error; its "
-                "uploaded files are kept for it", batch.batch_id,
-            )
-            return
-        _harvest_abandoned_batch(
-            [s for s in batch.submitted_slots if results[s.index] is None],
-            results,
-            batch_id=batch.batch_id,
-            client=client, cache=cache, on_log=None, sleep=sleep,
-            budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
-        )
-        _release_uploaded_files(
-            client, _take_slot_upload_ids(batch.slots),
-            in_background=cleanup_in_background, on_log=None,
-        )
-    except Exception as exc:  # noqa: BLE001 - never masks the caller's error
-        _log.warning(
-            "cleanup after a batch collection error failed: %s", summarize_exc(exc),
-        )
 
 
 def _rescue_failed_items_sync(
@@ -1420,7 +940,8 @@ def _rescue_failed_items_sync(
     carrying the item's exact request params
     (the uploaded ``file_id`` references are still alive — cleanup runs only
     after recovery), so batch processing is bypassed entirely. Costs the 50%
-    batch discount for just the rescued sheets.
+    batch discount for just the rescued sheets — the same trade the 404 inline
+    fallback makes when the alternative is no result.
 
     Sequential and bounded by ``max_elapsed_seconds`` (the remainder of the
     collect budget). The bound is best-effort in the same sense as the batch
@@ -1430,27 +951,12 @@ def _rescue_failed_items_sync(
     further sheet is attempted. Sheets not reached keep their batch error. A
     transient failure on a rescue call is retried with the real-time digest
     policy (:data:`~drawing_analyzer.digest.DEFAULT_DIGEST_MAX_RETRIES`,
-    exponential backoff); a permanent one keeps that sheet's batch-round read
-    or error, which then names the failed rescue (remediation WP-01.3, N16).
-    A rescue that lands keeps the better of the two reads
-    (:func:`_replace_result_with_attempt_history`), so a partial batch read
-    survives an empty or refused rescue. A rescue attempt whose stream is
-    interrupted (remediation WP-01.7) is retried when its cause is transient,
-    and keeps an attempt record either way: its partial read is folded like
-    any rescue read, and one that held nothing is a non-billable interrupted
-    record (:func:`_record_interrupted_rescue`). Returns the number of sheets
-    recovered.
-
-    Each rescued sheet spends one of its retries (remediation WP-01.5, the
-    owner's rule: one per-sheet budget at every site), however many transient
-    retries its call makes; a sheet whose budget is spent is not rescued and
-    keeps its read. A refused sheet reaches here only under ``RECOVERY_DIRECT``
-    (the full-rate policy a caller selects), carrying its fallback params.
+    exponential backoff); a permanent one keeps that sheet's — fresher —
+    batch error. Returns the number of sheets recovered.
     """
     started = time.monotonic()
     recovered = 0
     out_of_budget = False
-    budget = _max_batch_resubmit_rounds()
     for pos, (slot, params) in enumerate(rescue):
         if out_of_budget or time.monotonic() - started >= max_elapsed_seconds:
             _log.warning(
@@ -1459,21 +965,12 @@ def _rescue_failed_items_sync(
                 len(rescue) - pos, len(rescue),
             )
             break
-        if slot.retries >= budget:
-            _log.warning(
-                "direct-call rescue skipped for %s (%s): its retry budget (%d) is "
-                "spent; keeping its read", slot.custom_id, slot.ref.display_label,
-                budget,
-            )
-            continue
-        _count_retry(slot, params)
         attempt = 0
         message = None
-        call_error: Exception | None = None
         while True:
             try:
                 # Streamed rather than a plain ``create`` (via the shared
-                # ``stream_message``, which also applies the refusal
+                # ``stream_message``, which also applies the Opus 5 refusal
                 # fallback — see its docstring): the rescue may carry a raised
                 # max_tokens cap (up to ``MAX_TOKENS_RETRY_CEILING``) for an
                 # empty-at-max_tokens item, and the SDK refuses a non-streaming
@@ -1485,11 +982,6 @@ def _rescue_failed_items_sync(
                 message = stream_message(client, params)
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
-                call_error = exc
-                if isinstance(exc, StreamInterrupted):
-                    # Billed: the attempt is recorded, and a partial read is
-                    # folded like any rescue read (remediation WP-01.7).
-                    _record_interrupted_rescue(results, slot, exc, cache=cache)
                 if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
                     backoff = _retry_backoff_seconds(attempt)
                     remaining = max_elapsed_seconds - (time.monotonic() - started)
@@ -1521,37 +1013,22 @@ def _rescue_failed_items_sync(
                 )
                 break
         if message is None:
-            # The sheet keeps its batch-round read (or error), and that read's
-            # error names the rescue that failed (N16), as a real-time
-            # raised-cap retry that raises is named. A rescue whose last
-            # attempt was an interrupted stream holding a partial read was
-            # folded as a read already (remediation WP-01.7), so it is not
-            # named twice.
-            held = results[slot.index]
-            if call_error is not None and held is not None and not (
-                isinstance(call_error, StreamInterrupted) and call_error.partial is not None
-            ):
-                note_failed_retry(
-                    held, _clean_error(call_error), model=_fallback_model_of(slot),
-                )
-            continue
+            continue  # the sheet keeps its batch-round error
         digest = _digest_from_message(
             slot, message, cache=cache, transport="REAL_TIME",
             attempt_number=slot.attempts_submitted,
             request_or_custom_id=request_id_of(message) or (slot.custom_id or ""),
         )
+        # Not a batch at all — say so rather than crediting some batch id with
+        # a digest a full-rate direct call produced.
+        slot.served_by = "direct-call rescue"
         # This sheet was digested by a synchronous real-time call, not the Batches
         # API, so it is billed at the full rate — mark it so the usage ledger does
         # not apply the 50% batch discount to it (Phase 23B pricing correctness).
         digest.rescued = True
-        # The sheet keeps the better of its batch-round read and this one
-        # (N16): a partial read survives an empty or refused rescue, while an
-        # empty result still replaces a batch error that carried no content.
-        # Not a batch at all when it is kept — say so rather than crediting
-        # some batch id with a digest a full-rate direct call produced.
-        _replace_result_with_attempt_history(
-            results, slot, digest, served_by="direct-call rescue",
-        )
+        # Even an empty-digest result is fresher provenance than the batch
+        # error it replaces, and its stop_reason names what happened.
+        _replace_result_with_attempt_history(results, slot, digest)
         if digest.error is None:
             recovered += 1
             _log.info(
@@ -1672,12 +1149,6 @@ def _recover_via_batch_resubmit(
     resubmission may still be referencing the shared uploaded files, so the
     caller may release them. ``files_safe`` goes ``False`` only when a
     non-terminal resubmission could not be canceled (it may still be running).
-
-    Two bounds, one value (remediation WP-01.5, the owner's rule): the round
-    ceiling bounds the fresh batches this submits, a rejected submit included,
-    and the per-sheet retry budget bounds how often each sheet is resubmitted,
-    whatever the reason and at whichever site (:func:`_within_retry_budget`).
-    A refused sheet rides the same rounds on its fallback model.
     """
     started = time.monotonic()
     recovered = 0
@@ -1685,7 +1156,6 @@ def _recover_via_batch_resubmit(
     pending = list(items)
     max_rounds = _max_batch_resubmit_rounds()
     for round_no in range(1, max_rounds + 1):
-        pending = _within_retry_budget(pending, where=f"batch-resubmit round {round_no}")
         if not pending:
             break
         budget_left = max_elapsed_seconds - (time.monotonic() - started)
@@ -1723,12 +1193,10 @@ def _recover_via_batch_resubmit(
             continue
         retry_id = _get(mb, "id")
         # The batch submission was accepted; each item now has one additional
-        # Messages attempt, and its sheet spent one retry (WP-01.5). A
-        # rejected batch-level submit above is not billable per item and
-        # intentionally advances neither.
-        for slot, params in pending:
+        # Messages attempt. A rejected batch-level submit above is not billable
+        # per item and intentionally does not advance this counter.
+        for slot, _params in pending:
             slot.attempts_submitted += 1
-            _count_retry(slot, params)
         _log.info(
             "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
             round_no, retry_id, len(reqs), request_id_of(mb),
@@ -1764,15 +1232,14 @@ def _recover_via_batch_resubmit(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
-            recovered += len(harvest.resolved)
-            # What the harvest resolved or holds as final is not carried
-            # forward; a refusal it read goes on with its fallback (WP-01.5).
-            pending = [
-                (s, again) for s, prm in pending
-                if (again := harvest.rescue_params(s, prm)) is not None
-            ]
-            if not pending:
-                break
+            if harvest.resolved:
+                recovered += len(harvest.resolved)
+                pending = [
+                    (s, prm) for s, prm in pending
+                    if s.index not in harvest.resolved
+                ]
+                if not pending:
+                    break
             _mark_batch_abandoned(
                 [slot for slot, _ in pending
                  if slot.index not in harvest.responded],
@@ -1813,12 +1280,10 @@ def _recover_via_batch_resubmit(
                 still.append((slot, params))
                 continue
             digest = _parse_item(slot, res, cache=cache)
-            # The sheet keeps the better of the read it holds and this round's
-            # (N16); a batch digest, so no ``rescued`` full-rate flag. Whether
-            # to go another round is still decided by this round's read.
-            _replace_result_with_attempt_history(
-                results, slot, digest, served_by=retry_id,
-            )
+            slot.served_by = retry_id
+            # Fresher provenance than the error it replaces, even if still empty
+            # — and a batch digest, so no ``rescued`` full-rate flag.
+            _replace_result_with_attempt_history(results, slot, digest)
             if digest.error is None:
                 recovered += 1
                 continue
@@ -1873,9 +1338,8 @@ def _resubmit_failed_items(
     (:func:`_rescue_failed_items_sync`): one synchronous Messages call per
     item, reusing the same params and still-uploaded ``file_id``s, so a
     Batches-backend outage no longer zeroes the run. A sheet the rescue can't
-    recover keeps its best read, or its fresher error when no read carried
-    content (:func:`_replace_result_with_attempt_history`, N16), rather than
-    looping, so a systemic outage still ends with clean per-sheet errors.
+    recover keeps its (fresher) error rather than looping, so a systemic
+    outage still ends with clean per-sheet errors.
     Returns ``True`` when the uploaded files are safe to delete afterwards;
     ``False`` when the follow-up batch detached (still running remotely, so it
     still needs the files — mirroring the primary batch's detach policy).
@@ -1991,9 +1455,6 @@ def _resubmit_failed_items(
         )
         return True
 
-    retry = _within_retry_budget(retry, where="follow-up batch")
-    if not retry:
-        return True
     _log.info("resubmitting %d failed batch item(s) in a follow-up batch", len(retry))
     if on_log is not None:
         on_log(f"Retrying {len(retry)} failed sheet(s) in a follow-up batch")
@@ -2011,9 +1472,8 @@ def _resubmit_failed_items(
         _rescue_remaining(retry)
         return True
     retry_id = _get(mb, "id")
-    for slot, params in retry:
+    for slot, _params in retry:
         slot.attempts_submitted += 1
-        _count_retry(slot, params)
     _log.info(
         "follow-up batch submitted: id=%s items=%d request_id=%s",
         retry_id, len(reqs), request_id_of(mb),
@@ -2052,10 +1512,11 @@ def _resubmit_failed_items(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
-            retry = [
-                (s, again) for s, prm in retry
-                if (again := harvest.rescue_params(s, prm)) is not None
-            ]
+            if harvest.resolved:
+                retry = [
+                    (s, prm) for s, prm in retry
+                    if s.index not in harvest.resolved
+                ]
             _mark_batch_abandoned(
                 [slot for slot, _ in retry
                  if slot.index not in harvest.responded],
@@ -2094,10 +1555,10 @@ def _resubmit_failed_items(
             rescue.append((slot, params))
             continue
         digest = _parse_item(slot, res, cache=cache)
+        slot.served_by = retry_id
         if digest.error is None:
             recovered += 1
-        # The better of the first round's read and this one (N16).
-        _replace_result_with_attempt_history(results, slot, digest, served_by=retry_id)
+        _replace_result_with_attempt_history(results, slot, digest)
         # An item still failing retryably after BOTH batch rounds is the batch
         # backend itself erroring — hand it to the direct-call rescue. Passing
         # the follow-up round's params keeps the empty-at-max_tokens cap
@@ -2146,7 +1607,6 @@ def submit_drawing_batch(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     specs_text: str | None = None,
-    slots_out: "list[_Slot] | None" = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -2167,207 +1627,279 @@ def submit_drawing_batch(
     breakpoint on the actual batch-item build below (``cache_specs=False``):
     batch items submit in parallel, so a cache breakpoint here would only add
     the 1.25x write cost to every item with nothing yet written to read (see
-    :func:`drawing_analyzer.digest.digest_system_prompt`).
-
-    **Cleanup (DA-034, remediation WP-11.2).** Any unexpected error that escapes
-    the upload loop (the caller's progress or status callback, a cache, a
-    request that could not be built) deletes every file uploaded so far,
-    including a sheet whose images landed before its slot was recorded, then
-    propagates: no batch will ever reference them. It used to propagate with
-    every upload still remote; ``submit_critique_batch`` already had this guard.
-    ``slots_out`` (an empty list), when given, is the list the slots are
-    recorded in, so a caller that contains the error keeps what was resolved
-    before it, including cache hits and per-sheet upload errors.
+    :func:`drawing_analyzer.digest.digest_system_prompt`). The Files-API-
+    unavailable inline fallback (:func:`_serve_inline`) runs sequentially on
+    the calling thread instead, so it gets the real caching benefit via
+    :func:`~drawing_analyzer.digest.digest_sheet`'s own default.
     """
     focus = normalize_focus(focus)
     focus_fragment = focus_cache_fragment(focus)
     specs_text = normalize_specs_text(specs_text)
     specs_fragment = specs_cache_fragment(specs_text)
-    slots: list[_Slot] = [] if slots_out is None else slots_out
+    slots: list[_Slot] = []
     reqs: list[dict] = []
-    # A sheet whose upload landed but whose slot is not recorded yet; the guard
-    # below deletes its files too.
-    in_progress: _Slot | None = None
 
     # Upload circuit breaker. After MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
     # sheets in a row fail with the same credential/route-level status, the
-    # remaining sheets stop uploading. Cache hits are still served, and failed
-    # sheets retain an error without spending money on a different transport.
+    # remaining sheets stop attempting the (doomed) upload:
+    #   - 404 (Files API route down, Messages/Batches healthy) -> inline the
+    #     images as base64 instead, via ``inline_fallback_active``. No sheet is
+    #     lost; only the upload round-trips stop.
+    #   - 401/403 (credential) -> ``uploads_disabled_error`` skips the sheet with
+    #     a clear, actionable error, since an inline request would fail the same
+    #     way. Cache hits are still served in either case — only uploads stop.
     fatal_streak = 0
     last_fatal_status: int | None = None
     uploads_disabled_error: str | None = None
+    inline_fallback_active = False
 
-    try:
-        for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
-            image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
-            slot = _Slot(
-                index=index, ref=sheet.ref, image_estimate=image_est,
-                rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
+    def _serve_inline(slot: _Slot, sheet) -> None:
+        """Digest a sheet inline (base64, real-time) and resolve its slot.
+
+        The Files-API upload route is unavailable, so the sheet's images ride
+        inline in one synchronous vision request instead of being uploaded and
+        referenced by ``file_id``. The result is attached straight to the slot
+        (exactly like a cache hit), so the sheet never becomes a batch item —
+        which also keeps the inline payload out of the 256 MB batch envelope —
+        and :func:`collect_drawing_batch` resolves it with no special-casing.
+        Reuses :func:`~drawing_analyzer.digest.digest_sheet`, so caching,
+        transient-retry, and error capture match the real-time path; the only
+        cost is forgoing the 50% batch discount for this sheet.
+        """
+        if on_status is not None:
+            on_status(
+                f"[{slot.index + 1}/{total}] Inlining {sheet.ref.display_label} "
+                "(Files API unavailable)"
             )
-
-            cache_key: str | None = None
-            if cache is not None:
-                cache_key = digest_cache_key(
-                    sheet,
-                    model=model,
-                    prompt_version=DIGEST_PROMPT_VERSION,
-                    max_tokens=max_tokens,
-                    effort=effort,
-                    use_thinking=use_thinking,
-                    focus=focus_fragment,
-                    specs=specs_fragment,
-                    sheet_text=sheet.sheet_text,
-                )
-                hit = cache.get(cache_key)
-                # An entry that records an unfinished read is a miss: the sheet is
-                # uploaded and submitted like any other (D-4).
-                served = (
-                    sheet_digest_from_cache_entry(
-                        hit, sheet.ref, image_token_estimate=image_est,
-                    )
-                    if hit is not None else None
-                )
-                if served is not None:
-                    slot.digest = served
-                    slots.append(slot)
-                    _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
-                    if progress is not None:
-                        progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
-                    continue
-
-            # A route or credential failure tripped the upload breaker. Keep the
-            # per-sheet report complete, and continue serving free cache hits.
-            if uploads_disabled_error is not None:
-                slot.digest = SheetDigest(
-                    ref=sheet.ref,
-                    text="",
-                    image_token_estimate=image_est,
-                    error=uploads_disabled_error,
-                )
-                slots.append(slot)
-                _log.debug(
-                    "sheet %d upload skipped (uploads disabled): %s",
-                    index, sheet.ref.display_label,
-                )
-                if progress is not None:
-                    progress(index + 1, total or 0, f"Upload skipped: {sheet.ref.display_label}")
-                continue
-
-            # Per-image status (status-line only) so a sheet's tens-of-seconds,
-            # multi-image upload — and any transient-503 retry wave within it — shows
-            # continuous motion instead of a frozen line. Built only when a status
-            # sink is wired, so the no-callback path (and the tests) is unchanged.
-            on_image = None
-            if on_status is not None:
-                def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
-                    verb = "Retrying" if retrying else "Uploading"
-                    tail = " after overload" if retrying else ""
-                    on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
-
-            try:
-                upload = upload_sheet_images(client, sheet, on_image=on_image)
-            except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
-                rid = request_id_of(exc)
-                hint = upload_failure_hint(exc)
-                status = run_fatal_upload_status(exc)
-
-                # Capture every upload failure on its sheet, including the
-                # request ID and actionable hint when available.
-                error = f"image upload failed: {_clean_error(exc)}"
-                if rid:
-                    error += f" (request-id {rid})"
-                if hint:
-                    error += f" — {hint}"
-                slot.digest = SheetDigest(
-                    ref=sheet.ref,
-                    text="",
-                    image_token_estimate=image_est,
-                    error=error,
-                )
-                slots.append(slot)
-                _log.warning(
-                    "sheet %d upload failed (%s): %s",
-                    index, sheet.ref.display_label, summarize_exc(exc),
-                )
-                if progress is not None:
-                    progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
-
-                # Breaker accounting: only an unbroken run of the SAME
-                # credential/route-level status trips it; any other failure
-                # (transient retries exhausted, payload-shaped 4xx) resets the
-                # streak because it says nothing about the next sheet's fate.
-                if status is None:
-                    fatal_streak = 0
-                    last_fatal_status = None
-                    continue
-                fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
-                last_fatal_status = status
-                if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
-                    uploads_disabled_error = (
-                        f"image upload skipped: uploads stopped after {fatal_streak} "
-                        f"consecutive HTTP {status} upload failures"
-                    )
-                    if hint:
-                        uploads_disabled_error += f" — {hint}"
-                    _log.warning(
-                        "disabling Files-API uploads for the remaining sheets after "
-                        "%d consecutive HTTP %d failures (last: %s)",
-                        fatal_streak, status, summarize_exc(exc),
-                    )
-                continue
-
-            # A successful upload proves the Files API is reachable with this key,
-            # so any accumulated run-fatal streak was intermittent after all —
-            # reset it, keeping the breaker true to its "consecutive" contract.
-            # (Cache hits never reach here, so they carry no signal either way.)
-            fatal_streak = 0
-            last_fatal_status = None
-
-            custom_id = f"sheet__{index}"
-            slot.custom_id = custom_id
-            slot.cache_key = cache_key
-            slot.file_ids = list(upload.file_ids)
-            slot.reusable_upload = ReusableSheetUpload(
-                ref=sheet.ref,
-                rows=getattr(sheet, "rows", 0),
-                cols=getattr(sheet, "cols", 0),
-                content=list(upload.content),
-                file_ids=list(upload.file_ids),
+        slot.attempts_submitted += 1
+        slot.digest = digest_sheet(
+            sheet,
+            client=client,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
+            cache=cache,
+            focus=focus,
+            specs_text=specs_text,
+        )
+        # A fresh inline digest was a synchronous real-time call (no batch
+        # discount); a cache hit stays a cache hit. Mark it so the usage ledger
+        # prices it real-time, not at the batch rate (Phase 23B).
+        if not slot.digest.cached:
+            slot.digest.rescued = True
+            _attach_usage_attempt(
+                slot.digest, transport="REAL_TIME",
+                attempt_number=slot.attempts_submitted,
             )
-            in_progress = slot
-            slot.params = build_digest_request_params(
-                upload.content,
+        slots.append(slot)
+        verb = "Inlined" if slot.digest.ok else "Inline digest failed for"
+        _log.debug(
+            "sheet %d served inline (Files API unavailable): %s",
+            slot.index, sheet.ref.display_label,
+        )
+        if progress is not None:
+            progress(slot.index + 1, total or 0, f"{verb} {sheet.ref.display_label}")
+
+    for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
+        image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
+        slot = _Slot(
+            index=index, ref=sheet.ref, image_estimate=image_est,
+            rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
+        )
+
+        cache_key: str | None = None
+        if cache is not None:
+            cache_key = digest_cache_key(
+                sheet,
                 model=model,
+                prompt_version=DIGEST_PROMPT_VERSION,
                 max_tokens=max_tokens,
-                use_thinking=use_thinking,
                 effort=effort,
-                focus=focus,
-                specs_text=specs_text,
-                cache_specs=False,
+                use_thinking=use_thinking,
+                focus=focus_fragment,
+                specs=specs_fragment,
+                sheet_text=sheet.sheet_text,
             )
-            reqs.append({"custom_id": custom_id, "params": slot.params})
+            hit = cache.get(cache_key)
+            if hit is not None:
+                slot.digest = SheetDigest(
+                    ref=sheet.ref,
+                    text=hit.get("text", ""),
+                    input_tokens=int(hit.get("input_tokens", 0) or 0),
+                    output_tokens=int(hit.get("output_tokens", 0) or 0),
+                    image_token_estimate=image_est,
+                    stop_reason=hit.get("stop_reason"),
+                    error=None,
+                    cached=True,
+                    findings=findings_from_cache(hit, sheet.ref),
+                )
+                slots.append(slot)
+                _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
+                if progress is not None:
+                    progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
+                continue
+
+        # Files API confirmed unavailable (consecutive 404s already proved the
+        # /v1/files route is down while Messages/Batches is healthy): inline this
+        # sheet's images as base64 rather than attempt a doomed upload. Sits
+        # after the cache check so cached sheets are still served for free.
+        if inline_fallback_active:
+            _serve_inline(slot, sheet)
+            continue
+
+        # Breaker tripped on a credential rejection (401/403): the same
+        # rejection will hit every remaining upload, and an inline request would
+        # fail identically, so mark the sheet (keeping the per-sheet report
+        # complete) without spending more requests. Sits after the cache check
+        # so cached sheets are still served even when the Files API is dead.
+        if uploads_disabled_error is not None:
+            slot.digest = SheetDigest(
+                ref=sheet.ref,
+                text="",
+                image_token_estimate=image_est,
+                error=uploads_disabled_error,
+            )
             slots.append(slot)
-            in_progress = None
             _log.debug(
-                "sheet %d uploaded %d image(s) as %s: %s",
-                index, len(upload.file_ids), custom_id, sheet.ref.display_label,
+                "sheet %d upload skipped (uploads disabled): %s",
+                index, sheet.ref.display_label,
             )
             if progress is not None:
-                progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
-    except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
-        # No batch exists yet, so no request will ever reference these uploads:
-        # delete every one, the unrecorded sheet's included, then propagate
-        # (remediation WP-11.2; the twin of submit_critique_batch's guard).
-        # ``delete_files`` is best-effort and never itself raises.
-        owned = list(slots) + ([in_progress] if in_progress is not None else [])
-        leaked = _take_slot_upload_ids(owned)
-        if leaked:
-            _log.warning(
-                "drawing batch submit stopped before a batch existed; deleting "
-                "%d uploaded file(s)", len(leaked),
+                progress(index + 1, total or 0, f"Upload skipped: {sheet.ref.display_label}")
+            continue
+
+        # Per-image status (status-line only) so a sheet's tens-of-seconds,
+        # multi-image upload — and any transient-503 retry wave within it — shows
+        # continuous motion instead of a frozen line. Built only when a status
+        # sink is wired, so the no-callback path (and the tests) is unchanged.
+        on_image = None
+        if on_status is not None:
+            def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
+                verb = "Retrying" if retrying else "Uploading"
+                tail = " after overload" if retrying else ""
+                on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
+
+        try:
+            upload = upload_sheet_images(client, sheet, on_image=on_image)
+        except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
+            rid = request_id_of(exc)
+            hint = upload_failure_hint(exc)
+            status = run_fatal_upload_status(exc)
+
+            # A Files-API 404 means the upload route is unavailable while the
+            # Messages/Batches API (this batch's own transport) is healthy, so
+            # inline this sheet's images as base64 rather than lose it. The
+            # breaker still counts the consecutive 404s: once it trips, every
+            # remaining sheet skips the doomed upload and goes straight to the
+            # inline path above. No sheet is dropped — only the upload attempts
+            # stop. (Cache hits never reach here, so they carry no signal.)
+            if upload_failure_allows_inline_fallback(exc):
+                _log.warning(
+                    "sheet %d Files-API upload 404'd; inlining images as base64: "
+                    "%s (%s)",
+                    index, sheet.ref.display_label, summarize_exc(exc),
+                )
+                _serve_inline(slot, sheet)
+                fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+                last_fatal_status = status
+                if (
+                    fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
+                    and not inline_fallback_active
+                ):
+                    inline_fallback_active = True
+                    _log.warning(
+                        "Files API unreachable after %d consecutive HTTP 404 "
+                        "upload failure(s); inlining images as base64 for the "
+                        "remaining sheets%s",
+                        fatal_streak, f" — {hint}" if hint else "",
+                    )
+                continue
+
+            # Credential-level (401/403) or non-fatal failure: capture it on the
+            # sheet and continue. The request-id (when the SDK carried one) and
+            # the actionable hint are surfaced on the sheet error so the GUI's
+            # per-sheet line — not just the diagnostics file — names the exact
+            # call to quote and what to check.
+            error = f"image upload failed: {_clean_error(exc)}"
+            if rid:
+                error += f" (request-id {rid})"
+            if hint:
+                error += f" — {hint}"
+            slot.digest = SheetDigest(
+                ref=sheet.ref,
+                text="",
+                image_token_estimate=image_est,
+                error=error,
             )
-            delete_files(client, leaked)
-        raise
+            slots.append(slot)
+            _log.warning(
+                "sheet %d upload failed (%s): %s",
+                index, sheet.ref.display_label, summarize_exc(exc),
+            )
+            if progress is not None:
+                progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
+
+            # Breaker accounting: only an unbroken run of the SAME
+            # credential/route-level status trips it; any other failure
+            # (transient retries exhausted, payload-shaped 4xx) resets the
+            # streak because it says nothing about the next sheet's fate.
+            if status is None:
+                fatal_streak = 0
+                last_fatal_status = None
+                continue
+            fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+            last_fatal_status = status
+            if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
+                uploads_disabled_error = (
+                    f"image upload skipped: uploads stopped after {fatal_streak} "
+                    f"consecutive HTTP {status} upload failures"
+                )
+                if hint:
+                    uploads_disabled_error += f" — {hint}"
+                _log.warning(
+                    "disabling Files-API uploads for the remaining sheets after "
+                    "%d consecutive HTTP %d failures (last: %s)",
+                    fatal_streak, status, summarize_exc(exc),
+                )
+            continue
+
+        # A successful upload proves the Files API is reachable with this key,
+        # so any accumulated run-fatal streak was intermittent after all —
+        # reset it, keeping the breaker true to its "consecutive" contract.
+        # (Cache hits never reach here, so they carry no signal either way.)
+        fatal_streak = 0
+        last_fatal_status = None
+
+        custom_id = f"sheet__{index}"
+        slot.custom_id = custom_id
+        slot.cache_key = cache_key
+        slot.file_ids = list(upload.file_ids)
+        slot.reusable_upload = ReusableSheetUpload(
+            ref=sheet.ref,
+            rows=getattr(sheet, "rows", 0),
+            cols=getattr(sheet, "cols", 0),
+            content=list(upload.content),
+            file_ids=list(upload.file_ids),
+        )
+        slot.params = build_digest_request_params(
+            upload.content,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
+            focus=focus,
+            specs_text=specs_text,
+            cache_specs=False,
+        )
+        reqs.append({"custom_id": custom_id, "params": slot.params})
+        slots.append(slot)
+        _log.debug(
+            "sheet %d uploaded %d image(s) as %s: %s",
+            index, len(upload.file_ids), custom_id, sheet.ref.display_label,
+        )
+        if progress is not None:
+            progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
 
     batch_id: str | None = None
     if reqs:
@@ -2572,75 +2104,46 @@ def _digest_from_message(
     transport: str = "BATCH",
     attempt_number: int | None = None,
     request_or_custom_id: str = "",
-    interrupted: str | None = None,
 ) -> SheetDigest:
     """Parse one Messages-API response into the slot's :class:`SheetDigest`.
 
     Shared by the batch item parse (:func:`_parse_item`) and the direct-call
     rescue (:func:`_rescue_failed_items_sync`), so a rescued digest is shaped —
     and cached, under the same key — exactly as if the batch had returned it.
-
-    A read of a refusal fallback (remediation WP-01.5) is worded with the model
-    it was sent to (``refused digest on claude-opus-4-8 (…)``) and carries it
-    as ``fallback_model``; a finished one is cached under the slot's key, the
-    requested model's (the owner's rule), like the server-side fallback's.
-
-    ``interrupted`` is set for a direct rescue's interrupted stream (remediation
-    WP-01.7): ``message`` is its partial read, worded by the ladder with the
-    cause, never cached (it did not finish), and its attempt record counts one
-    interrupted attempt.
     """
-    raw_text = reply_text(message)
+    raw_text = _message_text(message)
     in_tok, out_tok = _message_usage(message)
     usage = _get(message, "usage")
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
-    fallback = _fallback_model_of(slot)
-    noun = f"digest on {fallback}" if fallback else "digest"
-    details = refusal_details(message)
-    # The real-time ladder, shared rather than restated: a reply the model did
-    # not FINISH is not a complete digest, whether it came back empty, cut
-    # off, refused, or with no stop reason at all. Treating any of those as
-    # success accepted it AND cached it permanently, while
-    # ``_item_retry_params`` never saw an error to retry on. A refusal names
-    # its stop_details category (WP-01.5).
-    error = digest_terminal_error(
-        raw_text, stop, noun=noun, category=details.category if details else None,
-        interrupted=interrupted,
-    )
-    if classify_stop_reason(stop).kind == REFUSED:
-        _log.info(
-            "refused %s for %s (%s): %s", noun, slot.custom_id,
-            slot.ref.display_label, describe_refusal(details),
-        )
+    # Parity with the real-time path: a reply the model did not FINISH is not a
+    # complete digest, whether it came back empty or merely cut off. Treating a
+    # nonempty truncation as success accepted it AND cached it permanently,
+    # while ``_item_retry_params`` never saw an error to retry on.
+    if not raw_text:
+        error = f"empty digest (stop_reason={stop!r})"
+    elif stop == "max_tokens":
+        error = "truncated digest (stop_reason='max_tokens')"
+    else:
+        error = None
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(
         raw_text, slot.ref, getattr(slot, "rows", 0), getattr(slot, "cols", 0)
     )
-    if cache is not None and slot.cache_key and digest_cache_admits(
-        error=error, text=raw_text, stop_reason=stop,
-    ):
-        # Advisory (remediation WP-11.2): the item was billed, so a cache that
-        # raises must not lose it, in the collect or in its harvest.
-        try:
-            cache.put(
-                slot.cache_key,
-                {
-                    "text": text,
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "stop_reason": stop,
-                    "findings": [f.to_dict() for f in findings],
-                    "created_ts": time.time(),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - a cache write is advisory
-            _log.warning(
-                "digest cache write failed for %s (%s); the read is kept",
-                slot.ref.display_label, type(exc).__name__,
-            )
+    if cache is not None and slot.cache_key and error is None and raw_text:
+        cache.put(
+            slot.cache_key,
+            {
+                "text": text,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "stop_reason": stop,
+                "findings": [f.to_dict() for f in findings],
+                "created_ts": time.time(),
+            },
+        )
     digest = SheetDigest(
         ref=slot.ref,
         text=text,
@@ -2653,7 +2156,6 @@ def _digest_from_message(
         findings_note=findings_note,
         cache_read_tokens=cache_read_tok,
         cache_write_tokens=cache_write_tok,
-        fallback_model=fallback,
     )
     return _attach_usage_attempt(
         digest,
@@ -2665,7 +2167,6 @@ def _digest_from_message(
         request_or_custom_id=(
             request_or_custom_id or (slot.custom_id or "") or request_id_of(message)
         ),
-        interrupted_attempts=1 if interrupted else 0,
     )
 
 
@@ -2698,7 +2199,6 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
             text="",
             image_token_estimate=slot.image_estimate,
             error=item_error,
-            fallback_model=_fallback_model_of(slot),
         )
     message = _get(rr, "message")
     digest = _digest_from_message(
@@ -2708,8 +2208,8 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
     )
     if digest.error is not None:
         _log.warning(
-            "item %s (%s): %s",
-            slot.custom_id, slot.ref.display_label, digest.error,
+            "item %s (%s): empty digest (stop_reason=%r)",
+            slot.custom_id, slot.ref.display_label, digest.stop_reason,
         )
     else:
         _log.debug(
@@ -2733,7 +2233,6 @@ def collect_drawing_batch(
     retry_failed_items: bool = False,
     recovery_transport: str = RECOVERY_DIRECT,
     reusable_upload_sink: list[ReusableSheetUpload] | None = None,
-    results_out: list | None = None,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
@@ -2782,18 +2281,6 @@ def collect_drawing_batch(
     discount) and never issues a real-time call. The pipeline passes
     ``RECOVERY_BATCH`` so a stalled/sick batch is retried as a batch rather than
     silently dropping the run to real-time pricing.
-
-    **An unexpected error anywhere after the submit (remediation WP-11.2, R1;
-    the owner's rule)** is handled like an abandoned batch before it
-    propagates (:func:`_abandon_after_collect_error`): what the batch finished
-    is read back (it was billed), then the files are released if the batch is
-    terminal or its cancel was accepted, and kept for it otherwise. The guard
-    used to cover only the read-back of a terminal batch, so an error during
-    the poll (the caller's progress or log callback among others) left every
-    upload remote and read nothing back. ``results_out`` (an empty list), when
-    given, is the page-ordered result list itself, so a caller that contains
-    the error keeps every digest resolved before it, the harvested ones
-    included.
     """
     # ``None`` means "the app's bound", resolved HERE rather than as a keyword
     # default so ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is read per call
@@ -2805,231 +2292,63 @@ def collect_drawing_batch(
     # 0..n-1 in page order) so a divergent display ``total`` can never
     # mis-size or drop a result.
     results: list[SheetDigest | None] = [None] * len(batch.slots)
-    if results_out is not None:
-        results_out[:] = results
-        results = results_out
     for slot in batch.slots:
         if slot.digest is not None:
             results[slot.index] = slot.digest
 
     submitted = batch.submitted_slots
     if batch.batch_id and submitted:
-        status: str | None = None
-        try:
-            cached_done = sum(1 for s in batch.slots if s.digest is not None)
-            collect_started = time.monotonic()
-            # With recovery enabled, hold back a slice of the budget from the
-            # poll — so a batch that never terminates leaves the direct-call
-            # rescue room to run — and watch for a stalled batch (request counts
-            # frozen for an hour). Without recovery there is nothing useful to do
-            # earlier, so the poll keeps the whole bound and only the elapsed
-            # detach applies, exactly as before.
-            poll_budget: float = max_elapsed_seconds
-            stall_timeout: float | None = None
-            if retry_failed_items:
-                poll_budget = max_elapsed_seconds - _rescue_reserve_seconds(
-                    max_elapsed_seconds
-                )
-                stall_timeout = _stall_timeout_seconds(first_watch=True)
-            status = _poll_until_terminal(
-                client,
-                batch.batch_id,
-                total=batch.total,
-                cached_done=cached_done,
-                progress=progress,
-                on_log=on_log,
-                sleep=sleep,
-                max_elapsed_seconds=poll_budget,
-                stall_timeout_seconds=stall_timeout,
+        cached_done = sum(1 for s in batch.slots if s.digest is not None)
+        collect_started = time.monotonic()
+        # With recovery enabled, hold back a slice of the budget from the
+        # poll — so a batch that never terminates leaves the direct-call
+        # rescue room to run — and watch for a stalled batch (request counts
+        # frozen for an hour). Without recovery there is nothing useful to do
+        # earlier, so the poll keeps the whole bound and only the elapsed
+        # detach applies, exactly as before.
+        poll_budget: float = max_elapsed_seconds
+        stall_timeout: float | None = None
+        if retry_failed_items:
+            poll_budget = max_elapsed_seconds - _rescue_reserve_seconds(
+                max_elapsed_seconds
             )
-            if status in ("ended", "failed", "expired", "canceled"):
-                try:
-                    raw = {}
-                    for result in client.messages.batches.results(batch.batch_id):
-                        raw[_get(result, "custom_id")] = result
-                    for slot in submitted:
-                        _replace_result_with_attempt_history(
-                            results, slot,
-                            _parse_item(slot, raw.get(slot.custom_id), cache=cache),
-                            served_by=batch.batch_id,
-                        )
-                    files_released = True
-                    if retry_failed_items:
-                        # The follow-up round spends what's LEFT of this call's
-                        # collection budget — the bound the caller gave applies to
-                        # the whole collect, not per batch round.
-                        remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
-                        files_released = _resubmit_failed_items(
-                            batch, results, raw,
-                            client=client, cache=cache, progress=progress,
-                            on_log=on_log, sleep=sleep,
-                            max_elapsed_seconds=remaining,
-                            recovery_transport=recovery_transport,
-                        )
-                    if files_released:
-                        _finish_digest_uploads(
-                            batch,
-                            client=client,
-                            reusable_upload_sink=reusable_upload_sink,
-                            cleanup_in_background=cleanup_in_background,
-                            on_log=on_log,
-                        )
-                except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
-                    # An unexpected error while collecting a *terminal* batch —
-                    # ``results()`` or the follow-up round raising, a parse blowing
-                    # up — must not leak the uploaded files (DA-034). The batch is
-                    # terminal (no longer processing), so its files are safe to delete
-                    # unconditionally; do so best-effort, then re-raise (unchanged
-                    # control flow — collect raised here before this guard too, just
-                    # leakily).
-                    leaked = _take_slot_upload_ids(batch.slots)
-                    _release_uploaded_files(
-                        client, leaked,
-                        in_background=cleanup_in_background, on_log=on_log,
-                    )
-                    raise
-            else:
-                # The batch never reached a terminal state: request counts frozen
-                # past the stall window ("stalled"), the poll bound hit
-                # ("detached"), or the poll endpoint failing repeatedly
-                # ("poll_failed"). This is the failure that used to zero a run —
-                # two real runs (50 and 20 sheets) sat `in_progress` with zero
-                # completions for 4h and returned nothing, despite every upload
-                # and request in hand being valid. With recovery enabled the
-                # batch is abandoned for good: best-effort canceled (its results
-                # will never be read, so left running it only burns quota) and
-                # every unresolved sheet recovered on the same still-uploaded
-                # file_ids, spending what remains of the collection budget (the poll
-                # held back a rescue reserve for exactly this). The recovery
-                # transport decides HOW: RECOVERY_BATCH (the pipeline) resubmits the
-                # sheets as fresh batches so the run keeps the 50% discount and never
-                # drops to real-time; RECOVERY_DIRECT digests them via full-rate
-                # direct calls. Without recovery the original behavior stands: files
-                # retained for the still-running batch, and a clear, retriable
-                # per-sheet error.
-                canceled = False
-                if retry_failed_items:
-                    canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
-                    # Harvest BEFORE building the rescue list (DA-035). A cancel is
-                    # asynchronous, so the sheets this batch already finished — and
-                    # billed — are still readable; without this the rescue list is
-                    # every submitted slot, and each completed sheet is paid for
-                    # twice.
-                    #
-                    # This is also why a still-MOVING detached batch is cancelled
-                    # like any other rather than left alone to finish: the Batches
-                    # API serves ``results()`` only once a batch has ENDED, so the
-                    # cancel is what makes its completed sheets readable at all.
-                    # Leaving a healthy-but-slow batch running looks generous and
-                    # strands every sheet it had already been paid for — this run
-                    # cannot read them, and a later run submits a new batch rather
-                    # than collecting this one. The moving/frozen split is
-                    # therefore diagnostic (it names which happened in the log, the
-                    # per-sheet error and the ledger's terminal status), not a
-                    # different disposition.
-                    harvest = _harvest_abandoned_batch(
-                        [s for s in submitted if results[s.index] is None],
-                        results,
-                        batch_id=batch.batch_id,
-                        client=client, cache=cache,
-                        on_log=on_log, sleep=sleep,
-                        budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
-                    )
-                    # The harvest's time is additional, not deducted: move the mark
-                    # every later ``remaining`` is measured from, so the rescue gets
-                    # exactly the budget it had before the harvest existed.
-                    collect_started += harvest.elapsed
-                    # Every sheet the harvest did not resolve, including one it
-                    # holds a partial read for (N16): the rescue can only improve
-                    # on that read (``_replace_result_with_attempt_history``).
-                    # A sheet the harvest holds as final (a permanent error, a
-                    # refusal not retried) is not rescued, and a refusal it
-                    # read goes to its fallback (remediation WP-01.5).
-                    rescue = [
-                        (slot, again)
-                        for slot in submitted
-                        if slot.params is not None
-                        and (again := harvest.rescue_params(slot, slot.params)) is not None
-                    ]
-                    _mark_batch_abandoned(
-                        [slot for slot, _ in rescue
-                         if slot.index not in harvest.responded],
-                        batch_id=batch.batch_id, status=status,
-                    )
-                    if rescue:
-                        remaining = max_elapsed_seconds - (
-                            time.monotonic() - collect_started
-                        )
-                        if recovery_transport == RECOVERY_BATCH:
-                            _log.info(
-                                "recovering %d sheet(s) from the %s batch via fresh "
-                                "batch resubmission (%.0fs of collection budget left)",
-                                len(rescue), status, max(0.0, remaining),
-                            )
-                            if on_log is not None:
-                                on_log(
-                                    f"Drawing batch {status}; resubmitting "
-                                    f"{len(rescue)} sheet(s) as a fresh batch"
-                                )
-                            n, files_safe = _recover_via_batch_resubmit(
-                                rescue, results,
-                                batch_total=batch.total,
-                                client=client, cache=cache, progress=progress,
-                                on_log=on_log, sleep=sleep,
-                                max_elapsed_seconds=remaining,
-                                stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
-                            )
-                            _log.info(
-                                "batch-resubmit recovery recovered %d/%d sheet(s) "
-                                "from the %s batch", n, len(rescue), status,
-                            )
-                            if on_log is not None:
-                                on_log(
-                                    f"Recovered {n} of {len(rescue)} sheet(s) via "
-                                    "batch resubmission"
-                                )
-                            # Retain the files if any resubmission may still be
-                            # running (its cancel did not land) — same policy as a
-                            # primary batch whose cancel failed.
-                            canceled = canceled and files_safe
-                        else:
-                            _log.info(
-                                "digesting %d sheet(s) from the %s batch via direct "
-                                "Messages calls (%.0fs of collection budget left)",
-                                len(rescue), status, max(0.0, remaining),
-                            )
-                            if on_log is not None:
-                                on_log(
-                                    f"Drawing batch {status}; digesting "
-                                    f"{len(rescue)} sheet(s) directly"
-                                )
-                            n = _rescue_failed_items_sync(
-                                rescue, results,
-                                client=client, cache=cache, sleep=sleep,
-                                max_elapsed_seconds=remaining,
-                            )
-                            _log.info(
-                                "direct-call rescue recovered %d/%d sheet(s) from "
-                                "the %s batch", n, len(rescue), status,
-                            )
-                            if on_log is not None:
-                                on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
-                tail = (
-                    f"remote batch id={batch.batch_id} was canceled"
-                    if canceled
-                    else f"remote batch id={batch.batch_id} may still be running"
-                )
+            stall_timeout = _stall_timeout_seconds(first_watch=True)
+        status = _poll_until_terminal(
+            client,
+            batch.batch_id,
+            total=batch.total,
+            cached_done=cached_done,
+            progress=progress,
+            on_log=on_log,
+            sleep=sleep,
+            max_elapsed_seconds=poll_budget,
+            stall_timeout_seconds=stall_timeout,
+        )
+        if status in ("ended", "failed", "expired", "canceled"):
+            try:
+                raw = {}
+                for result in client.messages.batches.results(batch.batch_id):
+                    raw[_get(result, "custom_id")] = result
                 for slot in submitted:
-                    if results[slot.index] is None:
-                        results[slot.index] = SheetDigest(
-                            ref=slot.ref,
-                            text="",
-                            image_token_estimate=slot.image_estimate,
-                            error=f"drawing batch not collected ({status}); {tail}",
-                        )
-                if canceled:
-                    # The canceled batch can no longer need the uploaded files,
-                    # and anything the rescue produced is already in hand.
+                    slot.served_by = batch.batch_id
+                    _replace_result_with_attempt_history(
+                        results, slot,
+                        _parse_item(slot, raw.get(slot.custom_id), cache=cache),
+                    )
+                files_released = True
+                if retry_failed_items:
+                    # The follow-up round spends what's LEFT of this call's
+                    # collection budget — the bound the caller gave applies to
+                    # the whole collect, not per batch round.
+                    remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
+                    files_released = _resubmit_failed_items(
+                        batch, results, raw,
+                        client=client, cache=cache, progress=progress,
+                        on_log=on_log, sleep=sleep,
+                        max_elapsed_seconds=remaining,
+                        recovery_transport=recovery_transport,
+                    )
+                if files_released:
                     _finish_digest_uploads(
                         batch,
                         client=client,
@@ -3037,13 +2356,162 @@ def collect_drawing_batch(
                         cleanup_in_background=cleanup_in_background,
                         on_log=on_log,
                     )
-        except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
-            _abandon_after_collect_error(
-                batch, results, client=client, cache=cache, status=status,
-                sleep=sleep, max_elapsed_seconds=max_elapsed_seconds,
-                cleanup_in_background=cleanup_in_background,
+            except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+                # An unexpected error while collecting a *terminal* batch —
+                # ``results()`` or the follow-up round raising, a parse blowing
+                # up — must not leak the uploaded files (DA-034). The batch is
+                # terminal (no longer processing), so its files are safe to delete
+                # unconditionally; do so best-effort, then re-raise (unchanged
+                # control flow — collect raised here before this guard too, just
+                # leakily).
+                leaked = _take_slot_upload_ids(batch.slots)
+                _release_uploaded_files(
+                    client, leaked,
+                    in_background=cleanup_in_background, on_log=on_log,
+                )
+                raise
+        else:
+            # The batch never reached a terminal state: request counts frozen
+            # past the stall window ("stalled"), the poll bound hit
+            # ("detached"), or the poll endpoint failing repeatedly
+            # ("poll_failed"). This is the failure that used to zero a run —
+            # two real runs (50 and 20 sheets) sat `in_progress` with zero
+            # completions for 4h and returned nothing, despite every upload
+            # and request in hand being valid. With recovery enabled the
+            # batch is abandoned for good: best-effort canceled (its results
+            # will never be read, so left running it only burns quota) and
+            # every unresolved sheet recovered on the same still-uploaded
+            # file_ids, spending what remains of the collection budget (the poll
+            # held back a rescue reserve for exactly this). The recovery
+            # transport decides HOW: RECOVERY_BATCH (the pipeline) resubmits the
+            # sheets as fresh batches so the run keeps the 50% discount and never
+            # drops to real-time; RECOVERY_DIRECT digests them via full-rate
+            # direct calls. Without recovery the original behavior stands: files
+            # retained for the still-running batch, and a clear, retriable
+            # per-sheet error.
+            canceled = False
+            if retry_failed_items:
+                canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
+                # Harvest BEFORE building the rescue list (DA-035). A cancel is
+                # asynchronous, so the sheets this batch already finished — and
+                # billed — are still readable; without this the rescue list is
+                # every submitted slot, and each completed sheet is paid for
+                # twice.
+                #
+                # This is also why a still-MOVING detached batch is cancelled
+                # like any other rather than left alone to finish: the Batches
+                # API serves ``results()`` only once a batch has ENDED, so the
+                # cancel is what makes its completed sheets readable at all.
+                # Leaving a healthy-but-slow batch running looks generous and
+                # strands every sheet it had already been paid for — this run
+                # cannot read them, and a later run submits a new batch rather
+                # than collecting this one. The moving/frozen split is
+                # therefore diagnostic (it names which happened in the log, the
+                # per-sheet error and the ledger's terminal status), not a
+                # different disposition.
+                harvest = _harvest_abandoned_batch(
+                    [s for s in submitted if results[s.index] is None],
+                    results,
+                    batch_id=batch.batch_id,
+                    client=client, cache=cache,
+                    on_log=on_log, sleep=sleep,
+                    budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+                )
+                # The harvest's time is additional, not deducted: move the mark
+                # every later ``remaining`` is measured from, so the rescue gets
+                # exactly the budget it had before the harvest existed.
+                collect_started += harvest.elapsed
+                rescue = [
+                    (slot, slot.params)
+                    for slot in submitted
+                    if results[slot.index] is None and slot.params is not None
+                ]
+                _mark_batch_abandoned(
+                    [slot for slot, _ in rescue
+                     if slot.index not in harvest.responded],
+                    batch_id=batch.batch_id, status=status,
+                )
+                if rescue:
+                    remaining = max_elapsed_seconds - (
+                        time.monotonic() - collect_started
+                    )
+                    if recovery_transport == RECOVERY_BATCH:
+                        _log.info(
+                            "recovering %d sheet(s) from the %s batch via fresh "
+                            "batch resubmission (%.0fs of collection budget left)",
+                            len(rescue), status, max(0.0, remaining),
+                        )
+                        if on_log is not None:
+                            on_log(
+                                f"Drawing batch {status}; resubmitting "
+                                f"{len(rescue)} sheet(s) as a fresh batch"
+                            )
+                        n, files_safe = _recover_via_batch_resubmit(
+                            rescue, results,
+                            batch_total=batch.total,
+                            client=client, cache=cache, progress=progress,
+                            on_log=on_log, sleep=sleep,
+                            max_elapsed_seconds=remaining,
+                            stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
+                        )
+                        _log.info(
+                            "batch-resubmit recovery recovered %d/%d sheet(s) "
+                            "from the %s batch", n, len(rescue), status,
+                        )
+                        if on_log is not None:
+                            on_log(
+                                f"Recovered {n} of {len(rescue)} sheet(s) via "
+                                "batch resubmission"
+                            )
+                        # Retain the files if any resubmission may still be
+                        # running (its cancel did not land) — same policy as a
+                        # primary batch whose cancel failed.
+                        canceled = canceled and files_safe
+                    else:
+                        _log.info(
+                            "digesting %d sheet(s) from the %s batch via direct "
+                            "Messages calls (%.0fs of collection budget left)",
+                            len(rescue), status, max(0.0, remaining),
+                        )
+                        if on_log is not None:
+                            on_log(
+                                f"Drawing batch {status}; digesting "
+                                f"{len(rescue)} sheet(s) directly"
+                            )
+                        n = _rescue_failed_items_sync(
+                            rescue, results,
+                            client=client, cache=cache, sleep=sleep,
+                            max_elapsed_seconds=remaining,
+                        )
+                        _log.info(
+                            "direct-call rescue recovered %d/%d sheet(s) from "
+                            "the %s batch", n, len(rescue), status,
+                        )
+                        if on_log is not None:
+                            on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
+            tail = (
+                f"remote batch id={batch.batch_id} was canceled"
+                if canceled
+                else f"remote batch id={batch.batch_id} may still be running"
             )
-            raise
+            for slot in submitted:
+                if results[slot.index] is None:
+                    results[slot.index] = SheetDigest(
+                        ref=slot.ref,
+                        text="",
+                        image_token_estimate=slot.image_estimate,
+                        error=f"drawing batch not collected ({status}); {tail}",
+                    )
+            if canceled:
+                # The canceled batch can no longer need the uploaded files,
+                # and anything the rescue produced is already in hand.
+                _finish_digest_uploads(
+                    batch,
+                    client=client,
+                    reusable_upload_sink=reusable_upload_sink,
+                    cleanup_in_background=cleanup_in_background,
+                    on_log=on_log,
+                )
 
     slot_by_index = {s.index: s for s in batch.slots}
     for i, digest in enumerate(results):

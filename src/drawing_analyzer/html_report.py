@@ -1,22 +1,145 @@
-"""Self-contained HTML report with searchable sheet digests and findings.
+"""Self-contained, navigable HTML report for a drawing digest.
 
-Rendering retains the context's sheet prose and exact ``combined_text``. This
-module reads context attributes without importing the pipeline or PDF engines,
-and performs no Python network I/O. Run-derived text is untrusted: escape it
-into content, build browser DOM safely, restrict links to HTTPS, and keep the
-config island inert under the report's hash-based Content-Security-Policy.
-Host diagnostics pass through ``redact_for_display``; drawing prose does not.
+The raw output of a run is a wall of Markdown — one digest per sheet plus a
+cross-sheet synthesis, concatenated. That is *complete* but hard to navigate: an
+operator who only wants the coordination items, or the conflicts the model
+flagged across the set, has to scroll a massive file. This module renders the
+same :class:`~drawing_analyzer.pipeline.DrawingContext` into a single, dependency-free
+HTML file that keeps **every** word the model produced while making it
+explorable — a sidebar table of contents, a live text search, and category
+filters (Coordination, Conflicts, Equipment & Schedules, …) so the operator can
+isolate exactly the sections they care about.
 
-The optional Ask AI widget sends report text and conversation history directly
-from the reader's browser to Anthropic, with server-side search/fetch tools.
-It uses the reader's key, held in memory and sessionStorage by default. Browsers
-control storage persistence; this is not a guarantee that a key never reaches
-disk. Explicit ``embed_api_key=True`` writes the key into the HTML and displays
-a sharing warning. Forgetting a key cannot erase one embedded in the file.
+Design constraints, mirroring :mod:`drawing_analyzer.export`:
 
-Chat transcripts persist locally and can be saved or loaded. They contain
-project information and require the same sharing care as the report. Set
-``include_chat=False`` to omit chat and its network references entirely."""
+- **Pure & duck-typed.** Reads only the documented attributes off the context
+  (``sheets`` / ``synthesis_text`` / ``focus`` / ``focus_report_text`` /
+  ``combined_text`` / the run-summary counts / ``errors``); it never imports the
+  engine, tkinter, PyMuPDF, or the network, so it unit-tests in isolation. See
+  :func:`build_html_report`. The one text helper it does take is
+  :func:`~drawing_analyzer.run_journal.redact_for_display`, so a host error
+  string reaches the report through the same secret/path boundary as run.log
+  (P9 item 44) — pure, I/O-free, and applied to host status text only, never to
+  digest prose (I-2) or to findings.
+- **Lossless.** The structured view is rendered from each sheet's digest, and the
+  exact, verbatim ``combined_text`` is also embedded (collapsed) so the original
+  Markdown is always one click / copy away — the rendering can never *drop*
+  content, only present it.
+- **Self-contained.** All CSS and JavaScript are inlined; the result is one
+  ``.html`` file the operator can double-click, search, filter, print, or email
+  with no server, build step, or internet access.
+
+In-report Q&A assistant (Ask AI)
+--------------------------------
+The report embeds a chat widget ("Ask AI") **by default** that answers
+questions about the results. It calls the Anthropic Messages API **directly from
+the reader's browser** (no server), grounded in the very report text already
+embedded in the page (the ``#raw-md`` block), with streaming, adaptive thinking,
+and the server-side web search / web fetch tools enabled. The report block is
+sent with a 1h prompt-cache breakpoint so follow-up questions re-read the
+(large) report at cache prices for an hour; a second, rolling breakpoint on the
+conversation keeps prior tool rounds cheap too.
+
+**Nothing is rationed.** The assistant is given the configured model's own
+limits, resolved host-side from the capability registry into the emitted config:
+``maxTokens`` is the model's full synchronous output ceiling (128k on the
+default), never a smaller house budget — a truncated answer is a wrong answer the
+reader pays for twice — and the input side is never trimmed at all: the report
+goes over verbatim and the transcript accumulates untouched. Both numbers follow
+``DRAWING_ANALYZER_CHAT_MODEL``, because exceeding a model's real ceiling is a
+400 that kills the request. The output size is safe only because the widget
+streams; a non-streaming request that large would hit an HTTP timeout.
+
+Since nothing is trimmed, the window is the one budget a long thread can exhaust
+— and the overrun is abrupt (the request that exceeds it is rejected outright),
+so the footer carries a **context readout** beside the cost one: how much of
+``contextWindow`` the live thread occupies, with a meter and a warning tier at
+70% and 90%. The two readouts answer different questions and are deliberately
+separate — the cost line accumulates across every round of every question
+(spend), while the context line is a snapshot of the newest round's prompt plus
+its answer (occupancy), which is what the *next* request will carry. Both are
+measured from the API's own usage numbers, so both stay silent until the first
+answer lands; a loaded transcript reads blank until its next question, because
+the occupancy of a thread this browser has never sent is not yet known.
+
+If a thread does reach the ceiling, generated tokens count toward the window
+too, so the answer stops mid-sentence with ``model_context_window_exceeded`` —
+a *different* stop reason from ``max_tokens`` (nothing about the request was too
+small; the conversation is simply too long) and so a different note, naming
+**New chat** as the remedy. Every stop reason that cuts an answer short gets a
+note recorded on the turn, not just drawn on screen, so a restored transcript
+never shows a truncated answer as a complete one.
+
+**Key handling.** By default the key is **not** written into the file — even
+when the caller has one: the widget asks the reader for a key on first use and
+keeps it only in the browser tab's ``sessionStorage`` (the **Forget key**
+control clears both the in-memory copy and sessionStorage) — so the file is
+safe to share and the key never touches disk. Pass ``embed_api_key=True`` (with
+a key) to bake the key into the HTML instead (zero-friction: double-click and
+ask) — the file must then never be shared, and the report carries a **red
+warning** saying so; a runtime "forget" cannot remove an embedded key, and the
+widget says exactly that.
+
+An embedded key is the author's **default, not a lock**. The key field renders
+in both modes, and a key the reader saves outranks the embedded one for their
+tab — so a report that was shared anyway does not bill every question to
+whoever generated it, and a report whose embedded key has since been rotated
+stays usable instead of 401-ing with no way forward.
+
+Pass ``include_chat=False`` to omit the widget (and every network reference)
+entirely. The *Python* module still performs no network I/O.
+
+**The ask box is expandable.** It opens at two rows and grows with what you
+type, up to a cap that always leaves the transcript a readable slice of the
+panel. The grip above it drags to any height and the ▲/▼ toggle jumps to the cap
+and back; either one pins the height (auto-grow stops) until a double-click on
+the grip hands it back. The pinned height persists in ``localStorage``
+(``da-chat-h``) and is re-clamped — never overwritten — when the panel shrinks,
+so borrowed space is returned when the panel grows again.
+
+**Transcript persistence.** The conversation is durable, two ways — nothing is
+ever sent anywhere for either.
+
+- It **auto-saves to the browser's ``localStorage``** after every turn, under a
+  key scoped to this report (``da-chat-tx-<reportId>``; see
+  :func:`_report_identity`), and is replayed on load. A refresh, a close, or a
+  reopened file no longer destroys the thread. **New chat** is the eraser: it
+  clears the stored copy too. The scoping is load-bearing — a double-clicked
+  report shares one ``file://`` storage origin with every other local page.
+- **Save** writes a ``drawing_analyzer_chat_transcript`` JSON document (schema
+  v1) through the file picker where the browser offers one — so it can sit next
+  to ``report.html`` in the export folder — and falls back to an ordinary
+  download otherwise. **Load** reads one back. Its ``turns[].message`` array is
+  the verbatim Messages API history, so a loaded transcript is a *resumable*
+  conversation, not a screenshot; display-only state (the excerpt disclosure,
+  closing notes) rides beside the message, never inside it.
+
+Two honest limits. The browser copy is capped (quota is shared across every
+local page), and past the cap the oldest exchanges are dropped and the widget
+says so; the saved *file* is never trimmed. And a turn aborted before any
+content reached ``history`` leaves text on screen that the transcript does not
+contain — ``history`` is the replayable truth, and the transcript follows it.
+
+**Save as PDF** is unchanged: it reformats the already-rendered message DOM for
+print and hands off to the browser's native print dialog (no new script, host,
+or dependency — "Save as PDF" is just a print destination there). The
+``beforeunload`` handler now fires **only** when persistence actually failed
+(quota, private mode, storage disabled); warning on every close once the thread
+survives would just train readers to click through it.
+
+**Security boundary.** All model output and every run-derived value (filenames,
+titles, errors, quotes…) is treated as hostile — see the trust-boundary note
+above the imports: escaped-into-content on the Python side, safe-DOM-built on
+the browser side, one https-only URL policy for all links/citations, an inert
+JSON config island, and a hash-pinned Content-Security-Policy.
+
+The Markdown→HTML conversion is a small, deliberately-scoped renderer
+(:func:`markdown_to_html`) covering exactly the constructs the digests use —
+headings, ``**bold**``, ``` `code` ```, bullet/numbered lists, GFM pipe tables
+(schedules), block quotes (failed-sheet notices), and horizontal rules. It
+escapes all model text, and any line it does not recognize falls through as an
+escaped paragraph, so nothing is ever lost.
+"""
 from __future__ import annotations
 
 import base64
@@ -40,7 +163,6 @@ from .models import (
     TRUST_REASON_NO_QUOTE,
     TRUST_REASON_NO_TEXT,
     TRUST_REASON_NOT_FOUND,
-    held_out_findings,
     reduced_trust_reason,
 )
 from .run_journal import redact_for_display
@@ -1065,43 +1187,6 @@ def _card(
     )
 
 
-def _held_out_block(sheet: Any) -> str:
-    """The findings a read the model did not finish reported, listed on its card.
-
-    Held out of the review (remediation WP-01.3, N15;
-    :func:`~drawing_analyzer.models.held_out_findings`): they have no QC number,
-    no row in the findings table and no markup, so the card lists them beside
-    the prose it keeps, with the same fields (severity, category, text, quote)
-    as the sheet's own export file (``export._held_out_line``). ``""`` for
-    every other sheet. Model content, escaped, never redacted (I-2).
-    """
-    held = held_out_findings(sheet)
-    if not held:
-        return ""
-    items = []
-    for f in held:
-        severity = str(getattr(f, "severity", "") or "").strip() or "?"
-        category = str(getattr(f, "category", "") or "").strip() or "?"
-        text = " ".join(str(getattr(f, "text", "") or "").split())
-        quote = " ".join(str(getattr(f, "source_quote", "") or "").split())
-        item = (
-            f"<li><strong>{html.escape(severity)}</strong> · "
-            f"{html.escape(category)}: {html.escape(text)}"
-        )
-        if quote:
-            item += f" <code>{html.escape(quote)}</code>"
-        items.append(item + "</li>")
-    return (
-        '<section class="block block-held-out" data-category="other">'
-        f"<p><strong>Findings held out of the review ({len(held)})</strong></p>"
-        '<p class="muted">The model did not finish reading this sheet, so the '
-        "review did not take the findings this read reported: they have no QC "
-        "number, markup or verification, and are not in the findings table. "
-        "Check them against the sheet.</p>"
-        f"<ul>{''.join(items)}</ul></section>"
-    )
-
-
 def _rawtext_block(geometry: Any) -> str:
     """A collapsed block carrying the sheet's raw extracted text layer.
 
@@ -1171,7 +1256,6 @@ def _sheet_card(
             '<section class="block" data-category="other">'
             '<p class="muted">(empty digest)</p></section>'
         )
-    body += _held_out_block(sheet)
     body += _rawtext_block(geometry)
 
     title = (
@@ -2801,12 +2885,7 @@ def _chat_bootstrap_html(
         # tells a reader whether the next question still fits.
         "contextWindow": caps.context_window,
         "rates": (
-            {
-                "in": price.input_per_mtok,
-                "out": price.output_per_mtok,
-                # Not a fixed share of ``in``: Opus 5.5 reads its cache at 0.05x.
-                "cacheRead": price.cache_read_per_mtok,
-            }
+            {"in": price.input_per_mtok, "out": price.output_per_mtok}
             if price
             else None
         ),
@@ -4122,14 +4201,12 @@ _CHAT_JS = r"""
   })();
 
   // Session token/cost readout. The dollar figure is an ESTIMATE and is labelled
-  // as one: cache reads bill at the model's read rate (CFG.rates.cacheRead, from
-  // the pricing table: 0.1x input on most models, 0.05x on Opus 5.5) and writes
-  // at 1.25x (5-minute) or 2x (1-hour), and `cache_creation_input_tokens` does
-  // not say which TTL produced it — with both TTLs in play here that is a band,
-  // not a figure. So the cost is shown as a range and the raw token counts sit
-  // beside it, which is what makes the number honest and what makes a regression
-  // visible: if cacheWrite is large on every question, the report block is not
-  // being cached.
+  // as one: cache reads bill at ~0.1x input and writes at 1.25x (5-minute) or 2x
+  // (1-hour), and `cache_creation_input_tokens` does not say which TTL produced
+  // it — with both TTLs in play here that is a band, not a figure. So the cost is
+  // shown as a range and the raw token counts sit beside it, which is what makes
+  // the number honest and what makes a regression visible: if cacheWrite is large
+  // on every question, the report block is not being cached.
   function fmtTokens(n){
     if(n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
     if(n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
@@ -4198,11 +4275,9 @@ _CHAT_JS = r"""
       fmtTokens(sessionUsage.output) + ' out'
     ];
     if(CFG.rates && CFG.rates.in && CFG.rates.out){
-      var readRate = (typeof CFG.rates.cacheRead === 'number')
-        ? CFG.rates.cacheRead : CFG.rates.in * 0.1;
       var base = (sessionUsage.input / 1e6) * CFG.rates.in
         + (sessionUsage.output / 1e6) * CFG.rates.out
-        + (sessionUsage.cacheRead / 1e6) * readRate;
+        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in * 0.1;
       var lo = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 1.25;
       var hi = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 2;
       var span = (lo.toFixed(2) === hi.toFixed(2))
@@ -5052,7 +5127,7 @@ _CHAT_JS = r"""
   // ----------------------------------------------------- transcript: shape
   // One JSON document, the same whether it lands in localStorage or in a file:
   //
-  //   {schema_version, kind, report:{report_id,title,generated,sources,model,prefix},
+  //   {schema_version, kind, report:{report_id,title,generated,sources,model},
   //    saved_at, truncated, turns:[{message, display?}, ...]}
   //
   // `turns[i].message` is the VERBATIM Messages API message, so
@@ -5079,10 +5154,7 @@ _CHAT_JS = r"""
         title: CFG.title || '',
         generated: CFG.generated || '',
         sources: (CFG.sources || []).slice(),
-        model: CFG.model || '',
-        // What this thread's thinking blocks are bound to (see
-        // requestPrefixKey), so a later load can tell whether they still hold.
-        prefix: requestPrefixKey() || ''
+        model: CFG.model || ''
       },
       saved_at: new Date().toISOString(),
       truncated: false,
@@ -5280,99 +5352,13 @@ _CHAT_JS = r"""
     }
     return turns.slice(0, end);
   }
-  // Preserved thinking. On Claude Sonnet 5.5 and Opus 5.5 a thinking block is
-  // bound to the conversation it was produced in: the system prompt, the tools
-  // and every message before it. A whole transcript this report wrote replays
-  // exactly that conversation. One saved from a different report (another
-  // system prompt) or trimmed to fit browser storage (its oldest turns are gone)
-  // does not, and for an account the API enforces the check on, the next
-  // question would be a 400, and so would every one after it. Such a thread is
-  // resumed without its thinking blocks, the API's own recovery: text and tool
-  // calls stay, and the model works from the visible turns. ALL of them go,
-  // never some: a block may only be removed from the front of the run, so
-  // dropping some would break the rest. A turn that was nothing but thinking is
-  // left empty, and an empty assistant message is a 400, so the exchange it
-  // ended is rewound whole, as an unfinished exchange at the tail always is.
-  // The screen shows what the thread holds.
-  //
-  // The report id alone does not prove the prefix is the same: it leaves out
-  // the chat model and the request itself, and one run exported twice (another
-  // DRAWING_ANALYZER_CHAT_MODEL, another build's system prompt or tool list)
-  // keeps its id. So a transcript records the key of the prefix its blocks were
-  // produced under, and only a match replays them. A transcript with no key (one
-  // written before the key existed) never matches.
-  var PREFIX_KEY;
-  function requestPrefixKey(){
-    if(PREFIX_KEY !== undefined) return PREFIX_KEY;
-    try {
-      var req = buildRequest(false);
-      // Cache markers are not part of the bound prefix. The thinking setting is
-      // keyed too, though the model already decides it: a false mismatch only
-      // costs the old reasoning, while a false match fails every question.
-      var text = JSON.stringify(
-        {model: req.model, thinking: req.thinking || null, system: req.system, tools: req.tools},
-        function(k, v){ return k === 'cache_control' ? undefined : v; });
-      var h = 0x811c9dc5;                    // FNV-1a, 32-bit
-      for(var i = 0; i < text.length; i++){
-        h ^= text.charCodeAt(i);
-        h = Math.imul(h, 0x01000193) >>> 0;
-      }
-      PREFIX_KEY = ('0000000' + h.toString(16)).slice(-8) + '-' + text.length;
-    } catch(e){
-      PREFIX_KEY = null;                     // unknown: never claim a match
-    }
-    return PREFIX_KEY;
-  }
-  function replaysVerbatim(data){
-    var rep = (data && data.report) || {};
-    var key = requestPrefixKey();
-    return data.truncated !== true
-      && String(rep.report_id || '') === String(CFG.reportId || '')
-      && !!key && rep.prefix === key;
-  }
-  function withoutThinking(m){
-    if(!m || m.role !== 'assistant' || !Array.isArray(m.content)) return m;
-    var kept = m.content.filter(function(b){
-      return !b || (b.type !== 'thinking' && b.type !== 'redacted_thinking');
-    });
-    return kept.length === m.content.length ? m : {role: m.role, content: kept};
-  }
-  function resumableTurns(data){
-    var turns = data.turns;
-    if(!replaysVerbatim(data)){
-      turns = [];
-      var start = 0;         // where the current exchange's reader turn sits
-      var skipping = false;  // the rest of a rewound exchange
-      data.turns.forEach(function(turn){
-        if(isReaderTurn(turn)){ start = turns.length; skipping = false; }
-        if(skipping) return;
-        var m = turn && turn.message;
-        var sent = withoutThinking(m);
-        if(sent !== m){
-          if(!sent.content.length){
-            // Dropping only this turn would leave two user turns in a row (the
-            // question or tool result before it, then the next question) in
-            // the MIDDLE of the thread, where dropUnansweredTail never looks.
-            // The API merges them, so the unanswered question would read as
-            // part of the next one.
-            turns.length = start;
-            skipping = true;
-            return;
-          }
-          turn = Object.assign({}, turn, {message: sent});
-        }
-        turns.push(turn);
-      });
-    }
-    return dropUnansweredTail(turns);
-  }
   function adoptTranscript(data, hint){
     turnGen++;                       // retire any in-flight turn's cleanup
     if(aborter) aborter.abort();
     clearPendingSelection();
     clearTermHighlight();
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild);
-    replayTranscript(resumableTurns(data));
+    replayTranscript(dropUnansweredTail(data.turns));
     if(hint) addMsg('da-hint', hint);
     saveTranscript();
   }
@@ -5388,7 +5374,7 @@ _CHAT_JS = r"""
       dropStoredTranscript();
       return;
     }
-    var turns = resumableTurns(data);
+    var turns = dropUnansweredTail(data.turns);
     if(!turns.length) return;
     replayTranscript(turns);
     addMsg('da-hint', 'Restored your previous conversation from this browser.'

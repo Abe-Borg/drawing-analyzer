@@ -78,13 +78,9 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
 from . import __version__, diagnostics
 from .core import updates
 from .core.api_config import REVIEW_MODEL_DEFAULT
-from .core.api_key_format import looks_like_api_key
 from .core.api_key_store import (
-    KeyNote,
     SecureKeyStorageUnavailable,
     load_api_key_from_file,
-    load_api_key_with_notes,
-    normalize_api_key,
     save_api_key,
 )
 from .core.app_paths import api_key_paths, app_config_dir
@@ -103,6 +99,7 @@ from .help_content import (
     PROCESSING_MODE_HYBRID,
     PROCESSING_MODES,
     HelpDocument,
+    help_document,
     processing_transports,
     transport_hint,
 )
@@ -140,10 +137,6 @@ _log = diagnostics.get_logger()
 # the small triangles as tofu.
 _CARET_OPEN = "▾"
 _CARET_SHUT = "▸"
-
-# The key status while an analysis runs (WP-16.2): a locked CTkEntry looks
-# exactly like an editable one, so the label beside it says why it ignores keys.
-_KEY_LOCKED_STATUS = "locked while analyzing"
 
 
 class CollapsibleSection:
@@ -340,18 +333,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
-        # The key the app uses (WP-16.2): the normalized field value, which the
-        # launch key pre-fills. Analyze and the exports read it; nothing reads
-        # or writes ANTHROPIC_API_KEY after the launch load.
-        self._applied_key = self._initial_key or ""
         # Tracks what's currently persisted so finishing an edit only rewrites
         # the store when the key actually changed (and never auto-persists an
         # unchanged, env-supplied key).
         self._persisted_key = self._initial_key
-        # Re-focus existing help windows instead of opening duplicates.
+        # Open help modals ("How to use" / "How it works" / "Why trust it?" /
+        # "About", plus the standalone API-key and runtime-transparency
+        # panels), keyed by HelpDocument.key so a second click re-focuses the
+        # existing window instead of stacking a duplicate.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
-        self._help_openers: dict[str, object] = {}
-        self._help_focus_targets: dict[str, list] = {}
+        # A help modal opened *from another help modal* (the "I'm not
+        # convinced" link) records its opener here, so closing the child hands
+        # the application-modal grab back to its parent instead of leaving the
+        # still-visible parent ungrabbed.
+        self._help_parents: dict[str, ctk.CTkToplevel] = {}
         # Resizable pop-out editor for the per-run focus box (see
         # _open_focus_popout); focus_popout_box is None whenever it's closed.
         self._focus_popout: ctk.CTkToplevel | None = None
@@ -382,37 +377,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     # ------------------------------------------------------------------ setup
 
     def _load_api_key(self) -> str:
-        """Resolve the launch key from the environment or the saved store.
+        """Resolve a key from the environment or saved store and apply it.
 
-        Returns the resolved key (or ``""``) so the caller can flip the
-        ``_has_key`` flag, pre-fill the key field and start the applied key.
-        The env var wins over the saved store, matching the precedence the rest
-        of the app expects.
-
-        Remediation WP-16.2 (G2; the owner's rules): an ``ANTHROPIC_API_KEY``
-        inherited from the shell is read here once and then **removed** from
-        the process environment, so no child process (the annotation pool's
-        spawned workers, the file opener, the update installer) inherits it,
-        and the GUI never writes it back. It goes through the one normalizer; a
-        value that is not an ``sk-ant-`` key is still used (like a typed value,
-        so a future key format keeps working for the session) with a warning
-        that names the variable, never the value.
-
-        What the store refused, repaired or kept (WP-16.1) is held in
-        ``_key_load_notes`` until the activity log exists
-        (:meth:`_report_key_at_startup`).
+        Returns the resolved key (or ``""``) so the caller can both flip the
+        ``_has_key`` flag and pre-fill the key field. The env var wins over the
+        saved store, matching the precedence the rest of the app expects.
         """
-        self._key_load_notes = ()
-        key = normalize_api_key(os.environ.pop("ANTHROPIC_API_KEY", None) or "")
-        if key and not looks_like_api_key(key):
-            self._key_load_notes = (KeyNote(
-                "The ANTHROPIC_API_KEY environment variable does not look like an "
-                "Anthropic API key (one starts with sk-ant-). It is used for this "
-                "session as it is; if calls fail to authenticate, check it.",
-            ),)
-        if not key:
-            loaded = load_api_key_with_notes()
-            key, self._key_load_notes = loaded.key, loaded.notes
+        key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+        if key:
+            os.environ["ANTHROPIC_API_KEY"] = key
         return key
 
     def _build_ui(self) -> None:
@@ -442,7 +415,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=(
                 "Drop construction drawing PDFs "
                 "(one or many; multi-sheet PDFs are split page-by-page). "
-                "Each sheet is read by Claude Opus 5.5 and summarized to text."
+                "Each sheet is read by Claude Opus 5 and summarized to text."
             ),
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_secondary"],
@@ -452,10 +425,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
         # environment. It applies the moment it's entered (no button), and is
-        # saved to the OS keyring when editing finishes; a plain-text key file
-        # is written only with the user's consent (DA-032). The field holds the
-        # key the app uses (WP-16.2): it is never written to the environment,
-        # and it is locked while an analysis runs.
+        # saved (OS keyring, or a local key file) when editing finishes.
         # Collapsed on launch when a key is already loaded (the common case);
         # expanded when there's none, so a first-run user is prompted for it.
         self._key_sec = CollapsibleSection(
@@ -801,7 +771,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         opt_row.pack(fill="x", padx=16, pady=(0, 4))
         self._embed_key_check = ctk.CTkCheckBox(
             opt_row,
-            text="Embed API key in HTML report (Ask-AI still needs internet; don't share the file)",
+            text="Embed API key in HTML report (Ask-AI works offline; don't share the file)",
             variable=self._embed_key_var,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"],
@@ -876,17 +846,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 f"below to view it any time.",
                 level="info",
             )
-        self._report_key_at_startup()
-
-    def _report_key_at_startup(self) -> None:
-        """Say what the key store did, then whether a key is loaded.
-
-        The store's notes (a key file refused or kept, a keyring entry repaired;
-        WP-16.1) name the file and the reason, never the value. They come first,
-        so the one-line status that follows reads as their outcome.
-        """
-        for note in self._key_load_notes:
-            self._log(note.text, level="warning" if note.warning else "muted")
         if not self._has_key:
             self._set_key_status("no key", COLORS["warning"])
             self._log(
@@ -919,43 +878,53 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.pack(side="right", anchor="e")
         for doc in HELP_DOCUMENTS:
-            button = ctk.CTkButton(
+            ctk.CTkButton(
                 bar, text=doc.button_label,
                 width=112 if len(doc.button_label) > 6 else 68, height=30,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
                 border_width=1, border_color=COLORS["border"],
                 text_color=COLORS["text_secondary"],
-            )
-            button.configure(command=lambda d=doc, b=button: self._open_help_modal(d, opener=b))
-            button.pack(side="left", padx=(6, 0))
+                command=lambda d=doc: self._open_help_modal(d),
+            ).pack(side="left", padx=(6, 0))
 
-    def _open_help_modal(self, doc: HelpDocument, opener=None) -> None:
-        """Open or re-focus a screen-bounded help window."""
+    def _open_help_modal(self, doc: HelpDocument, parent=None) -> None:
+        """Open (or re-focus) the scrollable modal for one help document.
+
+        The content is pure data from :mod:`help_content`; this method only
+        renders it. Re-clicking a button whose window is already open lifts and
+        focuses that window rather than stacking a duplicate.
+
+        ``parent`` is the help modal this one was opened *from* (the "I'm not
+        convinced" hand-off out of "Why trust it?"). It makes the child
+        transient to the panel that spawned it and lets
+        :meth:`_close_help_modal` return the modal grab to that parent, so
+        closing the deep-dive leaves the panel behind it usable again.
+        """
         existing = self._help_windows.get(doc.key)
         if existing is not None and existing.winfo_exists():
             existing.lift()
             existing.focus_force()
             return
 
-        win = ctk.CTkToplevel(self)
+        owner = parent if (parent is not None and parent.winfo_exists()) else self
+        win = ctk.CTkToplevel(owner)
         self._help_windows[doc.key] = win
-        self._help_openers[doc.key] = opener or self.focus_get()
+        if owner is not self:
+            self._help_parents[doc.key] = owner
         win.title(doc.title)
         win.configure(fg_color=COLORS["bg_dark"])
-        # CTk sizes are logical pixels; screen dimensions are physical pixels.
-        # Account for automatic monitor DPI and user scaling before bounding it.
-        scale = win._get_window_scaling()
-        width = min(720, int(win.winfo_screenwidth() * .92 / scale))
-        height = min(640, int(win.winfo_screenheight() * .88 / scale))
-        win.geometry(f"{width}x{height}")
-        win.minsize(min(520, width), min(360, height))
-        win.maxsize(int(win.winfo_screenwidth() / scale), int(win.winfo_screenheight() * .88 / scale))
-        win.transient(self)
-        win.bind("<Escape>", lambda _e: self._help_escape(doc.key))
-        win.bind("<Tab>", lambda e: self._help_tab(doc.key, e))
-        win.bind("<Shift-Tab>", lambda e: self._help_tab(doc.key, e, backwards=True))
-        win.bind("<ISO_Left_Tab>", lambda e: self._help_tab(doc.key, e, backwards=True))
+        # Panels carrying pre-formatted blocks (the runtime-transparency
+        # diagrams and tables) are rendered verbatim and never re-wrapped, so
+        # they open wider — a narrow window would clip them rather than reflow.
+        if any(b.kind == "pre" for s in doc.sections for b in s.blocks):
+            win.geometry("880x760")
+            win.minsize(620, 420)
+        else:
+            win.geometry("720x640")
+            win.minsize(520, 400)
+        win.transient(owner)
+        win.bind("<Escape>", lambda _e: self._close_help_modal(doc.key))
         win.protocol("WM_DELETE_WINDOW", lambda: self._close_help_modal(doc.key))
         # Grabbing input before the toplevel is viewable raises on some
         # platforms; defer it a beat so the modal reliably takes focus.
@@ -964,109 +933,55 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
         card.pack(fill="both", expand=True, padx=12, pady=12)
 
-        heading = ctk.CTkLabel(
+        ctk.CTkLabel(
             card, text=doc.title,
             font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
             text_color=COLORS["text_primary"], justify="left",
-        )
-        heading.pack(anchor="w", padx=18, pady=(16, 2))
-        card.bind("<Configure>", lambda e: heading.configure(
-            wraplength=max(40, heading._reverse_widget_scaling(e.width) - 42)), add="+")
+        ).pack(anchor="w", padx=18, pady=(16, 2))
         if doc.intro:
-            intro = ctk.CTkLabel(
+            ctk.CTkLabel(
                 card, text=doc.intro,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 text_color=COLORS["text_secondary"], wraplength=640, justify="left",
-            )
-            intro.pack(anchor="w", padx=18, pady=(0, 8))
-            card.bind("<Configure>", lambda e: intro.configure(
-                wraplength=max(40, intro._reverse_widget_scaling(e.width) - 42)), add="+")
+            ).pack(anchor="w", padx=18, pady=(0, 8))
 
         # Bottom bar first so the scrollable body fills the space between it and
         # the header (pack reserves the bottom before the expand widget claims
         # the rest).
         bottom = ctk.CTkFrame(card, fg_color="transparent")
         bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
-        close = ctk.CTkButton(
+        ctk.CTkButton(
             bottom, text="Close", width=100, height=32,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             command=lambda: self._close_help_modal(doc.key),
-        )
-        close.pack(side="right")
-        close.bind("<Return>", lambda _e: self._close_help_modal(doc.key))
-        close.bind("<space>", lambda _e: self._close_help_modal(doc.key))
+        ).pack(side="right")
 
         body = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_dark"], corner_radius=6)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        self._render_help_body(body, doc)
-        self._help_focus_targets[doc.key] = [*body._help_links, close]
-        # Labels reflow with the viewport, including a narrow screen.
-        last_width = None
-        def reflow(event):
-            nonlocal last_width
-            # Configure events use physical pixels; CTk wrap lengths use
-            # logical pixels and apply widget scaling themselves.
-            width = body._reverse_widget_scaling(event.width)
-            if width == last_width:
-                return
-            # Rewrapping changes the frame's height and fires Configure again.
-            # Ignore those events so scrollbar redraws cannot re-enter the loop.
-            last_width = width
-            for label in getattr(body, "_help_labels", []):
-                wraplength = max(40, width - 48)
-                if label.cget("wraplength") != wraplength:
-                    label.configure(wraplength=wraplength)
-        # Reflow after the canvas finishes allocating its viewport. Running
-        # inside a frame-height change can recursively redraw its scrollbar.
-        body._parent_canvas.bind("<Configure>", lambda event: body.after(0, lambda: reflow(event)), add="+")
-        win.after(160, close.focus_set)
-
-    def _help_escape(self, key: str) -> str:
-        self._close_help_modal(key)
-        return "break"
-
-    def _help_tab(self, key: str, event, backwards: bool = False) -> str:
-        targets = [w for w in self._help_focus_targets.get(key, []) if w.winfo_ismapped()]
-        if targets:
-            current = self.focus_get()
-            # CustomTkinter delegates bindings to its canvas/label children.
-            index = next((i for i, w in enumerate(targets)
-                          if current is w or str(current).startswith(str(w) + ".")), -1)
-            target = targets[(index + (-1 if backwards else 1)) % len(targets)]
-            target.focus_set()
-            self._help_see_target(target)
-        return "break"
+        self._render_help_body(
+            body,
+            doc,
+            on_modal_link=lambda key: self._open_help_modal(
+                help_document(key), parent=win
+            ),
+        )
 
     @staticmethod
-    def _help_see_target(target) -> None:
-        """Keep a keyboard-focused short-topic button inside its viewport."""
-        ancestor = target.master
-        while ancestor is not None:
-            canvas = getattr(ancestor, "_parent_canvas", None)
-            if canvas is not None:
-                height = max(1, ancestor.winfo_height())
-                top = canvas.canvasy(0)
-                y = target.winfo_rooty() - ancestor.winfo_rooty()
-                if y < top or y + target.winfo_height() > top + canvas.winfo_height():
-                    canvas.yview_moveto(y / height)
-                return
-            ancestor = getattr(ancestor, "master", None)
+    def _render_help_body(body, doc: HelpDocument, on_modal_link=None) -> None:
+        """Render each section's heading, paragraphs, and bullets into ``body``.
 
-    @staticmethod
-    def _render_help_body(body, doc: HelpDocument) -> None:
-        """Render shared help text and external links."""
+        ``on_modal_link`` receives the ``doc_key`` of a ``modal`` block when
+        the reader clicks it; when it is ``None`` (the content-only test path)
+        such a block still renders, just as inert text.
+        """
         wrap = 610
-        body._help_labels = []
-        body._help_links = []
         for section in doc.sections:
-            heading = ctk.CTkLabel(
+            ctk.CTkLabel(
                 body, text=section.heading,
                 font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
                 text_color=COLORS["accent_glow"], wraplength=wrap, justify="left",
-            )
-            heading.pack(anchor="w", padx=10, pady=(14, 3))
-            body._help_labels.append(heading)
+            ).pack(anchor="w", padx=10, pady=(14, 3))
             for block in section.blocks:
                 if block.kind == "bullet":
                     row = ctk.CTkFrame(body, fg_color="transparent")
@@ -1076,14 +991,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                     ).pack(side="left", anchor="n", padx=(4, 6))
-                    label = ctk.CTkLabel(
+                    ctk.CTkLabel(
                         row, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                         wraplength=wrap - 28, justify="left", anchor="w",
-                    )
-                    label.pack(side="left", anchor="w")
-                    body._help_labels.append(label)
+                    ).pack(side="left", anchor="w")
                 elif block.kind == "link" and block.href:
                     link = ctk.CTkLabel(
                         body, text=block.text,
@@ -1092,27 +1005,49 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         wraplength=wrap, justify="left", cursor="hand2",
                     )
                     link.pack(anchor="w", padx=10, pady=(2, 2))
-                    body._help_labels.append(link)
-                    link._label.configure(
-                        takefocus=True, highlightthickness=1,
-                        highlightbackground=COLORS["bg_dark"],
-                        highlightcolor=COLORS["accent_glow"],
+                    link.bind(
+                        "<Button-1>",
+                        lambda _e, url=block.href: webbrowser.open(url),
                     )
-                    body._help_links.append(link._label)
-                    def open_link(_event, url=block.href):
-                        webbrowser.open(url)
-                        return "break"
-                    for sequence in ("<Button-1>", "<Return>", "<space>"):
-                        link.bind(sequence, open_link)
+                elif block.kind == "pre":
+                    # Verbatim monospace: NO wraplength, so the ASCII diagrams
+                    # and tables keep their alignment. help_content bounds the
+                    # line length (PRE_MAX_WIDTH) and the modal opens wider
+                    # when a doc contains one of these. Breathing room comes
+                    # from pack's ipadx/ipady — CTkLabel forwards a constructor
+                    # `padx`/`pady` straight into its internal tkinter.Label,
+                    # which already sets both, and the duplicate raises.
+                    ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Consolas", size=11),
+                        text_color=COLORS["text_secondary"],
+                        fg_color=COLORS["bg_card"], corner_radius=6,
+                        justify="left", anchor="w",
+                    ).pack(anchor="w", padx=10, pady=(6, 6), ipadx=12, ipady=8)
+                elif block.kind == "modal" and block.doc_key:
+                    # A hand-off to another help document. Rendered like a web
+                    # link but routed back through _open_help_modal, so the
+                    # panel relationship lives in the content, not in gui.py.
+                    jump = ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Segoe UI", size=12, underline=True),
+                        text_color=COLORS["accent_glow"],
+                        wraplength=wrap, justify="left",
+                        cursor="hand2" if on_modal_link else "",
+                    )
+                    jump.pack(anchor="w", padx=10, pady=(4, 2))
+                    if on_modal_link is not None:
+                        jump.bind(
+                            "<Button-1>",
+                            lambda _e, key=block.doc_key: on_modal_link(key),
+                        )
                 else:
-                    label = ctk.CTkLabel(
+                    ctk.CTkLabel(
                         body, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                         wraplength=wrap, justify="left",
-                    )
-                    label.pack(anchor="w", padx=10, pady=(2, 2))
-                    body._help_labels.append(label)
+                    ).pack(anchor="w", padx=10, pady=(2, 2))
 
     def _grab_help_modal(self, win) -> None:
         """Make a help modal application-modal once it is viewable (best-effort)."""
@@ -1124,10 +1059,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             pass
 
     def _close_help_modal(self, key: str) -> None:
-        """Close help and restore focus to its opener."""
+        """Release the grab and destroy a help modal, forgetting its handle.
+
+        When the modal was opened from another one, the grab is handed back to
+        that parent — otherwise closing the child would leave the still-open
+        panel behind it visible but not accepting input.
+        """
         win = self._help_windows.pop(key, None)
-        opener = self._help_openers.pop(key, None)
-        self._help_focus_targets.pop(key, None)
+        parent = self._help_parents.pop(key, None)
         if win is None:
             return
         try:
@@ -1138,12 +1077,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             win.destroy()
         except Exception:  # pragma: no cover - platform dependent
             pass
-        if opener is not None:
+        if parent is not None:
             try:
-                if opener.winfo_exists():
-                    opener.focus_set()
-                    self._help_see_target(opener)
-            except Exception:  # pragma: no cover - opener may have been removed
+                if parent.winfo_exists():
+                    self._grab_help_modal(parent)
+            except Exception:  # pragma: no cover - platform dependent
                 pass
 
     # --------------------------------------------------------------- api key
@@ -1160,61 +1098,27 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=text, text_color=color or COLORS["text_muted"]
         )
 
-    def _set_key_editable(self, enabled: bool) -> None:
-        """Lock the key field while an analysis runs, and unlock it after.
-
-        A courtesy, not the correctness (remediation WP-16.2): the run's client
-        is built from the key snapshotted at Analyze, so an edit could not
-        reach a running analysis anyway. A disabled ``CTkEntry`` refuses typing,
-        Backspace, paste and cut, but looks exactly like an enabled one (real
-        Tk 8.6 + customtkinter 6.0.0: the same colours), so the status label
-        says why it is locked. Show stays live: the field shows the run's key.
-        Unlocking restores the status shown before, unless something reported
-        since (a save on ``<FocusOut>``, which still fires on a disabled entry).
-        """
-        label = self.key_status_label
-        if enabled:
-            self.key_entry.configure(state="normal")
-            before = getattr(self, "_key_status_before_lock", None)
-            self._key_status_before_lock = None
-            if before is not None and label.cget("text") == _KEY_LOCKED_STATUS:
-                label.configure(text=before[0], text_color=before[1])
-            return
-        self._key_status_before_lock = (label.cget("text"), label.cget("text_color"))
-        self.key_entry.configure(state="disabled")
-        self._set_key_status(_KEY_LOCKED_STATUS, COLORS["text_secondary"])
-
     def _on_key_changed(self, *_args) -> None:
-        """Apply the field's current value to the app as it is edited.
+        """Apply the field's current value to the process as it is edited.
 
         Bound to the entry's text variable so typing, Ctrl+V, and right-click
         paste all take effect immediately — the app is ready to analyze the
-        moment a non-empty key is present, with no button to press. The value
-        becomes the applied key (``_applied_key``), which Analyze snapshots for
-        its run and the exports read; it is never written to the process
-        environment (remediation WP-16.2), so no running stage and no child
-        process can see an edit. Writing to disk is deferred to
-        :meth:`_persist_key` (on finish) so a half-typed key is never persisted.
-
-        The value is normalized first (WP-16.1: a paste from a "UTF-8 with BOM"
-        file carries an invisible BOM), and the field is rewritten to show it,
-        so the field, the key in use and the key saved agree. Tcl runs no trace
-        on a variable while one of its traces is running, so the ``set`` does
-        not re-enter this method (measured with Tk 8.6 and customtkinter); and
-        normalizing is idempotent, so a toolkit that did would stop at once.
+        moment a non-empty key is present, with no button to press.
+        ``client.get_client`` re-reads ``ANTHROPIC_API_KEY`` on its next call
+        and rebuilds its cached client when the key changes, so setting the env
+        var is enough. Writing to disk is deferred to :meth:`_persist_key` (on
+        finish) so a half-typed key is never persisted.
         """
-        raw = self._key_var.get()
-        key = normalize_api_key(raw)
-        if key != raw:
-            self._key_var.set(key)
-        self._applied_key = key
+        key = self._key_var.get().strip()
         if key:
+            os.environ["ANTHROPIC_API_KEY"] = key
             self._has_key = True
             # Show "set" only while there are unsaved edits, so we don't stomp
             # the "saved"/"loaded" indicator when nothing actually changed.
             if key != self._persisted_key:
                 self._set_key_status("set", COLORS["text_secondary"])
         else:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
             self._has_key = False
             self._set_key_status("no key", COLORS["warning"])
 
@@ -1232,7 +1136,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         silently written to a plaintext file — the user is asked for explicit
         informed consent; declining keeps the key session-only.
         """
-        key = normalize_api_key(self._key_var.get())
+        key = self._key_var.get().strip()
         if not key or key == self._persisted_key:
             return
         try:
@@ -1890,12 +1794,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if not self._pdfs:
             messagebox.showinfo("No drawings", "Add one or more drawing PDFs first.")
             return
-        # The run's credential (remediation WP-16.2, G2): the applied key, read
-        # once here, before the cost dialog. The worker builds the run's one
-        # client from it, so no later edit, in the field or in the process
-        # environment, can reach a stage of this run.
-        run_key = self._applied_key
-        if not run_key:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
             messagebox.showerror(
                 "No API key",
                 "No Anthropic API key is set. Paste your key in the field at the "
@@ -1958,7 +1857,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.export_btn.configure(state="disabled")
         self._set_focus_editable(False)
         self.upload_specs_btn.configure(state="disabled")
-        self._set_key_editable(False)
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
@@ -2011,7 +1909,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
                   use_batch, critique_use_batch, save_tiles),
-            kwargs={"api_key": run_key},
             daemon=True,
         ).start()
 
@@ -2028,26 +1925,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         use_batch: bool = True,
         critique_use_batch: bool | None = None,
         save_tiles: bool = False,
-        *,
-        api_key: str,
     ) -> None:
-        """Run the analysis on the run's own client (remediation WP-16.2, G2).
-
-        ``api_key`` is the key :meth:`_on_process` snapshotted. The one client
-        every stage uses is built from it here, off the UI thread (the first
-        build also imports the SDK, measured at 0.6-0.7 s), with the same
-        constructor ``client.get_client`` uses; ``extract_drawing_context``
-        then never resolves a client from the environment.
-        """
         try:
-            # Imported here, on the worker: importing ``client`` imports the SDK,
-            # which the GUI otherwise loads only once a run needs it.
-            from .client import new_client
-
-            client = new_client(api_key)
             ctx = extract_drawing_context(
                 pdfs,
-                client=client,
                 model=REVIEW_MODEL_DEFAULT,
                 progress=self._progress_from_thread,
                 on_log=self._log_from_thread,
@@ -2137,7 +2018,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
-        self._set_key_editable(True)
         self._ctx = ctx
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
@@ -2334,7 +2214,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_error(self, message: str) -> None:
         self._busy = False
-        self._set_key_editable(True)
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
@@ -2401,13 +2280,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         embed_key = self._embed_key_var.get()
         try:
             source_names = [p.name for p in self._pdfs]
-            # The applied key (the key field) powers the report's built-in
-            # Ask-AI assistant (WP-16.2: the app's own attribute, never the
-            # process environment, so a session-only key is still found). By
-            # default it is NOT written into the file (the panel prompts for a
-            # key at runtime); the checkbox embeds it for a zero-friction, but
-            # unshareable, report. The saved-key fallback is WP-16.3's to decide.
-            api_key = self._applied_key or load_api_key_from_file()
+            # The same key that ran the analysis powers the report's built-in
+            # Ask-AI assistant. By default it is NOT written into the file (the
+            # panel prompts for a key at runtime); the checkbox embeds it for a
+            # zero-friction, but unshareable, report.
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
             html_doc = build_html_report(
                 self._ctx, source_names=source_names, api_key=api_key or None,
                 embed_api_key=embed_key,
@@ -2465,12 +2342,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.export_btn.configure(state="disabled", text="Exporting...")
         self._set_progress_text("Exporting full run record...", color=COLORS["text_secondary"])
         self._log("Exporting the full run record in the background...", level="muted")
-        # The applied key is read here, on the UI thread at the click (WP-16.2):
-        # a later edit cannot reach the export running in the background.
         threading.Thread(
             target=self._export_all_worker,
-            args=(ctx, folder, [p.name for p in self._pdfs], embed_key,
-                  self._applied_key),
+            args=(ctx, folder, [p.name for p in self._pdfs], embed_key),
             daemon=True,
         ).start()
 
@@ -2480,13 +2354,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         folder: str,
         source_names: list[str],
         embed_key: bool,
-        applied_key: str = "",
     ) -> None:
         """Build/hash/copy a complete export without blocking Tk's event loop."""
         from .export import write_drawing_export
 
         try:
-            api_key = applied_key or load_api_key_from_file()
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
             out = write_drawing_export(
                 ctx, folder, source_names=source_names,
                 api_key=api_key or None, embed_api_key=embed_key,

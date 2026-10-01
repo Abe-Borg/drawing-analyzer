@@ -231,25 +231,6 @@ def test_cache_read_write_and_web_search_pricing():
     assert ws == Decimal("4") * WEB_SEARCH_COST_PER_USE
 
 
-def test_opus_5_5_reads_its_cache_at_0_05x_and_writes_at_the_standard_rates():
-    """Opus 5.5's published rates: $4 input, $20 output, cache reads $0.20
-    (0.05x, half the multiplier every other model reads at), 5-minute writes $5
-    and 1-hour writes $8 (the standard 1.25x / 2x). Priced at 0.1x, every cached
-    token on the default digest model would read at double its real cost."""
-    opus = "claude-opus-5-5"
-    assert usage_record_cost(model=opus, input_tokens=1_000_000,
-                             output_tokens=1_000_000) == Decimal("24")
-    assert usage_record_cost(model=opus, cache_read_tokens=1_000_000) == Decimal("0.2")
-    assert usage_record_cost(model=opus, cache_write_tokens=1_000_000) == Decimal("5")
-    assert usage_record_cost(model=opus, cache_write_tokens=1_000_000,
-                             cache_write_ttl="1h") == Decimal("8")
-    assert usage_record_cost(model=opus, cache_read_tokens=1_000_000,
-                             batch=True) == Decimal("0.1")
-    # Sonnet 5.5 keeps the standard 0.1x read on its $2 input.
-    assert usage_record_cost(model="claude-sonnet-5-5",
-                             cache_read_tokens=1_000_000) == Decimal("0.2")
-
-
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
     """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
 

@@ -1454,25 +1454,6 @@ def test_chat_config_gates_web_fetch_on_model_capability(monkeypatch):
     assert '"webFetch": true' in doc
 
 
-def test_chat_config_hands_the_widget_the_models_own_cache_read_rate(monkeypatch):
-    """The cost readout prices cache reads at the model's rate, not 0.1x input.
-
-    Opus 5.5 reads its cache at $0.20 on a $4 input (0.05x). A fixed ``in * 0.1``
-    in the browser doubled every cached token on a reader who pointed
-    ``DRAWING_ANALYZER_CHAT_MODEL`` at it; the host hands over the pricing
-    table's figure instead, and the JS uses it.
-    """
-    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-opus-5-5")
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
-    assert '"rates": {"in": 4.0, "out": 20.0, "cacheRead": 0.2}' in doc
-
-    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-sonnet-5-5")
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
-    assert '"rates": {"in": 2.0, "out": 10.0, "cacheRead": 0.2}' in doc
-    assert "CFG.rates.cacheRead" in hr._CHAT_JS
-    assert "(sessionUsage.cacheRead / 1e6) * CFG.rates.in * 0.1" not in hr._CHAT_JS
-
-
 def test_chat_output_and_context_ceilings_come_from_the_registry(monkeypatch):
     """The widget gets the model's OWN limits, not a house-imposed budget.
 

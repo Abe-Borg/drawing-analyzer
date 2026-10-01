@@ -1,15 +1,15 @@
-"""Finding retention, coherent grounding and positional QC numbers.
+"""Phase 20 — lossless ledger reconciliation & the QC-ID lifecycle (§12).
 
 Pure and hermetic: synthetic findings, no PyMuPDF, no network. Covers the §12
 required behaviors — tile/geometry are never sufficient to merge, coherent
 grounding, order-independent numbering, positional QC ids, cross-sheet leg
-distinctness, and the OPEN→SEALED→NUMBERED lifecycle.
+distinctness, and the OPEN→SEALED→NUMBERED lifecycle with post-anchor Pass B.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from drawing_analyzer.ledger import Ledger, _families
+from drawing_analyzer.ledger import Ledger, _families, reconcile_post_anchor
 from drawing_analyzer.models import (
     CONFIDENCE_REPRODUCED,
     CONFIDENCE_SINGLETON,
@@ -48,6 +48,7 @@ def test_overlapping_rects_stay_separate_without_semantic_match():
     led.add([_f("cleanout required at base of stack", rect=[0, 0, 10, 10])], "digest_json")
     led.add([_f("backflow preventer size is wrong", rect=[1, 1, 10, 10])], "critique_1")
     led.seal()
+    reconcile_post_anchor(led)                 # Pass B sees geometry — still keeps both
     assert len(led) == 2
 
 
@@ -140,6 +141,7 @@ def test_ingest_order_independent_entries_and_numbers():
         for i in order:
             led.add([items[i]], "digest_json")
         led.seal()
+        reconcile_post_anchor(led)
         led.number()
         return sorted((e.qc_id, e.id, e.text) for e in led.entries)
 
@@ -208,8 +210,10 @@ def test_complete_link_ingest_survives_representative_switch():
     assert len(led) == 2                         # C kept distinct, not wrongly folded
 
 
-def test_conflicting_references_survive_anchoring():
-    # A generic bridge must not swallow either conflicting sheet reference.
+def test_pass_b_complete_link_does_not_collapse_a_conflicting_chain():
+    # Reviewer #1: Pass B must be complete-link too. A signature-less bridge that is
+    # the highest-quality survivor must not fold two findings that conflict with each
+    # other (M-101 vs M-102) just because each duplicates the bridge.
     led = Ledger()
     led.add([_f("coordinate riser with M-101 diagram", quote="M-101")], "digest_json")
     led.add([_f("coordinate riser with M-102 diagram", quote="M-102")], "digest_json")
@@ -221,6 +225,7 @@ def test_conflicting_references_survive_anchoring():
     led.seal()
     for e in led.entries:                        # anchor all three to the same cell
         e.anchor = Anchor(status="EXACT", rect_pdf=[10, 20, 200, 40], method="t")
+    reconcile_post_anchor(led)
     # The two conflicting refs stay separate; only true duplicates could fold.
     assert len(led) >= 2
     tags = {e.source_quote for e in led.entries}
@@ -299,17 +304,22 @@ def test_the_representative_does_not_depend_on_ingest_order():
         assert len(surviving) == 1, (a_sev, b_sev, surviving)
 
 
-def test_same_spot_paraphrases_stay_distinct_after_anchoring():
-    # Weakly matching text remains separate even when both quotes anchor to one spot.
+def test_post_anchor_reconciliation_folds_a_geometric_duplicate():
+    # Two entries the ingest pass could NOT merge — same verbatim quote but text too
+    # different to merge on text, and no geometry yet — become one once anchored to
+    # overlapping rects (Pass B: same quote + rect overlap). Mirrors the pipeline:
+    # ingest unanchored → seal → anchor → reconcile.
     led = Ledger()
     led.add([_f("cleanout required at base of the soil stack per code", quote="CO-1")], "digest_json")
     led.add([_f("provide a cleanout fitting shown on the plumbing detail", quote="CO-1")], "critique_1")
-    assert len(led) == 2                       # ingest can't merge (weak text)
+    assert len(led) == 2                       # ingest can't merge (weak text, no rects)
     led.seal()
     # Anchor both to heavily-overlapping rectangles (as resolve_anchors would).
     for e in led.entries:
         e.anchor = Anchor(status="EXACT", rect_pdf=[10, 20, 60, 42], method="t")
-    assert len(led) == 2
+    folded = reconcile_post_anchor(led)
+    assert folded == 1                         # same quote + rect overlap → now one
+    assert len(led) == 1
 
 
 def test_an_unanchored_winner_does_not_erase_a_compatible_rect():
@@ -334,8 +344,19 @@ def test_an_unanchored_winner_does_not_erase_a_compatible_rect():
     assert e.anchor.rect_pdf == [10, 200, 60, 220]         # the rect survived
 
 
-def test_conflicting_measurement_survives_a_representative_switch():
-    # A generic representative must not hide an absorbed conflicting measurement.
+def test_pass_b_keeps_a_conflict_carried_in_text_not_the_quote():
+    # Pass B rebuilt its complete-link history from the LIVE survivor rather
+    # than the ledger's ingest snapshots. When B won the representative, A's
+    # text — which held the discriminating "500 gpm" — was overwritten, and only
+    # A's *quote* rode into supporting_quotes. The measurement therefore vanished
+    # from the object Pass B compared against, so Pass B folded a chain Pass A
+    # had explicitly refused one call earlier, and C's "550 gpm" ended up
+    # nowhere at all: not in the text, not in the quotes, only a provenance tag
+    # pointing at content that no longer existed.
+    #
+    # The neighbouring chain test survives on quotes, which do ride into
+    # supporting_quotes. Every arithmetic or quantity conflict carries its signal
+    # in the text instead, which is the case that was uncovered.
     led = Ledger()
     led.add([_f("riser pump flow is 500 gpm per riser schedule",
                 cat="coordination", quote="RISER")], "digest_json")
@@ -353,26 +374,9 @@ def test_conflicting_measurement_survives_a_representative_switch():
 
     assert len(led) == 2 and has_550(led)        # Pass A refused the fold
     led.seal()
+    reconcile_post_anchor(led)
     assert len(led) == 2, [e.text for e in led.entries]
     assert has_550(led), "the conflicting measurement was destroyed"
-
-
-def test_absorbed_conflicting_measurements_remain_separate():
-    # Opposing measurements must belong to separate member histories.
-    led = Ledger()
-    led.add([_f("riser pump flow is 500 gpm per riser schedule",
-                cat="coordination", quote="RISER")], "digest_json")
-    led.add([_f("riser pump flow per riser schedule", cat="coordination",
-                quote="RISER PUMP FLOW")], "critique_1")
-    led.add([_f("riser pump flow is 550 gpm per riser schedule",
-                cat="coordination", quote="RISER PUMP FLOW SCHEDULE")], "cross_qc")
-    assert len(led) == 2                          # Pass A refused the fold
-    led.seal()
-    assert len(led) == 2, [e.text for e in led.entries]
-    # The two measurements stay in different entries, member for member.
-    for entry in led.entries:
-        members = " ".join(m.text for m in led.member_history(entry))
-        assert not ("500 gpm" in members and "550 gpm" in members), members
 
 
 # --------------------------------------------------------------------------- #

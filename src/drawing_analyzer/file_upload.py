@@ -89,7 +89,26 @@ def _resolve_upload_workers(image_count: int, override: int | None = None) -> in
 # rest of the run.
 RUN_FATAL_UPLOAD_STATUSES = frozenset({401, 403, 404})
 
-# Operator-facing diagnosis for credential and route failures.
+# Of the run-fatal statuses, the one for which an inline-base64 fallback is a
+# viable substitute. A 404 means the /v1/files *route* is unavailable while the
+# Messages/Batches API — the digest batch's own transport — is healthy, so the
+# sheet's images can ride inline as base64 in a normal vision request instead of
+# being uploaded and referenced by ``file_id``. A 401/403 is a credential-level
+# rejection an inline request would hit identically, so those keep the
+# stop-and-skip behavior; only 404 routes to the fallback.
+INLINE_FALLBACK_UPLOAD_STATUSES = frozenset({404})
+
+# Operator-facing diagnosis per run-fatal status. The 404 text exists because
+# the per-request error ("HTTP 404: Not found") is uniquely unhelpful there.
+# The Files API is GA (``client.files.upload``, no beta header) and the pinned
+# SDK posts straight to ``/v1/files``, and the call still comes back with an
+# Anthropic ``request_id`` — so a 404 there is the server declining the route,
+# not a malformed request. In practice that is the Files API not being enabled
+# for the key/workspace, an ``ANTHROPIC_BASE_URL``/proxy override that doesn't
+# forward /v1/files, or a different installed ``anthropic`` package than the
+# pinned one. The run no longer dies on it — it inlines the images as base64
+# instead (see ``INLINE_FALLBACK_UPLOAD_STATUSES``) — but the diagnosis is still
+# logged so the underlying misconfiguration stays visible.
 _RUN_FATAL_UPLOAD_HINTS = {
     401: "the API key was rejected — re-enter or rotate the key",
     403: "the API key/workspace lacks permission for the Files API",
@@ -117,6 +136,18 @@ def upload_failure_hint(exc: Exception) -> str | None:
     """An actionable diagnosis for a run-fatal upload rejection, else ``None``."""
     status = run_fatal_upload_status(exc)
     return _RUN_FATAL_UPLOAD_HINTS.get(status) if status is not None else None
+
+
+def upload_failure_allows_inline_fallback(exc: Exception) -> bool:
+    """Whether a failed upload can be served by inlining the image as base64.
+
+    True only for a Files-API 404 (see :data:`INLINE_FALLBACK_UPLOAD_STATUSES`):
+    the upload route is unavailable but the Messages/Batches API still works, so
+    the sheet is digested inline instead of lost. A credential-level 401/403
+    would fail an inline request the same way, so it is *not* inline-eligible —
+    the caller keeps the stop-and-skip behavior for those.
+    """
+    return _error_status(exc) in INLINE_FALLBACK_UPLOAD_STATUSES
 
 
 def _file_image_block(file_id: str) -> dict:

@@ -74,46 +74,7 @@ COMPARISON_INCOMPLETE = "INCOMPLETE"
 #: reader uses ``.get(...) or {}`` and a one-sided signal never blocks a match, so
 #: a stale record whose measurements simply vanished degrades toward "exact
 #: match" rather than erroring.
-#:
-#: v3 (remediation WP-04.1): the quantity tokenizer behind ``critical_signature``
-#: changed. ``6-inch`` signs as ``6in`` (it signed as nothing), ``12,500 cfm`` as
-#: ``12500cfm`` (it signed as ``500cfm``), ``90 deg F`` as ``90°f`` (``90deg``,
-#: the same as ``90 deg C``), and W×H sizes, compact volts and amps, ranges and
-#: lists now sign. A v2 record carries the old tokens, so comparing it with a
-#: v3 arm would report a tokenizer change as a model or geometry difference.
-#:
-#: Not bumped by remediation WP-04.2 (N1), which changed the compatibility RULE,
-#: not the stored signature. A record holds the signature's tokens, and the rule
-#: is re-applied (``_compatible``, ``_conflicting_axes``) whenever two records
-#: are compared, so a v3 record written before WP-04.2 is judged by the new rule
-#: exactly as a fresh one is: both arms of a comparison always share one rule.
-#: Bump this when what a record STORES changes shape or meaning, not when the
-#: rule that reads it does.
-#:
-#: v4 (remediation WP-04.3): ``critical_signature`` stores quantity roles
-#: (``roles``, ``ambiguous_roles``), which the rule compares. A v3 record has no
-#: role keys, and the rule reads a missing key as "no role", which never
-#: conflicts, so a v3 baseline against a v4 variant would call a swapped
-#: ``6 in main, 4 in branch`` / ``4 in main, 6 in branch`` pair EXACT: the silent
-#: failure above. Refused, never deleted: re-run the arm.
-#:
-#: v5 (remediation WP-04.4): the tokens a record stores changed (a spelled range
-#: or list, ``4 to 6 in`` or ``2, 4, 6 in``, and a compact ``A`` beside a
-#: voltage, ``20A 120V``, are read whole), and ``critical_signature`` stores each
-#: feet value with its inches (``feet_inches``). A v4 record holds the partial
-#: readings and no pairs, which the rule reads as agreeing, so a v4 baseline
-#: against a v5 variant would call ``12'`` / ``12'-6"`` or ``4 to 6 in`` /
-#: ``6 in`` EXACT: the silent failure above. Refused, never deleted: re-run the
-#: arm.
-#:
-#: v6 (remediation WP-06.2, N6; the owner's rule): ``critical_signature``'s
-#: ``leg_targets`` names each leg's page (``SRC-0002#p1``) instead of its sheet
-#: id, so two conflicts that point at two PDFs carrying one id no longer read
-#: as one. A v5 record holds sheet ids there, which never equal a page, so a v5
-#: baseline against a v6 variant would report every unchanged cross-sheet
-#: conflict as a candidate with different legs: a code change read as a model
-#: difference. Refused, never deleted: re-run the arm.
-RECORD_CONTRACT_VERSION = 6
+RECORD_CONTRACT_VERSION = 2
 
 _WS_RE = re.compile(r"\s+")
 
@@ -398,24 +359,32 @@ def _iou(a, b) -> float:
     return 0.0 if union <= 0 else inter / union
 
 
+def _signature_conflicts(a: dict, b: dict) -> list[str]:
+    """Which critical axes disagree — the *reason* a match is not exact.
+
+    The verdict itself comes from ``critique.signatures_compatible``; this only
+    names the axis for the report, so the two can never disagree about whether
+    a pair is compatible.
+    """
+    out: list[str] = []
+    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
+    if ta and tb and ta.isdisjoint(tb):
+        out.append("tags")
+    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
+    if ma and mb and ma.isdisjoint(mb):
+        out.append("measurements")
+    if bool(a.get("absence")) != bool(b.get("absence")):
+        out.append("absence_polarity")
+    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
+    if la and lb and la != lb:
+        out.append("cross_sheet_legs")
+    return out
+
+
 def _compatible(a: dict, b: dict) -> bool:
     from drawing_analyzer.critique import signatures_compatible
     return signatures_compatible(a.get("critical_signature") or {},
                                  b.get("critical_signature") or {})
-
-
-def _conflicting_axes(a: dict, b: dict) -> list[str]:
-    """Which critical axes disagree — the *reason* a match is not exact.
-
-    Named by ``critique.signature_conflicts``, the rule itself, whose negation
-    is the verdict ``_compatible`` reads. This module used to restate the
-    disjoint-set test to name the axes; once the rule changed (remediation
-    WP-04.2, N1) that copy would have named nothing for a pair the verdict
-    refuses.
-    """
-    from drawing_analyzer.critique import signature_conflicts
-    return signature_conflicts(a.get("critical_signature") or {},
-                               b.get("critical_signature") or {})
 
 
 def _attribute_deltas(base: dict, var: dict) -> dict:
@@ -580,7 +549,8 @@ def match_records(
                 "attribute_deltas": _attribute_deltas(b, v),
             })
         else:
-            conflicts = _conflicting_axes(b, v)
+            conflicts = _signature_conflicts(
+                b.get("critical_signature") or {}, v.get("critical_signature") or {})
             candidates.append({
                 "tier": MATCH_CANDIDATE,
                 "identity_key": key,
@@ -625,7 +595,9 @@ def match_records(
                 "base": _ref(b, bi),
                 "variant": _ref(v, vi),
                 "reasons": reasons,
-                "signature_conflicts": _conflicting_axes(b, v),
+                "signature_conflicts": _signature_conflicts(
+                    b.get("critical_signature") or {},
+                    v.get("critical_signature") or {}),
                 "attribute_deltas": _attribute_deltas(b, v),
             })
         elif not vs:
