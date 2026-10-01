@@ -31,6 +31,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Synthesis and focus reports distinguish source content from the task.**
+  Both wrap complete sheet digests and labels with the shared escaped source
+  blocks and system rule. Focus also escapes its operator question, explicitly
+  preserving it as the task. Existing corpus caps include wrappers, escaping and
+  separators; overflow still drops a counted, disclosed tail of whole sheets,
+  and the first sheet remains whole even if oversized. Retained prose and reply
+  handling are unchanged. Existing request hashes invalidate synthesis/focus
+  entries under the old framing without changing the global cache schema or
+  model/effort defaults. This is prompt optimization chunk PO-02, covered by
+  offline source-boundary, budget and cache regressions.
+
 - **Identity and review planning distinguish source content from instructions.**
   Both prompts wrap digest text and sheet labels in typed source blocks; identity
   also wraps OCR slices, code-edition windows and failed-read diagnostics, and
