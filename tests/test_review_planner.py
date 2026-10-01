@@ -250,10 +250,10 @@ def test_author_review_plan_happy_path():
     assert res.item_count == 3 and len(res.profiles) == 2
     assert "# Model-authored review plan" in res.markdown
     assert "NFPA 13 2016 §19.2.3.2.5" in res.markdown
-    # The identity context led the user turn; the system prompt is verbatim.
+    # The identity context leads as source data; the system prompt is verbatim.
     assert client.calls[0]["system"] == PLANNER_SYSTEM_PROMPT
     user_text = client.calls[0]["messages"][0]["content"]
-    assert user_text.startswith("SET IDENTITY (model-detected):")
+    assert user_text.startswith("<set_identity>\nSET IDENTITY (model-detected):")
     assert "California, United States" in user_text
 
 

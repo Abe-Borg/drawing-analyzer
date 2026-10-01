@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -238,14 +239,18 @@ def test_the_identity_corpus_skips_an_errored_sheets_text(error, text):
 
 
 def test_the_identity_corpus_of_a_clean_set_is_unchanged():
-    """Only a set with an errored sheet that carried text re-keys the identity
-    cache (the corpus is a key input): a clean sheet's block still opens with
-    its digest text, exactly where it was."""
+    """PO-01 changes framing and cache identity, while clean source content
+    remains exact after decoding its source blocks once."""
     corpus, _budget = build_identity_user_text(_SHEETS, _GEOMS)
+    root = ET.fromstring(f"<corpus>{corpus}</corpus>")
+    digests = root.findall("sheet_digest")
+    metadata = root.findall("sheet_metadata")
+    layers = [element.text[1:-1] for element in root.findall("sheet_text_layer")]
 
     for i, sd in enumerate(_SHEETS, start=1):
-        head = f"===== Sheet {i}/2: {sd.ref.display_label} =====\n{sd.text.strip()}\nTEXT LAYER"
-        assert head in corpus
+        assert metadata[i - 1].text[1:-1] == f"===== Sheet {i}/2: {sd.ref.display_label} ====="
+        assert digests[i - 1].text[1:-1] == sd.text.strip()
+        assert _GEOMS[i - 1].sheet_text in layers
 
 
 # --------------------------------------------------------------------------- #

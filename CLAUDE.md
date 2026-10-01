@@ -1126,6 +1126,17 @@ raise, after the paid digest and critique. Now:
   `review_plan.md`, a manifest `set_identity` key, and an additive combined-text
   section (I-2). Identity also feeds `check_citations(identity=)` (merged
   editions + jurisdiction line) and `cross_sheet_qc(identity=)` (preamble).
+  **Source framing (prompt optimization PO-01):** both intake prompts use
+  `core.prompt_content.source_content_block` plus `SOURCE_CONTENT_RULE`. Digest
+  heads, OCR slices/edition windows, source labels/diagnostics and the planner's
+  model-derived identity are source data, never task instructions. The helper
+  XML-escapes the model-visible copy (including ampersands); decode once when
+  quoting. Slice first, then wrap, and budget complete escaped blocks. Wrapper
+  overhead can move a near-cap block to the existing fallback/omission path;
+  omissions stay counted. The original evidence, digests and reports are not
+  escaped. The system rule rides both prompt hashes, and both keys already hash
+  the exact assembled corpus: no global schema bump. Other stages retain their
+  own framing until the follow-up chunks in `_plans/prompt-optimization.md`.
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
   vision read, run twice — self-consistency merge sets `reproduced`. **Only a
   read the model finished counts** (remediation WP-01.4, N4; the owner's

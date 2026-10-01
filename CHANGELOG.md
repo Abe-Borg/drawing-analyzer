@@ -31,6 +31,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Identity and review planning distinguish source content from instructions.**
+  Both prompts wrap digest text and sheet labels in typed source blocks; identity
+  also wraps OCR slices, code-edition windows and failed-read diagnostics, and
+  planning wraps the model-detected identity. A shared helper escapes literal
+  tag-like source text, and a shared system rule explains how to read it and
+  transcribe original quotes. Source digests, retained evidence and exported
+  prose are unchanged. Corpus caps still apply to complete rendered blocks,
+  including escaping and wrapper overhead. The changed system prompts and
+  assembled corpora change identity/review-plan cache keys; a recomputed plan
+  can also change downstream critique profile keys through existing machinery.
+  The global cache schema and model/effort defaults are unchanged. This is prompt
+  optimization chunk PO-01, covered by offline request-boundary and cache tests.
+
 - **The models are now Claude Opus 5.5 and Claude Sonnet 5.5.** Every stage
   that ran on Opus 5 now runs on Opus 5.5 (`claude-opus-5-5`): the digest,
   critique, review plan, synthesis, focus report, cross-sheet QC and the

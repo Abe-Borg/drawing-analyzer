@@ -41,6 +41,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.reply_text import reply_text
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
@@ -135,7 +136,7 @@ exactly: {"disciplines": [...], "sheet_disciplines": [{"sheet_id": "...", \
 "jurisdiction": "...", "country": "...", "region": "...", "language": "...", \
 "units": "...", "adopted_codes": [{"code": "...", "edition": "...", \
 "amendment_note": "...", "quote": "...", "source_sheet": "..."}], \
-"confidence": "...", "evidence": ["..."], "notes": "..."}"""
+"confidence": "...", "evidence": ["..."], "notes": "..."}""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 _IDENTITY_TASK_INSTRUCTION = (
@@ -267,23 +268,30 @@ def _sheet_block(
     words, not the model's, so they stay. The corpus is a key input, so only a
     set with such a sheet re-keys the identity cache.
     """
-    lines = [f"===== Sheet {index}/{total}: {sd.ref.display_label} ====="]
+    lines = [source_content_block(
+        f"===== Sheet {index}/{total}: {sd.ref.display_label} =====",
+        tag="sheet_metadata",
+    )]
     digest_text = (sd.text or "").strip()
     if sd.error:
-        lines.append(f"[digest failed: {_one_line(sd.error)[:120]}]")
+        lines.append(source_content_block(
+            f"[digest failed: {_one_line(sd.error)[:120]}]", tag="sheet_metadata",
+        ))
     elif digest_text:
         cap = _FULL_DIGEST_SLICE if deep else _HEADER_SLICE
-        lines.append(digest_text[:cap])
+        lines.append(source_content_block(digest_text[:cap], tag="sheet_digest"))
     else:
         lines.append("[no digest text]")
     sheet_text = (getattr(geom, "sheet_text", "") or "") if geom is not None else ""
     if deep and sheet_text.strip():
         lines.append(f"TEXT LAYER (verbatim, first {_FULL_TEXT_SLICE} chars):")
-        lines.append(sheet_text[:_FULL_TEXT_SLICE])
+        lines.append(source_content_block(sheet_text[:_FULL_TEXT_SLICE], tag="sheet_text_layer"))
     windows = _edition_windows(sheet_text)
     if windows:
         lines.append("EDITION MENTIONS (verbatim windows):")
-        lines.extend(f'- "{w}"' for w in windows)
+        lines.append(source_content_block(
+            "\n".join(f'- "{w}"' for w in windows), tag="sheet_text_layer",
+        ))
     return "\n".join(lines)
 
 
