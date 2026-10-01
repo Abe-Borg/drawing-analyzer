@@ -55,6 +55,22 @@ which decides whether two are one. The old key (primary sheet, category, quote,
 legs) had no text, so two different conflicts quoting the same strings on the
 same sheets became one before the ledger could see them.
 
+**Terminal honesty (remediation WP-06.3; U6, U7, N14; the owner's rules).**
+Every call (whole-set, shard map, reconcile) streams through
+``digest.stream_reply`` (:func:`_call`), and the stop reason is read first
+(D-1's classifier, through ``digest.unfinished_reply_error``): a reply the model
+did not finish is never parsed as finished or cached. A reply stopped at
+``max_tokens`` gets one retry at twice the cap, up to
+``digest.MAX_TOKENS_RETRY_CEILING`` (the digest's rank keeps the better read,
+N16). A reply cut off (``max_tokens``, the context window, no stop reason) keeps
+the complete items of its arrays (:func:`_salvage_object`), each validated and
+grounded as usual, and the call stays failed; a refusal, a continuation or an
+unknown stop keeps nothing. The stage is FAILED when it obtained nothing
+(:attr:`CrossQCResult.stage_status`), the error is the ladder's with a noun per
+call, a result short only by its budget is cached with its PARTIAL status (N14),
+and a fact past the per-shard cap, or a fact or leg that is not an object, is
+counted and named (U7).
+
 Additive and non-fatal (I-3): a failure is recorded and the standard deliverable
 ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
 """
@@ -78,29 +94,39 @@ from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     apply_effort_config,
     apply_thinking_config,
-    call_with_refusal_fallback,
     effort_config_for,
     model_supports_adaptive_thinking,
+    output_cap_for_model,
     phase_output_cap,
 )
 from .core.reply_text import reply_text
+from .core.terminal_outcome import (
+    TRUNCATED,
+    UNFINISHED,
+    classify_stop_reason,
+)
 from . import tiling
 from .anchor import _fold_text, source_words
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
+    MAX_TOKENS_RETRY_CEILING,
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
     _coerce_refs,
+    _name_discarded_retry,
+    _read_rank,
     _resolve_tile,
     _get,
-    _is_transient_error,
-    _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
+    digest_terminal_error,
+    numeric_claims_from_items,
     parse_numeric_claims,
     scan_structured_blocks,
+    stream_message,
+    stream_reply,
+    unfinished_reply_error,
 )
 from .models import (
     EVIDENCE_NOT_MATCHED,
@@ -213,7 +239,19 @@ _TEXT_LAYER_BUDGET = 4_000
 # claim dedup keys on the claim's source; and entries are ordered by source id
 # and page. The user-turn framing joined the key in the same release (K2), as
 # its own mechanism (the key's own inputs), not as a term beside this bump.
-_CROSS_QC_CACHE_CONTRACT = 9
+#
+# Bumped to 10 (remediation WP-06.3; U6, U7, N14, the owner's rules): what is
+# admitted, and what an admitted entry may be, changed for byte-identical
+# request inputs. A reply the model did not finish (stopped at ``max_tokens``,
+# refused, a continuation, no stop reason) used to be parsed as finished and
+# stored complete; now it is a failed call, never stored, and only a cut-off
+# reply's complete items are kept (for this run). A result short only by its
+# budget (text omitted, the findings cap) is now stored with its status and
+# replays PARTIAL (N14); it was never stored. A fact or leg that is not an
+# object is counted. One mechanism: no key term was added (the raised-cap
+# retry's cap is derived, and the ``[TRUNCATED N chars]`` marker already rides
+# the key through the framing, K2).
+_CROSS_QC_CACHE_CONTRACT = 10
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -449,6 +487,11 @@ class CrossQCDiscardCounts:
     facts_admitted_no_text_evidence: int = 0
     facts_ungrounded_quote_text_bearing_sheet: int = 0
     facts_accepted: int = 0
+    # Remediation WP-06.3 (U7, plan WP-06 step 8): returned items the host
+    # skipped without examining them. Run-level, observational.
+    facts_over_cap: int = 0
+    facts_not_object: int = 0
+    legs_not_object: int = 0
     # portable sheet key -> {counter name: count}. Same counter names as above.
     by_sheet: dict = field(default_factory=dict)
 
@@ -489,6 +532,22 @@ class CrossQCDiscardCounts:
             f"{legs + facts} sheet reference(s) named a sheet id that more than "
             f"one sheet carries and were not bound ({legs} leg(s), {facts} fact(s))"
         )
+
+    def omission_note(self) -> str:
+        """The stage warning for returned items skipped unexamined, or ``""``.
+
+        Remediation WP-06.3 (U7): a fact past the per-shard cap is never sent
+        to the reconciler, and a fact or leg that is not an object is skipped.
+        Observational, like :meth:`ambiguity_note`.
+        """
+        parts = []
+        if self.facts_over_cap:
+            parts.append(f"{self.facts_over_cap} fact(s) past the per-shard cap of "
+                         f"{DEFAULT_MAP_MAX_FACTS} were not compared across shards")
+        if self.facts_not_object or self.legs_not_object:
+            parts.append(f"{self.facts_not_object} fact(s) and {self.legs_not_object} "
+                         "leg(s) that were not objects were skipped")
+        return "; ".join(parts)
 
     def to_dict(self) -> dict:
         out = {name: getattr(self, name) for name in self._counter_names()}
@@ -584,6 +643,43 @@ class CrossQCInvalidCounts:
         return cls(**{k: int(v or 0) for k, v in d.items() if k in known})
 
 
+@dataclass
+class CrossQCSalvage:
+    """What the host kept from cross-QC replies the model did not finish (WP-06.3).
+
+    A reply cut off at ``max_tokens`` or the context window, or one that never
+    said how it ended (an interrupted stream's partial read, N27), may still
+    hold complete items. Each complete item is kept and goes through the same
+    validator and grounding as any other (:func:`_finding_from_handles`,
+    :func:`_parse_facts`); the item the reply was cut in is dropped and counted
+    (``items_cut``). The call stays failed (its error is the ladder's), so the
+    stage is never COMPLETE on it and the result is never cached.
+    Observational counts; runtime only.
+    """
+
+    calls: int = 0
+    findings: int = 0
+    facts: int = 0
+    claims: int = 0
+    items_cut: int = 0
+
+    def merge(self, other: "CrossQCSalvage") -> None:
+        for f in fields(self):
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+
+    def note(self) -> str:
+        if not self.calls:
+            return ""
+        return (
+            f"{self.calls} call(s) did not finish; kept the {self.findings} finding(s), "
+            f"{self.facts} fact(s) and {self.claims} claim(s) they completed"
+            + (f"; {self.items_cut} item(s) cut off were dropped" if self.items_cut else "")
+        )
+
+    def to_dict(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
 def sheet_counter_key(geom: Any) -> str:
     """A portable ``"SRC-0001:p0"`` key for one sheet — never a path.
 
@@ -628,6 +724,8 @@ class CrossQCResult:
     and completed, and whether the text budget was degraded (§16.2). ``complete`` is
     False when any shard or the reconciliation failed, or the budget was degraded —
     the pipeline then holds the stage at PARTIAL while still using the findings.
+    ``failed`` (remediation WP-06.3) is True when the stage obtained nothing, and
+    is read first: :attr:`stage_status` is the one rule the pipeline records.
 
     ``findings`` are every conflict the host kept, with only findings identical
     in every field collapsed (remediation WP-06.1, N2): two reports of one
@@ -667,6 +765,28 @@ class CrossQCResult:
     # both paths. ``None`` = not recorded (a result cached before it existed),
     # never "nothing was refused". Observational: it feeds no status.
     invalid: "CrossQCInvalidCounts | None" = None
+    # Remediation WP-06.3. ``failed``: the stage obtained nothing (every call
+    # failed with nothing kept, or no call could be made); the pipeline records
+    # it FAILED. ``salvage``: items kept from replies the model did not finish.
+    # ``interrupted_attempts``: streamed attempts whose final usage never came.
+    # All runtime only: a failed or salvaged result is never cached.
+    failed: bool = False
+    salvage: "CrossQCSalvage | None" = None
+    interrupted_attempts: int = 0
+
+    @property
+    def stage_status(self) -> str:
+        """The stage's status: the failure flag before any count (D-2).
+
+        ``FAILED`` when the stage obtained nothing (remediation WP-06.3, the
+        owner's rule: every call failed and kept nothing, or no call could be
+        made); else ``COMPLETE`` when every call finished and nothing was left
+        out, else ``PARTIAL`` (a failed or cut-off call, a reconcile shortfall,
+        a budget-only shortfall).
+        """
+        if self.failed:
+            return "FAILED"
+        return "COMPLETE" if self.complete else "PARTIAL"
 
 
 # --------------------------------------------------------------------------- #
@@ -1120,9 +1240,14 @@ def _finding_from_handles(
     # Keep each ref's own dict so its ``tile_label`` resolves against ITS OWN
     # sheet's grid (§8.4 Part 1), exactly as the whole-set validator does.
     refs_raw = [(_handle(item), _quote(item.get("source_quote", "")), item)]
-    for leg in item.get("also_on") or []:
+    legs = item.get("also_on")
+    # Only a list holds legs (``_findings_array``'s rule); a leg that is not an
+    # object is skipped and counted (remediation WP-06.3).
+    for leg in legs if isinstance(legs, list) else []:
         if isinstance(leg, dict):
             refs_raw.append((_handle(leg), _quote(leg.get("source_quote", "")), leg))
+        elif counts is not None:             # no one sheet: run-level only
+            counts.bump("legs_not_object")
 
     resolved = []
     seen_sheets: set[tuple] = set()
@@ -1292,9 +1417,10 @@ _RECONCILE_TASK = (
     "\nCompare the facts across the whole manifest and report cross-sheet "
     "conflicts in the required json block."
 )
-# Written by ``_budgeted_text_layer`` after a capped text layer. A degraded
-# result is never cached, so it never reaches a stored entry; it is keyed so it
-# never has to be remembered when that changes (WP-06.3, N14).
+# Written by ``_budgeted_text_layer`` after a capped text layer. Load-bearing in
+# the key since remediation WP-06.3 (N14): a result short only by its budget is
+# now cached with its PARTIAL status, and the marker the model saw is keyed
+# (K2), so a marker edit re-keys that entry.
 _TRUNCATION_MARKER_TEMPLATE = "\n[TRUNCATED {omitted} chars]"
 
 #: The framing strings by name, in a fixed order: what the key holds.
@@ -1468,14 +1594,77 @@ def _build_reconcile_input(
 # --------------------------------------------------------------------------- #
 
 
-def _call(
-    *, client: Any, model: str, system: str, user_text: str,
-    max_retries: int, sleep: Any,
-) -> tuple[str | None, int, int, str | None]:
-    """One cross-QC model call → ``(raw_text, in, out, error)``. Never raises."""
+# The ladder's noun for each call (remediation WP-06.3), so a sharded run's
+# joined errors say which call failed: ``truncated cross-qc shard (…)``.
+_NOUN_WHOLE_SET = "cross-qc"
+_NOUN_MAP = "cross-qc shard"
+_NOUN_RECONCILE = "cross-qc reconciliation"
+
+# The kinds whose complete items may be kept (remediation WP-06.3): a reply
+# cut off while it was being written (``max_tokens``, the context window) or
+# one that never said how it ended (``None``, an interrupted stream).
+_SALVAGE_KINDS = frozenset({TRUNCATED, UNFINISHED})
+
+
+@dataclass
+class _Reply:
+    """One cross-QC call after its retries (remediation WP-06.3).
+
+    ``error`` is ``None`` only for a nonempty reply the model finished: D-1's
+    classifier decides first (:func:`~drawing_analyzer.digest.unfinished_reply_error`),
+    then an empty reply is the ladder's ``empty …``. ``text`` is what came
+    back, from a reply it did not finish too. ``raised``: the call ended with
+    nothing in hand. ``findings``, ``read_error`` and ``retries_discarded``
+    let the digest's one rank and wording read it
+    (:func:`~drawing_analyzer.digest._read_rank`,
+    :func:`~drawing_analyzer.digest._name_discarded_retry`); no read here is
+    parsed before it is kept, so ``findings`` stays empty.
+    """
+
+    text: str = ""
+    stop_reason: Any = None
+    error: str | None = None
+    raised: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    interrupted_attempts: int = 0
+    findings: list = field(default_factory=list)
+    read_error: str | None = None
+    retries_discarded: int = 0
+
+    @property
+    def salvageable(self) -> bool:
+        """A reply cut off (:data:`_SALVAGE_KINDS`) with text: its complete items
+        may be kept (the owner's rule). A refusal, a continuation or an unknown
+        stop keeps nothing."""
+        return (
+            self.error is not None and not self.raised and bool(self.text)
+            and classify_stop_reason(self.stop_reason).kind in _SALVAGE_KINDS
+        )
+
+
+@dataclass
+class _CallLog:
+    """What a stage run's calls reported beyond their tuples (remediation WP-06.3).
+
+    One per thread of work (a shard, a reconcile pair), folded in input order
+    like the discard counters.
+    """
+
+    salvage: CrossQCSalvage = field(default_factory=CrossQCSalvage)
+    interrupted_attempts: int = 0
+    errors: list = field(default_factory=list)
+
+    def merge(self, other: "_CallLog") -> None:
+        self.salvage.merge(other.salvage)
+        self.interrupted_attempts += other.interrupted_attempts
+        self.errors.extend(other.errors)
+
+
+def _request(model: str, system: str, user_text: str, max_tokens: int) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": phase_output_cap(PHASE_CROSS_QC, model=model),
+        "max_tokens": max_tokens,
         "system": system,
         "messages": [{"role": "user", "content": [{"type": "text", "text": user_text}]}],
     }
@@ -1487,31 +1676,212 @@ def _call(
     # depth nothing here controlled.
     apply_thinking_config(kwargs, model=model, phase=PHASE_CROSS_QC)
     apply_effort_config(kwargs, model=model, phase=PHASE_CROSS_QC)
+    return kwargs
 
-    attempt = 0
+
+def _send(client: Any, kwargs: dict[str, Any], *, noun: str, max_retries: int,
+          sleep: Any) -> _Reply:
+    """One streamed request with its transient retries, judged by D-1's classifier.
+
+    :func:`~drawing_analyzer.digest.stream_reply` with this module's own
+    ``stream_message`` (the name ``tests/test_sdk_contract.py`` regresses): a
+    transient failure or interrupted stream is re-sent, and once the retries
+    are spent an interrupted stream's partial read is the reply. The stop
+    reason decides first (:func:`~drawing_analyzer.digest.unfinished_reply_error`,
+    the ladder with ``noun``); a finished reply with no text is the ladder's
+    ``empty …`` (the wording ``_call`` always had). Every attempt's usage is
+    summed.
+    """
+    sent = stream_reply(client, kwargs, max_retries=max_retries, sleep=sleep,
+                        send=stream_message)
+    usage = sent.usage
+    if sent.message is None:
+        return _Reply(error=_clean_error(sent.error), raised=True,
+                      input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                      interrupted_attempts=usage.interrupted_attempts)
+    text = reply_text(sent.message)
+    stop = _get(sent.message, "stop_reason")
+    error = unfinished_reply_error(sent.message, text, noun=noun, interrupted=sent.interrupted)
+    if error is None and not text:
+        error = digest_terminal_error(text, stop, noun=noun)
+    return _Reply(text=text, stop_reason=stop, error=error,
+                  input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                  interrupted_attempts=usage.interrupted_attempts)
+
+
+def _keep_reply(first: _Reply, retry: _Reply) -> _Reply:
+    """The digest's rule for two reads of one request (N16): the retry wins when
+    it ranks at least as high; else the first is kept and names the retry."""
+    if not retry.raised and _read_rank(retry) >= _read_rank(first):
+        kept, other = retry, first
+    else:
+        kept, other = first, retry
+        _name_discarded_retry(kept, (" failed: " if retry.raised else ": ") + (retry.error or ""))
+    kept.input_tokens += other.input_tokens
+    kept.output_tokens += other.output_tokens
+    kept.interrupted_attempts += other.interrupted_attempts
+    return kept
+
+
+def _call(
+    *, client: Any, model: str, system: str, user_text: str,
+    max_retries: int, sleep: Any, noun: str = _NOUN_WHOLE_SET,
+) -> _Reply:
+    """One cross-QC model call → a :class:`_Reply`. Never raises.
+
+    Streamed (remediation WP-06.3) through :func:`~drawing_analyzer.digest.stream_reply`,
+    the one loop for a single reply, so a transient failure or an interrupted
+    stream is retried and a partial read is judged like any reply. A reply cut
+    off at ``max_tokens`` gets one retry at twice the cap, up to
+    :data:`~drawing_analyzer.digest.MAX_TOKENS_RETRY_CEILING`, clamped to what
+    the model serves; only ``max_tokens`` qualifies (``raised_cap_may_finish``).
+    """
+    cap = phase_output_cap(PHASE_CROSS_QC, model=model)
+    reply = _send(client, _request(model, system, user_text, cap), noun=noun,
+                  max_retries=max_retries, sleep=sleep)
+    if reply.error is None or not classify_stop_reason(reply.stop_reason).raised_cap_may_finish:
+        return reply
+    raised = output_cap_for_model(model, requested=min(cap * 2, MAX_TOKENS_RETRY_CEILING))
+    if raised <= cap:
+        return reply                   # no headroom left to grant; not a retry
+    _log.info("%s stopped at max_tokens=%d; retrying once at %d", noun, cap, raised)
+    retry = _send(client, _request(model, system, user_text, raised), noun=noun,
+                  max_retries=max_retries, sleep=sleep)
+    return _keep_reply(reply, retry)
+
+
+_DECODER = json.JSONDecoder()
+_SALVAGED_ARRAYS = ("findings", "facts", "claims")
+
+
+def _salvage_object(raw_text: str) -> tuple[dict | None, int]:
+    """The complete members of a cut-off findings object → ``(object, items cut)``.
+
+    Remediation WP-06.3, for a reply the model did not finish. Reads the last
+    json block (closed or not) in one linear pass: each top-level member in
+    turn, and inside the ``findings``, ``facts`` and ``claims`` arrays each
+    complete item (:meth:`json.JSONDecoder.raw_decode`). It stops at the first
+    thing that does not parse, the item the reply was cut in, which is dropped
+    and counted. ``(None, 0)`` when no member was complete.
+    """
+    blocks = [c for c in scan_structured_blocks(raw_text) if c.language in ("json", "")]
+    if not blocks:
+        return None, 0
+    s = blocks[-1].body
+    n = len(s)
+    i = s.find("{")
+    if i < 0:
+        return None, 0
+    i += 1
+    out: dict = {}
+    cut = 0
+
+    def _ws(j: int) -> int:
+        while j < n and s[j] in " \t\r\n":
+            j += 1
+        return j
+
     while True:
-        try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+        i = _ws(i)
+        if i >= n or s[i] == "}":
             break
-        except Exception as exc:  # noqa: BLE001 - report, don't sink the run
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
-                attempt += 1
-                continue
-            return None, 0, 0, _clean_error(exc)
+        if s[i] == ",":
+            i += 1
+            continue
+        try:
+            key, i = _DECODER.raw_decode(s, i)
+        except ValueError:
+            break
+        if not isinstance(key, str):
+            break
+        i = _ws(i)
+        if i >= n or s[i] != ":":
+            break
+        i = _ws(i + 1)
+        if i < n and s[i] == "[" and key in _SALVAGED_ARRAYS:
+            items: list = []
+            i += 1
+            closed = False
+            while True:
+                i = _ws(i)
+                if i >= n:
+                    break
+                if s[i] == "]":
+                    i += 1
+                    closed = True
+                    break
+                if s[i] == ",":
+                    i += 1
+                    continue
+                try:
+                    item, i = _DECODER.raw_decode(s, i)
+                except ValueError:
+                    cut += 1                 # the item it was cut in
+                    break
+                items.append(item)
+            out[key] = items
+            if not closed:
+                break
+            continue
+        try:
+            value, i = _DECODER.raw_decode(s, i)
+        except ValueError:
+            break
+        out[key] = value
+    if not any(isinstance(out.get(k), list) for k in ("findings", "facts")):
+        return None, cut
+    return out, cut
 
-    raw = reply_text(resp)
-    in_tok, out_tok = _message_usage(resp)
-    if not raw:
-        return None, in_tok, out_tok, f"empty cross-qc (stop_reason={_get(resp, 'stop_reason')!r})"
-    return raw, in_tok, out_tok, None
+
+def _reply_object(reply: _Reply) -> tuple[dict | None, int, bool]:
+    """``(object, items cut, salvaged)`` to read from ``reply``.
+
+    A finished reply: its last findings object (:func:`_last_json_object`). One
+    the model did not finish (:attr:`_Reply.salvageable`): the same object when
+    it closed, else its complete members (:func:`_salvage_object`). Anything
+    else (refused, raised, empty, a continuation, an unknown stop): nothing.
+    """
+    if reply.error is None:
+        return _last_json_object(reply.text), 0, False
+    if not reply.salvageable:
+        return None, 0, False
+    obj = _last_json_object(reply.text)
+    if obj is not None:
+        return obj, 0, True
+    obj, cut = _salvage_object(reply.text)
+    return obj, cut, obj is not None
+
+
+def _reply_claims(reply: _Reply, obj: dict | None, salvaged: bool) -> list[NumericClaim]:
+    if salvaged:
+        return numeric_claims_from_items(obj.get("claims") if obj else None)
+    if reply.error is not None:
+        return []
+    return parse_numeric_claims(reply.text)
+
+
+def _note_reply(log: "_CallLog | None", reply: _Reply) -> None:
+    if log is not None:
+        log.interrupted_attempts += reply.interrupted_attempts
+        if reply.error is not None:
+            log.errors.append(reply.error)
+
+
+def _note_salvage(log: "_CallLog | None", *, findings: int, facts: int, claims: int,
+                  cut: int) -> None:
+    if log is not None:
+        log.salvage.calls += 1
+        log.salvage.findings += findings
+        log.salvage.facts += facts
+        log.salvage.claims += claims
+        log.salvage.items_cut += cut
 
 
 def _one_cross_qc_call(
     entries: list[tuple], handles: _SheetHandles, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", invalid: "CrossQCInvalidCounts | None" = None,
-    counts: "CrossQCDiscardCounts | None" = None,
+    counts: "CrossQCDiscardCounts | None" = None, log: "_CallLog | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``.
 
@@ -1520,18 +1890,22 @@ def _one_cross_qc_call(
     (:func:`_finding_from_handles`): bound through the one resolver, grounded
     against each sheet's uncapped text, its losses counted in ``counts``. Its
     claims are rebound through the same handles (:func:`_resolve_claim_handles`).
+    Since remediation WP-06.3 a reply the model did not finish sets ``err``,
+    and the complete items of a cut-off one are still returned beside it.
     """
     ebh, by_label = handles.entry_by_handle, handles.by_label
-    raw, in_tok, out_tok, err = _call(
+    reply = _call(
         client=client, model=model, system=cross_qc_system_prompt(),
         user_text=_build_whole_set_input(entries, handles, budget, preamble),
-        max_retries=max_retries, sleep=sleep,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_WHOLE_SET,
     )
-    if err is not None or raw is None:
-        return [], [], in_tok, out_tok, err
-    obj = _last_json_object(raw)
+    _note_reply(log, reply)
+    in_tok, out_tok = reply.input_tokens, reply.output_tokens
+    obj, cut, salvaged = _reply_object(reply)
     if obj is None:
-        claims = _resolve_claim_handles(parse_numeric_claims(raw), ebh, by_label)
+        if reply.error is not None:
+            return [], [], in_tok, out_tok, reply.error
+        claims = _resolve_claim_handles(parse_numeric_claims(reply.text), ebh, by_label)
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
     local = CrossQCDiscardCounts()
     findings = [
@@ -1546,8 +1920,10 @@ def _one_cross_qc_call(
                   local.findings_dropped_under_two_legs)
     if counts is not None:
         counts.merge(local)
-    claims = _resolve_claim_handles(parse_numeric_claims(raw), ebh, by_label)
-    return _cap_findings(findings, budget), claims, in_tok, out_tok, None
+    claims = _resolve_claim_handles(_reply_claims(reply, obj, salvaged), ebh, by_label)
+    if salvaged:
+        _note_salvage(log, findings=len(findings), facts=0, claims=len(claims), cut=cut)
+    return _cap_findings(findings, budget), claims, in_tok, out_tok, reply.error
 
 
 def _map_call(
@@ -1556,22 +1932,27 @@ def _map_call(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
+    log: "_CallLog | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed).
 
     ``by_label`` (the run's :class:`_SheetHandles`) lets a reply's sheet id bind
-    when one sheet carries it, exactly as on the whole-set path.
+    when one sheet carries it, exactly as on the whole-set path. A cut-off
+    reply's complete findings and facts are returned beside its error
+    (remediation WP-06.3).
     """
-    raw, in_tok, out_tok, err = _call(
+    reply = _call(
         client=client, model=model, system=cross_qc_map_system_prompt(),
         user_text=_build_map_input(shard, handle_by_key, budget, preamble),
-        max_retries=max_retries, sleep=sleep,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_MAP,
     )
-    if err is not None or raw is None:
-        return [], [], [], in_tok, out_tok, err
-    obj = _last_json_object(raw)
+    _note_reply(log, reply)
+    in_tok, out_tok = reply.input_tokens, reply.output_tokens
+    obj, cut, salvaged = _reply_object(reply)
     if obj is None:
-        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
+        if reply.error is not None:
+            return [], [], [], in_tok, out_tok, reply.error
+        claims = _resolve_claim_handles(parse_numeric_claims(reply.text), entry_by_handle, by_label)
         return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = _cap_findings([
         f for item in _findings_array(obj)
@@ -1579,9 +1960,11 @@ def _map_call(
                                        by_label=by_label))
         is not None
     ], budget)
-    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
+    claims = _resolve_claim_handles(_reply_claims(reply, obj, salvaged), entry_by_handle, by_label)
     facts = _parse_facts(obj, entry_by_handle, discipline_by_handle, counts, by_label)
-    return findings, claims, facts, in_tok, out_tok, None
+    if salvaged:
+        _note_salvage(log, findings=len(findings), facts=len(facts), claims=len(claims), cut=cut)
+    return findings, claims, facts, in_tok, out_tok, reply.error
 
 
 def _parse_facts(
@@ -1606,8 +1989,18 @@ def _parse_facts(
     reconciler and the fact-tile join see one spelling of each sheet.
     """
     out: list[CrossQCFact] = []
-    for item in (obj.get("facts") or []):
-        if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS:
+    items = obj.get("facts")
+    # Only a list holds facts (``_findings_array``'s rule). A fact that is not
+    # an object, and every fact past the cap, is skipped and counted
+    # (remediation WP-06.3, U7): the cap used to drop them with no counter.
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            if counts is not None:           # run-level only
+                counts.bump("facts_not_object")
+            continue
+        if len(out) >= DEFAULT_MAP_MAX_FACTS:
+            if counts is not None:
+                counts.bump("facts_over_cap")
             continue
         handle, why = _resolve_sheet_ref(
             str(item.get("sheet_handle", "") or item.get("sheet_id", "") or "").strip(),
@@ -1661,18 +2054,27 @@ def _reconcile_call(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
+    log: "_CallLog | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
-    """One reconciliation call comparing ``facts`` across the whole manifest."""
-    raw, in_tok, out_tok, err = _call(
+    """One reconciliation call comparing ``facts`` across the whole manifest.
+
+    A cut-off reply's complete findings are returned beside its error
+    (remediation WP-06.3).
+    """
+    reply = _call(
         client=client, model=model, system=CROSS_QC_RECONCILE_SYSTEM_PROMPT,
         user_text=_build_reconcile_input(manifest, facts, preamble),
-        max_retries=max_retries, sleep=sleep,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_RECONCILE,
     )
-    if err is not None or raw is None:
-        return [], [], in_tok, out_tok, err
-    obj = _last_json_object(raw)
+    _note_reply(log, reply)
+    in_tok, out_tok = reply.input_tokens, reply.output_tokens
+    obj, cut, salvaged = _reply_object(reply)
     if obj is None:
-        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
+        if reply.error is not None:
+            return [], [], in_tok, out_tok, reply.error
+        claims = _resolve_claim_handles(parse_numeric_claims(reply.text), entry_by_handle, by_label)
+        if log is not None:
+            log.errors.append(_NO_FINDINGS_OBJECT)
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
     # §8.4 Part 2: recover each returned leg's location from the fact its quote
     # came from. Built over the facts THIS call was given, so a leg can only
@@ -1684,8 +2086,10 @@ def _reconcile_call(
                                        by_label=by_label))
         is not None
     ], budget)
-    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
-    return findings, claims, in_tok, out_tok, None
+    claims = _resolve_claim_handles(_reply_claims(reply, obj, salvaged), entry_by_handle, by_label)
+    if salvaged:
+        _note_salvage(log, findings=len(findings), facts=0, claims=len(claims), cut=cut)
+    return findings, claims, in_tok, out_tok, reply.error
 
 
 # Cap the all-pairs reconcile fan-out (a runaway backstop far above any real set —
@@ -1698,7 +2102,7 @@ def _reconcile_facts(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     max_workers: int | None = None, invalid: "CrossQCInvalidCounts | None" = None,
-    by_label: "dict | None" = None,
+    by_label: "dict | None" = None, log: "_CallLog | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -1711,7 +2115,9 @@ def _reconcile_facts(
     within one group can come back from every pair call that group is in; the
     caller collapses only identical copies and the findings ledger judges the
     rest (remediation WP-06.1). ``completed`` is False if any reconcile call
-    failed or the pair fan-out had to be capped.
+    failed or the pair fan-out had to be capped. ``log`` (remediation WP-06.3)
+    collects each failed call's error, so the caller can say why, and what a
+    cut-off reply kept.
     """
     if not facts:
         return [], [], 0, 0, True
@@ -1720,7 +2126,7 @@ def _reconcile_facts(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=counts, invalid=invalid,
-            by_label=by_label,
+            by_label=by_label, log=log,
         )
         return f, c, i, o, err is None
 
@@ -1747,15 +2153,18 @@ def _reconcile_facts(
         # increments.
         local_counts = CrossQCDiscardCounts()
         local_invalid = CrossQCInvalidCounts()
+        local_log = _CallLog()
         try:
             return (*_reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=budget, preamble=preamble, counts=local_counts,
-                invalid=local_invalid, by_label=by_label,
-            ), local_counts, local_invalid)
+                invalid=local_invalid, by_label=by_label, log=local_log,
+            ), local_counts, local_invalid, local_log)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
-            return [], [], 0, 0, _clean_error(exc), local_counts, local_invalid
+            local_log.errors.append(_clean_error(exc))
+            return ([], [], 0, 0, _clean_error(exc), local_counts, local_invalid,
+                    local_log)
 
     workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
     if workers == 1:
@@ -1769,13 +2178,15 @@ def _reconcile_facts(
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
-    for f, c, in_t, out_t, err, local_counts, local_invalid in pair_results:
+    for f, c, in_t, out_t, err, local_counts, local_invalid, local_log in pair_results:
         tot_in += in_t
         tot_out += out_t
         if counts is not None:
             counts.merge(local_counts)
         if invalid is not None:
             invalid.merge(local_invalid)
+        if log is not None:
+            log.merge(local_log)
         if err is not None:
             completed = False
         all_f.extend(f)
@@ -1962,16 +2373,29 @@ def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
         )
     except (TypeError, ValueError):
         return None
-    # Only fully successful results are ever admitted.  Recheck on read so a
-    # hand-edited/corrupt entry cannot turn a PARTIAL review into COMPLETE.
-    if not result.complete or result.budget_degraded:
+    # Recheck on read so a hand-edited/corrupt entry cannot turn a PARTIAL
+    # review into COMPLETE. Since remediation WP-06.3 (N14, the owner's rule) an
+    # entry may be short of complete for its budget alone, and it replays as
+    # such (PARTIAL). One that claims to be both, or neither, is refused.
+    if result.complete == result.budget_degraded:
         return None
     return result
 
 
 def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
-    """Admit only a complete, non-degraded cross-QC result."""
-    if result.error is not None or not result.complete or result.budget_degraded:
+    """Admit a result every call of which finished and parsed: complete, or
+    short of complete for its budget alone.
+
+    Remediation WP-06.3 (N14, the owner's rule): a budget-only shortfall (text
+    omitted, the per-response findings cap) is a function of the keyed inputs
+    (the text, the budget and the ``[TRUNCATED N chars]`` marker are all in the
+    key), so it is stored with ``complete=False`` and replays PARTIAL with the
+    same warnings instead of re-billing every warm run. A result with any error
+    (a failed, refused, cut-off or interrupted call; a salvage; a reconcile
+    shortfall) or a failed stage is never stored: a later run may finish it.
+    """
+    if result.error is not None or result.failed or (
+            not result.complete and not result.budget_degraded):
         return
     put_stage_cache_entry(
         cache,
@@ -2055,6 +2479,10 @@ def cross_sheet_qc(
     source order (remediation WP-06.2: :func:`_canonical_order`,
     :func:`_assign_handles`), and both ground and count what they keep
     (``discards``).
+
+    Every call streams and is judged by its stop reason first (remediation
+    WP-06.3): see the module docstring. ``failed`` is set when the stage
+    obtained nothing, including when no client could be made.
     """
     model = model or cross_qc_model()
     preamble = _identity_preamble(identity)
@@ -2103,7 +2531,11 @@ def cross_sheet_qc(
 
             client = _get_client()
         except Exception as exc:  # noqa: BLE001 - no key etc. → skip the pass
-            return CrossQCResult(error=_clean_error(exc))
+            # Remediation WP-06.3 (the owner's rule): no call could be made, so
+            # nothing was judged, and the stage reads FAILED. It read COMPLETE
+            # beside its error line (WP-16.2's finding: ``complete`` defaulted
+            # to True).
+            return CrossQCResult(error=_clean_error(exc), complete=False, failed=True)
 
     budget = _Budget()
     # Remediation WP-06.1 (B6): refused items are counted on both paths.
@@ -2114,10 +2546,11 @@ def cross_sheet_qc(
 
     # ---- Small set: one whole-set call (complete). ----
     if len(entries) <= MAX_SHEETS_SINGLE_CALL:
+        log = _CallLog()
         findings, claims, in_tok, out_tok, err = _one_cross_qc_call(
             entries, handles, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
-            preamble=preamble, invalid=invalid, counts=discards,
+            preamble=preamble, invalid=invalid, counts=discards, log=log,
         )
         kept = _drop_exact_repeats(findings)
         _log.info(
@@ -2137,6 +2570,12 @@ def cross_sheet_qc(
             budget_degraded=budget.degraded,
             discards=discards,
             invalid=invalid,
+            # Nothing obtained: the call failed and kept nothing (D-2's
+            # all-failed rule, the owner's; a cut-off reply that kept its
+            # complete items is PARTIAL).
+            failed=err is not None and not log.salvage.calls,
+            salvage=log.salvage,
+            interrupted_attempts=log.interrupted_attempts,
         )
         _put_cross_qc_cache(cache, cache_key, result)
         return result
@@ -2158,20 +2597,24 @@ def cross_sheet_qc(
     total_in = total_out = 0
     errors: list[str] = []
     shards_completed = 0
+    shards_salvaged = 0
+    log = _CallLog()
+
     def _run_map(shard: list[tuple]):
         local_budget = _Budget()
         local_counts = CrossQCDiscardCounts()
         local_invalid = CrossQCInvalidCounts()
+        local_log = _CallLog()
         try:
             return (*_map_call(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=local_budget, preamble=preamble, counts=local_counts,
-                invalid=local_invalid, by_label=by_label,
-            ), local_budget, local_counts, local_invalid)
+                invalid=local_invalid, by_label=by_label, log=local_log,
+            ), local_budget, local_counts, local_invalid, local_log)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
             return ([], [], [], 0, 0, _clean_error(exc), local_budget, local_counts,
-                    local_invalid)
+                    local_invalid, local_log)
 
     workers = _resolve_cross_qc_workers(max_workers, len(shards))
     if workers == 1:
@@ -2182,10 +2625,12 @@ def cross_sheet_qc(
             map_results = list(pool.map(_run_map, shards))
 
     for (f, c, facts, in_tok, out_tok, err, local_budget, local_counts,
-         local_invalid) in map_results:
+         local_invalid, local_log) in map_results:
         _fold_budget(budget, local_budget)
         discards.merge(local_counts)
         invalid.merge(local_invalid)
+        log.salvage.merge(local_log.salvage)
+        log.interrupted_attempts += local_log.interrupted_attempts
         total_in += in_tok
         total_out += out_tok
         if err is not None:
@@ -2194,6 +2639,12 @@ def cross_sheet_qc(
             # additive salvage (§2.4/I-3): the arithmetic auditor can use them
             # while the shard itself stays failed (stage PARTIAL).
             all_claims.extend(c)
+            if local_log.salvage.calls:
+                # Remediation WP-06.3: a shard cut off part way keeps the
+                # findings and facts it completed; the shard stays failed.
+                shards_salvaged += 1
+                all_findings.extend(f)
+                all_facts.extend(facts)
             continue
         shards_completed += 1
         all_findings.extend(f)
@@ -2206,19 +2657,27 @@ def cross_sheet_qc(
     reconciliation_required = len(shards) > 1
     reconciliation_completed = True
     if all_facts:
+        reconcile_log = _CallLog()
         r_find, r_claims, r_in, r_out, completed = _reconcile_facts(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=discards,
             max_workers=max_workers, invalid=invalid, by_label=by_label,
+            log=reconcile_log,
         )
+        log.salvage.merge(reconcile_log.salvage)
+        log.interrupted_attempts += reconcile_log.interrupted_attempts
         total_in += r_in
         total_out += r_out
         all_findings.extend(r_find)
         all_claims.extend(r_claims)
         reconciliation_completed = completed
         if not completed:
-            errors.append("cross-qc reconciliation incomplete")
+            # Remediation WP-06.3: say why (a refusal names itself), once per
+            # distinct reason, in call order.
+            reasons = list(dict.fromkeys(reconcile_log.errors))
+            errors.append("cross-qc reconciliation incomplete"
+                          + (f" ({'; '.join(reasons)})" if reasons else ""))
     elif reconciliation_required:
         _log.warning(
             "cross-qc: sharded set produced no comparable facts; cross-shard "
@@ -2259,6 +2718,10 @@ def cross_sheet_qc(
         budget_degraded=budget.degraded,
         discards=discards,
         invalid=invalid,
+        # Nothing obtained: no shard finished or kept a cut-off reply's items.
+        failed=shards_completed + shards_salvaged == 0,
+        salvage=log.salvage,
+        interrupted_attempts=log.interrupted_attempts,
     )
     _put_cross_qc_cache(cache, cache_key, result)
     return result

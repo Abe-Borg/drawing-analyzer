@@ -782,7 +782,9 @@ def test_the_cross_qc_contract_moved_for_source_binding():
     # Host-side binding changed for byte-identical request inputs: handles and
     # one resolver on the whole-set path, its grounding, claims rebound through
     # handles, the claim dedup keyed on the source, entries in source order.
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    # 10 since remediation WP-06.3 (what is admitted changed: a reply the model
+    # did not finish is never stored; a budget-only shortfall is, with its status).
+    assert X._CROSS_QC_CACHE_CONTRACT == 10
     geoms = _two_m101()
     current = _key(geoms)
     with pytest.MonkeyPatch.context() as mp:

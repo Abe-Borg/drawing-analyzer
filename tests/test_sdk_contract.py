@@ -484,7 +484,11 @@ def _stage_caps(model: str) -> dict[str, tuple[int, bool]]:
     cap = api.output_cap_for_model
     return {
         "citation": (api.phase_output_cap(api.PHASE_CITATION, model=model), False),
-        "cross_qc": (api.phase_output_cap(api.PHASE_CROSS_QC, model=model), False),
+        # Streamed since remediation WP-06.3 (every call, and its raised-cap
+        # retry, which a non-streaming create could not send).
+        "cross_qc": (api.phase_output_cap(api.PHASE_CROSS_QC, model=model), True),
+        "cross_qc raised-cap retry": (cap(model, requested=min(
+            api.CROSS_QC_OUTPUT_CAP * 2, digest.MAX_TOKENS_RETRY_CEILING)), True),
         "prose_harvest": (api.phase_output_cap(api.PHASE_HARVEST, model=model), False),
         "identity": (cap(model, requested=set_identity.DEFAULT_IDENTITY_MAX_TOKENS), False),
         "verification": (api.phase_output_cap(api.PHASE_VERIFICATION, model=model), False),
@@ -562,6 +566,52 @@ def test_the_raised_cap_retry_is_a_request_the_sdk_sends(tmp_path, transport):
                  for r in stub.requests if r["path"] == "/v1/messages/batches" and r["method"] == "POST"
                  for item in r["body"]["requests"]]
         assert max(items) > digest.DEFAULT_DIGEST_MAX_TOKENS          # the follow-up batch
+
+
+def _truncating_first_cross_qc(script):
+    seen = {"n": 0}
+
+    def route(params):
+        if stage_of(params) == "cross_qc":
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return FakeMessage(content=[FakeTextBlock(text="```json\n{\"findings\": [")],
+                                   stop_reason="max_tokens",
+                                   usage=FakeUsage(input_tokens=10, output_tokens=5))
+        return script._route(params)
+
+    return route
+
+
+def test_the_cross_qc_raised_cap_retry_is_a_request_the_sdk_sends(tmp_path):
+    # Remediation WP-06.3: cross-QC streams, and its one raised-cap retry goes
+    # at twice the cap (32,000, above the SDK's non-streaming cap).
+    stub = AnthropicAPIStub(_truncating_first_cross_qc(_script()))
+
+    ctx = _run(tmp_path, stub)
+
+    assert _statuses(ctx)["cross_qc"] == "COMPLETE", ctx.errors
+    by_stage = assert_request_contract(stub)
+    sent = [(r["body"]["max_tokens"], bool(r["body"].get("stream"))) for r in by_stage["cross_qc"]]
+    assert sent == [(api.CROSS_QC_OUTPUT_CAP, True), (api.CROSS_QC_OUTPUT_CAP * 2, True)]
+    assert api.CROSS_QC_OUTPUT_CAP * 2 > sdk_nonstreaming_limit(OPUS)
+
+
+def test_cross_qc_regressed_to_create_has_its_retry_refused_by_the_real_sdk(tmp_path, monkeypatch):
+    # The review's case for cross-QC: at 16,000 a plain create is still within
+    # the SDK's cap, so the regression shows on the retry, which the SDK
+    # refuses before sending anything; the first read is kept and names it.
+    import drawing_analyzer.cross_qc as cross_qc_mod
+
+    monkeypatch.setattr(cross_qc_mod, "stream_message", _as_create)
+    stub = AnthropicAPIStub(_truncating_first_cross_qc(_script()))
+
+    ctx = _run(tmp_path, stub)
+
+    sent = assert_request_contract(stub)
+    assert [r["body"]["max_tokens"] for r in sent["cross_qc"]] == [api.CROSS_QC_OUTPUT_CAP]
+    [error] = [e for e in ctx.errors if e.startswith("Cross-sheet QC")]
+    assert "; retry failed: " in error and "Streaming is required" in error
 
 
 def test_count_tokens_goes_to_the_plain_endpoint():

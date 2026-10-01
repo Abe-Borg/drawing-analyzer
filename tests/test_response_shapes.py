@@ -514,17 +514,21 @@ def test_a_refused_synthesis_or_focus_report_is_not_kept_or_cached(tmp_path, sta
     assert _warm_calls(tmp_path).get(stage, 0) == 1
 
 
-def test_recorded_limit_cross_qc_names_only_an_empty_refusal(tmp_path):
-    """Recorded limit (WP-06.3): cross-QC checks only for an empty reply, so a
-    refusal with an explanation reads as unparseable output. WP-06.3 checks the
-    stop reason: the error names the refusal."""
+def test_a_refused_cross_qc_reply_names_its_refusal(tmp_path):
+    """Remediation WP-06.3 (flipped from WP-02.3's recorded limit, the owner's
+    rules): cross-QC reads the stop reason first, so a refusal with an
+    explanation names itself, its category included, instead of reading as
+    unparseable output. The whole-set call obtained nothing, so the stage is
+    FAILED (it read PARTIAL), and nothing is cached: the warm run asks again."""
     stub = AnthropicAPIStub(_shaped(_script(), _refusal, stages={"cross_qc"}))
 
     ctx = _run(tmp_path, stub)
 
-    assert _statuses(ctx)["cross_qc"] == "PARTIAL"
+    assert _statuses(ctx)["cross_qc"] == "FAILED"
     [error] = [e for e in ctx.errors if e.startswith("Cross-sheet QC")]
-    assert "no parseable findings object" in error and "refusal" not in error
+    assert error == ("Cross-sheet QC: refused cross-qc "
+                     "(stop_reason='refusal', category='cyber')")
+    assert _warm_calls(tmp_path)["cross_qc"] == 1
 
 
 def test_a_refused_batch_item_is_resubmitted_on_the_fallback_model(tmp_path):

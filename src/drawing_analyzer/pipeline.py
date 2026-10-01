@@ -4672,14 +4672,19 @@ def extract_drawing_context(
             # cross-shard reconciliation completed and the text budget was not
             # degraded — a failed shard/reconciliation or a silent truncation holds
             # the stage at PARTIAL while its findings stay usable.
-            cross_complete = bool(getattr(cross_res, "complete", not cross_res.error))
+            # Remediation WP-06.3: the failure flag before any count (D-2). A
+            # stage that obtained nothing (every call failed with nothing kept,
+            # or no call could be made) is FAILED, not PARTIAL; one rule,
+            # ``CrossQCResult.stage_status``.
+            cross_status = cross_res.stage_status
             _record_usage(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
                 transport="CACHE" if getattr(cross_res, "cached", False) else "REAL_TIME",
                 cache_hit=bool(getattr(cross_res, "cached", False)),
-                terminal_status="COMPLETE" if cross_complete else "PARTIAL",
+                terminal_status=cross_status,
+                interrupted_attempts=int(getattr(cross_res, "interrupted_attempts", 0) or 0),
             )
             cross_stage.items_out = len(cross_findings)
             cross_stage.calls_planned = getattr(cross_res, "shards_planned", 0)
@@ -4689,13 +4694,26 @@ def extract_drawing_context(
                 cross_stage.errors.append(str(cross_res.error))
                 _log.warning("cross-sheet QC: %s", cross_res.error)
             if getattr(cross_res, "budget_degraded", False):
-                cross_stage.warnings.append(
-                    f"text budget degraded: {cross_res.text_chars_omitted} char(s) omitted"
-                )
+                if cross_res.text_chars_omitted or not getattr(cross_res, "findings_omitted", 0):
+                    cross_stage.warnings.append(
+                        f"text budget degraded: {cross_res.text_chars_omitted} char(s) omitted"
+                    )
+                # Remediation WP-06.3: the per-response findings cap's loss is
+                # named too (it read "0 char(s) omitted").
+                if getattr(cross_res, "findings_omitted", 0):
+                    cross_stage.warnings.append(
+                        f"{cross_res.findings_omitted} finding(s) past the per-response "
+                        "cap were dropped"
+                    )
             if getattr(cross_res, "reconciliation_required", False) and not getattr(
                 cross_res, "reconciliation_completed", True
             ):
                 cross_stage.warnings.append("cross-shard reconciliation incomplete")
+            # Remediation WP-06.3: what was kept from replies the model did not
+            # finish (observational; the error already holds the status).
+            salvage = getattr(cross_res, "salvage", None)
+            if salvage is not None and salvage.note():
+                cross_stage.warnings.append(salvage.note())
             # Remediation WP-06.1 (B6): items the host refused for an invalid
             # field are a warning, never a status (the owner's decision; the
             # counts are observational, like the discards). Placed after the
@@ -4710,7 +4728,11 @@ def extract_drawing_context(
             # status, and the cached result carries the counts.
             if discarded is not None and discarded.ambiguity_note():
                 cross_stage.warnings.append(discarded.ambiguity_note())
-            cross_stage.status = "COMPLETE" if cross_complete else "PARTIAL"
+            # Remediation WP-06.3 (U7): facts past the cap and items that were
+            # not objects. Observational, a warning, never a status.
+            if discarded is not None and discarded.omission_note():
+                cross_stage.warnings.append(discarded.omission_note())
+            cross_stage.status = cross_status
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")
             cross_stage.status = "FAILED"
