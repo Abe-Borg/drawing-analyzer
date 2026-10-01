@@ -14,9 +14,9 @@ The output comes two ways: a **self-contained HTML report** (`report.html`) — 
 portable file with a sidebar table of contents, full-text search, and category
 filters so you can isolate, say, just the coordination items or the conflicts the
 model flagged across the whole set — and the underlying **plain Markdown**, for
-reading, diffing, or feeding to anything downstream. The HTML is a lossless
-re-presentation of the same content (it even embeds the verbatim Markdown), so
-nothing the model returned is lost.
+reading, diffing, or feeding to anything downstream. The HTML embeds the combined
+Markdown. That preserves the recorded report text; parsers, filters and failed or
+partial calls can still omit model proposals from the findings.
 
 The HTML report also includes an **Ask AI** assistant (bottom-right button): a chat
 grounded in the report's own text, so you can ask things like *"what are the biggest
@@ -26,8 +26,9 @@ product data) — all by calling the Anthropic API **directly from your browser*
 there is no server. The assistant is present **by default**, whether or not the
 report was built with a key. **By default the report does not contain your API
 key**: the assistant asks for one the first time you use it and keeps it only in
-that browser tab (`sessionStorage`), so the file is safe to share and the key never
-touches disk (a **Forget key** control clears it). If you'd rather have a
+memory and that browser tab (`sessionStorage`). Browser recovery, disk storage and
+local-file origin isolation are browser-controlled. The report still contains
+private project data; **Forget key** clears the entered key. If you'd rather have a
 zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
 (GUI) or pass `embed_api_key=True` — the key is then baked into the HTML, the report
 shows a red *"don't share this file"* warning, and you should treat the file like a
@@ -65,9 +66,10 @@ left off (**New chat** clears it). **Save** writes the conversation to a
 folder, archive it, or hand it to a colleague — and **Load** reads one back and
 lets you carry on asking questions from where it ended. The transcript is data,
 not a picture: the questions, the answers, the reasoning, the tool steps and the
-citations all come back. Your API key is never part of it (any `sk-ant-…` in the
-conversation is redacted before anything is written), and nothing is uploaded —
-saving and loading happen entirely on your machine.
+citations all come back. The key field is not serialized; recognized `sk-ant-…`
+patterns in conversation text are redacted. Other secrets and project content
+can remain. Saving and loading are local; sending the next question uploads the
+loaded history and report to the provider.
 
 See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output is
 treated as hostile and can never execute), API-key handling, secret redaction in
@@ -75,9 +77,11 @@ logs, and what project data each artifact and the Ask-AI assistant contains.
 
 ## Download & install (Windows)
 
-Drawing Analyzer ships as a normal downloadable Windows app — there is **no
-server to host and nothing to run in the cloud**. The app runs entirely on your
-own PC and talks only to the Anthropic API using your own API key.
+Drawing Analyzer ships as a normal downloadable Windows app. Rendering, local
+checks and export run on your PC; model work runs at Anthropic by default, using
+your key. Startup/manual update checks reach GitHub and redirects; optional
+installers use manifest-supplied HTTPS URLs. Provider web tools research external
+sites. Desktop endpoint/proxy overrides and clicked links can change destinations.
 
 1. Go to the [latest release](https://github.com/abe-borg/drawing-analyzer/releases/latest)
    and download **`DrawingAnalyzerSetup.exe`**.
@@ -304,9 +308,9 @@ GUI) makes a large set easy to navigate:
   same verbatim text therefore **collapse behind the first one**, which grows a
   `+N more sheets` control that expands the group in place. This is display only:
   the ledger, the exports, the markups and the badge total keep every finding
-  (§18.6), the grouping recomputes after every sort and filter (so a collapsed
-  row is never stranded without a lead), search still reaches a collapsed row,
-  and **Group repeated quotes** turns the whole thing off.
+  (§18.6). Grouping recomputes when filters change; the sort handler currently
+  does not regroup, so a sort can leave the earlier group lead in place. Search
+  still reaches a collapsed row, and **Group repeated quotes** turns grouping off.
 - **Search** — live full-text filter across every sheet. When a QC run captured
   the sheets' **raw text layers**, search runs over what each *sheet* actually
   says (a collapsed *Sheet text layer* block per sheet), not only what the digest
@@ -400,12 +404,11 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
      → optional QC: deterministic auditors + anchor → verify → cloud (reviewed PDFs, CSV)
 ```
 
-- **Text-layer grounding.** Before rasterizing, each sheet's vector text layer is
-  lifted losslessly (`page.get_text()` — free, ~0.3 s for 8 sheets) and spliced
-  into the digest prompt **verbatim, before the images**, as the source of truth
-  for exact strings (tags, schedule values, note numbers, sheet references). Vector
-  text can't misread a digit the way OCR of a low-resolution embedded raster can,
-  so grounding the read in it is the antidote to that class of error.
+- **Text-layer grounding.** Before rasterizing, selectable PDF text is extracted
+  with `page.get_text()` and placed **before the images**, up to the prompt cap.
+  It helps check tags, schedule values, note numbers and sheet references. The
+  PDF's text layer and extraction order can themselves be wrong; comparing text
+  with the drawing remains part of review.
 - **Render resolution.** Ordinary (vector) sheets now render each tile at a
   **1560 px** long edge (down from 1992 px) — the text layer carries the exact
   strings, so the tiles trade ~40% of their PNG bytes and image tokens for a
@@ -1976,11 +1979,11 @@ directory. The run still ships (I-3); it just says so.
 | `auditor_reference` / `auditor_arithmetic` / `auditor_naming` / `auditor_titleblock` / `auditor_sheet_index` | the deterministic auditors |
 | `focus_prose` | per-sheet Focus sections (only with `focus_findings_to_markups=True`) |
 
-### Prose harvest — the legacy channel's guarantee
+### Prose harvest — carrying recorded prose into findings
 
 The prose digest predates the structured findings and feeds a downstream
-consumer, so it is never modified — it is **mirrored**. Three layered
-mechanisms make the mirror a guarantee: (1) the digest prompt requires every
+consumer, so its recorded text is retained. Three layered
+mechanisms attempt to carry issues into findings: (1) the digest prompt asks every
 prose Coordination/Conflict item to also appear in the JSON block; (2) the
 harvester splits those prose sections into items (using the same section
 grammar as the report's "⚠ Issues only" filter) and fuzzy-matches each against
@@ -1989,8 +1992,8 @@ when the two make the same claim (their critical signatures agree, below); (3)
 each unmatched straggler gets **one small structuring call** (item + the sheet's
 text layer → one finding with a verbatim quote), and if even that fails a
 **degraded entry** is ingested — the prose item verbatim, sheet-level — which
-still reaches the PDF as a margin callout. **No prose QC item can fail to
-produce a ledger entry.** Synthesis prose contributes its conflict statements
+can reach the PDF as a margin callout. Parsing, filler filters and caps mean this
+is not a guarantee that every proposed issue gets a ledger entry. Synthesis prose contributes its conflict statements
 the same way, anchored on the first sheet each names and dual-anchored when a
 second sheet is named.
 
@@ -2110,7 +2113,9 @@ only strong trigger phrases run, and the finding reports the limitation.
 The arithmetic auditor embodies the tool's core principle — *coverage proposes,
 precision disposes* — for the one thing a vision model is worst at: mental
 arithmetic on a table it just transcribed (the prototype watched one misread a
-flow-test total, `540` → `660`). So the model never calculates. The critique and
+flow-test total, `540` → `660`). Prompts ask the model to transcribe relationships;
+the host calculates supported numeric claims. This does not guarantee that prose
+or chat contains no model arithmetic. The critique and
 cross-sheet QC passes emit, alongside their findings, a **`claims`** array — the
 numbers they read and how those should relate:
 
@@ -2802,3 +2807,23 @@ annotations with a cloud border-effect dict (`/BE {/S /C /I 2}`), but it does
 **not** generate the appearance stream (`/AP`) that PyMuPDF's `annot.update()`
 produces, so some viewers render those annotations blank — which is why PyMuPDF
 is used here. That trade-off is documented in `annotate.py`'s module docstring.
+
+## Why trust it?
+
+The GUI's **Why trust it?** topic gives the short explanation; its **I'm not
+convinced — show me exactly what runs →** button opens a stacked dossier with
+the full action inventory, network boundary, model settings, limits, storage,
+cost caveats and audit steps. Closing it returns to the short topic.
+The same content is available locally in [docs/TRUST.html](docs/TRUST.html);
+the code evidence and recorded contradictions are in
+[docs/TRUST_CLAIMS.md](docs/TRUST_CLAIMS.md).
+
+Treat a review as evidence to inspect, not professional approval. Automatic
+follow-ups can run after you approve analysis or send chat; startup update
+checks are separate. Costs remain estimates, and local/provider retention has
+exceptions. The dossier names these mechanisms explicitly.
+
+The trust surfaces are a contract. Any change to a behavior they describe updates
+them in the same change: a new user action, network call, automatic behavior,
+model or setting change, or new limit. See CLAUDE.md for the regeneration and
+test commands.

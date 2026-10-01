@@ -359,6 +359,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # the application-modal grab back to its parent instead of leaving the
         # still-visible parent ungrabbed.
         self._help_parents: dict[str, ctk.CTkToplevel] = {}
+        self._help_openers: dict[str, object] = {}
+        self._help_focus_targets: dict[str, list] = {}
         # Resizable pop-out editor for the per-run focus box (see
         # _open_focus_popout); focus_popout_box is None whenever it's closed.
         self._focus_popout: ctk.CTkToplevel | None = None
@@ -808,7 +810,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         opt_row.pack(fill="x", padx=16, pady=(0, 4))
         self._embed_key_check = ctk.CTkCheckBox(
             opt_row,
-            text="Embed API key in HTML report (Ask-AI works offline; don't share the file)",
+            text="Embed API key in HTML report (Ask-AI still needs internet; don't share the file)",
             variable=self._embed_key_var,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"],
@@ -926,17 +928,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.pack(side="right", anchor="e")
         for doc in HELP_DOCUMENTS:
-            ctk.CTkButton(
+            button = ctk.CTkButton(
                 bar, text=doc.button_label,
                 width=112 if len(doc.button_label) > 6 else 68, height=30,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
                 border_width=1, border_color=COLORS["border"],
                 text_color=COLORS["text_secondary"],
-                command=lambda d=doc: self._open_help_modal(d),
-            ).pack(side="left", padx=(6, 0))
+            )
+            button.configure(command=lambda d=doc, b=button: self._open_help_modal(d, opener=b))
+            button.pack(side="left", padx=(6, 0))
 
-    def _open_help_modal(self, doc: HelpDocument, parent=None) -> None:
+    def _open_help_modal(self, doc: HelpDocument, parent=None, opener=None) -> None:
         """Open (or re-focus) the scrollable modal for one help document.
 
         The content is pure data from :mod:`help_content`; this method only
@@ -958,21 +961,27 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         owner = parent if (parent is not None and parent.winfo_exists()) else self
         win = ctk.CTkToplevel(owner)
         self._help_windows[doc.key] = win
+        self._help_openers[doc.key] = opener or self.focus_get()
         if owner is not self:
             self._help_parents[doc.key] = owner
         win.title(doc.title)
         win.configure(fg_color=COLORS["bg_dark"])
-        # Panels carrying pre-formatted blocks (the runtime-transparency
-        # diagrams and tables) are rendered verbatim and never re-wrapped, so
-        # they open wider — a narrow window would clip them rather than reflow.
-        if any(b.kind == "pre" for s in doc.sections for b in s.blocks):
-            win.geometry("880x760")
-            win.minsize(620, 420)
-        else:
-            win.geometry("720x640")
-            win.minsize(520, 400)
+        # Bound the native dialog to the screen; dossier content reflows inside
+        # one scroll, with a contents rail only when the width can support it.
+        dossier = doc.key == "runtime_transparency"
+        # CTk sizes are logical pixels; screen dimensions are physical pixels.
+        # Account for automatic monitor DPI and user scaling before bounding it.
+        scale = win._get_window_scaling()
+        width = min(1180 if dossier else 720, int(win.winfo_screenwidth() * .92 / scale))
+        height = min(850 if dossier else 640, int(win.winfo_screenheight() * .88 / scale))
+        win.geometry(f"{width}x{height}")
+        win.minsize(min(520, width), min(360, height))
+        win.maxsize(int(win.winfo_screenwidth() / scale), int(win.winfo_screenheight() * .88 / scale))
         win.transient(owner)
-        win.bind("<Escape>", lambda _e: self._close_help_modal(doc.key))
+        win.bind("<Escape>", lambda _e: self._help_escape(doc.key))
+        win.bind("<Tab>", lambda e: self._help_tab(doc.key, e))
+        win.bind("<Shift-Tab>", lambda e: self._help_tab(doc.key, e, backwards=True))
+        win.bind("<ISO_Left_Tab>", lambda e: self._help_tab(doc.key, e, backwards=True))
         win.protocol("WM_DELETE_WINDOW", lambda: self._close_help_modal(doc.key))
         # Grabbing input before the toplevel is viewable raises on some
         # platforms; defer it a beat so the modal reliably takes focus.
@@ -981,29 +990,44 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
         card.pack(fill="both", expand=True, padx=12, pady=12)
 
-        ctk.CTkLabel(
+        heading = ctk.CTkLabel(
             card, text=doc.title,
             font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
             text_color=COLORS["text_primary"], justify="left",
-        ).pack(anchor="w", padx=18, pady=(16, 2))
+        )
+        heading.pack(anchor="w", padx=18, pady=(16, 2))
+        card.bind("<Configure>", lambda e: heading.configure(wraplength=max(160, e.width - 42)), add="+")
         if doc.intro:
-            ctk.CTkLabel(
+            intro = ctk.CTkLabel(
                 card, text=doc.intro,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 text_color=COLORS["text_secondary"], wraplength=640, justify="left",
-            ).pack(anchor="w", padx=18, pady=(0, 8))
+            )
+            intro.pack(anchor="w", padx=18, pady=(0, 8))
+            card.bind("<Configure>", lambda e: intro.configure(wraplength=max(160, e.width - 42)), add="+")
 
         # Bottom bar first so the scrollable body fills the space between it and
         # the header (pack reserves the bottom before the expand widget claims
         # the rest).
         bottom = ctk.CTkFrame(card, fg_color="transparent")
         bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
-        ctk.CTkButton(
+        close = ctk.CTkButton(
             bottom, text="Close", width=100, height=32,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             command=lambda: self._close_help_modal(doc.key),
-        ).pack(side="right")
+        )
+        close.pack(side="right")
+        close.bind("<Return>", lambda _e: self._close_help_modal(doc.key))
+        close.bind("<space>", lambda _e: self._close_help_modal(doc.key))
+
+        if dossier:
+            from .trust_ui import DossierView
+            view = DossierView(card, lambda: self._close_help_modal(doc.key))
+            win._dossier_view = view
+            self._help_focus_targets[doc.key] = [view.text, *view.buttons, *view.links, close]
+            win.after(160, view.text.focus_set)
+            return
 
         body = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_dark"], corner_radius=6)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -1014,6 +1038,52 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 help_document(key), parent=win
             ),
         )
+        self._help_focus_targets[doc.key] = [*getattr(body, "_help_buttons", []), close]
+        # Labels reflow with the viewport, including a narrow screen.
+        def reflow(event):
+            for label in getattr(body, "_help_labels", []):
+                label.configure(wraplength=max(160, event.width - 48))
+            for button in getattr(body, "_help_buttons", []):
+                label = getattr(button, "_text_label", None)
+                if label is not None:
+                    label.configure(wraplength=max(160, event.width - 64))
+            for button in getattr(body, "_help_buttons", []):
+                label = getattr(button, "_text_label", None)
+                if label is not None:
+                    label.configure(wraplength=max(160, event.width - 56))
+        body.bind("<Configure>", reflow, add="+")
+        win.after(160, close.focus_set)
+
+    def _help_escape(self, key: str) -> str:
+        self._close_help_modal(key)
+        return "break"
+
+    def _help_tab(self, key: str, event, backwards: bool = False) -> str:
+        targets = [w for w in self._help_focus_targets.get(key, []) if w.winfo_ismapped()]
+        if targets:
+            current = self.focus_get()
+            # CustomTkinter delegates bindings to its canvas/label children.
+            index = next((i for i, w in enumerate(targets)
+                          if current is w or str(current).startswith(str(w) + ".")), -1)
+            target = targets[(index + (-1 if backwards else 1)) % len(targets)]
+            target.focus_set()
+            self._help_see_target(target)
+        return "break"
+
+    @staticmethod
+    def _help_see_target(target) -> None:
+        """Keep a keyboard-focused short-topic button inside its viewport."""
+        ancestor = target.master
+        while ancestor is not None:
+            canvas = getattr(ancestor, "_parent_canvas", None)
+            if canvas is not None:
+                height = max(1, ancestor.winfo_height())
+                top = canvas.canvasy(0)
+                y = target.winfo_rooty() - ancestor.winfo_rooty()
+                if y < top or y + target.winfo_height() > top + canvas.winfo_height():
+                    canvas.yview_moveto(y / height)
+                return
+            ancestor = getattr(ancestor, "master", None)
 
     @staticmethod
     def _render_help_body(body, doc: HelpDocument, on_modal_link=None) -> None:
@@ -1024,12 +1094,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         such a block still renders, just as inert text.
         """
         wrap = 610
+        body._help_buttons = []
+        body._help_labels = []
         for section in doc.sections:
-            ctk.CTkLabel(
+            heading = ctk.CTkLabel(
                 body, text=section.heading,
                 font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
                 text_color=COLORS["accent_glow"], wraplength=wrap, justify="left",
-            ).pack(anchor="w", padx=10, pady=(14, 3))
+            )
+            heading.pack(anchor="w", padx=10, pady=(14, 3))
+            body._help_labels.append(heading)
             for block in section.blocks:
                 if block.kind == "bullet":
                     row = ctk.CTkFrame(body, fg_color="transparent")
@@ -1073,34 +1147,41 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         justify="left", anchor="w",
                     ).pack(anchor="w", padx=10, pady=(6, 6), ipadx=12, ipady=8)
                 elif block.kind == "modal" and block.doc_key:
-                    # A hand-off to another help document. Rendered like a web
-                    # link but routed back through _open_help_modal, so the
-                    # panel relationship lives in the content, not in gui.py.
-                    jump = ctk.CTkLabel(
+                    # A real button with keyboard activation. Focus it before
+                    # opening the child so close can restore this exact opener.
+                    jump = ctk.CTkButton(
                         body, text=block.text,
-                        font=ctk.CTkFont(family="Segoe UI", size=12, underline=True),
-                        text_color=COLORS["accent_glow"],
-                        wraplength=wrap, justify="left",
-                        cursor="hand2" if on_modal_link else "",
+                        font=ctk.CTkFont(family="Segoe UI", size=12),
+                        text_color=COLORS["text_primary"], fg_color=COLORS["accent"],
+                        hover_color=COLORS["accent_hover"], height=64,
                     )
-                    jump.pack(anchor="w", padx=10, pady=(4, 2))
+                    jump.pack(fill="x", padx=10, pady=(8, 8))
+                    body._help_buttons.append(jump)
                     if on_modal_link is not None:
-                        jump.bind(
-                            "<Button-1>",
-                            lambda _e, key=block.doc_key: on_modal_link(key),
-                        )
+                        def activate(key=block.doc_key, button=jump):
+                            button.focus_set()
+                            on_modal_link(key)
+                        jump.configure(command=activate)
+                        jump.bind("<Return>", lambda _e, f=activate: f())
+                        jump.bind("<space>", lambda _e, f=activate: f())
                 else:
-                    ctk.CTkLabel(
+                    label = ctk.CTkLabel(
                         body, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                         wraplength=wrap, justify="left",
-                    ).pack(anchor="w", padx=10, pady=(2, 2))
+                    )
+                    label.pack(anchor="w", padx=10, pady=(2, 2))
+                    body._help_labels.append(label)
 
     def _grab_help_modal(self, win) -> None:
         """Make a help modal application-modal once it is viewable (best-effort)."""
         try:
             if win.winfo_exists():
+                # A delayed parent's grab must not steal input from its child.
+                if any(parent is win and self._help_windows.get(key) is not None
+                       for key, parent in self._help_parents.items()):
+                    return
                 win.grab_set()
                 win.focus_force()
         except Exception:  # pragma: no cover - platform dependent
@@ -1115,6 +1196,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         """
         win = self._help_windows.pop(key, None)
         parent = self._help_parents.pop(key, None)
+        opener = self._help_openers.pop(key, None)
+        self._help_focus_targets.pop(key, None)
         if win is None:
             return
         try:
@@ -1130,6 +1213,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 if parent.winfo_exists():
                     self._grab_help_modal(parent)
             except Exception:  # pragma: no cover - platform dependent
+                pass
+        if opener is not None:
+            try:
+                if opener.winfo_exists():
+                    opener.focus_set()
+                    self._help_see_target(opener)
+            except Exception:  # pragma: no cover - opener may have been removed
                 pass
 
     # --------------------------------------------------------------- api key
