@@ -183,6 +183,35 @@ def persistence_enabled() -> bool:
     return _env_truthy(os.environ.get("DRAWING_ANALYZER_CACHE_PERSIST"), default=True)
 
 
+def rendered_request_labels(sheet: Any) -> str:
+    """Model-visible label values, independent of image bytes and prompt text."""
+    return json.dumps([
+        sheet.ref.display_label, sheet.rows, sheet.cols,
+        [(tile.row, tile.col, tile.label) for tile in sheet.tiles],
+        sheet.omitted_tiles,
+    ], ensure_ascii=False, separators=(",", ":"))
+
+
+def prescan_request_labels(geometry: Any) -> str:
+    """Generate the tile-label contract without rasterizing the sheet.
+
+    Blank suppression is covered by the render identity. Including every grid
+    position also catches changes to label generation before a level-1 hit.
+    """
+    from . import tiling
+
+    width, height = geometry.page_width_pt, geometry.page_height_pt
+    positions = tiling.tile_rects(
+        width, height, rows=geometry.rows, cols=geometry.cols,
+        overlap_frac=geometry.overlap_frac,
+    )
+    return json.dumps([
+        geometry.ref.display_label, geometry.rows, geometry.cols,
+        [(tile.row, tile.col, tiling.position_label(tile, width, height))
+         for tile in positions],
+    ], ensure_ascii=False, separators=(",", ":"))
+
+
 def digest_cache_key(
     sheet: Any,
     *,
@@ -195,34 +224,11 @@ def digest_cache_key(
     specs: str | None = None,
     sheet_text: str | None = None,
 ) -> str:
-    """Content-address one sheet's digest request.
+    """Content-address a digest's images, text, labels and request settings.
 
-    The rendered images are a model input, so hashing them captures the page
-    content *and* every tiling parameter at once (different rows / cols / overlap
-    → different crops → different bytes → different key). Folding in the model,
-    prompt fingerprint, and output-shaping params means a model swap or a prompt
-    edit re-digests rather than serving a stale cached read.
-
-    ``sheet_text`` is the sheet's verbatim vector text layer, now sent in the
-    prompt as a *second* model input. It is normally implied by the pixels (both
-    derive from the same page), but not always: a scanned sheet's hidden OCR
-    layer can be corrected/regenerated **without changing the rendered pixels**,
-    so the text must be folded into the key too or a corrected re-run would serve
-    the stale digest. Folded **only when non-empty**, so a text-free (raster)
-    sheet's key is unaffected — its rendered pixels already key it, and empty
-    text ⟺ raster render target, which changes the pixels anyway.
-
-    ``focus`` carries the per-run focus prompt fragment
-    (:func:`drawing_analyzer.digest.focus_cache_fragment`) when one is set. It is
-    folded in **only when non-empty**, so a no-focus key is byte-identical to a
-    key produced before the focus feature existed — pre-existing cache entries
-    stay valid — while any focus (or a change to it) re-digests.
-
-    ``specs`` carries the uploaded project-specifications prompt fragment
-    (:func:`drawing_analyzer.digest.specs_cache_fragment`) when specs are
-    attached — folded in **only when non-empty**, same rationale as ``focus``,
-    and independent of it (a run can vary focus and specs on separate axes).
-    """
+    Static prompt wording is covered by ``prompt_version``; interpolated
+    sheet/grid/tile labels are hashed separately from image bytes.
+    ``focus`` and ``specs`` carry their model-visible prompt fragments."""
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
@@ -244,6 +250,9 @@ def digest_cache_key(
         h.update(b"sheet_text=")
         h.update(sheet_text.encode("utf-8"))
         h.update(b"\x00")
+    h.update(b"request_labels=")
+    h.update(rendered_request_labels(sheet).encode("utf-8"))
+    h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
         h.update(tile.png_bytes)
@@ -260,25 +269,14 @@ def digest_cache_key_level1(
     use_thinking: bool,
     focus: str | None = None,
     specs: str | None = None,
+    request_labels: str = "",
 ) -> str:
-    """Content-address one sheet's digest **before rendering** (Phase 9, level-1).
+    """Key a digest before rasterization, in a separate level-1 namespace.
 
-    The dominant cost of a re-run is rasterization (~4.5 s/sheet, ~2.5 min for a
-    33-sheet set). A digest is deterministic given the rendered images, so if the
-    images *would* be byte-identical we can serve the cached digest without ever
-    rendering. ``render_identity`` is exactly that "would the images match"
-    fingerprint, produced from cheap page access alone
-    (:func:`drawing_analyzer.render.sheet_render_identity`): the PyMuPDF version,
-    grid + overlap + render target, the blank-suppression mode, and a conservative
-    hash of every page dependency that can affect rendered pixels or extracted text
-    (with whole-source fallback when isolation is uncertain).
-
-    This folds the *same* request/model params as :func:`digest_cache_key` around
-    that identity, plus a ``level=1`` namespace tag so a level-1 key can never
-    collide with a level-2 (PNG-bytes) key. On a hit the pipeline skips rendering;
-    on a miss it renders, computes the level-2 key for continuity, and stores the
-    fresh digest under **both**.
-    """
+    ``render_identity`` covers page content, extracted text and render settings.
+    Production callers supply ``prescan_request_labels(geometry)`` so changes
+    to sheet labels or generated tile labels miss before the render shortcut.
+    Fresh results are stored under both cache tiers."""
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
@@ -297,6 +295,8 @@ def digest_cache_key_level1(
     if specs:
         h.update(f"specs={specs}".encode("utf-8"))
         h.update(b"\x00")
+    h.update(f"request_labels={request_labels}".encode("utf-8"))
+    h.update(b"\x00")
     h.update(b"render_identity=")
     h.update(render_identity.encode("utf-8"))
     h.update(b"\x00")
@@ -314,42 +314,13 @@ def critique_cache_key_level1(
     runs: int,
     profiles_key: str | None = None,
     structured_key: str | None = None,
+    request_labels: str = "",
 ) -> str:
-    """Content-address one sheet's *critique* **before rendering** (Phase 19B, §11.5).
+    """Key a critique before rasterization, including its read/merge contract.
 
-    The critique reads the same rendered images the digest does, so an unchanged
-    exhaustive re-run would otherwise have to rasterize every sheet merely to
-    compute the level-2 (PNG-bytes) :func:`critique_cache_key` and discover the
-    critique was already cached — contradicting the warm-run fast path. This keys
-    the critique on the *same* pre-render ``render_identity``
-    (:func:`drawing_analyzer.render.sheet_render_identity`) the digest level-1 key
-    uses, plus the critique's own request params — the critique prompt version, the
-    self-consistency ``runs`` count (a one-read and a two-read merge differ), and the
-    profile fingerprint (Phase 12; selecting or editing a profile re-critiques). The
-    ``stage=critique level=1`` namespace tags keep it from ever colliding with the
-    digest level-1 key or the level-2 critique key. On a hit the pipeline serves the
-    merged critique with neither a render nor an API call; on a miss it renders,
-    critiques, and stores under this key too (store-under-both).
-
-    ``profiles_key`` is folded **only when non-empty**, so a no-profiles critique
-    level-1 key stays byte-identical to a run that never selected one.
-
-    ``structured_key`` (F-01) carries the same meaning it does on the level-2
-    :func:`critique_cache_key`, and carrying it on **both** levels is the whole
-    point: this key is probed *before rendering*, so a level-1 entry that did
-    not distinguish the two contracts would let a warm run enabling structured
-    outputs hit a stored **fenced** result and return it without ever issuing a
-    structured request — the feature would look enabled and change nothing.
-    The reverse leaks too: a structured result stored under a shared key would
-    be served after the option was switched back off. Separating only the
-    level-2 key closes neither case, because level 1 answers first and a hit
-    there means level 2 is never consulted.
-
-    ``_CRITIQUE_CACHE_CONTRACT`` is folded here and in :func:`critique_cache_key`
-    unconditionally, from the module, never passed by a caller, so the probe and
-    the store cannot disagree about which merge rule, or which rule for the
-    reads it may hold (remediation WP-01.4), an entry was produced under.
-    """
+    Production callers supply ``prescan_request_labels(geometry)``. Rebuild the
+    store key if the structured-output latch changes during a read, retaining
+    the same render identity and label descriptor used for the probe."""
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
@@ -373,6 +344,8 @@ def critique_cache_key_level1(
         h.update(b"structured=")
         h.update(structured_key.encode("utf-8"))
         h.update(b"\x00")
+    h.update(f"request_labels={request_labels}".encode("utf-8"))
+    h.update(b"\x00")
     h.update(b"render_identity=")
     h.update(render_identity.encode("utf-8"))
     h.update(b"\x00")
@@ -392,46 +365,11 @@ def critique_cache_key(
     profiles_key: str | None = None,
     structured_key: str | None = None,
 ) -> str:
-    """Content-address one sheet's *critique* (Phase 11) — a separate model read
-    from the digest, over the same images.
+    """Key a merged critique's images, text, labels and request settings.
 
-    Mirrors :func:`digest_cache_key` (the rendered images key the page content
-    and every tiling parameter at once, and a non-empty ``sheet_text`` is folded
-    in so a corrected text layer re-critiques even when the pixels are unchanged),
-    but adds a ``stage=critique`` namespace tag, the critique prompt fingerprint,
-    and the self-consistency ``runs`` count — a one-run critique and a two-run
-    merge are different results. The distinct stage tag and prompt version mean a
-    critique key can never collide with a digest key over the same images. The
-    *merged* critique findings are cached under this key, so a re-run skips the
-    model calls; the run-to-run sampling variance the merge feeds on is not itself
-    reproducible, so only the merged outcome is stored (never an individual run).
-
-    ``profiles_key`` (Phase 12) is the fingerprint of the review profiles injected
-    into the critique prompt (:func:`drawing_analyzer.profiles.profiles_cache_fragment`
-    — sorted ``name@version@hash`` triples). Folded in **only when non-empty**, so
-    selecting no profile adds nothing to the key (when profiles were introduced,
-    every existing entry stayed valid), while selecting a profile — or editing
-    one — re-critiques.
-
-    ``structured_key`` (F-01) is
-    :data:`drawing_analyzer.critique.CRITIQUE_STRUCTURED_PROMPT_VERSION` when the
-    read was taken under ``output_config.format``, and ``None`` otherwise. It
-    exists because a structured read is a genuinely different request — a
-    different findings instruction and a schema the model decoded against — and
-    must not be served to, or from, a fenced run. Folded in on the same
-    only-when-set rule as ``profiles_key``, which is what let it land with NO
-    ``_SCHEMA_VERSION`` bump: every existing entry had been written without it,
-    a fenced run kept computing its pre-F-01 key byte-for-byte, and nothing
-    already paid for was discarded. Turning the feature on adds entries beside
-    the old ones rather than replacing them, so flipping it back and forth costs
-    one re-read each way instead of invalidating both sides.
-
-    ``_CRITIQUE_CACHE_CONTRACT`` versions the host merge rule the stored
-    findings were produced under, and which reads the merge may take (only
-    reads the model finished, since remediation WP-01.4; see its definition).
-    It is folded on every call, unlike ``profiles_key`` and ``structured_key``:
-    its whole purpose is to make every entry written under an older rule miss.
-    """
+    The critique contract versions the host merge/read rules, independently of
+    digest caches. Read count, profiles and structured-output format distinguish
+    different requests; only completed merged results belong in this cache."""
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
@@ -458,6 +396,9 @@ def critique_cache_key(
         h.update(b"structured=")
         h.update(structured_key.encode("utf-8"))
         h.update(b"\x00")
+    h.update(b"request_labels=")
+    h.update(rendered_request_labels(sheet).encode("utf-8"))
+    h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
         h.update(tile.png_bytes)

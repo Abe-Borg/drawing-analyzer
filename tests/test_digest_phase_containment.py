@@ -1,40 +1,9 @@
-"""An unexpected error in the digest phase ends the phase, not the run (R1).
+"""Digest exceptions preserve resolved sheet outcomes, usage and exports.
 
-Remediation WP-11.2. WP-11.1 made a source or page that fails after the
-inventory an unread page instead of an abort. Any other exception inside the
-digest phase still ended the run with nothing: an exception out of the prescan,
-either transport, the level-1 store or the accounting propagated out of
-``extract_drawing_context``, so the paid digests it had collected, their usage
-and their journal events were lost, no run.log or run_manifest.json was
-written, the batch uploads leaked (``submit_drawing_batch`` had no outer DA-034
-guard, and the collect's poll sat outside its guard), and the render spool and
-the uploads retained for the critique were released only in the critique
-stage's ``finally``.
-
-The owner's rules (two rounds, measured first):
-
-- a contained failure **stops after the digest phase**: the digests in hand
-  ship (usage, ``SHEET_DIGESTED``, the export); every other page the run owed
-  is an ``UnreadPage`` with one ``PAGE_UNREAD``; no later stage makes a call,
-  reopens a source or writes a reviewed PDF, while the read sheets' digest
-  findings are still ingested and anchored offline as on every standard run;
-  the stages that did not run are not recorded; the journal closes with
-  ``RUN_END``; the context goes to the exporter;
-- the digest stage is **FAILED** whatever was read (D-2: the stage's own
-  failure flag before its counts), its items still pages owed -> pages read;
-- the collect side **harvests, then releases** (the abandon path's rule: a
-  terminal batch is released; a running one is canceled first and released
-  only once the cancel is accepted); ``collect_drawing_batch`` and
-  ``submit_drawing_batch`` still raise after their cleanup;
-- **``Exception`` only** is contained: ``KeyboardInterrupt`` and ``SystemExit``
-  still end the run, and the spool and retained uploads are released on the
-  way out anyway;
-- **one run-level line**, the exception's **type name only**, which says what
-  was exported and, with a cache, that a re-run does not pay for it again;
-  each page the phase never reached carries ``not read: the digest phase
-  stopped early (<Type>)``;
-- **reads in flight are kept**: nothing new is rendered or submitted, and each
-  read already running is waited for and kept.
+Stop later paid stages, name unreached pages, mark the digest stage failed and
+close the journal. Keep reads already in flight. Release uploads and render
+spools safely, retaining files a running batch still needs. KeyboardInterrupt
+and SystemExit propagate after cleanup; ordinary exceptions return a context.
 """
 from __future__ import annotations
 
@@ -82,7 +51,7 @@ class _Client(_Pipe):
     ``running``: the batch reports ``in_progress`` until it is canceled.
     ``cancel_error``: the cancel request raises (the batch keeps running).
     ``results_error``: ``results()`` raises. ``upload_status``: every upload
-    fails with that HTTP status (404 inlines the sheet, real time).
+    fails with that HTTP status, without making a real-time call.
     """
 
     def __init__(self, *, running=False, cancel_error=None, results_error=None,
@@ -647,19 +616,25 @@ def test_batch_upload_loop_failure_through_the_pipeline(tmp_path):
     _assert_closed(ctx, "FAILED")
 
 
-def test_an_inline_read_survives_a_submit_failure(tmp_path):
-    # The Files API 404s, so each sheet is digested inline (real time, paid);
-    # the loop then fails after B. A's and B's reads are kept.
+def test_upload_errors_survive_a_submit_progress_failure(tmp_path):
     paths = _three(tmp_path)
     client = _Client(upload_status=404)
-    ctx = _run(paths, client, transport="batch", progress=_raise_at("Inlined B.pdf"))
+    ctx = _run(paths, client, transport="batch", progress=_raise_at("Upload failed: B.pdf"))
 
-    assert client.digest_calls == 2
+    assert client.digest_calls == 0 and client.batch_creates == 0
     assert [s.ref.source_name for s in ctx.sheets] == ["A.pdf", "B.pdf"]
-    assert [p.display_label for p in ctx.unread_pages] == ["C.pdf (page 1/1)"]
+    assert all(not s.ok and "upload failed" in s.error for s in ctx.sheets)
+    assert [(p.display_label, p.reason) for p in ctx.unread_pages] == [
+        ("C.pdf (page 1/1)", _reason("RuntimeError")),
+    ]
     records = [r for r in ctx.run_usage.records if r.stage_family == "digest"]
-    assert [r.transport for r in records] == ["REAL_TIME", "REAL_TIME"]
-    assert ctx.errors == [_line("RuntimeError", total=3, unread=1, read=2)]
+    assert len(records) == 2
+    assert all(r.transport == "BATCH" and r.terminal_status == "FAILED"
+               and r.input_tokens == r.output_tokens == 0 and r.estimated_cost == 0
+               for r in records)
+    assert ctx.errors[0] == _line("RuntimeError", total=3, unread=1, read=0)
+    assert (_stage(ctx).status, _stage(ctx).items_in, _stage(ctx).items_out) == ("FAILED", 3, 0)
+    _assert_closed(ctx, "FAILED")
 
 
 def _submitted(paths, client, cache=None):

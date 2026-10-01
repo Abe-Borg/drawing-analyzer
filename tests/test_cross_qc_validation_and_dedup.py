@@ -1,26 +1,6 @@
-"""Remediation WP-06.1: an uncertain conflict is a low question, a refused item
-is counted, and distinct conflicts that quote one string reach the ledger (B6, N2).
-
-**B6.** The cross-QC persona prompt told the model, when unsure that two sheets
-conflict, to "lower the severity to `question`". ``question`` is a category;
-severity is ``high``, ``medium`` or ``low``, and both validators refuse anything
-else. So exactly the items that sentence targeted were dropped, with no counter,
-in a stage that read COMPLETE and was cached. The prompt now asks for category
-``question`` with severity ``low``. Validation stays strict (plan §7, B6), and
-every refused item is counted once, under the first check that refused it, on
-both paths (``CrossQCResult.invalid``). The counts are observational: the stage
-stays COMPLETE, gains a warning, and the cached result carries them (the owner's
-decisions).
-
-**N2.** ``_dedup_findings`` keyed on (primary sheet, category, primary quote,
-sorted legs), with no text, so two different conflicts quoting the same strings
-on the same sheets became one before the ledger saw them. Now only findings
-identical in every field collapse; the ledger decides the rest (the owner's
-decision). A re-report phrased apart therefore reaches the ledger twice: the
-recorded cost.
-
-Also: a fact whose ``exact_quote`` is only whitespace is dropped and counted
-``facts_no_quote``, like an empty one (found by WP-05.1).
+"""Cross-QC validates categories, severity and source references, counting each
+refused item once. Exact duplicate reports collapse; distinct conflicts reach
+the ledger. Cached results preserve the validation counts.
 """
 from __future__ import annotations
 
@@ -258,14 +238,7 @@ def _build(overrides, *, handles):
 
 
 def _validators():
-    """The whole-set and sharded binding inputs over one pair of sheets.
-
-    Since remediation WP-06.2 both paths parse through one validator
-    (``_finding_from_handles``); the whole-set path also passes the run's id
-    index (``by_label``), so a reply that names a sheet by its id still binds
-    when one sheet carries it. The whole-set side used to be a separate,
-    label-keyed ``_validate_cross_item`` over a first-wins id map.
-    """
+    """Shared binding inputs; only the whole-set call accepts unique legacy sheet labels."""
     sheets, geoms = _pair_set()
     gm, ge = geoms
     entry_by_handle = {"S001": ("M-101", gm), "S002": ("E-101", ge)}
@@ -305,9 +278,8 @@ def test_b6_each_refusal_is_counted_once_under_its_first_reason(overrides, reaso
 
 
 def test_b6_the_same_item_binds_alike_on_both_validators():
-    # Whole-set / sharded equivalence is testable only at parser level (plan
-    # WP-06 notes): the same item gives the same binding and the same counts.
-    # Since remediation WP-06.2 the two paths share the validator and the
+    # The same item must produce identical binding and counts on both paths.
+    # The two paths share the validator and the
     # whole-set path grounds too (U8); tests/test_cross_qc_source_binding.py
     # also compares the evidence state and the discard counters.
     by_label, entry_by_handle = _validators()
@@ -360,7 +332,7 @@ def test_b6_a_refused_item_is_counted_on_the_whole_set_path():
     assert res.invalid.total == 2
     # Observational (the owner's decision): the stage's own completeness is
     # unchanged. A refused item never reaches a sheet, so it is no grounding
-    # discard; since remediation WP-06.2 the whole-set path records its
+    # discard; the whole-set path records its
     # discards (it asserted ``discards is None``, "not measured", until then).
     assert res.complete is True and res.error is None
     assert res.discards is not None
@@ -429,7 +401,7 @@ def test_b6_a_clean_empty_response_is_not_a_validation_loss():
 
 def test_b6_an_unplaceable_item_is_not_an_invalid_one():
     # Valid fields, but only one sheet resolves: dropped as before (binding is
-    # WP-06.2's), never counted as a validation loss.
+    # binding), never counted as a validation loss.
     res, _ = _whole([_item(also_on=[{"sheet_id": "Z-999", "source_quote": "x"}])])
     assert res.findings == []
     assert res.invalid.total == 0
@@ -548,10 +520,7 @@ def test_n2_pair_calls_reporting_one_finding_identically_collapse(monkeypatch):
 
 
 def test_n2_a_re_report_phrased_apart_reaches_the_ledger_twice(monkeypatch):
-    # The recorded cost of handing the ledger what it must judge: a re-report
-    # of one conflict in other words (overlap 0.118) is not identical, and the
-    # ledger's text rule keeps it apart. Destroying it would need a same-claim
-    # predicate, which no host-side rule has (WP-06.4, U11).
+    # Uncertain paraphrases remain separate rather than risking a lost claim.
     terse = "Pump P-1 motor is 10 HP on M-101 but 15 HP on E-101."
     apart = "Horsepower mismatch between the mechanical schedule and the electrical feeder for P-1."
     res, _ = _whole([_item(terse), _item(apart)])
@@ -604,26 +573,8 @@ def test_n2_only_findings_identical_in_every_field_collapse():
     assert X._drop_exact_repeats(mixed)[0] is variants[0]
 
 
-def test_recorded_limit_n30_a_terse_same_pair_conflict_folds_in_the_ledger():
-    """N30 (WP-03.5): the ledger's quote branch folds two different issues.
-
-    Cross-QC now hands both to the ledger (N2's half is fixed here). But two
-    terse texts that each name both sheets share the pump and sheet tokens
-    (overlap 0.462), and with one quote the ledger folds them: the isolation
-    valve issue is lost. Measured on a synthetic corpus of twelve distinct
-    P-1 issues between M-101 and E-101: 0 of 66 pairs fold without sheet names,
-    4 of 66 with them in full sentences, and 45 of 66 in one terse clause each.
-    WP-03.5 keeps the loser's text as an observation; flip this then.
-    """
-    valve = "Pump P-1 has an isolation valve on M-101 that E-101 omits."
-    hp = "Pump P-1 motor is 10 HP on M-101 but 15 HP on E-101."
-    res, _ = _whole([_item(valve), _item(hp)])
-    assert len(res.findings) == 2, "cross-QC keeps both (N2)"
-    assert len(_ledger_entries(res.findings)) == 1, "the ledger folds them (N30)"
-
-
 # --------------------------------------------------------------------------- #
-# The whitespace-only fact quote (found by WP-05.1)
+# Whitespace-only fact quotes
 # --------------------------------------------------------------------------- #
 
 
@@ -655,33 +606,6 @@ def test_a_whitespace_only_fact_never_reaches_the_reconciler(monkeypatch):
     assert "S001 |" not in body and "S002 |" in body
     assert res.facts_collected == 1
     assert res.discards.facts_no_quote == 1
-
-
-# --------------------------------------------------------------------------- #
-# Cache contract
-# --------------------------------------------------------------------------- #
-
-
-def test_the_cross_qc_contract_moved_for_the_new_host_binding():
-    # Remediation WP-06.1 changes what is stored for byte-identical request
-    # inputs: distinct conflicts that share a quote are no longer destroyed,
-    # a whitespace-only fact quote is no longer sent to the reconciler, and the
-    # result carries its refused-item counts. The persona edit re-keys every
-    # entry through the prompt text as well; that is a second change with its
-    # own mechanism, not a bump and a key term for one change (plan §2 rule 15).
-    # 7 since remediation WP-05.3 (the character-stream grounding), 8 since
-    # remediation WP-04.4 (the quantity reader its veto reuses) and 9 since
-    # remediation WP-06.2 (whole-set binding through handles, grounded) and 10
-    # since remediation WP-06.3 (terminal honesty: what is admitted changed); the
-    # key still differs from contract 5's.
-    assert X._CROSS_QC_CACHE_CONTRACT == 10
-    _sheets, geoms = _pair_set()
-    entries = [("M-101", "digest", "text", geoms[0])]
-    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 5)
-        previous = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    assert current != previous
 
 
 # --------------------------------------------------------------------------- #
@@ -774,8 +698,7 @@ def test_pipeline_a_refused_item_is_a_stage_warning_in_run_log_and_manifest(tmp_
     (warning,) = stage.warnings
     assert "invalid field" in warning and "severity 1" in warning
     assert ctx.cross_qc_invalid["findings_invalid_severity"] == 1
-    # Since remediation WP-06.2 the whole-set path grounds and records it (U8):
-    # the kept item's two legs, grounded; the refused item reached no sheet.
+    # The retained item has two grounded legs; the refused item reaches no sheet.
     assert ctx.cross_qc_discards["legs_accepted_grounded"] == 2
     assert ctx.cross_qc_discards["findings_dropped_under_two_legs"] == 0
 

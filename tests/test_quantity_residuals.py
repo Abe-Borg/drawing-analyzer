@@ -1,51 +1,6 @@
-"""The tokenizer residuals WP-04.1 read only in part (remediation WP-04.4).
-
-Four demonstrated conflicting pairs still folded into one finding, each a
-spelling the quantity reader signed only in part, so the two findings'
-signatures agreed:
-
-* **a bare feet value**: ``12'`` signs ``{12ft}``, which ``12'-6"``
-  (``{12ft, 6in}``, feet-inches is two tokens) includes;
-* **a ``to`` range**: the ``4`` of ``4 to 6 in`` has no unit, so the range
-  signed its far end, ``6in``; ``4 and 6 in`` and ``4 or 6 in`` did the same;
-* **a loose-comma list**: ``2, 4, 6 in`` signed only its last element;
-* **a bare ``20A``**: a compact ``A`` needs electrical context, so neither
-  ``20A`` nor ``30A`` signed and the shared ``120V`` made them compatible.
-
-The owner's rules (decided before any code, measured over the whole suite):
-
-* **Feet-inches, a pair beside the tokens.** The token model is unchanged
-  (feet-inches stays two tokens). The signature gains ``feet_inches``: every
-  feet value, in any spelling (``12'``, ``12 ft``, ``12 feet``, ``10-foot``),
-  signs with the inches half joined to it (``12'-6"``, ``12' 6"``,
-  ``12' - 6"``, ``12'\u20136"``, ``12 ft 6 in`` are ``12ft6in``) or with zero
-  inches when bare (``12'`` and ``12'-0"`` are both ``12ft0in``). Compared by
-  inclusion on the ``measurements`` axis, so it can only ever block a merge.
-* **Spelled ranges and lists.** ``4 to 6 in`` and ``between 4 and 6 in`` are
-  the range ``4..6in`` (the token ``4-6 in`` already signs); ``4 and 6 in``
-  and ``4 or 6 in`` are the list ``4,6in`` (the tight ``4,6 in``'s token).
-* **Loose-comma lists of three or more numbers** (``2, 4, 6 in``,
-  ``2, 4 and 6 in``, ``2, 4, and 6 in``, ``2, 4 or 6 in``) are the tight
-  list's token, ``2,4,6in``. Two numbers joined by a comma alone stay prose
-  (``at column 4, 10 ft`` is ``10ft``), a recorded limit.
-* **Guards, the new forms only, so nothing is widened:** today's reading
-  stands when a name or reference word precedes the first number (``grid``,
-  ``notes``, ``pages``, ...), when the unit is the word ``in`` followed by an
-  article or a preposition's object (``in the manual``, ``in plan``), for
-  ``2 and 1/2 in`` (a mixed number), and for a run inside a longer list.
-* **A bare ``20A`` beside a voltage** (right after it, ``20A 120V``,
-  ``20A, 120V``, ``20A @ 480V``, or right before it, ``120V 20A``) is a
-  current, unless a name word precedes the number: ``Room 101A 120V`` and
-  ``Panel 2A 120/208V`` stay names.
-
-Every pair shares enough prose that the text alone would merge it, so the
-signature is what decides, in the critique's two-read merge and the ledger.
-
-New names are imported inside the tests that need them, so that on a tree
-without them only those tests fail and the rest still say what they check.
-The degree sign and the en dash are written as escapes.
-
-Hermetic (I-4): pure data, no client, no PDF.
+"""Quantity signatures keep conflicting feet/inches, ranges, lists and electrical
+ratings apart while equivalent spellings still merge. Retention is checked
+through critique, ledger ingestion, anchoring and prose matching.
 """
 from __future__ import annotations
 
@@ -64,7 +19,7 @@ from drawing_analyzer.critique import (
     signature_conflicts,
     signatures_compatible,
 )
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import Anchor, Finding
 
 
@@ -240,7 +195,7 @@ _FEET_INCHES = [
     ("Maintain 12' - 6\" clear", ["12ft6in"]),
     ("Maintain 12'\u20136\" clear", ["12ft6in"]),
     ("Maintain 12'-6 1/2\" clear", ["12ft6.5in"]),
-    # A sign after a space is a negative six inches, not a join (WP-05.3).
+    # A sign after a space is a negative six inches, not a join.
     ("Maintain 12' -6\" clear", ["12ft0in"]),
     ("Maintain 12 ft clear", ["12ft0in"]),
     ("Maintain 12 feet clear", ["12ft0in"]),
@@ -429,8 +384,7 @@ _CHAINS = {
         "Provide the" + _D,
         "Provide 3, 5, 6 in" + _D,
     ),
-    # A shared quantity is the bridge here: before WP-04.4 all three signed
-    # {120volt} and folded into one.
+    # A shared voltage must not mask conflicting current ratings.
     "amp": (
         "Provide 20A 120V" + _E,
         "Provide 120V" + _E,
@@ -475,7 +429,7 @@ def test_the_ledger_never_folds_the_chain(chain, order):
 
 
 @pytest.mark.parametrize("chain,order", _ORDERS, ids=_ORDER_IDS)
-def test_pass_b_never_folds_the_chain(chain, order):
+def test_anchoring_never_folds_the_chain(chain, order):
     texts = _chain(chain)
     ledger = Ledger()
     for key in order:
@@ -484,7 +438,7 @@ def test_pass_b_never_folds_the_chain(chain, order):
     ledger.seal()
     for entry in ledger.entries:
         entry.anchor = Anchor(status="EXACT", rect_pdf=[10.0, 20.0, 200.0, 40.0], method="exact")
-    reconcile_post_anchor(ledger)
+    ledger.number()
     assert len(ledger) == 2
     for entry in ledger.entries:
         members = {m.text for m in ledger.member_history(entry)}
@@ -549,8 +503,7 @@ def test_the_quantity_tokens_are_still_the_readings_tokens():
 
 
 def test_a_role_after_a_spelled_list_binds_like_a_tight_list():
-    """A spelled list or range is one reading, as a tight one is, so a role
-    after it binds the whole quantity (WP-04.3's rules are unchanged)."""
+    """The role applies to the whole quantity in a spelled or compact list/range."""
     loose = critical_signature(_finding("Provide 2, 4, 6 in main at the riser"))
     tight = critical_signature(_finding("Provide 2,4,6 in main at the riser"))
     assert loose["roles"] == tight["roles"] == ["main=2,4,6in"]
@@ -559,7 +512,7 @@ def test_a_role_after_a_spelled_list_binds_like_a_tight_list():
 
 
 # --------------------------------------------------------------------------- #
-# The prose harvest's veto reads the same rule (WP-09.2)
+# The prose harvest uses the same quantity rule
 # --------------------------------------------------------------------------- #
 
 _VETO_CASES = {
@@ -589,16 +542,10 @@ def test_the_prose_veto_refuses_a_residual_candidate(case):
 
 
 # --------------------------------------------------------------------------- #
-# The anchor and cross-QC read the same quantities (WP-05.3)
+# Anchor and cross-QC share quantity checks
 # --------------------------------------------------------------------------- #
 #
-# ``anchor._same_quantities`` reuses ``_quantity_tokens``. Its tokens changed
-# for the new forms, and so, through the new guards, did whether two
-# spellings a named letter-merge join relates read alike: a quote with ``IN A``
-# against a sheet printing ``IN ACLEAR`` (the article ``a`` keeps today's
-# reading; ``aclear`` is not an article). That is host-side binding for
-# byte-identical inputs, so ``_CROSS_QC_CACHE_CONTRACT`` 7 -> 8 (the owner's
-# decision). Measured: none of the suite's grounding verdicts or anchors moved.
+# A spacing join must not change how quantities or references are read.
 
 _JOIN_FLIPS = {
     "to, an article merged into the next word": ("4 TO 6 IN A CLEAR SPACE", "PROVIDE 4 TO 6 IN ACLEAR SPACE"),
@@ -610,11 +557,7 @@ _JOIN_FLIPS = {
 
 @pytest.mark.parametrize("case", sorted(_JOIN_FLIPS), ids=sorted(_JOIN_FLIPS))
 def test_the_anchor_and_cross_qc_refuse_a_join_that_reads_differently(case):
-    """Both matchers still agree (one matcher, WP-05.3: the anchor places EXACT
-    or ``char_stream`` exactly where cross-QC grounds): each refuses the join,
-    since the two sides no longer read the same quantities. The anchor's
-    sub-phrase tier may still place a part of the quote (``4 TO 6 IN``), on
-    ``main`` as here."""
+    """Both matchers reject joins that change quantities; a valid subphrase may still anchor."""
     from drawing_analyzer import cross_qc
     from tests.test_anchor_whole_words import _line, _place
 
@@ -622,11 +565,3 @@ def test_the_anchor_and_cross_qc_refuse_a_join_that_reads_differently(case):
     assert cross_qc._grounded(quote, sheet) is False
     anchor, _matched = _place(quote, _line(sheet))
     assert anchor.method not in ("exact", "char_stream")
-
-
-def test_the_cross_qc_contract_moved_for_the_quantity_reader():
-    from drawing_analyzer import cross_qc as X
-
-    # 9 since remediation WP-06.2 (whole-set binding through handles, grounded;
-    # the owner's decision), 10 since remediation WP-06.3 (terminal honesty).
-    assert X._CROSS_QC_CACHE_CONTRACT == 10

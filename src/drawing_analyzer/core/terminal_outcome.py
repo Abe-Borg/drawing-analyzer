@@ -52,7 +52,7 @@ reason: a transport failure (the call raised, and there is no response to
 classify), a malformed result (a finished reply whose content the stage cannot
 parse), and a valid inconclusive judgment (a finished reply that parses and
 says "cannot tell"). Those belong to each stage's own parser, applied only to a
-``FINISHED`` reply. ``DECISIONS.md`` D-1 records the whole contract.
+``FINISHED`` reply.
 """
 from __future__ import annotations
 

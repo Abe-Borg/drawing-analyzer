@@ -762,23 +762,6 @@ def test_the_raised_cap_retry_keeps_the_structured_contract(monkeypatch):
     assert retry["max_tokens"] == 128_000 and oc.status == "COMPLETE"
 
 
-class _NoUploadStub(AnthropicAPIStub):
-    def _answer(self, request, record, raw):
-        if record["path"] == "/v1/files" and record["method"] == "POST":
-            return httpx2.Response(400, json={"type": "error", "error": {
-                "type": "invalid_request_error", "message": "upload refused"}})
-        return super()._answer(request, record, raw)
-
-
-def test_the_upload_failure_fallback_gets_the_raised_cap_too(monkeypatch):
-    stub = _NoUploadStub(_script(_RT_CUT, None))
-
-    res = _first(_collect(stub, monkeypatch, n=1))
-
-    assert res.rescued and res.completed_runs == 2
-    assert [m["body"]["max_tokens"] for m in stub.messages()] == [64_000, 128_000, 64_000]
-
-
 # --------------------------------------------------------------------------- #
 # Through the pipeline: the stage, the tally, the usage record, the warm run
 # --------------------------------------------------------------------------- #

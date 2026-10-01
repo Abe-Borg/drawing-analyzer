@@ -103,7 +103,6 @@ from .help_content import (
     PROCESSING_MODE_HYBRID,
     PROCESSING_MODES,
     HelpDocument,
-    help_document,
     processing_transports,
     transport_hint,
 )
@@ -349,16 +348,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # the store when the key actually changed (and never auto-persists an
         # unchanged, env-supplied key).
         self._persisted_key = self._initial_key
-        # Open help modals ("How to use" / "How it works" / "Why trust it?" /
-        # "About", plus the standalone API-key and runtime-transparency
-        # panels), keyed by HelpDocument.key so a second click re-focuses the
-        # existing window instead of stacking a duplicate.
+        # Re-focus existing help windows instead of opening duplicates.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
-        # A help modal opened *from another help modal* (the "I'm not
-        # convinced" link) records its opener here, so closing the child hands
-        # the application-modal grab back to its parent instead of leaving the
-        # still-visible parent ungrabbed.
-        self._help_parents: dict[str, ctk.CTkToplevel] = {}
         self._help_openers: dict[str, object] = {}
         self._help_focus_targets: dict[str, list] = {}
         # Resizable pop-out editor for the per-run focus box (see
@@ -939,45 +930,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             button.configure(command=lambda d=doc, b=button: self._open_help_modal(d, opener=b))
             button.pack(side="left", padx=(6, 0))
 
-    def _open_help_modal(self, doc: HelpDocument, parent=None, opener=None) -> None:
-        """Open (or re-focus) the scrollable modal for one help document.
-
-        The content is pure data from :mod:`help_content`; this method only
-        renders it. Re-clicking a button whose window is already open lifts and
-        focuses that window rather than stacking a duplicate.
-
-        ``parent`` is the help modal this one was opened *from* (the "I'm not
-        convinced" hand-off out of "Why trust it?"). It makes the child
-        transient to the panel that spawned it and lets
-        :meth:`_close_help_modal` return the modal grab to that parent, so
-        closing the deep-dive leaves the panel behind it usable again.
-        """
+    def _open_help_modal(self, doc: HelpDocument, opener=None) -> None:
+        """Open or re-focus a screen-bounded help window."""
         existing = self._help_windows.get(doc.key)
         if existing is not None and existing.winfo_exists():
             existing.lift()
             existing.focus_force()
             return
 
-        owner = parent if (parent is not None and parent.winfo_exists()) else self
-        win = ctk.CTkToplevel(owner)
+        win = ctk.CTkToplevel(self)
         self._help_windows[doc.key] = win
         self._help_openers[doc.key] = opener or self.focus_get()
-        if owner is not self:
-            self._help_parents[doc.key] = owner
         win.title(doc.title)
         win.configure(fg_color=COLORS["bg_dark"])
-        # Bound the native dialog to the screen; dossier content reflows inside
-        # one scroll, with a contents rail only when the width can support it.
-        dossier = doc.key == "runtime_transparency"
         # CTk sizes are logical pixels; screen dimensions are physical pixels.
         # Account for automatic monitor DPI and user scaling before bounding it.
         scale = win._get_window_scaling()
-        width = min(1180 if dossier else 720, int(win.winfo_screenwidth() * .92 / scale))
-        height = min(850 if dossier else 640, int(win.winfo_screenheight() * .88 / scale))
+        width = min(720, int(win.winfo_screenwidth() * .92 / scale))
+        height = min(640, int(win.winfo_screenheight() * .88 / scale))
         win.geometry(f"{width}x{height}")
         win.minsize(min(520, width), min(360, height))
         win.maxsize(int(win.winfo_screenwidth() / scale), int(win.winfo_screenheight() * .88 / scale))
-        win.transient(owner)
+        win.transient(self)
         win.bind("<Escape>", lambda _e: self._help_escape(doc.key))
         win.bind("<Tab>", lambda e: self._help_tab(doc.key, e))
         win.bind("<Shift-Tab>", lambda e: self._help_tab(doc.key, e, backwards=True))
@@ -1023,24 +997,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         close.bind("<Return>", lambda _e: self._close_help_modal(doc.key))
         close.bind("<space>", lambda _e: self._close_help_modal(doc.key))
 
-        if dossier:
-            from .trust_ui import DossierView
-            view = DossierView(card, lambda: self._close_help_modal(doc.key))
-            win._dossier_view = view
-            self._help_focus_targets[doc.key] = [view.text, *view.buttons, *view.links, close]
-            win.after(160, view.text.focus_set)
-            return
-
         body = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_dark"], corner_radius=6)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        self._render_help_body(
-            body,
-            doc,
-            on_modal_link=lambda key: self._open_help_modal(
-                help_document(key), parent=win
-            ),
-        )
-        self._help_focus_targets[doc.key] = [*getattr(body, "_help_buttons", []), close]
+        self._render_help_body(body, doc)
+        self._help_focus_targets[doc.key] = [*body._help_links, close]
         # Labels reflow with the viewport, including a narrow screen.
         last_width = None
         def reflow(event):
@@ -1057,12 +1017,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 wraplength = max(40, width - 48)
                 if label.cget("wraplength") != wraplength:
                     label.configure(wraplength=wraplength)
-            for button in getattr(body, "_help_buttons", []):
-                label = getattr(button, "_text_label", None)
-                if label is not None:
-                    wraplength = max(40, width - 56)
-                    if int(label.cget("wraplength")) != int(wraplength):
-                        label.configure(wraplength=wraplength)
         # Reflow after the canvas finishes allocating its viewport. Running
         # inside a frame-height change can recursively redraw its scrollbar.
         body._parent_canvas.bind("<Configure>", lambda event: body.after(0, lambda: reflow(event)), add="+")
@@ -1100,16 +1054,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             ancestor = getattr(ancestor, "master", None)
 
     @staticmethod
-    def _render_help_body(body, doc: HelpDocument, on_modal_link=None) -> None:
-        """Render each section's heading, paragraphs, and bullets into ``body``.
-
-        ``on_modal_link`` receives the ``doc_key`` of a ``modal`` block when
-        the reader clicks it; when it is ``None`` (the content-only test path)
-        such a block still renders, just as inert text.
-        """
+    def _render_help_body(body, doc: HelpDocument) -> None:
+        """Render shared help text and external links."""
         wrap = 610
-        body._help_buttons = []
         body._help_labels = []
+        body._help_links = []
         for section in doc.sections:
             heading = ctk.CTkLabel(
                 body, text=section.heading,
@@ -1144,43 +1093,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     )
                     link.pack(anchor="w", padx=10, pady=(2, 2))
                     body._help_labels.append(link)
-                    link.bind(
-                        "<Button-1>",
-                        lambda _e, url=block.href: webbrowser.open(url),
+                    link._label.configure(
+                        takefocus=True, highlightthickness=1,
+                        highlightbackground=COLORS["bg_dark"],
+                        highlightcolor=COLORS["accent_glow"],
                     )
-                elif block.kind == "pre":
-                    # Verbatim monospace: NO wraplength, so the ASCII diagrams
-                    # and tables keep their alignment. help_content bounds the
-                    # line length (PRE_MAX_WIDTH) and the modal opens wider
-                    # when a doc contains one of these. Breathing room comes
-                    # from pack's ipadx/ipady — CTkLabel forwards a constructor
-                    # `padx`/`pady` straight into its internal tkinter.Label,
-                    # which already sets both, and the duplicate raises.
-                    ctk.CTkLabel(
-                        body, text=block.text,
-                        font=ctk.CTkFont(family="Consolas", size=11),
-                        text_color=COLORS["text_secondary"],
-                        fg_color=COLORS["bg_card"], corner_radius=6,
-                        justify="left", anchor="w",
-                    ).pack(anchor="w", padx=10, pady=(6, 6), ipadx=12, ipady=8)
-                elif block.kind == "modal" and block.doc_key:
-                    # A real button with keyboard activation. Focus it before
-                    # opening the child so close can restore this exact opener.
-                    jump = ctk.CTkButton(
-                        body, text=block.text,
-                        font=ctk.CTkFont(family="Segoe UI", size=12),
-                        text_color=COLORS["text_primary"], fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"], height=64,
-                    )
-                    jump.pack(fill="x", padx=10, pady=(8, 8))
-                    body._help_buttons.append(jump)
-                    if on_modal_link is not None:
-                        def activate(key=block.doc_key, button=jump):
-                            button.focus_set()
-                            on_modal_link(key)
-                        jump.configure(command=activate)
-                        jump.bind("<Return>", lambda _e, f=activate: f())
-                        jump.bind("<space>", lambda _e, f=activate: f())
+                    body._help_links.append(link._label)
+                    def open_link(_event, url=block.href):
+                        webbrowser.open(url)
+                        return "break"
+                    for sequence in ("<Button-1>", "<Return>", "<space>"):
+                        link.bind(sequence, open_link)
                 else:
                     label = ctk.CTkLabel(
                         body, text=block.text,
@@ -1195,24 +1118,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         """Make a help modal application-modal once it is viewable (best-effort)."""
         try:
             if win.winfo_exists():
-                # A delayed parent's grab must not steal input from its child.
-                if any(parent is win and self._help_windows.get(key) is not None
-                       for key, parent in self._help_parents.items()):
-                    return
                 win.grab_set()
                 win.focus_force()
         except Exception:  # pragma: no cover - platform dependent
             pass
 
     def _close_help_modal(self, key: str) -> None:
-        """Release the grab and destroy a help modal, forgetting its handle.
-
-        When the modal was opened from another one, the grab is handed back to
-        that parent — otherwise closing the child would leave the still-open
-        panel behind it visible but not accepting input.
-        """
+        """Close help and restore focus to its opener."""
         win = self._help_windows.pop(key, None)
-        parent = self._help_parents.pop(key, None)
         opener = self._help_openers.pop(key, None)
         self._help_focus_targets.pop(key, None)
         if win is None:
@@ -1225,12 +1138,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             win.destroy()
         except Exception:  # pragma: no cover - platform dependent
             pass
-        if parent is not None:
-            try:
-                if parent.winfo_exists():
-                    self._grab_help_modal(parent)
-            except Exception:  # pragma: no cover - platform dependent
-                pass
         if opener is not None:
             try:
                 if opener.winfo_exists():

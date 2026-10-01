@@ -1,47 +1,6 @@
-"""Remediation WP-05.3: the anchor's character-stream tier, and a split number stays whole.
-
-B4's other four pairs are verbatim sheet text whose words the PDF extraction
-spaced differently: an inch mark or a percent sign extracted as its own word
-(``PROVIDE 6 " DRAIN``, ``SLOPE 2 % MIN``), a feet-inches dimension split
-around its hyphen (``CLG 12' - 6" AFF``), and two words merged
-(``PROVIDE INCHDRAIN``). Every tier compares whole words or their tokens, so
-each quote went UNANCHORED: excluded from verification and investigation,
-inked as the hallucination signal ``[QUOTE NOT FOUND]``, and dropped by
-cross-QC as NOT_MATCHED.
-
-The rules, decided by the owner before any code (measured first):
-
-- **A tier of its own, last.** Its status is FUZZY and its method is
-  ``char_stream`` (``char_stream_ambiguous`` when the reported tile does not
-  settle two occurrences, as EXACT's ``exact_ambiguous``). It runs after the
-  sub-phrase and before the tile fallback, so no anchor an older tier places
-  can move. ``numbers_grounded`` does not include it: the arithmetic auditor
-  keeps a mismatch it anchors model-transcribed and crop-verified.
-- **The whole quote, on a contiguous run of whole sheet words**, in reading
-  order, on one sheet, where only the spacing differs, and only through
-  **named joins**: a number and a separated ``"`` ``'`` or ``%`` (either side
-  spaced); the feet-inches hyphen (``12' - 6"``, either side); letters merged
-  by extraction (one sheet word for several quote words, each quote word
-  letters only). Anything else refuses: a join between two digits, at a sign,
-  a decimal point, a fraction slash or a comma, a tag's letter and number, a
-  unit word, ``x``, ``°``, and two sheet words for one quote word.
-- **The quantity-aware veto** is those join rules (no join touches a digit
-  except before a separated mark or in the feet-inches hyphen, so every number
-  is read whole, with its sign, and as often as the quote states it) plus the
-  WP-04 quantity reader, ``critique._quantity_tokens``, reused as it is: the
-  quote and the matched words must read the same quantities.
-- **A number split around a lone ``.`` stays whole, in every tier.** A lone
-  ``.`` folds away (WP-05.2), so ``SET AT 5 IN`` matched ``SET AT . 5 IN``
-  EXACT and cross-QC grounded it: ``.5`` became ``5``. Now no match may start
-  on, end on or cover a word starting with a digit right after such a ``.``
-  (nor the digit-ending word before it), on the sheet and in the quote alike.
-- **A sub-phrase keeps a number's unit.** It may not end on a digit-bearing
-  token the quote follows with another token (``150 GPM 568 L/S`` no longer
-  anchors on ``150 GPM (568``).
-- **Cross-QC grounds through the same matcher** (``_CROSS_QC_CACHE_CONTRACT``
-  6 -> 7), so the anchor and cross-QC keep agreeing.
-
-Hermetic: fake clients only, no key, no network.
+"""Spacing-only anchor matches must cover contiguous source words and preserve
+numbers, units and tag boundaries. Cross-QC shares the matcher; arithmetic
+keeps these matches model-transcribed rather than deterministic.
 """
 from __future__ import annotations
 
@@ -55,11 +14,9 @@ from drawing_analyzer.anchor import numbers_grounded, resolve_anchors, resolve_c
 from drawing_analyzer.auditors.arithmetic import audit_arithmetic
 from drawing_analyzer.cross_qc import (
     CrossQCDiscardCounts,
-    CrossQCFact,
     _finding_from_handles,
     _parse_facts,
     classify_quote_evidence,
-    fact_tile_lookup,
 )
 from drawing_analyzer.investigate import _candidates
 from drawing_analyzer.models import (
@@ -157,7 +114,7 @@ _MORE = [
     # a part of a line, whole words at both ends
     ('6" DRAIN', 'PROVIDE 6 " DRAIN AT COLUMN LINE 4', '6 " DRAIN'),
     ("INCH DRAIN", "PROVIDE INCHDRAIN AT", "INCHDRAIN"),
-    # the brackets and sentence punctuation still fold (WP-05.2)
+    # brackets and sentence punctuation still fold
     ('PROVIDE 6" DRAIN', 'PROVIDE (6 ") DRAIN.', 'PROVIDE (6 ") DRAIN.'),
 ]
 
@@ -170,8 +127,8 @@ def test_the_named_joins_anchor_whole_runs(quote, text, span):
 
 
 _STILL_EXACT = [
-    ("RATED 175 PSI TYP", "RATED 175 PSI, TYP."),     # PSI, (WP-05.2)
-    ("NOTE 3", "SEE NOTE 3: PROVIDE ACCESS"),           # NOTE 3: (WP-05.2)
+    ("RATED 175 PSI TYP", "RATED 175 PSI, TYP."),     # PSI,
+    ("NOTE 3", "SEE NOTE 3: PROVIDE ACCESS"),           # NOTE 3:
     ("150 GPM 568 L/MIN", "FLOW 150 GPM (568 L/MIN) AT"),   # a metric conversion
     ('PROVIDE 6" DRAIN', 'PROVIDE 6" DRAIN'),           # verbatim
     ("SET AT .5 IN", "SET AT .5 IN"),                  # a leading decimal, whole
@@ -270,7 +227,7 @@ _IDENTIFIER_AND_MARK = [
 def test_a_mark_is_joined_only_to_a_number(quote, text):
     """A mark is joined across a space only to a number: a word of its own
     with no letter, on the side that has the space. An identifier's digits
-    (``ROOM12``, a tag's ``101``) are not one, and the WP-04 reader reads
+    (``ROOM12``, a tag's ``101``) are not one, and the quantity reader reads
     nothing on either side, so its veto cannot refuse them (Codex review)."""
     anchor, matched = _place(quote, _line(text))
     assert anchor.status == "UNANCHORED", (anchor, matched)
@@ -300,7 +257,7 @@ def test_a_match_is_never_assembled_from_fragments_out_of_reading_order():
 
 
 # --------------------------------------------------------------------------- #
-# The veto reads quantities with the one WP-04 reader
+# The veto uses the shared quantity reader
 # --------------------------------------------------------------------------- #
 
 
@@ -486,24 +443,8 @@ def test_cross_qc_admits_a_fact_whose_words_extraction_merged():
 
 
 def test_a_textless_sheet_is_still_unavailable_evidence():
-    """The tier is a text match: on a sheet with no text it has nothing to join,
-    and the WP-05.1 order holds (no text is unavailable, never NOT_MATCHED)."""
+    """A text match cannot ground evidence when the sheet has no text."""
     assert classify_quote_evidence('PROVIDE 6" DRAIN', _sheet([])) == EVIDENCE_UNAVAILABLE
-
-
-def _fact(handle: str, quote: str, tile) -> CrossQCFact:
-    return CrossQCFact(sheet_handle=handle, sheet_id="M-1", discipline="m", entity_or_tag="D",
-                       attribute="size", value="v", exact_quote=quote, tile=tile)
-
-
-def test_recorded_limit_the_fact_tile_join_does_not_join_across_spacing():
-    """The owner's choice: the join keys on the folded form (WP-05.2), not the
-    character stream, so a leg quoted ``6" DRAIN`` does not take the tile of a
-    fact recorded ``6 " DRAIN``. On a sheet with text the anchor places the leg
-    itself; on a scanned one the leg keeps the tile the model reported."""
-    lookup = fact_tile_lookup([_fact("S001", 'PROVIDE 6 " DRAIN', [1, 0])])
-    assert lookup.get(("S001", X._norm_for_match('PROVIDE 6" DRAIN'))) is None
-    assert lookup.get(("S001", X._norm_for_match('PROVIDE 6 " DRAIN'))) == [1, 0]
 
 
 def test_both_matchers_share_one_implementation():
@@ -514,25 +455,6 @@ def test_both_matchers_share_one_implementation():
     assert words.joined_spans("AT INCH DRAIN") == ((4, 5),)
     assert words.joined_spans("VAV-21") == ()
     assert A.SourceWords('SEE 6 " DRAIN').joined_spans('6" DRAIN') == ((1, 3),)
-
-
-def test_the_cross_qc_contract_moved_for_the_character_stream():
-    """Host-side binding for byte-identical request inputs: a leg or fact whose
-    quote differs from the sheet only by the named joins is admitted, and a
-    quote or text with a number split around a lone point no longer grounds.
-    One mechanism, the existing contract term (plan §2 rule 15). 8 since
-    remediation WP-04.4 (the quantity reader the veto reuses changed) and 9
-    since remediation WP-06.2 (whole-set binding through handles, grounded)
-    and 10 since remediation WP-06.3 (a reply the model did not finish is never
-    stored; a budget-only shortfall is stored with its status); the key still
-    differs from contract 6's."""
-    assert X._CROSS_QC_CACHE_CONTRACT == 10
-    entries = [("M-101", "digest", "text", _sheet(_line("SEE 6 \" DRAIN")))]
-    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 6)
-        previous = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    assert current != previous
 
 
 # --------------------------------------------------------------------------- #

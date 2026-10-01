@@ -389,15 +389,8 @@ the machine-read mirror of those sections. Emit at most 40 findings, most \
 important first; emit {"findings": []} if there are none. Put nothing but the \
 JSON object inside the block, and write no prose after it."""
 
-# The user-turn framing the model actually reads, as templates rather than
-# inline f-strings, so they can be hashed into the prompt versions below.
-#
-# These are model-visible strings that sat OUTSIDE both prompt hashes: editing
-# how a sheet is introduced, how an omitted tile is disclosed, or how a tile is
-# labelled changed what was sent while every cache key stayed byte-identical, so
-# warm runs kept replaying digests taken under the old wording. The per-sheet
-# values interpolated in (label, grid size, tile position) are already covered —
-# the images and text layer ride the key directly.
+# Prompt versions cover static user-turn framing. Cache keys also cover the
+# interpolated sheet, grid, tile and omission labels, independently of images.
 _USER_FRAMING_TEMPLATE = (
     "You are given ONE construction drawing sheet "
     "({label}), rendered as a low-resolution overview "

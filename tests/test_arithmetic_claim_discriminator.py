@@ -17,7 +17,7 @@ hashes sheet, category and quote). Two things then destroyed the second one:
 The fix: the coordinator's id dedup is gone; every arithmetic finding carries a
 claim discriminator (the host operation, the Decimal-canonical terms as a
 multiset, the Decimal-canonical expected value), which blocks the merge in
-Pass A and Pass B and is folded into the finding's id. Findings that carry no
+ingestion and is folded into the finding's id. Findings that carry no
 discriminator (every model finding) are unaffected. The claim dedups key on
 parsed Decimals.
 
@@ -34,7 +34,7 @@ import pytest
 from drawing_analyzer.auditors import run_auditors
 from drawing_analyzer.auditors.arithmetic import audit_arithmetic
 from drawing_analyzer.critique import _is_duplicate, _token_overlap
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import (
     Anchor,
     Finding,
@@ -214,17 +214,16 @@ def test_titleblock_dedups_on_sheet_and_quote_not_on_the_id(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# The ledger: Pass A, Pass B, numbering
+# The ledger: ingestion and numbering
 # --------------------------------------------------------------------------- #
 
 
 def _lifecycle(claims, sheets):
-    """``run_auditors`` → ``Ledger.add`` → seal → Pass B → ``number()``."""
+    """``run_auditors`` → ``Ledger.add`` → seal → ``number()``."""
     res = run_auditors(sheets, claims=claims)
     led = Ledger()
     led.add(res.findings)
     led.seal()
-    reconcile_post_anchor(led)
     led.number()
     return res, _arith(led.entries)
 
@@ -329,7 +328,6 @@ def test_the_discriminator_holds_against_every_accepting_branch(branch, a_claim,
         led.add([_copy(second)])
         assert len(led) == 2                       # Pass A
         led.seal()
-        assert reconcile_post_anchor(led) == 0     # Pass B
         assert len(led) == 2
 
 
@@ -347,11 +345,8 @@ def _copy(f: Finding) -> Finding:
     return copy.deepcopy(f)
 
 
-def test_pass_b_does_not_fold_two_mismatches_anchored_after_ingest():
-    """Two mismatches on one row, too different in text for either text
-    branch, arrive unanchored and then anchor to the row. Before remediation
-    WP-03.7 (N28) Pass B's geometry branch accepted them and only their claim
-    discriminators kept them apart; no branch reads a rectangle now."""
+def test_two_mismatches_remain_distinct_after_anchoring():
+    """Two distinct arithmetic claims at one row keep separate IDs and QC numbers."""
     a, b = _pair(
         _claim("sum", [20, 20, 20], 540,
                note="north zone riser flow test column per hydraulic calculation sheet"),
@@ -367,7 +362,6 @@ def test_pass_b_does_not_fold_two_mismatches_anchored_after_ingest():
         led.seal()
         for e in led.entries:                      # as resolve_anchors would
             e.anchor = Anchor(status="EXACT", rect_pdf=[100, 300, 444, 314], method="t")
-        assert reconcile_post_anchor(led) == 0
         led.number()
         assert len(led) == 2
         assert len({e.id for e in led.entries}) == 2
@@ -441,7 +435,6 @@ def test_a_model_twin_joins_its_own_mismatch_and_the_other_survives():
         for finding, tag in order:
             led.add([_copy(finding)], tag)
         led.seal()
-        reconcile_post_anchor(led)
         led.number()
         assert len(led) == 2
         by_id = {e.id: e for e in led.entries}

@@ -8,16 +8,8 @@ in the hermetic suite even on machines without ``tkinter`` / ``customtkinter``
 installed. ``gui.py`` owns only the thin CustomTkinter rendering (see
 ``_open_help_modal``).
 
-Two documents are *standalone* — reachable from inside the app but not from a
-header button: :data:`GET_API_KEY` (from the key field) and
-:data:`RUNTIME_TRANSPARENCY` (from the "I'm not convinced" link at the foot of
-**Why trust it?**). Both render through the same machinery and are resolvable
-via :func:`help_document`.
-
-Keep the prose faithful to the implementation; reconcile README and ``CLAUDE.md``: these panels are the
-in-app version of that documentation, so a claim here (verification, gating,
-artifact-backed coverage, host arithmetic, the licensing story)
-must match what the pipeline actually does and what LICENSE actually says.
+The API-key guide is reached from the key field. Keep help faithful to current
+behavior; explain privacy and limits without maintaining a second code inventory.
 """
 from __future__ import annotations
 
@@ -28,35 +20,11 @@ from . import __version__
 
 @dataclass(frozen=True)
 class HelpBlock:
-    """One rendered block within a section.
+    """A paragraph, bullet, or HTTPS link in the shared help renderer."""
 
-    ``kind`` selects the renderer in ``gui.DrawingAnalyzerApp._render_help_body``:
-
-    ``para``    a wrapped paragraph.
-    ``bullet``  a wrapped paragraph carrying a bullet mark.
-    ``link``    a clickable label that opens ``href`` in the default browser.
-                Only this kind sets ``href``, and it must be ``https``.
-    ``pre``     a pre-formatted monospace block (the ASCII diagrams and tables
-                in the runtime-transparency briefing). It is rendered
-                **verbatim and never re-wrapped**, so every line has to stay
-                inside :data:`PRE_MAX_WIDTH` or it will run off the panel at
-                the modal's minimum width.
-    ``modal``   a keyboard-accessible button that opens *another* help document, named by
-                ``doc_key``. This is what lets one panel hand off to a deeper
-                one without ``gui.py`` hard-coding the relationship.
-    """
-
-    kind: str  # "para" | "bullet" | "link" | "pre" | "modal"
+    kind: str  # "para" | "bullet" | "link"
     text: str
     href: str | None = None
-    doc_key: str | None = None
-
-
-#: Hard ceiling on a ``pre`` block's line length. The help modal is scrollable
-#: vertically but not horizontally, and its minimum width is 520 px, so a
-#: monospace line much longer than this is clipped rather than wrapped. Guarded
-#: by ``tests/test_help_content.py``.
-PRE_MAX_WIDTH = 64
 
 
 @dataclass(frozen=True)
@@ -170,14 +138,8 @@ def _link(text: str, href: str) -> HelpBlock:
     return HelpBlock(kind="link", text=text, href=href)
 
 
-def _pre(text: str) -> HelpBlock:
-    """A verbatim monospace block (diagram / table). See :data:`PRE_MAX_WIDTH`."""
-    return HelpBlock(kind="pre", text=text.strip("\n"))
 
 
-def _modal(text: str, doc_key: str) -> HelpBlock:
-    """A button that opens another :class:`HelpDocument` by key."""
-    return HelpBlock(kind="modal", text=text, doc_key=doc_key)
 
 
 def _section(heading: str, *blocks: HelpBlock) -> HelpSection:
@@ -538,9 +500,10 @@ _HOW_IT_WORKS = HelpDocument(
                 "second writes the review checklist a specialist for THIS set would apply."
             ),
             _bullet(
-                "Codes from any system are recognized — NFPA, IBC, Eurocode/EN, BS, DIN, "
-                "AS/NZS, GB. A plain text search for edition statements is always merged "
-                "in as a backstop, so a stated edition can never be argued away."
+                "The model proposes adopted codes and editions; local matching also "
+                "checks supported edition statements. Check both against the actual "
+                "project jurisdiction and adopted editions. Neither guarantees that "
+                "every code or edition statement was recognized."
             ),
             _bullet(
                 "The identity is advisory only. It steers the review but never gates or "
@@ -585,7 +548,7 @@ _HOW_IT_WORKS = HelpDocument(
             ),
             _para(
                 "Every channel feeds one per-run findings ledger; de-duplication is "
-                "conservative and lossless (a tile overlap is never enough on its own)."
+                "conservative (a tile overlap is never enough on its own)."
             ),
         ),
         _section(
@@ -626,16 +589,6 @@ _HOW_IT_WORKS = HelpDocument(
 # Why trust it?
 # --------------------------------------------------------------------------
 
-# Ledger sources for each short claim; titles and paragraphs are a contract.
-TRUST_SHORT_SOURCES = {
-    "S01": ("A06", "A11", "A12"), "S02": ("A10", "A11"),
-    "S03": ("A13", "A16"), "S04": ("A16",),
-    "S05": ("A01", "A02", "A05", "A07", "A17", "A18"),
-    "S06": ("U02", "U14", "U32", "U33"),
-    "S07": ("N01", "N02", "N03", "N04", "N05", "N06"),
-    "S08": ("U19", "U20", "A11", "A13", "A18"),
-}
-
 _WHY_TRUST_IT = HelpDocument(
     key="why_trust_it", button_label="Why trust it?",
     title="Why trust it?",
@@ -644,51 +597,22 @@ _WHY_TRUST_IT = HelpDocument(
         _section("You can separate findings from their origins", _para(
             "Prose is model-authored. Findings keep origin tags, quotes, locations and check results in the ledger — the exported list you can inspect. An origin tag is not proof.")),
         _section("Local checks support specific claims with evidence", _para(
-            "Text checks and quote matching run locally. Decimal (base-ten) arithmetic checks transcribed equations; DETERMINISTIC status requires matching the numbers and relationship to the drawing. Models can still misread or miss content.")),
+            "The first vision pass uses an overview and tiles for each readable sheet; failed reads remain incomplete. Text checks and quote matching run locally. Decimal (base-ten) arithmetic checks transcribed equations; DETERMINISTIC status requires matching the numbers and relationship to the drawing. Whole-sheet coverage does not guarantee every issue is found: models can misread or miss content.")),
         _section("Uncertainty and rejected findings have separate labels", _para(
             "Model crop checks label findings VERIFIED, REJECTED or UNCERTAIN; missing locations are UNANCHORED. An inconclusive check does not prove a finding false. Rejected findings remain in the ledger/index.")),
         _section("Saved annotations are checked against the plan", _para(
             "The writer stamps required marks, reopens the PDFs and compares receipts with the plan. Missing required marks make coverage INCOMPLETE; this checks saved marks, not whether every defect was found.")),
         _section("Approved work can continue without another click", _para(
-            "Launch loads keys/profiles/logs and may check GitHub for updates; that check can be disabled. Selection helpers and chat autosave also run automatically. Approved reviews and sent questions start automatic calls, retries, tools and cleanup; analysis has no Stop button.")),
+            "Launch may check GitHub for updates; that check can be disabled. Analyze and report Send start paid calls, retries, tools and cleanup automatically. Analysis has no Stop button or hard spending cap. Closing a window or clearing local results does not refund calls already made or cancel a submitted batch.")),
         _section("You control the key and export choices", _para(
-            "Keys prefer your operating system's tested credential store; a readable-file fallback needs consent. HTML omits the key by default; embedding puts it in the file. Browser storage and private project files need your care.")),
+            "Desktop keys prefer your operating system's tested credential store; a readable-file fallback needs consent. HTML omits the key by default; embedding puts it in the file. Report chat keeps entered keys in browser session storage and saved conversations in local storage when available. Protect exported reports, evidence, caches and browser data as private project files.")),
         _section("Project data and automatic connections are described", _para(
-            "Approved review and sent chat context go to Anthropic by default; web tools may research project-derived claims. The dossier names endpoint/proxy overrides, update redirects, installer URLs and clicked links.")),
+            "Reviews send page images, source/spec text and project metadata to Anthropic by default; report Send sends report context and chat history. Configured desktop endpoints or proxies can change that route. Provider web tools may research project-derived claims. Update checks reach GitHub and redirects; optional installers and clicked links can reach other hosts. Local reference checks add no API calls, but Analyze still runs a paid digest.")),
         _section("You can inspect evidence and estimated spending", _para(
-            "Export All writes findings, source text, evidence, receipts and file fingerprints. Costs are estimates: interrupted usage, fallback pricing and chat search charges can be missing. Check claims against drawings and spending against your provider.")),
-        _section("Not convinced?", _para(
-            "Fair. The points above are claims — here is the mechanism behind each one, action by action, plus how to audit any of it yourself."),
-            _modal("I'm not convinced — show me exactly what runs →", "runtime_transparency")),
+            "Export All writes findings, source text, evidence, receipts and file fingerprints. Costs are estimates: interrupted usage, fallback pricing and chat search charges can be missing. Check findings and missed known issues against the drawings, and spending against your provider."),
+            _link("Privacy and security details", f"{REPO_URL}/blob/main/SECURITY.md")),
     ),
 )
-
-
-# --------------------------------------------------------------------------
-# Runtime dossier: the native view and this compatibility data share one source.
-# --------------------------------------------------------------------------
-
-def _runtime_document() -> HelpDocument:
-    from .trust_dossier import Links, plain_blocks, sections
-
-    result = []
-    for section in sections():
-        blocks = []
-        for block in section.blocks:
-            if isinstance(block, Links):
-                blocks.extend(_link(label, url) for label, url in block.items)
-            else:
-                blocks.extend(_para(text) for text in plain_blocks(block))
-        result.append(HelpSection(section.title, tuple(blocks)))
-    return HelpDocument(
-        key="runtime_transparency", button_label="I'm not convinced",
-        title="I'm not convinced — exactly what runs",
-        intro="For the professional responsible for checking and signing the review: mechanisms, limits, automatic work and ways to audit it.",
-        sections=tuple(result),
-    )
-
-
-RUNTIME_TRANSPARENCY = _runtime_document()
 
 
 # --------------------------------------------------------------------------
@@ -778,12 +702,9 @@ HELP_DOCUMENTS: tuple[HelpDocument, ...] = (
 )
 
 
-# Reachable from inside the app, but not from a header button. Every ``modal``
-# block's ``doc_key`` must resolve through :func:`help_document`, so anything
-# linked from a panel has to be registered here (or in HELP_DOCUMENTS).
+# Reached from the key field rather than a header button.
 STANDALONE_DOCUMENTS: tuple[HelpDocument, ...] = (
     GET_API_KEY,
-    RUNTIME_TRANSPARENCY,
 )
 
 
@@ -791,9 +712,7 @@ def help_document(key: str) -> HelpDocument:
     """Return the :class:`HelpDocument` with ``key`` (raises ``KeyError`` if absent).
 
     Covers the four header modals (:data:`HELP_DOCUMENTS`) and the standalone
-    panels (:data:`STANDALONE_DOCUMENTS`) — the API-key guide reached from the
-    key field, and the runtime-transparency briefing reached from the "I'm not
-    convinced" link at the foot of "Why trust it?".
+    API-key guide (:data:`STANDALONE_DOCUMENTS`).
     """
     for doc in (*HELP_DOCUMENTS, *STANDALONE_DOCUMENTS):
         if doc.key == key:

@@ -32,8 +32,8 @@ class SheetRef:
     The pages a run owes are the inventory's (remediation WP-11.1; D-8):
     :func:`render.inventory_sheet_refs` builds one ref per page of every
     accepted document without reopening a file, and ``page_count`` is the
-    inventory's count, so ``display_label`` (model-visible, in no cache key)
-    reads ``page k/N`` against the revision the run set out to read.
+    inventory's count. The model-visible ``display_label`` reads ``page k/N``
+    against that revision and participates in request cache identity.
     """
 
     pdf_path: Path
@@ -2469,7 +2469,7 @@ def roll_up_qc_status(
 
 
 def item_coverage_status(eligible: int, judged: int) -> str:
-    """A stage's status from its required-item coverage (``_plans/DECISIONS.md`` D-2).
+    """A stage's status from its required-item coverage.
 
     ``eligible`` is what the stage was required to judge, fixed by its
     eligibility rule before any call is made; ``judged`` is how many of those

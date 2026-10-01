@@ -55,7 +55,7 @@ from drawing_analyzer.critique import (
     merge_self_consistency,
     signatures_compatible,
 )
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import Anchor, Finding
 
 
@@ -356,10 +356,8 @@ def test_the_rule_blocks_every_pair_the_flat_rule_blocked():
 #
 # A survivor's signature includes its supporting quotes (``critique._sig_text``),
 # so its sets grow as it absorbs members. The complete-link checks compare
-# members as they arrived instead of a grown signature: the critique's
-# ``_cluster``, the ledger's ``Ledger.add`` (member snapshots) and Pass B
-# (``Ledger.member_history`` on both sides since WP-03.1; its incoming side is
-# tested in ``tests/test_pass_b_complete_link.py``).
+# members as they arrived instead of a grown signature, both in critique
+# clustering and ledger ingestion.
 
 _P1 = "Pump P-1 suction valve conflicts with the strainer at the base of the riser"
 _P1_V3 = "Pump P-1 suction valve V-3 conflicts with the strainer at the base of the riser"
@@ -410,46 +408,6 @@ def test_a_critique_representative_brings_its_members_quotes_into_the_ledger():
     ledger.add(merged, source="critique_1")
     ledger.add([_finding(_P1_V4)], source="digest")
     assert len(ledger) == 2
-
-
-def _pass_b(text_a: str, text_b: str, quote: str) -> tuple[int, int]:
-    """Entries after ingest (Pass A) and after Pass B, in the pipeline's order:
-    ingest, seal, anchor, reconcile. Both findings anchor to one rectangle."""
-    assert _token_overlap(text_a, text_b) < 0.4  # too little prose for Pass A
-    ledger = Ledger()
-    ledger.add([_finding(text_a, quote=quote)], source="digest")
-    ledger.add([_finding(text_b, quote=quote)], source="critique_1")
-    after_ingest = len(ledger)
-    ledger.seal()
-    for entry in ledger.entries:
-        entry.anchor = Anchor(status="EXACT", rect_pdf=[10.0, 20.0, 200.0, 40.0],
-                              method="exact")
-    reconcile_post_anchor(ledger)
-    return after_ingest, len(ledger)
-
-
-def test_pass_b_refuses_a_conflicting_tag_behind_one_shared_tag():
-    # Same quote, same rectangle: until remediation WP-03.7 Pass B folded such a
-    # pair on geometry. The second valve differs, so it must not either way.
-    assert _pass_b(
-        "Pump P-1 suction valve V-3 conflicts with the strainer",
-        "Relocate V-4 at the P-1 inlet",
-        "PUMP P-1 SUCTION",
-    ) == (2, 2)
-
-
-def test_pass_b_does_not_fold_a_compatible_pair_on_position_alone():
-    # Re-baselined by remediation WP-03.7 (N28). This pair used to fold in
-    # Pass B on geometry (2, 1): one side omits the valve, which the tag rule
-    # allows, and both anchor to one rectangle. A rectangle is resolved from the
-    # quote, so that fold was the quote alone, and the pair shares too little
-    # text to be the same issue by any other branch. It now stays two. That a
-    # reference one side omits does not block a merge is pinned where a merge
-    # is still decided on text: test_a_reference_one_side_omits_still_merges.
-    a = "Pump P-1 suction valve V-3 conflicts with the strainer"
-    b = "Relocate the P-1 inlet strainer"
-    assert signatures_compatible(critical_signature(_finding(a)), critical_signature(_finding(b)))
-    assert _pass_b(a, b, "PUMP P-1 SUCTION") == (2, 2)
 
 
 # --------------------------------------------------------------------------- #

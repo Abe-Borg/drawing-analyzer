@@ -1,145 +1,22 @@
-"""Self-contained, navigable HTML report for a drawing digest.
+"""Self-contained HTML report with searchable sheet digests and findings.
 
-The raw output of a run is a wall of Markdown — one digest per sheet plus a
-cross-sheet synthesis, concatenated. That is *complete* but hard to navigate: an
-operator who only wants the coordination items, or the conflicts the model
-flagged across the set, has to scroll a massive file. This module renders the
-same :class:`~drawing_analyzer.pipeline.DrawingContext` into a single, dependency-free
-HTML file that keeps **every** word the model produced while making it
-explorable — a sidebar table of contents, a live text search, and category
-filters (Coordination, Conflicts, Equipment & Schedules, …) so the operator can
-isolate exactly the sections they care about.
+Rendering retains the context's sheet prose and exact ``combined_text``. This
+module reads context attributes without importing the pipeline or PDF engines,
+and performs no Python network I/O. Run-derived text is untrusted: escape it
+into content, build browser DOM safely, restrict links to HTTPS, and keep the
+config island inert under the report's hash-based Content-Security-Policy.
+Host diagnostics pass through ``redact_for_display``; drawing prose does not.
 
-Design constraints, mirroring :mod:`drawing_analyzer.export`:
+The optional Ask AI widget sends report text and conversation history directly
+from the reader's browser to Anthropic, with server-side search/fetch tools.
+It uses the reader's key, held in memory and sessionStorage by default. Browsers
+control storage persistence; this is not a guarantee that a key never reaches
+disk. Explicit ``embed_api_key=True`` writes the key into the HTML and displays
+a sharing warning. Forgetting a key cannot erase one embedded in the file.
 
-- **Pure & duck-typed.** Reads only the documented attributes off the context
-  (``sheets`` / ``synthesis_text`` / ``focus`` / ``focus_report_text`` /
-  ``combined_text`` / the run-summary counts / ``errors``); it never imports the
-  engine, tkinter, PyMuPDF, or the network, so it unit-tests in isolation. See
-  :func:`build_html_report`. The one text helper it does take is
-  :func:`~drawing_analyzer.run_journal.redact_for_display`, so a host error
-  string reaches the report through the same secret/path boundary as run.log
-  (P9 item 44) — pure, I/O-free, and applied to host status text only, never to
-  digest prose (I-2) or to findings.
-- **Lossless.** The structured view is rendered from each sheet's digest, and the
-  exact, verbatim ``combined_text`` is also embedded (collapsed) so the original
-  Markdown is always one click / copy away — the rendering can never *drop*
-  content, only present it.
-- **Self-contained.** All CSS and JavaScript are inlined; the result is one
-  ``.html`` file the operator can double-click, search, filter, print, or email
-  with no server, build step, or internet access.
-
-In-report Q&A assistant (Ask AI)
---------------------------------
-The report embeds a chat widget ("Ask AI") **by default** that answers
-questions about the results. It calls the Anthropic Messages API **directly from
-the reader's browser** (no server), grounded in the very report text already
-embedded in the page (the ``#raw-md`` block), with streaming, adaptive thinking,
-and the server-side web search / web fetch tools enabled. The report block is
-sent with a 1h prompt-cache breakpoint so follow-up questions re-read the
-(large) report at cache prices for an hour; a second, rolling breakpoint on the
-conversation keeps prior tool rounds cheap too.
-
-**Nothing is rationed.** The assistant is given the configured model's own
-limits, resolved host-side from the capability registry into the emitted config:
-``maxTokens`` is the model's full synchronous output ceiling (128k on the
-default), never a smaller house budget — a truncated answer is a wrong answer the
-reader pays for twice — and the input side is never trimmed at all: the report
-goes over verbatim and the transcript accumulates untouched. Both numbers follow
-``DRAWING_ANALYZER_CHAT_MODEL``, because exceeding a model's real ceiling is a
-400 that kills the request. The output size is safe only because the widget
-streams; a non-streaming request that large would hit an HTTP timeout.
-
-Since nothing is trimmed, the window is the one budget a long thread can exhaust
-— and the overrun is abrupt (the request that exceeds it is rejected outright),
-so the footer carries a **context readout** beside the cost one: how much of
-``contextWindow`` the live thread occupies, with a meter and a warning tier at
-70% and 90%. The two readouts answer different questions and are deliberately
-separate — the cost line accumulates across every round of every question
-(spend), while the context line is a snapshot of the newest round's prompt plus
-its answer (occupancy), which is what the *next* request will carry. Both are
-measured from the API's own usage numbers, so both stay silent until the first
-answer lands; a loaded transcript reads blank until its next question, because
-the occupancy of a thread this browser has never sent is not yet known.
-
-If a thread does reach the ceiling, generated tokens count toward the window
-too, so the answer stops mid-sentence with ``model_context_window_exceeded`` —
-a *different* stop reason from ``max_tokens`` (nothing about the request was too
-small; the conversation is simply too long) and so a different note, naming
-**New chat** as the remedy. Every stop reason that cuts an answer short gets a
-note recorded on the turn, not just drawn on screen, so a restored transcript
-never shows a truncated answer as a complete one.
-
-**Key handling.** By default the key is **not** written into the file — even
-when the caller has one: the widget asks the reader for a key on first use and
-keeps it only in the browser tab's ``sessionStorage`` (the **Forget key**
-control clears both the in-memory copy and sessionStorage) — so the file is
-safe to share and the key never touches disk. Pass ``embed_api_key=True`` (with
-a key) to bake the key into the HTML instead (zero-friction: double-click and
-ask) — the file must then never be shared, and the report carries a **red
-warning** saying so; a runtime "forget" cannot remove an embedded key, and the
-widget says exactly that.
-
-An embedded key is the author's **default, not a lock**. The key field renders
-in both modes, and a key the reader saves outranks the embedded one for their
-tab — so a report that was shared anyway does not bill every question to
-whoever generated it, and a report whose embedded key has since been rotated
-stays usable instead of 401-ing with no way forward.
-
-Pass ``include_chat=False`` to omit the widget (and every network reference)
-entirely. The *Python* module still performs no network I/O.
-
-**The ask box is expandable.** It opens at two rows and grows with what you
-type, up to a cap that always leaves the transcript a readable slice of the
-panel. The grip above it drags to any height and the ▲/▼ toggle jumps to the cap
-and back; either one pins the height (auto-grow stops) until a double-click on
-the grip hands it back. The pinned height persists in ``localStorage``
-(``da-chat-h``) and is re-clamped — never overwritten — when the panel shrinks,
-so borrowed space is returned when the panel grows again.
-
-**Transcript persistence.** The conversation is durable, two ways — nothing is
-ever sent anywhere for either.
-
-- It **auto-saves to the browser's ``localStorage``** after every turn, under a
-  key scoped to this report (``da-chat-tx-<reportId>``; see
-  :func:`_report_identity`), and is replayed on load. A refresh, a close, or a
-  reopened file no longer destroys the thread. **New chat** is the eraser: it
-  clears the stored copy too. The scoping is load-bearing — a double-clicked
-  report shares one ``file://`` storage origin with every other local page.
-- **Save** writes a ``drawing_analyzer_chat_transcript`` JSON document (schema
-  v1) through the file picker where the browser offers one — so it can sit next
-  to ``report.html`` in the export folder — and falls back to an ordinary
-  download otherwise. **Load** reads one back. Its ``turns[].message`` array is
-  the verbatim Messages API history, so a loaded transcript is a *resumable*
-  conversation, not a screenshot; display-only state (the excerpt disclosure,
-  closing notes) rides beside the message, never inside it.
-
-Two honest limits. The browser copy is capped (quota is shared across every
-local page), and past the cap the oldest exchanges are dropped and the widget
-says so; the saved *file* is never trimmed. And a turn aborted before any
-content reached ``history`` leaves text on screen that the transcript does not
-contain — ``history`` is the replayable truth, and the transcript follows it.
-
-**Save as PDF** is unchanged: it reformats the already-rendered message DOM for
-print and hands off to the browser's native print dialog (no new script, host,
-or dependency — "Save as PDF" is just a print destination there). The
-``beforeunload`` handler now fires **only** when persistence actually failed
-(quota, private mode, storage disabled); warning on every close once the thread
-survives would just train readers to click through it.
-
-**Security boundary.** All model output and every run-derived value (filenames,
-titles, errors, quotes…) is treated as hostile — see the trust-boundary note
-above the imports: escaped-into-content on the Python side, safe-DOM-built on
-the browser side, one https-only URL policy for all links/citations, an inert
-JSON config island, and a hash-pinned Content-Security-Policy.
-
-The Markdown→HTML conversion is a small, deliberately-scoped renderer
-(:func:`markdown_to_html`) covering exactly the constructs the digests use —
-headings, ``**bold**``, ``` `code` ```, bullet/numbered lists, GFM pipe tables
-(schedules), block quotes (failed-sheet notices), and horizontal rules. It
-escapes all model text, and any line it does not recognize falls through as an
-escaped paragraph, so nothing is ever lost.
-"""
+Chat transcripts persist locally and can be saved or loaded. They contain
+project information and require the same sharing care as the report. Set
+``include_chat=False`` to omit chat and its network references entirely."""
 from __future__ import annotations
 
 import base64

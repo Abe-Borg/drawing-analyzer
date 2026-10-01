@@ -18,8 +18,8 @@ This module fixes both halves for a ``use_batch`` run:
   imagery is neither re-rendered per read nor re-uploaded. That is the DA-030
   "image reuse" — within the critique stage.
 
-* **The two reads ride one Message Batch** at the batch rate, so the pipeline
-  prices them ``BATCH`` (a rescued real-time fallback stays ``REAL_TIME``).
+* **The two reads ride one Message Batch** at the batch rate. Upload failures
+  remain per-sheet errors rather than switching to full-rate real-time calls.
 
 * **Files are released on every exit** — a fully-collected batch, a confirmed
   cancel, or an unexpected collection error (best-effort cancel, then release).
@@ -85,7 +85,6 @@ from .critique import (
     critique_model,
     critique_result_from_entry,
     critique_runs,
-    critique_sheet_self_consistent,
     keep_critique_read,
     outcome_from_message,
     result_from_outcomes,
@@ -116,16 +115,13 @@ class _CSlot:
     # Grid dims, for bounds-checking the model's tile_label at parse (§17.1).
     rows: int = 0
     cols: int = 0
-    # Set for a cache hit or a real-time fallback (no batch item for this sheet).
+    # Set for a cache hit or upload error (no batch item for this sheet).
     result: CritiqueResult | None = None
     # One custom_id per requested read; empty when the sheet was served without
-    # the batch (cache hit / upload-failure fallback).
+    # the batch (cache hit / upload failure).
     custom_ids: list[str] = field(default_factory=list)
     file_ids: list[str] = field(default_factory=list)
     cache_key: str | None = None
-    # The sheet's critique was produced via a synchronous real-time fallback (its
-    # Files-API upload failed), so the pipeline prices it REAL_TIME not BATCH.
-    rescued: bool = False
     # Remediation WP-01.8 (the owner's rule: WP-01.5's per-sheet budget): the
     # resubmissions of this sheet's reads so far, every read counting one.
     # Bounded by ``batch_digest._max_batch_resubmit_rounds``.
@@ -223,15 +219,14 @@ def submit_critique_batch(
       :class:`~drawing_analyzer.critique.CritiqueResult` — no upload, no batch item;
     * otherwise a retained digest upload is adopted, or the sheet's images upload
       once, and become ``runs`` batch items sharing the uploaded ``file_id``s;
-    * an upload failure degrades **only that sheet** to a synchronous real-time
-      critique that reuses the in-hand render (no re-render), marked ``rescued`` so
-      the pipeline prices it REAL_TIME — the critique is additive/non-fatal (I-3).
+    * an upload failure leaves an errored, empty critique on that sheet, without
+      issuing full-rate real-time calls.
 
     All reads across all sheets go in ONE ``batches.create``. If that call raises,
     every already-uploaded file is deleted and only the would-be-batched sheets
     (``custom_ids`` set, no result yet) are degraded to an errored, empty critique;
     the function still **returns** a ``CritiqueBatch(batch_id=None)`` so the slots
-    already resolved (cache hits and real-time fallbacks) are preserved — the submit
+    already resolved (cache hits and upload errors) are preserved — the submit
     failure is additive/non-fatal (I-3) and does not propagate. Any *other*
     unexpected error escaping the submit loop deletes the uploaded files before
     propagating, so a submit failure never leaks remote files (DA-034).
@@ -250,34 +245,20 @@ def submit_critique_batch(
     # Upload circuit breaker, mirroring the digest batch path (§10.1). A
     # credential/route-level rejection (401/403/404) will hit every remaining
     # upload identically, so after MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES such
-    # failures in a row the remaining sheets skip the (doomed) upload and go
-    # straight to the real-time fallback — otherwise a whole-run Files-API outage
-    # would fire one dead upload round-trip per sheet before each fallback.
+    # failures in a row the remaining sheets skip uploads. Cache hits and retained
+    # digest uploads are still served; no failure switches the transport.
     fatal_streak = 0
     last_fatal_status: int | None = None
-    uploads_dead = False
+    uploads_disabled_error: str | None = None
 
-    def _serve_realtime(slot: _CSlot, sheet) -> None:
-        """Critique one sheet via a synchronous real-time self-consistency read.
-
-        Reuses the render already in hand (no re-render, no batch discount) and
-        marks the result ``rescued`` so the pipeline prices it REAL_TIME. Used both
-        when a sheet's upload fails and when uploads are already known dead.
-        """
-        slot.result = critique_sheet_self_consistent(
-            sheet, client=client, cache=cache, runs=runs, model=model,
-            max_tokens=max_tokens, use_thinking=use_thinking, effort=effort,
-            sleep=sleep, profiles=profiles,
+    def _fail_upload(slot: _CSlot, error: str) -> None:
+        slot.result = CritiqueResult(
+            findings=[], input_tokens=0, output_tokens=0,
+            runs=0, requested_runs=runs, completed_runs=0, error=error,
         )
-        slot.rescued = True
-        # Carry the rescue marker onto the RESULT itself — the pipeline prices each
-        # sheet off ``res.rescued``. A cache hit inside the fallback keeps CACHE
-        # precedence, so marking it rescued is harmless there.
-        if not slot.result.cached:
-            slot.result.rescued = True
         slots.append(slot)
         if progress is not None:
-            progress(slot.index + 1, total or 0, f"Critiqued {sheet.ref.display_label} (inline)")
+            progress(slot.index + 1, total or 0, f"Critique unavailable {slot.ref.display_label}")
 
     batch_id: str | None = None
     try:
@@ -342,12 +323,10 @@ def submit_critique_batch(
                     continue
                 reused_digest_upload = True
             else:
-                # The Files API is already known dead this run
-                # (consecutive 401/403/404s): skip the doomed upload and critique
-                # this freshly rendered sheet real-time. Retained digest uploads
-                # bypass this breaker because they need no Files-API upload.
-                if uploads_dead:
-                    _serve_realtime(slot, sheet)
+                # Retained digest uploads bypass this breaker because they need
+                # no Files-API upload.
+                if uploads_disabled_error is not None:
+                    _fail_upload(slot, uploads_disabled_error)
                     continue
 
                 on_image = None
@@ -370,11 +349,15 @@ def submit_critique_batch(
                         on_image=on_image,
                     )
                 except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
+                    hint = upload_failure_hint(exc)
+                    error = f"image upload failed: {summarize_exc(exc)}"
+                    if hint:
+                        error += f" — {hint}"
                     _log.warning(
-                        "critique sheet %d upload failed; falling back to real-time: %s (%s)",
+                        "critique sheet %d upload failed: %s (%s)",
                         index, ref.display_label, summarize_exc(exc),
                     )
-                    _serve_realtime(slot, sheet)
+                    _fail_upload(slot, error)
                     status = run_fatal_upload_status(exc)
                     if status is None:
                         fatal_streak = 0
@@ -383,11 +366,15 @@ def submit_critique_batch(
                     fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
                     last_fatal_status = status
                     if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
-                        uploads_dead = True
-                        hint = upload_failure_hint(exc)
+                        uploads_disabled_error = (
+                            f"image upload skipped: uploads stopped after {fatal_streak} "
+                            f"consecutive HTTP {status} upload failures"
+                        )
+                        if hint:
+                            uploads_disabled_error += f" — {hint}"
                         _log.warning(
                             "Files API unreachable after %d consecutive HTTP %d critique "
-                            "upload failure(s); critiquing the remaining sheets real-time%s",
+                            "upload failure(s); skipping remaining uploads%s",
                             fatal_streak, status, f" — {hint}" if hint else "",
                         )
                     continue
@@ -451,8 +438,7 @@ def submit_critique_batch(
                 # files. Then DEGRADE ONLY the would-be-batched sheets rather than
                 # re-raise: the critique is additive and per-sheet non-fatal (I-3), and
                 # re-raising here would propagate to the stage-level guard and discard
-                # the results ALREADY resolved on the other slots — free cache hits and,
-                # worse, the paid-for real-time fallbacks whose reads have already run.
+                # the cache hits and upload errors already resolved on other slots.
                 # Only the sheets whose reads never happened (custom_ids set, no result)
                 # lose their critique; every resolved slot is preserved.
                 batched = [s for s in slots if s.custom_ids and s.result is None]
