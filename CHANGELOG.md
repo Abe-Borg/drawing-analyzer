@@ -31,6 +31,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Cross-sheet QC and both verification passes retain API prompt-cache usage.**
+  Cache-read/write tokens now reach the append-only usage ledger and its existing
+  pricing rules, including billed replies that fail to produce a verdict or
+  findings. Shard/reconcile and verifier workers sum their counters in the
+  collector; local result-cache hits add no billed usage. Model requests,
+  caching policy, verdict-cache payloads and keys stay unchanged. This is prompt
+  optimization chunk PO-04, verified with offline usage and pricing regressions.
+
 - **Cross-sheet QC and investigation distinguish source text from instructions.**
   All cross-QC requests frame sheet digests, text layers, labels/handles,
   detected identity and reconciliation facts with the shared escaped source
