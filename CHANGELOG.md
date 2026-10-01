@@ -268,7 +268,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `===== SHEET S001 = M-101 =====`: the handle (`S001`) is how the model
     names a sheet in its answer, and the sheet id beside it is what it names in
     the text a reviewer reads. Handles follow the source files and pages, so a
-    set given in another order is sent, keyed and bound identically.
+    set given in another order is sent, keyed and bound identically. A handle
+    is never one of the set's own sheet ids: a set with a sheet numbered
+    `S001` gets `H001`, `H002` … instead, so that sheet is still reached by its
+    id and never mistaken for the sheet that would have had the handle `S001`.
   - **One binding rule on both paths.** A handle binds its own page. An answer
     that names a sheet id instead still binds when exactly one sheet carries
     it; an id more than one sheet carries is **refused and counted, never

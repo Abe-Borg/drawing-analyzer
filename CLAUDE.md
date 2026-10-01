@@ -1528,7 +1528,12 @@ raise, after the paid digest and critique. Now:
   - **One set of handles** (`_assign_handles`, `_SheetHandles`): `S001` … in
     source order (`_canonical_order`: by `(source_id, page_index)`, natural
     order, when every entry has a source id, else input order), so a reordered
-    input gets the same handles, request and key. Each sheet's title in the
+    input gets the same handles, request and key. **No handle is a sheet id of
+    the set** (`_handle_prefix`, Codex review): the prefix is `S` unless one of
+    the set's ids is one of its handles, then `H`, `K`, `Q`, `X`, `Z`, then
+    every other letter and longer runs, so a set with `S001 = A-101` and a
+    sheet whose own id is `S001` (which bound a reply's `S001` to A-101) gets
+    `H001 = A-101`, `H002 = S001`. Each sheet's title in the
     whole-set and map requests reads `===== SHEET S001 = M-101 =====`
     (`_sheet_block`, one helper): the handle is the address, the id beside it
     is display metadata a model needs for a cross-reference ("see M-501") and
@@ -1536,14 +1541,13 @@ raise, after the paid digest and critique. Now:
     sentence (`_HANDLE_RULE`: handles in the json, sheet ids in text).
   - **One resolver** (`_resolve_sheet_ref`) and **one validator**
     (`_finding_from_handles`, whose whole-set twin `_validate_cross_item` is
-    gone): a handle names its own sheet, always; otherwise a sheet id (a
-    legacy reply's `sheet_id`, or a model writing the id it saw) binds only
-    when exactly one sheet carries it. An id more than one sheet carries
-    (`by_label`) is refused and counted `legs_ambiguous_label` /
-    `facts_ambiguous_label`, never bound to the first. A sheet whose own id
-    reads like a handle is reachable by its handle only (a recorded limit). The
-    finding carries each sheet's own id from the manifest, never the reply's
-    spelling. The sharded path reads a reply's `sheet_id` through the same
+    gone): a handle names its own sheet; otherwise a sheet id (a legacy
+    reply's `sheet_id`, or a model writing the id it saw) binds only when
+    exactly one sheet carries it. The two never compete, since no handle is an
+    id of the set. An id more than one sheet carries (`by_label`) is refused
+    and counted `legs_ambiguous_label` / `facts_ambiguous_label`, never bound
+    to the first. The finding carries each sheet's own id from the manifest,
+    never the reply's spelling. The sharded path reads a reply's `sheet_id` through the same
     resolver, so the two paths bind, ground and count an item alike
     (`tests/test_cross_qc_source_binding.py` compares them at parser level).
   - **Whole-set grounding** (U8; plan WP-06 Step 6 reverses WP-03A's scope,

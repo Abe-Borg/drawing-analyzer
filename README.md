@@ -1132,7 +1132,11 @@ every answer was bound back through that id, the first sheet with a given id
 winning: two PDFs that both carry `M-101` (two revisions of one drawing, or two
 files with one name in two folders) could not be told apart, an answer naming
 `M-101` was silently placed on the first of them, and a conflict *between* the
-two could not be expressed at all. Now each is reachable by its handle. An
+two could not be expressed at all. Now each is reachable by its handle. A
+handle is never one of the set's own sheet ids: handles start with `S` unless a
+sheet in the set is itself numbered like one (`S001`), and then with another
+letter (`H001`, …), so an answer naming that sheet by its id still reaches it
+and not the sheet that would otherwise have had the handle `S001`. An
 answer that still names a sheet by an id more than one sheet carries is
 **refused rather than guessed**, and counted: the stage shows a warning such as
 *"2 sheet reference(s) named a sheet id that more than one sheet carries and

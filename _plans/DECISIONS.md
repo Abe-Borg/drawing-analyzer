@@ -1522,12 +1522,15 @@ markup reopen.
     assignment (`cross_qc._assign_handles`): `S001` … over the entries in
     source order (`_canonical_order`: `(source_id, page_index)`, natural order,
     when every entry has a source id; input order otherwise), so a reordered
-    input is sent, keyed and bound identically. A handle names one page. The
+    input is sent, keyed and bound identically. A handle names one page, and
+    no handle is a sheet id of the set (`_handle_prefix`, Codex review: `S`
+    unless one of the set's ids is one of its handles, then `H`, `K`, …), so a
+    reference is a handle or an id, never both. The
     human sheet id is shown beside each handle (`===== SHEET S001 = M-101
     =====`, whole-set and map requests; the reconcile manifest already did) as
     display metadata, for cross-references and for the text a reviewer reads.
   - **One resolver binds every reference** (`_resolve_sheet_ref`): a handle
-    names its own page, always; else a sheet id binds when exactly one page of
+    names its own page; else a sheet id binds when exactly one page of
     the set carries it. An id more than one page carries is refused and
     counted, never bound to the first (D-2's WP-06.2 note). One validator
     serves both paths (`_finding_from_handles`), so the whole-set path grounds

@@ -61,9 +61,11 @@ ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import re
+import string
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
@@ -748,18 +750,58 @@ class _SheetHandles:
     by_label: dict = field(default_factory=dict)
 
 
+# The handle prefixes, in order of preference: ``S`` for every set none of
+# whose sheet ids is one of its handles, then these, then every other letter
+# and every longer run of letters (:func:`_handle_prefix`).
+_HANDLE_PREFIXES = ("S", "H", "K", "Q", "X", "Z")
+
+
+def _handle(prefix: str, i: int) -> str:
+    return f"{prefix}{i:03d}"
+
+
+def _candidate_prefixes():
+    yield from _HANDLE_PREFIXES
+    for width in itertools.count(1):
+        for letters in itertools.product(string.ascii_uppercase, repeat=width):
+            prefix = "".join(letters)
+            if prefix not in _HANDLE_PREFIXES:
+                yield prefix
+
+
+def _handle_prefix(labels: set, count: int) -> str:
+    """The first prefix none of whose ``count`` handles is a sheet id in ``labels``.
+
+    Handles and sheet ids are kept disjoint (remediation WP-06.2, Codex review):
+    a reply may name a sheet by its id, and an id that was also a handle would
+    bind the handle's sheet, so a set with ``S001 = A-101`` and a sheet whose
+    own id is ``S001`` sent a legacy reply's numbers to the wrong PDF. A sheet
+    id spells at most one prefix's handle (its letters), so at most
+    ``len(labels)`` prefixes are refused and the search ends. Deterministic
+    (I-7): it reads only the set's normalized ids.
+    """
+    for prefix in _candidate_prefixes():
+        if not any(_handle(prefix, i) in labels for i in range(1, count + 1)):
+            return prefix
+    raise AssertionError("unreachable: the prefixes are unbounded")
+
+
 def _assign_handles(entries: list[tuple]) -> _SheetHandles:
     """Opaque handles ``S001`` … for ``entries`` in order, with the manifest.
 
     One assignment for the whole-set and sharded paths (remediation WP-06.2, the
     owner's rule). A handle resolves to one page, ``(source_id, page_index)``
-    (D-8); the sheet id is display metadata shown beside it.
+    (D-8); the sheet id is display metadata shown beside it. No handle is a
+    sheet id of the set (:func:`_handle_prefix`): a set that uses ``S002`` as a
+    sheet id gets ``H001`` …, so a reference is a handle or an id, never both.
     """
     from .auditors.sheet_ids import discipline_token
 
     handles = _SheetHandles()
+    labels = {_norm_id(e[0]) for e in entries} - {""}
+    prefix = _handle_prefix(labels, len(entries))
     for i, (sheet_id, _t, _tl, geom) in enumerate(entries, start=1):
-        handle = f"S{i:03d}"
+        handle = _handle(prefix, i)
         disc = discipline_token(sheet_id)
         handles.entry_by_handle[handle] = (sheet_id, geom)
         handles.handle_by_key[source_page_key(geom.ref)] = handle
@@ -782,11 +824,11 @@ def _resolve_sheet_ref(
     """The handle ``raw`` names, as ``(handle, "")``, else ``("", why)``.
 
     The one resolver both paths bind a reply's references through (remediation
-    WP-06.2, N6; the owner's rules). A handle names its own sheet, first and
-    always: the prompt asks for handles, so ``S001`` is never looked up as an
-    id. Otherwise ``raw`` may be a sheet id (a legacy reply, or a model that
-    wrote the id it saw beside a handle): it binds when exactly one sheet of
-    the set carries it, and an id more than one sheet carries is
+    WP-06.2, N6; the owner's rules). A handle names its own sheet: no handle
+    is a sheet id of the set (:func:`_handle_prefix`), so the two lookups
+    cannot both match. Otherwise ``raw`` may be a sheet id (a legacy reply, or
+    a model that wrote the id it saw beside a handle): it binds when exactly
+    one sheet of the set carries it, and an id more than one sheet carries is
     ``_REF_AMBIGUOUS`` and binds none of them, where the old whole-set map let
     the first detection win. Both forms are compared after :func:`_norm_id`.
     """

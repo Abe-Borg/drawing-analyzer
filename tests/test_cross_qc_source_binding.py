@@ -313,17 +313,66 @@ def test_an_ambiguous_reference_never_binds_the_first_source():
     assert res.discards.legs_ambiguous_label == 1
 
 
-def test_a_handle_means_its_own_sheet_even_when_another_sheet_is_labelled_like_one():
-    """Handles take precedence: the prompt asks for them, and S001 is never a label
-    lookup. A sheet whose own id reads like a handle is reachable by its handle."""
-    geoms = [
-        _geom("SRC-0001", "m.pdf", "M-101", ["PUMP P-1 480V"]),
+def _handle_shaped_ids():
+    # A set whose sheet ids read like handles: sheet 2's own id is S001.
+    return [
+        _geom("SRC-0001", "a.pdf", "A-101", ["PUMP P-1 480V"]),
         _geom("SRC-0002", "s.pdf", "S001", ["PUMP P-1 208V"]),
     ]
-    res, client = _run(geoms, whole={"findings": [
-        _item("S001", "PUMP P-1 480V", [("S002", "PUMP P-1 208V")])]})
-    assert "===== SHEET S002 = S001 =====" in client.bodies["whole"][0]
-    assert _bindings(res) == [(("SRC-0001", 0), [("SRC-0002", 0)])]
+
+
+def test_handles_never_take_a_sheet_id_the_set_uses():
+    """Codex review of this PR: with S001 handed to A-101, a legacy reply naming
+    the sheet whose own id is S001 bound A-101, the wrong PDF. The handles now
+    take a prefix no sheet id of the set uses, so a handle and an id never
+    compete, and S### stays the handle of every other set."""
+    _res, client = _run(_handle_shaped_ids())
+    body = client.bodies["whole"][0]
+    assert "===== SHEET H001 = A-101 =====" in body
+    assert "===== SHEET H002 = S001 =====" in body
+
+
+@pytest.mark.parametrize("ref,bound", [
+    ("S001", "SRC-0002"),          # the id: the sheet that carries it
+    ("H002", "SRC-0002"),          # its handle
+    ("H001", "SRC-0001"),          # the other sheet's handle
+], ids=["the id S001", "its handle H002", "the other handle H001"])
+def test_a_handle_shaped_id_binds_its_own_sheet(ref, bound):
+    res, _ = _run(_handle_shaped_ids(), whole={
+        "findings": [_item(ref, "PUMP P-1 208V" if bound == "SRC-0002" else "PUMP P-1 480V",
+                           [("A-101" if bound == "SRC-0002" else "S001",
+                             "PUMP P-1 480V" if bound == "SRC-0002" else "PUMP P-1 208V")],
+                           key="sheet_id")],
+        "claims": [{"sheet_id": ref, "quote": "20 20 TOTAL 40", "kind": "sum",
+                    "terms": [20, 20], "expected": 40}]})
+    (f,) = res.findings
+    assert f.source_id == bound
+    (c,) = res.claims
+    assert c.source_id == bound, "a claim is rebound to the sheet it names"
+
+
+def test_a_handle_shaped_id_binds_its_own_sheet_on_the_sharded_parser():
+    entries = X._canonical_order([(X.detect_sheet_id(g), "d", g.sheet_text, g)
+                                  for g in _handle_shaped_ids()])
+    handles = X._assign_handles(entries)
+    (f,), _counts, _invalid = _parse_map(entries, handles, _item(
+        "S001", "PUMP P-1 208V", [("H001", "PUMP P-1 480V")]))
+    assert _state([f])[0][:2] == ("SRC-0002", 0)
+    assert [(leg.source_id, leg.page_index) for leg in f.also_on] == [("SRC-0001", 0)]
+
+
+def test_the_handle_prefix_skips_every_prefix_the_set_uses():
+    geoms = [_geom("SRC-0001", "a.pdf", "S001", ["NOTE"]),
+             _geom("SRC-0002", "b.pdf", "H002", ["NOTE"]),
+             _geom("SRC-0003", "c.pdf", "M-101", ["NOTE"])]
+    _res, client = _run(geoms)
+    titles = re.findall(r"===== SHEET (\S+ = \S+) =====", client.bodies["whole"][0])
+    assert titles == ["K001 = S001", "K002 = H002", "K003 = M-101"]
+
+
+def test_a_set_with_no_handle_shaped_id_keeps_the_s_handles():
+    entries = [(X.detect_sheet_id(g), "d", g.sheet_text, g) for g in _two_m101()]
+    assert list(X._assign_handles(entries).entry_by_handle) == ["S001", "S002", "S003"]
 
 
 def test_a_whole_set_finding_carries_its_sheet_label_not_the_reply_spelling():
