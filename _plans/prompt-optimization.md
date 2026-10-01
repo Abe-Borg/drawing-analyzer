@@ -10,9 +10,9 @@ before the preceding PR merges and the owner asks to continue.
 
 | Chunk | Scope | Status / gate |
 |---|---|---|
-| PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) open; awaiting owner review and merge |
-| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | After PO-01 merges |
-| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | After preceding chunks merge; first reconcile with remediation PR #191 and any newer cross-QC/investigation work |
+| PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) merged |
+| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | Validated; opening one PR, then pause for owner review and merge |
+| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | After PO-02 merges and the owner asks to continue; reconcile with merged remediation PR #191 and any newer cross-QC/investigation work |
 | PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
 | PO-05 | Measure prefix token counts, current model cache minimums and reuse; enable eligible caching through the existing policy helper | Requires approved drawings and an intended live measurement budget before billable work |
 | PO-06 | Evaluate digest and critique effort separately against human-labeled findings; record precision/recall, important-defect retention, cost and latency | Requires approved dataset and budget; keep current defaults until an evidence-backed decision |
@@ -80,5 +80,61 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
     tests pass. All pytest commands explicitly deselect `network`.
   - No live model calls or paid experiments. These checks verify request
     structure and host behavior, not model quality or injection resistance.
-- Next: review/merge PO-01, then start PO-02 when requested. Keep live cache and
-  effort experiments gated on representative drawings and a budget.
+- PO-01 merged as `358dafe`; the owner requested the next chunk. PO-02 starts
+  from the newer main below. Live cache and effort experiments remain gated on
+  representative drawings and a budget.
+
+## PO-02 contract
+
+- Reuse `source_content_block` and the unchanged `SOURCE_CONTENT_RULE` for
+  complete digests and sheet labels in synthesis and focus. Escape only their
+  model-visible copies. Preserve existing `.strip()` at the request/reply
+  boundaries; retained digests and output prose are not rewritten or decoded.
+- Escape `<operator_focus>` text separately. Its explicit system instruction
+  preserves the operator's question as the task, distinct from source data.
+  Task instructions and loss disclosures stay outside source blocks.
+- Keep existing budgets and whole-sheet selection. Count complete rendered
+  source blocks, including escaping, wrappers and the three separator characters
+  per sheet. At overflow, drop the entire contiguous tail and count its rendered
+  characters; preserve the existing omission disclosure and first-sheet
+  exception (the first sheet remains whole even if it alone exceeds the cap).
+- Each existing stage key hashes its entire system and assembled user prompt.
+  These changes invalidate only synthesis/focus request contracts, without
+  adding a key term or bumping the stage/global cache schema. A newly generated
+  report can change downstream prose-harvest input keys through existing
+  machinery; stored digest, critique, identity and planner contracts stay put.
+- Offline checks cover literal source recovery, hostile closing tags in
+  labels/digests/focus, escaping/wrapper budget overhead, complete blocks,
+  contiguous-tail loss counts, the oversized first sheet, both request-key
+  inputs and exact retained response replay. No live model calls or paid
+  experiments; this does not measure model quality or injection resistance.
+
+## PO-02 handoff
+
+- Base: `aa0bfe1` (main with PO-01 PR #192 and cross-QC remediation PR #191
+  merged). Open-PR check found only dependency PR #190; no overlapping work.
+- Seventeen new regressions: **15 failed, 2 passed** before implementation.
+  The passing cases already confirmed the assembled corpus participates in
+  the cache key; the failures reproduce missing source boundaries, unsafe
+  literal focus framing, uncounted wrapper/escape overhead and unchanged
+  system contracts. No existing test expectations are rebaselined.
+- System hashes: synthesis `96fa274271e0d6a1` → `423c896b3e102583`; focus
+  `c63fb4f0dcd9a208` → `2f243b214b327325`. Old entries remain on disk and miss
+  on the next eligible synthesis/focus request. The shared helper/rule itself
+  is unchanged, so PO-01's identity/planner prompt hashes stay unchanged.
+- Focused boundaries/stage/terminal-outcome tests: **151 passed**.
+- Expanded SDK/cache/stream/pipeline checks: **402 passed**.
+- Validation environment: Python 3.12.14, Anthropic SDK 1.7.0 (supported by the
+  current `>=1.7,<1.9` dependency range).
+- Full baseline in an independent checkout of `aa0bfe1`: **5,920 passed,
+  105 skipped, 10 deselected**. Full final: **5,937 passed, 105 skipped,
+  10 deselected**. JUnit comparison: 17 added tests, all passed; no removed
+  tests and **zero changed existing outcomes**. The same 105 report/browser
+  tests skip because Chromium is unavailable; report HTML/JS is outside PO-02.
+- `compileall`, correctness-class ruff, diff checks and the secret scan
+  (237 tracked files, including the new tests): clean. All pytest commands
+  explicitly deselect `network`; the hermetic guard remains enabled. Full
+  suites allow the local sockets required by the guard's own tests, as in
+  PO-01. No live model calls or paid experiments.
+- Next: pause for owner review and merge of PO-02. Start PO-03 only when asked;
+  inspect latest main and PR #191's merged cross-QC framing-key contracts first.

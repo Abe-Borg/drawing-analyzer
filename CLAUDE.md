@@ -1137,6 +1137,16 @@ raise, after the paid digest and critique. Now:
   escaped. The system rule rides both prompt hashes, and both keys already hash
   the exact assembled corpus: no global schema bump. Other stages retain their
   own framing until the follow-up chunks in `_plans/prompt-optimization.md`.
+  **Set reports (PO-02):** synthesis and focus use the same helper/rule for
+  complete digest and sheet-label blocks. Their existing digest corpus caps
+  count escaping, wrappers and separators; overflow still drops a contiguous
+  tail, with loss counters and a prompt disclosure. The first sheet is kept
+  whole even if it alone exceeds the cap (the existing exception). Focus escapes
+  its `<operator_focus>` text separately and explicitly treats that block as
+  the operator's task. The stage keys already hash each entire system prompt
+  and assembled user turn, so old synthesis/focus framing misses without a
+  global schema or stage-contract bump. Retained prose and reply handling stay
+  unchanged; these are offline request checks, not a live model-quality eval.
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
   vision read, run twice — self-consistency merge sets `reproduced`. **Only a
   read the model finished counts** (remediation WP-01.4, N4; the owner's
