@@ -11,8 +11,8 @@ before the preceding PR merges and the owner asks to continue.
 | Chunk | Scope | Status / gate |
 |---|---|---|
 | PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) merged |
-| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) open; paused for owner review and merge |
-| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | After PO-02 merges and the owner asks to continue; reconcile with merged remediation PR #191 and any newer cross-QC/investigation work |
+| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) merged |
+| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | Implemented and validated; opening one PR for owner review |
 | PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
 | PO-05 | Measure prefix token counts, current model cache minimums and reuse; enable eligible caching through the existing policy helper | Requires approved drawings and an intended live measurement budget before billable work |
 | PO-06 | Evaluate digest and critique effort separately against human-labeled findings; record precision/recall, important-defect retention, cost and latency | Requires approved dataset and budget; keep current defaults until an evidence-backed decision |
@@ -111,8 +111,8 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 
 ## PO-02 handoff
 
-- [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) is open. Work
-  is paused for the owner's review and merge; PO-03 has not started.
+- [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) merged as
+  `c791e44`; the owner requested the next chunk, PO-03.
 - Base: `aa0bfe1` (main with PO-01 PR #192 and cross-QC remediation PR #191
   merged). Open-PR check found only dependency PR #190; no overlapping work.
 - Seventeen new regressions: **15 failed, 2 passed** before implementation.
@@ -138,5 +138,78 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
   explicitly deselect `network`; the hermetic guard remains enabled. Full
   suites allow the local sockets required by the guard's own tests, as in
   PO-01. No live model calls or paid experiments.
-- Next: pause for owner review and merge of PO-02. Start PO-03 only when asked;
-  inspect latest main and PR #191's merged cross-QC framing-key contracts first.
+- PO-03 proceeds from `c791e44` under the owner's follow-up below, retaining
+  PR #191's merged cross-QC binding and framing-key contracts.
+
+## PO-03 contract
+
+- Reuse the existing source rule/renderer on whole-set, map and reconcile
+  cross-QC requests: digest, original text slice, handle/label metadata,
+  detected identity, manifest entries and model-derived fact lines. Extend only
+  the helper's allowed tag names; its escaping behavior and shared rule stay
+  unchanged. Quote checks continue against original, uncapped host evidence.
+- Preserve opaque handles, source ordering, duplicate-label refusal and all
+  grounding/claim/parse policies from PR #191. The original text-layer cap and
+  counters stay at 4,000 source characters per sheet; slice before wrapping.
+  XML escaping adds bounded wire overhead (up to five characters per source
+  character, plus tags), not additional source coverage or a new total request
+  cap. Host truncation notices and task instructions stay outside source data.
+  Fact, finding, pair-call and tool budgets are unchanged.
+- Cross-QC's existing request hash retains K2's named host framing and adds
+  source-block signatures rendered by the same helper, covering delimiter and
+  XML-special-character encoding changes alongside the system prompts. Keep
+  host binding/grounding contract 9 and the global schema unchanged.
+- Investigation wraps initial finding/prior-review text and the sheet index.
+  Frame tool text only at the send boundary, including search JSON, image
+  labels and errors that echo source/model text. Preserve raw executor outputs,
+  images, saved traces, SHA replay, error flags and budget/forced-close messages.
+  Bump only its existing manual prompt version, `investigate-v3` → `v4`.
+- Retained prose/evidence, model/effort settings, tool schemas, response parsing
+  and other stages' prompt contracts stay unchanged. No live model calls or
+  paid experiments; offline structure/host checks do not establish model
+  quality or injection resistance.
+
+## PO-03 handoff
+
+- Base: `c791e44`, main after PO-02 PR #193 merged. Open-PR check found only
+  dependency PR #190. Read PR #191's D-8 binding decision and K2 framing-key
+  contracts before implementation; no remediation slice is marked complete.
+- Nineteen new regressions fail against baseline code and pass after the fix.
+  They cover all request paths, literal/hostile source recovery, original
+  slicing/loss counters, wrapper-key sensitivity, original-quote grounding,
+  model-visible tool text/errors/images, forced close and exact evidence replay.
+- Six existing test files adapt to the intended framing/version changes:
+  the reconcile-layout and identity-preamble checks compare decoded blocks;
+  the raster pipeline's fake client reads the decoded text layer to distinguish
+  scanned sheets, keeping all grounding/anchor/verification assertions intact;
+  the investigation's manual-version pin moves to v4; the acceptance test
+  checks the decoded identity preamble; the response-join structural guard
+  exempts only the outgoing tool formatter, retaining coverage of investigation
+  reply readers. Test IDs stay unchanged.
+- System hashes, whole/map/reconcile: `cb02462b66d993c7` / `6bebddaf21bee920` /
+  `6d90d100ce95347f` → `5004a634214d665a` / `551a72ef1446af1e` /
+  `a90a63aed3d3e9b8`. Investigation system: `11b8cd450ce11bcb` →
+  `693d1b3ee38efe0d`, with manual version v4. Cross-QC host contract 9 and
+  global schema 10 are unchanged; digest/critique/identity/planner/synthesis/
+  focus system hashes are unchanged. Older affected entries remain on disk.
+- Focused cross-QC/investigation/identity checks: **373 passed**. Expanded
+  SDK/stream/cache/pipeline checks: **592 passed**.
+- The first full run exposed two additional test-side framing assumptions:
+  the acceptance test's bare identity prefix and the structural response-join
+  guard matching the outgoing tool formatter. The narrow updates above retain
+  all pipeline/verdict assertions and response-reader coverage. Additional
+  acceptance/response-join/new-regression checks: **136 passed**. The first full
+  run had **5,954 passed, 2 failed, 105 skipped, 10 deselected**, with only those
+  two checks failing. The fresh full suite passes after these adjustments.
+- Full baseline in an independent checkout of `c791e44`: **5,937 passed,
+  105 skipped, 10 deselected**. Final suite: **5,956 passed, 105 skipped,
+  10 deselected**. JUnit comparison: 19 added tests pass, no removed tests and
+  no changes to existing outcomes. Browser skips match baseline (Chromium is
+  unavailable here). Validation used Python 3.12.14 and supported Anthropic
+  SDK 1.7.0; no Chromium installation or unguarded model access.
+- `compileall`, correctness-class ruff, diff checks and the secret scan
+  (238 tracked files, including the new tests): clean. All pytest commands
+  explicitly deselect `network`; the hermetic guard remains enabled.
+- Next: pause for owner review and merge of PO-03. Start PO-04 (accurate API
+  cache-token usage/pricing in cross-QC and both verification paths) only when
+  asked. Live caching/effort experiments remain gated on drawings and budget.

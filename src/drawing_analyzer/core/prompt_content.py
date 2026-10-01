@@ -1,8 +1,9 @@
 """Shared framing for source data in prompts; not a security boundary.
 
 Escape only the model-visible copy. Retained evidence, digests, and rendered
-reports keep their original spelling. Slice source content before wrapping it,
-and budget complete wrapped blocks so truncation cannot remove a closing tag.
+reports keep their original spelling. Slice source content before wrapping it.
+Apply assembled-corpus budgets to complete wrapped blocks so truncation cannot
+remove a closing tag; per-source slice counters measure original characters.
 """
 from __future__ import annotations
 
@@ -23,7 +24,10 @@ SOURCE_CONTENT_RULE = (
 def source_content_block(
     text: str,
     *,
-    tag: Literal["sheet_digest", "sheet_text_layer", "sheet_metadata", "set_identity"],
+    tag: Literal[
+        "sheet_digest", "sheet_text_layer", "sheet_metadata", "set_identity",
+        "cross_qc_fact", "finding_context", "tool_evidence",
+    ],
 ) -> str:
     """Wrap source text in a host-selected tag without allowing tag breakout.
 

@@ -617,9 +617,12 @@ class _PipelineClient(BetaClientMixin):
                     facts = []
                     # A sheet's title reads "S001 = <its id>" since remediation
                     # WP-06.2 (the id beside the handle).
-                    for handle, chunk in re.findall(
-                            r"===== SHEET (S\d+) = [^\n]* =====(.*?)(?======|\Z)", body, re.S):
-                        textless = "TEXT LAYER:\n\n" in chunk or chunk.rstrip().endswith("TEXT LAYER:")
+                    from xml.etree import ElementTree as ET
+
+                    root = ET.fromstring(f"<request>{body}</request>")
+                    for metadata, layer in zip(root.findall("sheet_metadata"), root.findall("sheet_text_layer")):
+                        handle = re.search(r"===== SHEET (S\d+) =", metadata.text).group(1)
+                        textless = not layer.text[1:-1].strip()
                         facts.append({"sheet_handle": handle, "entity_or_tag": "P-1",
                                       "attribute": "a", "value": "v", "tile_label": "r1c1",
                                       "exact_quote": fact_quotes["scanned" if textless else "text"]})

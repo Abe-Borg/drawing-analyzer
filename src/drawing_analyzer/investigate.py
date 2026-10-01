@@ -74,6 +74,7 @@ from .digest import (
     StreamUsage,
     stream_message,
 )
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .models import Finding, Verification, source_page_key
 from .verify import (
     _FATAL_STATUSES,
@@ -93,7 +94,10 @@ _log = get_logger()
 # MEANING changed, so a stored verdict reached under turn-counting is not
 # reproducible under the same key. This manual bump is the only mechanism that
 # covers this stage, and it discards investigation verdicts only.
-INVESTIGATE_PROMPT_VERSION = "investigate-v3"
+# v4 (prompt optimization PO-03): shared source instructions and escaped
+# finding/index/tool text change the model-visible contract. Keep this stage's
+# existing manual version as the sole invalidation mechanism.
+INVESTIGATE_PROMPT_VERSION = "investigate-v4"
 
 _DEFAULT_MAX_ROUNDS = 6
 # Per-run investigation budget, scaled to the size of the set rather than a
@@ -202,7 +206,7 @@ exhausted). Prefer the single most decisive request over broad exploration.
 When you can decide — or when told the budget is exhausted — respond with \
 ONLY a JSON object and nothing else:
 {"verdict": "CONFIRMED" | "CONTRADICTED" | "NOT_VISIBLE", "note": "<= 25 words \
-on what you actually saw"}"""
+on what you actually saw"}""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 # Whether this process may still send the advisory task budget. The beta is
@@ -830,17 +834,28 @@ def _build_initial_content(
     if legs:
         header += "\nThe finding also involves sheet(s): " + ", ".join(legs)
     content: list = [
-        {"type": "text", "text": header},
+        {"type": "text", "text": source_content_block(header, tag="finding_context")},
         {"type": "text", "text": "The region the first reviewer saw follows:"},
         _image_block(crop_png),
     ]
     if sheet_index:
-        content.append({"type": "text", "text": sheet_index})
+        content.append({"type": "text", "text": source_content_block(sheet_index, tag="sheet_metadata")})
     content.append({"type": "text", "text": (
         f"You may make up to {budget} evidence request(s). Use the tools to "
         "gather what you need, then respond with ONLY the JSON verdict object."
     )})
     return content
+
+
+def _tool_source_content(content: list | str) -> list | str:
+    """Frame only model-visible tool text; keep raw results, images and traces."""
+    if isinstance(content, str):
+        return source_content_block(content, tag="tool_evidence")
+    return [
+        {**block, "text": source_content_block(block["text"], tag="tool_evidence")}
+        if isinstance(block, dict) and block.get("type") == "text" else block
+        for block in content
+    ]
 
 
 _BUDGET_EXHAUSTED_TEXT = (
@@ -1071,7 +1086,7 @@ def _investigate_one(
                 result_block: dict = {
                     "type": "tool_result",
                     "tool_use_id": str(getattr(block, "id", "") or ""),
-                    "content": content_out,
+                    "content": _tool_source_content(content_out),
                 }
                 if is_error:
                     result_block["is_error"] = True

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.digest_cache import DigestCache
@@ -439,7 +440,9 @@ def test_cross_qc_preamble_present_only_with_identity():
 
     si = parse_identity_text(_identity_reply())
     pre = _identity_preamble(si)
-    assert pre.startswith("SET IDENTITY (model-detected):") and pre.endswith("\n\n")
+    root = ET.fromstring(f"<request>{pre}</request>")
+    assert root.find("set_identity").text[1:-1] == si.context_block()
+    assert pre.endswith("\n\n")
     assert "units: metric" in pre
     assert _identity_preamble(None) == ""
     assert _identity_preamble(SetIdentity()) == ""      # empty identity adds nothing

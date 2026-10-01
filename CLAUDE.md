@@ -1147,6 +1147,20 @@ raise, after the paid digest and critique. Now:
   and assembled user turn, so old synthesis/focus framing misses without a
   global schema or stage-contract bump. Retained prose and reply handling stay
   unchanged; these are offline request checks, not a live model-quality eval.
+  **Cross-QC and investigation (PO-03):** the same rule/helper frames source
+  digests, OCR text, identity context, handle/label metadata and model-derived
+  reconciliation facts on all three cross-QC requests. Host tasks and truncation
+  notices stay outside. The text-layer cap and counters still measure original
+  source characters (4,000 per sheet); slice first, then escape/wrap, so markup
+  adds bounded wire overhead without removing additional source characters.
+  Cross-QC keys retain K2's named host strings and include rendered source-block
+  signatures for delimiters/escaping alongside the changed system prompts;
+  host binding/grounding contract 9 is unchanged. Investigation frames its
+  initial finding/prior-note/index and tool-result text only when sending it;
+  raw executor results, images and saved evidence/traces remain unchanged.
+  Its existing manual `INVESTIGATE_PROMPT_VERSION` moves v3 → v4. No global
+  schema bump or unrelated prompt change; host quote checks still use original
+  evidence, without decoding model replies to make a quote match.
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
   vision read, run twice — self-consistency merge sets `reproduced`. **Only a
   read the model finished counts** (remediation WP-01.4, N4; the owner's
