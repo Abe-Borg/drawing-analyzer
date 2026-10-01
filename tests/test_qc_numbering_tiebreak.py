@@ -45,7 +45,7 @@ import random
 
 import pytest
 
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import (
     Anchor,
     CitationAssessment,
@@ -127,10 +127,9 @@ def test_the_k5_pair_gets_the_same_numbers_in_both_orders(rect):
     assert numbered[0] == {_MOTOR: "QC-001", _PUMP: "QC-002"}
 
 
-def _k5_through_the_ledger(order: str, *, rect: list[float] | None = None,
-                           pass_b: bool = True) -> list[Finding]:
+def _k5_through_the_ledger(order: str, *, rect: list[float] | None = None) -> list[Finding]:
     """Ingest in ``order``, seal, anchor every live entry as the anchor stage
-    does (``rect=None``: the quote was not found), Pass B, number."""
+    does (``rect=None``: the quote was not found), then number."""
     pair = _k5_pair()
     sources = {"X": "digest_json", "Y": "critique_1"}
     ledger = Ledger()
@@ -142,8 +141,6 @@ def _k5_through_the_ledger(order: str, *, rect: list[float] | None = None,
             Anchor(status="EXACT", rect_pdf=list(rect), method="exact") if rect
             else Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
         )
-    if pass_b:
-        reconcile_post_anchor(ledger)
     return ledger.number()
 
 
@@ -154,21 +151,10 @@ def test_the_k5_pair_through_the_ledger_unanchored():
     assert numbered[0] == numbered[1] == {_MOTOR: "QC-001", _PUMP: "QC-002"}
 
 
-def test_the_k5_pair_through_the_ledger_on_one_rectangle_without_the_fold():
-    """Both anchored to the tag and numbered with no Pass B fold between (the
-    pipeline numbers anyway when Pass B raises, I-3)."""
-    numbered = [
-        _numbers(_k5_through_the_ledger(order, rect=_RECT, pass_b=False))
-        for order in ("XY", "YX")
-    ]
-    assert numbered[0] == numbered[1] == {_MOTOR: "QC-001", _PUMP: "QC-002"}
 
 
 def test_the_k5_pair_through_the_whole_lifecycle_on_one_rectangle():
-    """Whatever Pass B decides, the numbers do not follow arrival. Until
-    WP-03.7 it folded the pair (N28) and kept the same survivor in both orders.
-    Now Pass B keeps them apart (a rectangle resolved from one quote is not
-    evidence of one issue), so the tie-break above numbers them."""
+    """Distinct issues at one rectangle keep stable, separate QC numbers."""
     numbered = [_numbers(_k5_through_the_ledger(order, rect=_RECT)) for order in ("XY", "YX")]
     assert numbered[0] == numbered[1]
     assert numbered[0] == {_MOTOR: "QC-001", _PUMP: "QC-002"}
@@ -224,7 +210,6 @@ def test_entries_sharing_text_quote_and_category_are_ordered_by_what_they_absorb
         ledger.seal()
         for entry in ledger.entries:
             entry.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
-        reconcile_post_anchor(ledger)
         entries = ledger.number()
         assert len(entries) == 2, order
         one, two = entries

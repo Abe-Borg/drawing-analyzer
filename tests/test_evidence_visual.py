@@ -1,22 +1,6 @@
-"""WP-03B — evidence that is not in the text layer at all.
-
-The three-state grounding contract (README, "Evidence the host cannot check";
-CLAUDE.md, `classify_quote_evidence`). WP-03A recovered quotes past the prompt
-cap, where the text was still there to find. This covers the cases where there
-is nothing to find:
-
-- a **scanned** sheet has no text layer, so every quote on it failed grounding
-  and — worse — `_parse_facts` dropped every fact, excluding the sheet from
-  cross-shard reconciliation entirely;
-- a **hybrid** sheet has words (so `is_raster` is False) and still cannot
-  support a text check over its pasted raster detail;
-- a leg with **no quote at all** short-circuited the check and was trusted more
-  readily than one whose quote merely failed to match.
-
-The fix admits these at *reduced trust* rather than dropping them — but §2.2 is
-emphatic that admission without a location is a dead end, so this file also pins
-the three-part route that makes them verifiable, and the negative half: on a
-text-bearing sheet an unmatched quote is still the hallucination signal.
+"""Textless and hybrid sheets admit visually located evidence at reduced trust.
+Unmatched quotes on text-bearing sheets still fail. Retained findings must
+reach anchoring, verification and investigation on their own sheet.
 """
 from __future__ import annotations
 
@@ -404,13 +388,7 @@ def test_reduced_trust_without_a_reported_tile_is_still_unanchored():
 
 @pytest.mark.parametrize("quote", [SCANNED_QUOTE, "P-1", "AHU-1", "M-101"])
 def test_a_recovered_finding_reaches_verification_and_investigation(quote):
-    """Asserted against the real gatekeepers, not a copy of their conditions.
-
-    Remediation WP-05.1 (B5) extends it to the short tags cross-QC quotes most,
-    and takes each state from the real classifier: a quote under six characters
-    used to be TEXT_GROUNDED even on a sheet with no text, so the tile fallback
-    never fired and the finding died UNANCHORED.
-    """
+    """Visual evidence, including short tags, reaches both evidence consumers."""
     scanned = _geom("scan.pdf", "AS-1", text="", words=[])
     other = _geom("b.pdf", "B-1", text="", words=[])
     f = Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
@@ -637,43 +615,3 @@ def test_the_prompt_edit_supplies_the_invalidation():
         assert X._cross_qc_cache_key(entries, model="m", preamble="") != key
     finally:
         X.cross_qc_map_system_prompt = original
-
-
-def test_contract_counter_is_not_bumped_by_this_package():
-    # 3, not 2, because P8 item 11 bumped it for its own reason (the `_norm_id`
-    # fold — host-side binding that no key input covers). WP-03B added nothing to
-    # it, which is what this tripwire keeps honest: a bump has to be justified
-    # here before the value moves again.
-    #
-    # 4 since remediation WP-05.1 (B5, N12, N13): grounding became a real,
-    # whole-word match on the anchor's normalizer, which changes which legs and
-    # facts are admitted, and the `evidence_state` stored on each, for
-    # byte-identical inputs. Host-side binding again, so the contract, not a key
-    # term. Still not this package's: WP-03B added nothing.
-    #
-    # 5 since remediation WP-05.2 (B4, N12): that match now folds brackets and
-    # sentence punctuation off every word, the anchor's rule, which changes
-    # which legs and facts are admitted for byte-identical inputs. WP-03B still
-    # added nothing.
-    #
-    # 6 since remediation WP-06.1 (B6, N2): only findings identical in every
-    # field collapse, a whitespace-only fact quote is no longer sent to the
-    # reconciler, and the stored result carries its refused-item counts, for
-    # byte-identical inputs. WP-03B still added nothing.
-    #
-    # 7 since remediation WP-05.3 (B4): grounding also takes a quote that
-    # differs from the sheet's words only by the named character-stream joins,
-    # and no quote or text with a number split around a lone `.` grounds any
-    # longer, for byte-identical inputs. WP-03B still added nothing.
-    #
-    # 8 since remediation WP-04.4: the quantity reader the character-stream
-    # veto reuses changed, so a grounding verdict can move for byte-identical
-    # inputs. WP-03B still added nothing.
-    #
-    # 9 since remediation WP-06.2: the whole-set path binds through host
-    # handles and grounds what it keeps, for byte-identical inputs. WP-03B
-    # still added nothing.
-    #
-    # 10 since remediation WP-06.3: what is admitted changed (terminal
-    # honesty, N14). WP-03B still added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 10

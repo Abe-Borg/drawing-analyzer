@@ -1,79 +1,23 @@
-"""Cross-sheet QC pass (Phase 13 / Phase 24) — a deliberate conflict hunt across the set.
+"""Find conflicts across sheets without changing the retained prose digest.
 
-Distinct from the prose ``synthesis`` (which stays exactly as-is): this pass has
-one job — find **conflicts between sheets**. It is a *text-reasoning* task, so it
-sends the per-sheet digests plus the verbatim text layers and **no images**.
+Requests contain digests and text layers, not images. Small sets use one call;
+larger sets map discipline shards to findings and grounded facts, then reconcile
+facts across shards. Oversized fact collections use every pair of half-cap groups
+so facts in different groups can meet.
 
-Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
-more ``also_on`` legs on the other sheets in the conflict, so the markup writer can
-cloud *both* sheets. The prose ``combined_text`` is never touched (I-2) — cross-QC
-findings live only in the findings artifacts.
+Model references use request-local sheet handles. A legacy printed sheet label
+is accepted only when unique in the set. Ground quotes against uncapped source
+text before trusting dual-anchor findings; never bind an ambiguous label to the
+first sheet. Report request-budget omissions and invalid items explicitly.
+Only exact repeated findings collapse before the ledger.
 
-**Whole-set at every size (Phase 24, DA-015).** For sets up to
-``MAX_SHEETS_SINGLE_CALL`` it is one Opus call over the whole set. Above that it
-uses a **map → reconcile** architecture: it shards by discipline (same-series
-sheets, where conflicts cluster, stay together); each shard call returns its local
-conflicts **and** a set of compact grounded ``CrossQCFact`` s (the comparable data
-points another shard might contradict); then a final **reconciliation** call
-compares the facts across *all* shards, so a conflict whose two sheets fall in
-different shards is still found (the old "shard and union" silently missed those).
-If the facts exceed one call, they are split into half-cap groups and every pair
-of groups is reconciled, so any two facts meet in at least one call
-(:func:`_reconcile_facts`; this docstring called it "a balanced reduction tree"
-until remediation WP-06.1).
+Check terminal status before parsing. Truncation gets one larger-cap retry;
+complete, valid grounded items may survive an unfinished reply as partial work,
+without caching that reply. Refusals and unknown stops retain nothing. A result
+limited only by a known request budget may be cached with its PARTIAL status.
 
-**Opaque handles (§16.1; remediation WP-06.2, N6, U8).** Source identity stays
-host-owned: on **both** paths the model sees a request-local opaque
-``sheet_handle`` (``S001`` …), never a ``source_id``, with the sheet's human id
-shown beside it (``S001 = M-101``) as display metadata. Every returned reference
-goes through one resolver (:func:`_resolve_sheet_ref`): a handle, else a sheet id
-that names exactly one sheet of the set (a legacy reply). An id more than one
-sheet carries is refused and counted (``legs_ambiguous_label`` /
-``facts_ambiguous_label``), never bound to the first; an unknown reference leaves
-the item unbound. Every quote is validated against the sheet's **uncapped**
-source text (:func:`classify_quote_evidence`) before it is trusted, on the
-whole-set path too — an ungrounded quote never becomes a trusted dual-anchor
-finding. The whole-set path used to label sheets by their human id, bind replies
-through a first-wins id map and ground nothing (U8): two PDFs carrying one id
-could not be told apart, and a conflict between them could not be expressed.
-
-**Loss-aware budgeting (§16.2, DA-028).** Each sheet's text layer is capped, but the
-omission is *counted and surfaced* (``text_chars_omitted`` / ``budget_degraded``),
-never a silent slice. The same now holds for the per-response findings cap
-(``findings_omitted``): a response carrying more conflicts than
-``DEFAULT_CROSS_QC_MAX_FINDINGS`` used to be truncated with no counter and still
-reported ``complete``, which on a large set — where cross-sheet coordination
-conflicts matter most — is indistinguishable from a set that simply had fewer.
-
-**Refused items and repeats (remediation WP-06.1; B6, N2).** An item whose
-shape, category, severity or text the host refuses is dropped, as before, and
-now counted on both paths (:class:`CrossQCInvalidCounts`), so a response that
-lost items no longer reads like a clean empty one. The counts are observational:
-a stage warning, never a status. Findings identical in every field collapse
-(:func:`_drop_exact_repeats`); every other report reaches the findings ledger,
-which decides whether two are one. The old key (primary sheet, category, quote,
-legs) had no text, so two different conflicts quoting the same strings on the
-same sheets became one before the ledger could see them.
-
-**Terminal honesty (remediation WP-06.3; U6, U7, N14; the owner's rules).**
-Every call (whole-set, shard map, reconcile) streams through
-``digest.stream_reply`` (:func:`_call`), and the stop reason is read first
-(D-1's classifier, through ``digest.unfinished_reply_error``): a reply the model
-did not finish is never parsed as finished or cached. A reply stopped at
-``max_tokens`` gets one retry at twice the cap, up to
-``digest.MAX_TOKENS_RETRY_CEILING`` (the digest's rank keeps the better read,
-N16). A reply cut off (``max_tokens``, the context window, no stop reason) keeps
-the complete items of its arrays (:func:`_salvage_object`), each validated and
-grounded as usual, and the call stays failed; a refusal, a continuation or an
-unknown stop keeps nothing. The stage is FAILED when it obtained nothing
-(:attr:`CrossQCResult.stage_status`), the error is the ladder's with a noun per
-call, a result short only by its budget is cached with its PARTIAL status (N14),
-and a fact past the per-shard cap, or a fact or leg that is not an object, is
-counted and named (U7).
-
-Additive and non-fatal (I-3): a failure is recorded and the standard deliverable
-ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
-"""
+Failures are additive and nonfatal: record them while retaining the ordinary
+deliverables. This module imports no PDF engine."""
 from __future__ import annotations
 
 import hashlib
@@ -600,7 +544,7 @@ class CrossQCInvalidCounts:
       remediation WP-06.2, and kept apart from it: a refused item never reaches
       a sheet, so it is no grounding discard.
     - Run-level only: an item is refused before any of its sheets is resolved.
-    - **Observational** (``_plans/DECISIONS.md`` D-2): nothing here feeds
+    - **Observational**: nothing here feeds
       ``complete`` or ``budget_degraded``. The pipeline turns a non-zero total
       into a stage warning and the stage keeps its status; the cached result
       carries the counts, so a warm run shows the same warning.

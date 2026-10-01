@@ -1,16 +1,8 @@
-"""Orchestration: drawing PDFs -> per-sheet vision digests -> combined text.
+"""Read construction PDFs into per-sheet digests, findings and review artifacts.
 
-This is the public entry point for the drawing subsystem. It flattens the given
-PDFs into sheets (one per page), renders and digests each sheet independently,
-and concatenates the per-sheet digests into a single text artifact ready to be
-spliced into the spec reviewer's Project Context.
-
-Rendering (PyMuPDF) runs sequentially on the calling thread — it is fast and the
-PDF backend is not thread-safe to share — while the slow, independent per-sheet
-*digest* (one vision call each) runs on a bounded thread pool, so a large set
-completes in roughly ``1/workers`` of the wall-clock. Results are reassembled in
-page order, so the combined digest and every total are deterministic regardless
-of completion order.
+PDF rendering is sequential. Model work uses bounded concurrency or Message
+Batches, with results restored to source/page order and all reported usage
+recorded. The public entry point is extract_drawing_context.
 """
 from __future__ import annotations
 
@@ -44,7 +36,7 @@ from .digest import (
     sheet_digest_from_cache_entry,
     specs_cache_fragment,
 )
-from .digest_cache import digest_cache_key_level1
+from .digest_cache import digest_cache_key_level1, prescan_request_labels
 from .models import (
     Finding,
     NumericClaim,
@@ -881,35 +873,11 @@ def _rendered_stream(
     expected_pages: "dict[str, int] | None" = None,
     on_page_count_changed: "Any" = None,
 ) -> "Any":
-    """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
+    """Yield rendered sheets with optional geometry, artifact and spool sinks.
 
-    When ``geometry_sink`` is given, a :class:`SheetGeometry` (text + geometry,
-    **no PNG bytes**) is appended per sheet as it renders, so the QC stages can
-    anchor / verify / export after the images are gone — the batch path streams
-    and discards each rendered sheet after upload, so this is the only place the
-    per-sheet geometry survives. ``None`` disables capture (a plain digest run
-    keeps no findings state and holds nothing extra).
-
-    ``only`` restricts rendering to the given sheet identities (the level-1 cache
-    passes the set of sheets that missed, so cached sheets never render). Geometry
-    for cached sheets is captured separately during the pre-scan, so when ``only``
-    is in play the caller passes a :class:`_GeometryOmissionSink` (which merges
-    render-time facts into the prescan records instead of appending duplicates).
-
-    ``journal`` (optional) receives one ``SHEET_RENDERED`` event per sheet
-    carrying its render telemetry — image count, PNG byte spread, long edge.
-    This is the only point where the PNG bytes exist on both transports, and
-    the numbers are what a near-blank byte threshold (or a render-target change)
-    has to be chosen against. Emission is best-effort: telemetry must never sink
-    a render (I-3).
-
-    ``expected_pages`` / ``on_page_count_changed`` (remediation WP-11.1, R1)
-    pass the inventory's page counts through to
-    :func:`~drawing_analyzer.render.iter_rendered_sheets`, so the stream reads
-    exactly the pages the run owes and never yields more than it was asked
-    for; a source that cannot be opened again, or a page past its source's
-    current end, is reported through ``on_page_error`` like any page that
-    would not render.
+    `only` selects cache misses. Inventory page counts bound the stream; page
+    failures go through `on_page_error`. Capture lightweight geometry before batch
+    uploads discard images. Journal telemetry and render reuse are advisory.
     """
     for rendered in iter_rendered_sheets(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
@@ -950,22 +918,11 @@ def _rendered_stream(
 
 
 class _GeometryOmissionSink:
-    """Merges render-time facts into already-captured prescan geometries.
+    """Update prescan geometry with render-only facts without duplicating pages.
 
-    On a cache-enabled run the prescan captures every sheet's geometry without
-    rasterizing, so the blank-tile suppression count (the I-1 disclosure §18.2
-    asks the run.log to carry) is unknown at capture time. When a cache *miss*
-    then renders for real, :func:`_rendered_stream` "appends" the freshly built
-    :class:`SheetGeometry` here and only the render-time ``omitted_tile_count``
-    is copied onto the prescan record, and never-rendered cache hits honestly
-    keep ``None``.
-
-    Since remediation WP-11.1 the prescan is best effort: a page it could not
-    scan is routed to the render path, so a render can arrive with no prescan
-    record. Given ``order`` (``_refkey`` -> the page's position among the pages
-    the run owes), the sink adds that page's render-time geometry at its place
-    in page order, so the QC stages still have it; a page not in ``order`` is
-    ignored, and without ``order`` the list never grows (the old contract).
+    Cache hits retain an unknown omitted-tile count. With `order`, render geometry
+    missing from prescan is inserted in inventory order; unknown pages are ignored.
+    Without `order`, the list does not grow.
     """
 
     def __init__(
@@ -1016,30 +973,12 @@ def _page_ranges(numbers: "list[int]") -> str:
 
 
 class _UnreadPages:
-    """Every expected page the digest could not read, and why (remediation WP-11.1, R1).
+    """Account for every expected page without a digest, using thread-safe callbacks.
 
-    Filled by the render path's ``on_page_error`` (the batch path calls it from
-    its prefetch thread, hence the lock; the first outcome for a page wins) and
-    ``on_page_count_changed``. The owner's rules:
-
-    - :meth:`settle` turns every page the run owes that has no digest into a
-      :class:`~drawing_analyzer.models.UnreadPage`, in page order; a page the
-      render path neither yielded nor reported still gets one ("no render
-      outcome was recorded"), so no expected page can drop out of the account;
-    - :meth:`lines` is what ``ctx.errors`` and the digest stage's errors say:
-      **one line per source** for a source-level failure (it could not be
-      opened again; it has fewer pages now), one line per page otherwise, as
-      page failures always read;
-    - :meth:`notes` names each source that has more pages than the inventory
-      counted: only the inventoried pages were read.
-
-    Remediation WP-11.2 (R1): once the digest phase stopped on an unexpected
-    error (:meth:`stop`), a page with no outcome is one the phase never
-    reached. Its record names the failure (``not read: the digest phase
-    stopped early (<Type>)``, the owner's wording) and :meth:`lines` says
-    nothing for it: the one run-level line counts those pages
-    (:attr:`not_reached`). A page that failed on its own keeps its own reason
-    and line.
+    The first page failure wins. `settle` supplies an outcome for every unread page;
+    `lines` groups source failures and lists other page failures. Extra source pages
+    are noted but not read. After `stop`, pages never reached carry the phase's
+    failure and are counted in one run-level line rather than repeated per page.
     """
 
     UNREACHED = "no render outcome was recorded"
@@ -1612,6 +1551,7 @@ def _level1_partition(
         geometries.append(geometry)
         key = digest_cache_key_level1(
             identity,
+            request_labels=prescan_request_labels(geometry),
             model=model,
             prompt_version=DIGEST_PROMPT_VERSION,
             max_tokens=max_tokens,
@@ -1798,18 +1738,20 @@ def _critique_level1_partition(
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
     miss_only: set[tuple[str, int]] = set()
-    level1_identities: dict[tuple[str, int], str] = {}
+    level1_identities: dict[tuple[str, int], tuple[str, str]] = {}
     # Portable (source_id, page) identity per refkey, taken from the stamped
     # refs themselves — the recorded usage instances must carry SRC-#### ids,
     # never paths (§10.4), and deriving from the refs (like the digest path
     # does) needs no assumption about the caller's path-list ordering.
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
-    for ref, identity, _geom in iter_sheet_prescan(
+    for ref, identity, geometry in iter_sheet_prescan(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
         snapshot_by_path=snapshot_by_path, expected_pages=expected_pages,
     ):
+        labels = prescan_request_labels(geometry)
         key = critique_cache_key_level1(
             identity,
+            request_labels=labels,
             model=model,
             prompt_version=CRITIQUE_PROMPT_VERSION,
             max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS,
@@ -1827,7 +1769,7 @@ def _critique_level1_partition(
             ),
         )
         rk = _refkey(ref)
-        level1_identities[rk] = identity
+        level1_identities[rk] = (identity, labels)
         portable_by_key[rk] = source_page_key(ref)
         entry = cache.get(key)
         if entry is not None:
@@ -1843,7 +1785,7 @@ def _critique_level1_partition(
 
 @dataclass
 class _CritiqueReadTally:
-    """The critique stage's read coverage (``_plans/DECISIONS.md`` D-2).
+    """The critique stage's read coverage.
 
     Remediation WP-01.4, the owner's rule: the critique's items are its
     **reads**. Every sheet the run set out to read is critiqued ``runs`` times,
@@ -1936,48 +1878,15 @@ def _run_critique_stage(
     refs: "list[Any] | None" = None,
     expected_pages: "dict[str, int] | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
-    """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
+    """Critique inventoried sheets, using pre-render and rendered-image caches.
 
-    A **level-1** pre-render cache scan (Phase 19B) recognizes unchanged sheets
-    before rasterizing, so a warm exhaustive re-run skips **both** the render and
-    the critique API calls for a cached sheet — the level-2 (PNG-bytes) cache alone
-    still had to rasterize to discover the hit. Only the sheets that miss level-1
-    are re-rendered (streamed on the calling thread) and critiqued on the same
-    bounded pool the digests use; each complete result is then stored under its
-    level-1 key too (store-under-both). Additive and non-fatal: a per-sheet failure
-    is logged and contributes no findings; the run continues.
+    Return `(findings, claims, degraded)` in deterministic order. `degraded` names
+    every sheet lacking a complete set of parsed critique reads. Per-sheet failures
+    are nonfatal. Read coverage and all reported billed usage reach the supplied
+    tally and usage ledger, including partial or failed reads.
 
-    Returns ``(critique_findings, claims, degraded)``; the findings are sorted
-    deterministically so the pooled result is independent of completion order (I-7).
-    ``claims`` are the numeric relationships the critique transcribed (Phase 14), fed
-    to the deterministic arithmetic auditor. ``degraded`` names every sheet whose
-    critique was incomplete — fewer reads finished and parsed than were requested
-    (:func:`~drawing_analyzer.critique.critique_shortfall`: a failed, malformed or
-    unfinished read, even beside a surviving read that shipped findings), a sheet
-    whose critique call raised, or one with no critique input — so the caller can
-    hold the stage off COMPLETE (§3.3: incomplete critique reads are never a valid
-    skip; Phase 27 gauntlet regression). Until remediation WP-01.4 only
-    ``res.error`` degraded a sheet, and a sheet whose surviving read shipped
-    findings keeps ``error=None``, so one finished read of two read COMPLETE.
-
-    ``read_tally`` (a :class:`_CritiqueReadTally`), when given, receives the
-    stage's read coverage for D-2's item rule: every sheet contributes its
-    ``runs`` reads as judged, failed or skipped, and ``eligible`` is set before
-    returning. Per-sheet usage is appended to ``run_usage`` (§15.6): a
-    ``critique`` record per sheet (``CACHE`` for a hit — zero billed tokens — else
-    ``REAL_TIME`` or ``BATCH``); each record aggregates the sheet's
-    self-consistency reads, every billed read included, and reads COMPLETE only
-    when every requested read finished and parsed (FAILED when none did,
-    otherwise PARTIAL), so it says what the stage says.
-
-    ``refs`` / ``expected_pages`` (remediation WP-11.1, the owner's rule): the
-    pages the run owes, from the inventory, and their counts. The stage
-    critiques exactly those pages and never reopens files to count them, so a
-    source lost after the digest stays in its account: its sheets are read from
-    the digest's own spooled renders or retained uploads where those exist, and
-    a page it cannot obtain is named in ``degraded`` with the reason the render
-    path gave. Without ``refs`` (a direct caller) the stage lists the pages
-    itself with ``list_sheets``, which skips a file it cannot open.
+    Only level-1 misses render. Reuse digest renders/uploads where available. When
+    `refs` is supplied, it defines the pages owed; otherwise list sheets directly.
     """
     from .critique import (
         CRITIQUE_PROMPT_VERSION,
@@ -2001,7 +1910,7 @@ def _run_critique_stage(
     tally.runs = runs
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
-    level1_identities: dict[tuple[str, int], str] = {}
+    level1_identities: dict[tuple[str, int], tuple[str, str]] = {}
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
     if cache is not None:
@@ -2121,11 +2030,13 @@ def _run_critique_stage(
         # it parks a fenced-produced merge exactly where the next working
         # structured run will find and serve it. Same correction, same reason, as
         # the level-2 store key.
-        identity = level1_identities.get(_refkey(ref)) if cache is not None else None
-        if identity is not None and res.error is None and res.runs == runs:
+        key_inputs = level1_identities.get(_refkey(ref)) if cache is not None else None
+        if key_inputs is not None and res.error is None and res.runs == runs:
+            identity, labels = key_inputs
             cache.put(
                 critique_cache_key_level1(
                     identity,
+                    request_labels=labels,
                     model=model,
                     prompt_version=CRITIQUE_PROMPT_VERSION,
                     max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS,
@@ -2606,19 +2517,11 @@ def _run_qc_stages(
                 _log.warning("edition audit failed: %s", exc)
     _finish_stage(stage_results, journal, edition_stage)
 
-    # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
-    # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
-    # freeze-before-anchor ordering is gone (Phase 20). Seal first (no more
-    # entries), anchor every primary + leg, fold any duplicate the ingest pass
-    # could not see without geometry, and only then assign QC-### in visual order.
+    # Seal ingestion, resolve primary/leg anchors, then number in visual order.
     entries = ledger.seal()
     _emit("LEDGER_SEALED", stage="ledger", entries=len(entries))
 
-    # Anchor the entries that don't already carry a rectangle (auditor entries do).
-    # The WHOLE block is wrapped (not just the per-sheet resolves): a throw in the
-    # setup (imports, key-building) must not skip numbering below and ship entries
-    # with empty QC ids — pre-Phase-20 freeze() ran before anchoring, so numbering
-    # always survived; number() now runs after, so anchoring must stay non-fatal (I-3).
+    # Setup and per-sheet anchor failures must not prevent numbering.
     if entries and geometries:
         if progress is not None:
             progress(total, total, "Anchoring findings")
@@ -2653,15 +2556,6 @@ def _run_qc_stages(
                 "STAGE_END", stage="anchor", level="WARNING",
                 status="FAILED", error=str(exc),
             )
-
-    # Post-anchor reconciliation (Pass B, §12.1). Since remediation WP-03.7 the
-    # merge rule reads no rectangle, so it folds nothing Pass A refused.
-    try:
-        from .ledger import reconcile_post_anchor
-
-        reconcile_post_anchor(ledger)
-    except Exception as exc:  # noqa: BLE001 - reconciliation must never sink the run
-        _log.warning("post-anchor reconciliation failed: %s", exc)
 
     # Assign the run's positional QC-### numbers now that anchors exist (§12.4).
     entries = ledger.number()
@@ -3285,138 +3179,31 @@ def extract_drawing_context(
     qc_work_dir: Path | None = None,
     confirm_large_set: bool = False,
 ) -> DrawingContext:
-    """Render and digest every sheet in ``pdf_paths`` into one text context.
+    """Read every selected sheet and return its digests, findings and run records.
 
-    ``progress`` (if given) is invoked as ``progress(done, total, label)`` as
-    each sheet finishes and once at completion, so a GUI can show "k/n".
-    ``on_log(message, level=...)`` (batch path only) receives leveled
-    diagnostics — a batch that detached past the elapsed bound, or repeated poll
-    failures — so a GUI can surface *why* a partial run came back incomplete;
-    when omitted these fall back onto ``progress``.
-    ``on_status(text)`` (batch path only) receives transient status-line updates —
-    per-image upload progress, including any transient-503 retry wave — that are
-    intentionally *not* logged, so a GUI's status line keeps moving during a
-    sheet's multi-image upload without flooding its activity history.
-    ``client`` is injectable for tests. Per-sheet failures are captured on the
-    returned :class:`DrawingContext` (``errors`` and the failing sheet's
-    ``SheetDigest.error``); they never abort the run.
+    `client` may be injected. Page failures and incomplete stages are reported on
+    DrawingContext; completed paid work survives a digest-phase exception.
+    `progress(done, total, label)` reports completion, `on_log(message, level=...)`
+    receives batch diagnostics, and `on_status(text)` receives transient updates.
 
-    Digest caching is opt-in: pass an explicit ``cache``
-    (:class:`~drawing_analyzer.digest_cache.DigestCache`), or ``use_cache=True`` to
-    use the process-wide persistent cache, so an unchanged sheet on a re-run is
-    served without a new vision call. Left off, the engine behaves exactly as
-    before (hermetic tests never touch the on-disk cache).
+    Caching is opt-in through `cache` or `use_cache`. Request-affecting settings
+    participate in cache identity. Rendering is sequential; real-time digests use
+    `max_workers` and results return in source/page order. `max_workers=1` disables
+    stage overlap. Batch digests and critique transport are selected independently:
+    Economy uses both, Hybrid queues critique only, and Fast uses neither.
 
-    Digests run concurrently on up to ``max_workers`` threads (default
-    :data:`DEFAULT_DIGEST_WORKERS`, or ``DRAWING_ANALYZER_MAX_WORKERS``);
-    rendering stays sequential. Sheets are reassembled in page order, so the
-    output is independent of completion order. ``max_workers=1`` forces fully
-    sequential processing.
+    Optional stages add synthesis, focus, critique, cross-sheet QC, deterministic
+    audits, crop verification, investigation and citation checks. Focus and project
+    specification text affect digest requests; profile checklists affect critique.
+    Large cross-sheet sets shard by discipline. Stage failures do not certify an
+    empty review or silently count as success.
 
-    ``synthesize=True`` runs one extra text-only pass after the digests that
-    reconciles them into a "Drawing Set Overview" (cross-sheet references /
-    conflicts), prepended to ``combined_text`` and exposed on
-    ``DrawingContext.synthesis_text``. It is skipped for <2 readable sheets and
-    falls back to the plain per-sheet digests on failure (the failure is
-    recorded in ``errors``). ``synthesis_model`` overrides the synthesis model.
-
-    ``use_batch=True`` digests every (uncached) sheet through the Message
-    Batches API instead of the per-sheet real-time pool — 50% cheaper, and each
-    sheet's images ride as Files-API ``file_id`` references so no request body
-    approaches the 32 MB Messages-API limit (the failure the inline-base64 path
-    hit on dense sheets). The batch is polled to completion on the calling
-    thread; the cross-sheet synthesis still runs as one synchronous text-only
-    call afterward. Caching, page ordering, and per-sheet error capture behave
-    identically to the real-time path.
-
-    ``critique_use_batch`` selects the exhaustive review's two critique reads
-    independently. It defaults to the resolved ``use_batch`` value for backward
-    compatibility. ``use_batch=False, critique_use_batch=True`` is Hybrid mode:
-    immediate digests followed by half-rate queued critique; both true is Economy
-    and both false is Fast. Model, prompt, coverage, and output contracts do not
-    change with transport.
-
-    ``focus`` (optional, at the operator's discretion) is a free-text per-run
-    focus — e.g. *"I am particularly interested in the rooms, and what types of
-    plumbing fixtures each has"*. The standard deliverable is unchanged; the
-    focus is purely additive: each sheet's digest gains a final ``**Focus
-    findings**`` section (the vision pass reads the drawings with the question
-    in mind), and one extra text-only pass assembles the set-level **Focus
-    Report** answering it (exposed on ``DrawingContext.focus_report_text`` and
-    woven into ``combined_text``; ``focus_model`` overrides its model). The
-    focus is folded into the digest cache key, so re-running with the same
-    focus is served from cache, while changing or clearing it re-digests —
-    a no-focus run keeps hitting pre-focus cache entries.
-
-    ``project_specifications`` (optional, at the operator's discretion — see
-    :mod:`drawing_analyzer.spec_documents` for the GUI's upload/extraction
-    path) is ground-truth written spec text for this run, distinct from
-    ``focus`` above and from the unrelated "Project Context" external-tool
-    concept referenced elsewhere in this module's module docstring. Unlike
-    ``focus`` it creates NO new report section: it is folded only into each
-    sheet's digest system prompt (cached across sheets — see
-    :func:`drawing_analyzer.digest.digest_system_prompt`), instructing the
-    model to report any drawing-vs-spec conflict as an ORDINARY finding, so it
-    flows through the existing ledger -> anchor -> verify -> markup pipeline
-    with no new plumbing. Oversized input is truncated to a fixed character
-    budget (:func:`drawing_analyzer.spec_documents.enforce_specs_budget`); a
-    truncation is non-fatal and appended to ``ctx.errors`` (I-3). Folded into
-    the digest cache key like ``focus``, and exposed on
-    ``DrawingContext.project_specifications``.
-
-    ``critique=True`` (Phase 11) adds a dedicated **critique pass**: a second
-    full-coverage vision read per sheet, under a senior-QA-engineer persona, whose
-    only job is finding problems (errors, code concerns, RFI-worthy ambiguities,
-    inconsistencies, stale text, and *absences*). It runs self-consistently — two
-    independent reads merged, an issue both raise flagged ``reproduced`` — and its
-    findings pool with the digest's before anchoring, so ``findings`` carries the
-    union. Additive and non-fatal (a failure is recorded in ``errors``); the prose
-    digest is untouched (I-2). The merged critique is cached under its own key, so
-    a re-run skips the extra calls. It re-renders each sheet (the digest images are
-    gone by then), so it is meaningfully more expensive — the exhaustive QC mode.
-
-    ``profiles`` (Phase 12) is a list of review-profile names (or
-    :class:`~drawing_analyzer.profiles.Profile` objects) whose checklists are
-    injected into the critique prompt, so the model applies the owner's encoded QC
-    knowledge item by item. Unknown names are skipped (non-fatal). The selected
-    profiles' fingerprint folds into the critique cache key, so choosing or editing
-    a profile re-critiques. Ignored unless ``critique=True``.
-
-    ``cross_qc=True`` (Phase 13) adds a **cross-sheet QC pass**: one text-only
-    reasoning call over all the digests + text layers (no images) that hunts
-    conflicts *between* sheets — the same tag valued two ways, twin notes diverged,
-    a note contradicted elsewhere, a reference whose target disclaims what the
-    pointer claims. Its findings carry **dual anchors** (``also_on`` legs), so the
-    markup writer clouds **both** sheets of a conflict, each popup cross-referencing
-    the other. Distinct from the prose ``synthesize`` (which is untouched); additive
-    and non-fatal, and — like the critique — the prose ``combined_text`` never sees
-    it (I-2). Large sets shard by discipline.
-
-    ``citation_check=True`` (Phase 15) adds a **citation check**: one web-search-
-    backed call per unique code ref the findings cite, judged against the editions
-    the set adopts (harvested from the general-notes text) and the current
-    edition. The verdict (``CHECKED_SUPPORTS`` / ``CHECKED_MISMATCH`` /
-    ``UNCHECKED``) attaches to each citing finding and appears in the markup
-    popup, the CSV, and the report; a MISMATCH downgrades nothing automatically —
-    sometimes the stale citation *is* the finding. Real-time only; additive and
-    non-fatal.
-
-    **Part III — the findings ledger and the gating amendment (§16–18).** When
-    any QC stage runs, every QC item from every channel is ingested into one
-    per-run ledger (the digest's JSON findings, its harvested prose
-    Coordination/Conflict items, the critique reads, cross-sheet conflicts, the
-    deterministic auditors, harvested synthesis conflicts, and — behind
-    ``focus_findings_to_markups`` — the per-sheet Focus sections). Duplicates
-    merge with unioned provenance (``Finding.sources``); the exhaustive default
-    inks **everything except REJECTED**: anchored entries cloud (UNCERTAIN
-    dashed), rect-less entries become margin callouts (``[SHEET-WIDE]`` /
-    ``[QUOTE NOT FOUND]`` prefixes), and REJECTED entries are listed on the index
-    page's "Rejected by verification" section (inked grey only with
-    ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
-    opt-in that restricts ink to VERIFIED + DETERMINISTIC (it now defaults
-    **off** — §18 supersedes the old default). The run-end coverage tally lands
-    on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line`` (markup runs only —
-    without ``qc_markups`` there is no PDF ink to account for).
+    All finding channels feed one ledger, sealed before anchoring and numbered
+    before verification/export. Markups normally include every non-REJECTED finding;
+    `markup_verified_only` limits them to VERIFIED or DETERMINISTIC, and
+    `ink_rejected` includes rejected findings. `ledger_tally` accounts for saved
+    markup placements when `qc_markups` is enabled. These model and artifact statuses
+    are review evidence, not engineering approval.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache

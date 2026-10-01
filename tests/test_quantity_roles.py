@@ -59,7 +59,7 @@ from drawing_analyzer.critique import (
     merge_self_consistency,
     signatures_compatible,
 )
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import Anchor, Finding
 
 DEG = "\u00b0"
@@ -522,8 +522,7 @@ def test_recorded_role_limits_still_merge(pair):
 # and B fold, B and C fold, A and C conflict. A survivor's signature grows as
 # it absorbs supporting quotes, and when the bundle passes to the bridge the
 # live survivor may carry no role at all, so every complete-link check must
-# compare members as they arrived: the critique's _cluster, Ledger.add's
-# member snapshots, and Pass B's member histories on both sides.
+# compare members as they arrived, in critique clustering and Ledger.add.
 
 _A = "Provide 6 in main and 4 in branch at the riser serving the east data hall"
 _B = "Provide 6 in and 4 in piping at the riser serving the east data hall"
@@ -558,22 +557,6 @@ def test_the_ledger_never_folds_the_chain(order):
     for entry in ledger.entries:
         texts = {m.text for m in ledger.member_history(entry)}
         assert not {_A, _C} <= texts
-
-
-@pytest.mark.parametrize(
-    "order", list(itertools.permutations("ABC")),
-    ids=["".join(p) for p in itertools.permutations("ABC")],
-)
-def test_pass_b_never_folds_the_chain(order):
-    ledger = Ledger()
-    for key in order:
-        ledger.add([_finding(_CHAIN[key], quote="RISER")], source=f"read_{key}")
-    assert len(ledger) == 2
-    ledger.seal()
-    for entry in ledger.entries:
-        entry.anchor = Anchor(status="EXACT", rect_pdf=[10.0, 20.0, 200.0, 40.0], method="exact")
-    reconcile_post_anchor(ledger)
-    assert len(ledger) == 2
 
 
 def test_a_grown_survivor_without_roles_does_not_admit_the_conflict():

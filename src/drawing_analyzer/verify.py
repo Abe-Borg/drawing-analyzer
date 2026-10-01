@@ -795,9 +795,8 @@ class VerifyResult:
     run could say whether its UNCERTAIN share came from the drawings or from
     the parser.
 
-    Since remediation WP-01.1 they also decide the stage's completeness
-    (``_plans/DECISIONS.md`` D-2): the pipeline passes :attr:`eligible` and
-    :attr:`judged` to :func:`~drawing_analyzer.models.item_coverage_status`,
+    The pipeline passes :attr:`eligible` and :attr:`judged` to
+    :func:`~drawing_analyzer.models.item_coverage_status`,
     so a pass is COMPLETE only when every eligible finding got a settled
     verdict. Counting every UNCERTAIN as judged had let a pass whose every
     call came back malformed read COMPLETE (N5).

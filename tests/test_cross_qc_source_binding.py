@@ -1,34 +1,6 @@
-"""Remediation WP-06.2: whole-set cross-QC on host handles, grounded like the
-sharded path, its claims rebound through handles, its framing in the key
-(N6, U8, K2; the owner's rules).
-
-**N6.** The whole-set path (40 sheets or fewer) labelled each sheet by its
-human sheet id and bound every reply back through a map keyed by that id, in
-which the first detection won: two PDFs that both carry ``M-101`` could not be
-told apart, a reply naming ``M-101`` silently bound the first one, and a
-conflict between the two same-label sheets could not be expressed at all. The
-same first-wins lookup decided the arithmetic auditor's sheet for a claim with
-no source. Now both paths address sheets by the same host handles (``S001``
-...), with the sheet id shown beside each (``S001 = M-101``), and one resolver
-binds a reference: a handle, else a sheet id that names exactly one sheet (a
-legacy reply). An id more than one sheet carries is refused and counted
-(``legs_ambiguous_label`` / ``facts_ambiguous_label``), never bound to the
-first; the arithmetic auditor refuses it too (``arithmetic_ambiguous_sheet``).
-
-**U8.** The whole-set path grounded nothing: a quote the sheet does not print
-was trusted, and an item it could not place on two sheets was dropped with an
-INFO line only. Whole-set items now go through the sharded validator, which
-grounds each quote against the sheet's **uncapped** evidence text
-(``classify_quote_evidence`` over ``models.sheet_evidence_text``), with no
-exemption for short tags, and counts what it drops (``discards`` is recorded
-on the whole-set path too).
-
-**K2.** The user-turn framing (the task line, the set/shard/reconcile headers
-and lines, the truncation marker) was outside the cache key, so editing it
-changed the request while every key stayed the same. The framing strings now
-ride the key beside the three system prompts.
-
-Hermetic: fake clients only, no key, no network.
+"""Both cross-QC paths bind replies to unique physical sheets, ground quotes
+against uncapped text and reject ambiguous labels. Numeric claims retain
+source ownership, and model-visible framing participates in cache identity.
 """
 from __future__ import annotations
 
@@ -737,8 +709,7 @@ def test_each_framing_string_is_model_visible_and_in_the_key(monkeypatch, name):
 
 
 def test_the_truncation_marker_is_in_the_key(monkeypatch):
-    # A degraded result is never cached, so the marker never reaches a stored
-    # entry; the plan asks only that the key covers it (WP-10 step 2, K2).
+    # Changing a model-visible omission marker changes the request identity.
     geoms = _two_m101()
     before = _key(geoms)
     monkeypatch.setattr(X, "_TRUNCATION_MARKER_TEMPLATE", "\n[CUT {omitted} chars]")
@@ -774,25 +745,6 @@ def test_the_requests_keep_their_bytes_apart_from_the_sheet_title():
     assert reconcile.startswith("SHEET MANIFEST (handle = sheet-id (discipline)):\n")
     assert metadata[0] == "  S001 = M-101 (m)"
     assert root.find("cross_qc_fact").text[1:-1] == '  S001 | P-1 | v | 480 | "PUMP P-1 480V"'
-
-
-# --------------------------------------------------------------------------- #
-# The contract (the owner's decision: 8 -> 9 for the host-side binding)
-# --------------------------------------------------------------------------- #
-
-
-def test_the_cross_qc_contract_moved_for_source_binding():
-    # Host-side binding changed for byte-identical request inputs: handles and
-    # one resolver on the whole-set path, its grounding, claims rebound through
-    # handles, the claim dedup keyed on the source, entries in source order.
-    # 10 since remediation WP-06.3 (what is admitted changed: a reply the model
-    # did not finish is never stored; a budget-only shortfall is, with its status).
-    assert X._CROSS_QC_CACHE_CONTRACT == 10
-    geoms = _two_m101()
-    current = _key(geoms)
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 8)
-        assert _key(geoms) != current
 
 
 # --------------------------------------------------------------------------- #

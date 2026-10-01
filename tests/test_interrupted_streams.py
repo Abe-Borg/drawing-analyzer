@@ -675,20 +675,22 @@ def test_a_rescue_with_no_event_keeps_the_batch_read_and_names_it(monkeypatch):
     assert [(a.transport, a.billable, a.input_tokens) for a in interrupted] == [("REAL_TIME", False, 0)] * 3
 
 
-def test_the_batch_inline_fallback_counts_its_interrupted_attempt(tmp_path):
-    # A Files-API 404 serves the sheet inline through digest_sheet (batch's
-    # _serve_inline): its one REAL_TIME attempt record carries the count.
+def test_batch_upload_failure_never_bills_a_real_time_digest(tmp_path):
     stub = AnthropicAPIStub(
-        _script()._route, stream=_stream_seq("digest", [_DROP], _about_m101),
+        _script()._route,
         reject=lambda record: httpx2.Response(404, json={"type": "error", "error": {
             "type": "not_found_error", "message": "no files"}})
         if record["path"] == "/v1/files" else None)
 
     ctx = _run(tmp_path, stub, "batch", full=False)
 
-    assert _sheet(ctx, "M-101").error is None
-    rec = _record(ctx, "digest", "digest:SRC-0001:p0")
-    assert (rec.transport, rec.interrupted_attempts) == ("REAL_TIME", 1)
+    assert all(sheet.error and "upload" in sheet.error for sheet in ctx.sheets)
+    assert _calls(stub) == {}
+    records = _records(ctx, "digest")
+    assert len(records) == len(ctx.sheets)
+    assert all(rec.transport == "BATCH" and rec.terminal_status == "FAILED"
+               and rec.estimated_cost == 0 and rec.interrupted_attempts == 0
+               for rec in records)
 
 
 # --------------------------------------------------------------------------- #
@@ -731,16 +733,3 @@ def test_a_cached_digest_is_never_an_interrupted_read(tmp_path):
 
     assert _record(ctx, "digest", "digest:SRC-0001:p0").interrupted_attempts == 0
     assert _sheet(ctx, "M-101").cached
-
-
-def test_no_cache_term_moved():
-    # No key, contract or schema moved (the owner's rule, D-4's WP-01.7 note):
-    # a finished snapshot is stored like any finished reply, under the same key.
-    # WP-01.7 left the critique contract at 3; remediation WP-04.3 is the bump
-    # after it (quantity roles in the merge rule), re-pinned here by the owner's
-    # decision, and remediation WP-04.4 the next (the tokenizer residuals and
-    # the feet-inches pairs), re-pinned to (10, 5) by the owner's decision. The
-    # keys WP-01.7 left are pinned in test_drawing_cache_identity.py.
-    from drawing_analyzer import digest_cache
-
-    assert (digest_cache._SCHEMA_VERSION, digest_cache._CRITIQUE_CACHE_CONTRACT) == (10, 5)

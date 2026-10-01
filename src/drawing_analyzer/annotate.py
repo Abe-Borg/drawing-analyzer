@@ -1,81 +1,23 @@
-"""Markup writer: turn findings into a numbered, navigable, reviewed PDF.
+"""Write numbered QC annotations and an index to new reviewed PDFs.
 
-This writes **real annotation objects** onto a ``<stem>_reviewed.pdf`` so the
-result reads like a senior plan-review set (Phase 15):
+Findings produce severity-styled clouds or sheet-level callouts, QC tags,
+optional-content layers, and linked index entries. Never overwrite the original:
+open it, add annotations in memory, and save a separate ``_reviewed.pdf``.
 
-- every inked finding carries a sequential **QC tag** (``QC-001`` …) — a small
-  FreeText label beside its cloud in the severity color; the same number appears
-  in the CSV, ``findings.json``, the HTML report, and the index page;
-- **severity styling**: high = red, medium = orange, low / question = blue;
-  DETERMINISTIC (auditor) findings draw a **solid** border, model findings a
-  **revision cloud** (``clouds=2``), opted-in unverified findings **dashed** with
-  a ``[CHECK]`` popup prefix;
-- **severity layers**: every finding's ink (cloud, QC tag, margin callout, leader
-  line, overflow / set-level note) is placed on a per-severity **PDF
-  optional-content layer** — ``QC markups - High/Medium/Low severity`` — so a
-  reviewer can show or hide a whole severity tier's markups at once in Bluebeam
-  Revu / Acrobat / Chromium. Findings layer strictly by ``severity`` (a
-  question-category finding rides its own tier, even though its *color* is blue);
-  every layer ships **on**, so a freshly-opened reviewed set looks exactly as it
-  did before — the layers only add the *option* to filter;
-- text-anchored defects are Square clouds; **sheet-level / absence findings**
-  (``anchor_hint="SHEET"``) become FreeText **callout boxes stacked in a computed
-  clear margin band** (the largest text-free horizontal band, found from the
-  sheet's word rectangles), with a **leader Line** arrow to the reported tile's
-  centroid when one is known;
-- **findings index pages** are inserted at the front of each reviewed PDF —
-  a table (ID, sheet, severity, status, one-line text) where every row carries a
-  GOTO link jumping to the finding's page and rectangle; labeled
-  "AI DRAFT REVIEW — index";
-- an optional **appendix page** (off by default) lists the deterministic checks
-  that *passed* — the balance column of a real review;
-- popups are lean and actionable, written for a human reviewer: finding text,
-  the recommended action, the verbatim quote to look for, the cross-sheet
-  pointer, human-meaningful refs plus the citation verdict in plain words, and
-  a closing plain-words trust note. Machine detail (finding ids, provenance
-  chips, evidence paths, raw statuses) lives in the CSV/HTML report instead.
+PyMuPDF is AGPL-3.0. Only this module and ``render.py`` may import it; other
+modules use dependency-free finding and geometry records. Annotation appearance
+streams must be generated with ``annot.update()`` for consistent viewer display.
 
-Opened in Bluebeam Revu the annots populate the Markups List (filter / sort /
-reply / export all work); Acrobat and Chromium render them too, and the index
-links jump in all three.
+Input rectangles use PAGE_VIEW_V2: post-CropBox and post-rotation, matching the
+rendered sheet. PyMuPDF annotation/link APIs expect unrotated, CropBox-relative
+coordinates. Apply the live page's ``derotation_matrix`` immediately before
+placement, and rotate FreeText with the page so it reads upright.
 
-.. warning::
-   PyMuPDF is licensed **AGPL-3.0**. This is the **second and only other** module
-   permitted to import it (the first is :mod:`render`); every other module works
-   on the dependency-free :class:`~drawing_analyzer.models.Finding` /
-   geometry, so the PDF backend stays swappable. If this project is distributed
-   and you need to relicense, a permissive alternative is ``pypdf`` building
-   ``/Square`` annots with a manual border-effect dict
-   (``/BE {/S /C /I 2}`` for the cloud) — but pypdf does **not** generate an
-   appearance stream, so some viewers render nothing; PyMuPDF's ``annot.update()``
-   (below) builds the ``/AP`` that makes the cloud show everywhere. That gap is
-   why PyMuPDF is used here.
-
-.. note::
-   Finding rectangles arrive in the canonical **PAGE_VIEW_V2** space (Phase 19) —
-   post-CropBox, post-rotation, matching the images the model saw. PyMuPDF's
-   ``add_*_annot`` / link APIs, however, place ink in the page's *un-rotated,
-   CropBox-relative* space (characterized empirically — see
-   ``tests/test_drawing_geometry.py``). So every rect/point is transformed
-   view→page via the live page's ``derotation_matrix`` (== ``PageGeometry.
-   view_to_page``) right before it is drawn (:func:`_derotate_rect` /
-   :func:`_derotate_point`), and FreeText text is drawn with ``rotate=
-   page.rotation`` so callouts read upright on a rotated sheet. On an un-rotated
-   page the transform is the identity, so the common case is unchanged. The
-   transform lives here (a blessed PyMuPDF module), keeping every other module
-   working on plain PAGE_VIEW_V2 numbers.
-
-The writer never touches the source file: it opens the original, adds annots in
-memory, and saves a *new* ``_reviewed.pdf``. It proves its work (Phase 21,
-DA-007): every mark is stamped with its logical placement id, and after saving
-the file is reopened and reconciled against the plan — a placement counts only
-when its stamped component is found again in the saved artifact. Stamps embed a
-per-run id, so a re-review of a PDF that already carries analyzer annotations
-reconciles against *this* run's marks, and unrelated pre-existing source
-annotations (which carry no stamp) are ignored (DA-029). The writer returns a
-:class:`~drawing_analyzer.models.MarkupRunResult` — the receipts, the
-receipt-derived coverage status/tally, and the reviewed-PDF paths.
-"""
+Every placement component carries a logical id and per-run stamp. Reopen the
+saved PDF and reconcile those stamps with the plan before reporting coverage;
+unrelated or earlier-run annotations do not count. ``MarkupRunResult`` returns
+the resulting receipts, coverage and reviewed paths. Placement coverage does
+not certify the engineering judgment behind a finding."""
 from __future__ import annotations
 
 import itertools

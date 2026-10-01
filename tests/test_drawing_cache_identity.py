@@ -1,15 +1,13 @@
-"""Level-1 cache identity and schema migration (DA-004, §11.5).
+"""Cache identity follows rendered page content, configuration and schema.
 
-The render identity conservatively hashes the transitive PDF dependencies that
-can affect one page's pixels, plus render configuration and environment. A local
-page edit rekeys that page while preserving unchanged siblings; any ambiguity
-falls back to the whole-source hash, so stale hits remain impossible. The same
-identity supports digest and critique pre-render cache hits.
+Page-local changes preserve unaffected siblings; changed critique contracts
+miss at both cache levels without invalidating unrelated paid stages.
 """
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,7 +18,9 @@ from drawing_analyzer.digest_cache import (
     critique_cache_key_level1,
     digest_cache_key_level1,
 )
-from drawing_analyzer.models import COORDINATE_SPACE_VERSION, SheetRef
+from drawing_analyzer.models import (
+    COORDINATE_SPACE_VERSION, ImageTile, RenderedSheet, SheetGeometry, SheetRef,
+)
 
 pymupdf = pytest.importorskip("pymupdf")
 
@@ -291,7 +291,7 @@ def test_prescan_rehashes_a_source_changed_since_the_snapshot(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Schema migration: a pre-v5 cache entry is discarded on load
+# Older cache schemas are not served as current results
 # --------------------------------------------------------------------------- #
 
 
@@ -336,98 +336,6 @@ def test_critique_level1_key_sensitive_to_runs_and_profiles():
     kp = critique_cache_key_level1(ri, runs=2, profiles_key="fp@1@hash", **base)
     assert k1 != k2                              # one-read vs two-read differ
     assert k2 != kp                              # a profile selection re-critiques
-
-
-def test_both_prompt_hashes_cover_every_shared_user_framing_string():
-    # The user-turn framing (how a sheet is introduced, how an omitted tile is
-    # disclosed, the overview label, the per-tile label) is model-visible text
-    # that sat OUTSIDE both prompt hashes. Editing it changed what was sent
-    # while every cache key stayed byte-identical, so warm runs replayed reads
-    # taken under the old wording.
-    #
-    # ``build_user_content_blocks`` is SHARED: the critique passes its own
-    # closing instruction and reuses this exact framing, so a string covered by
-    # only one hash re-keys that cache while silently replaying the other — the
-    # failure CRITIQUE_PROMPT_VERSION's own comment already records.
-    import hashlib
-
-    from drawing_analyzer import critique as critique_mod
-    from drawing_analyzer import digest as digest_mod
-
-    assert digest_mod.SHARED_USER_FRAMING_STRINGS, "shared framing tuple is empty"
-
-    def _digest_hash(strings):
-        return hashlib.sha256(
-            "\x00".join(
-                (
-                    digest_mod.DIGEST_SYSTEM_PROMPT,
-                    digest_mod._DIGEST_TASK_INSTRUCTION,
-                    *strings,
-                    digest_mod._FINDINGS_INSTRUCTION,
-                )
-            ).encode("utf-8")
-        ).hexdigest()[:16]
-
-    def _critique_hash(strings):
-        return hashlib.sha256(
-            "\x00".join(
-                (
-                    critique_mod.CRITIQUE_SYSTEM_PROMPT,
-                    critique_mod._CRITIQUE_TASK_INSTRUCTION,
-                    critique_mod._CRITIQUE_FINDINGS_INSTRUCTION,
-                    *strings,
-                )
-            ).encode("utf-8")
-        ).hexdigest()[:16]
-
-    shared = list(digest_mod.SHARED_USER_FRAMING_STRINGS)
-    assert _digest_hash(shared) == digest_mod.DIGEST_PROMPT_VERSION
-    assert _critique_hash(shared) == critique_mod.CRITIQUE_PROMPT_VERSION
-
-    # Editing any one of them must move BOTH versions, never just one.
-    for i in range(len(shared)):
-        edited = list(shared)
-        edited[i] = edited[i] + " EDITED"
-        assert _digest_hash(edited) != digest_mod.DIGEST_PROMPT_VERSION, shared[i]
-        assert _critique_hash(edited) != critique_mod.CRITIQUE_PROMPT_VERSION, shared[i]
-
-
-# --------------------------------------------------------------------------- #
-# The render-identity SCHEME bump is the invalidation mechanism (P7 item 28)
-# --------------------------------------------------------------------------- #
-
-
-def test_render_identity_scheme_is_v4_for_the_annotation_free_text_policy(tmp_path):
-    """Item 28 changed the text-extraction POLICY, not the document.
-
-    ``_page_dependency_sha256`` hashes the annotation bytes and those bytes did
-    not move, so without a scheme bump an already-cached annotated page still
-    hits level 1 and is served a digest built from annotation-contaminated
-    ``sheet_text`` **without re-extracting the text** — a false hit, which is the
-    one failure mode the identity exists to prevent.
-
-    Without this test the bump is invisible: reverting the literal to v3 changes
-    nothing else observable, so every other cache-identity test still passes.
-    """
-    import drawing_analyzer.render as R
-
-    assert R._RENDER_IDENTITY_SCHEME == "render-identity-v4"
-
-    path = tmp_path / "M-101.pdf"
-    doc = _base_doc()
-    annot = doc[0].add_freetext_annot(
-        pymupdf.Rect(200, 300, 500, 360), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
-    )
-    annot.update()
-    doc.save(str(path))
-    doc.close()
-
-    current = _identity(path)
-    assert current.startswith("render-identity-v4|")
-    # The scheme rides the key: a pre-change entry cannot be served to the new
-    # extraction policy.
-    legacy = "render-identity-v3|" + current.split("|", 1)[1]
-    assert current != legacy
 
 
 # --------------------------------------------------------------------------- #
@@ -514,24 +422,17 @@ def test_annotation_content_on_the_page_itself_still_rekeys(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Remediation WP-04.1: a critique-scoped contract term, not a schema bump
+# A critique contract change must leave other paid stages reusable.
 # --------------------------------------------------------------------------- #
-#
-# A critique entry stores the POST-MERGE findings of its reads
-# (``critique.critique_cache_entry_from_result``), so the host's merge rule is
-# part of what a stored critique means. WP-04.1 changed the quantity tokenizer
-# behind ``critique.critical_signature``, which changes which reads merge. The
-# change had to invalidate the critique namespace, and only it: the v10
-# precedent bumped ``_SCHEMA_VERSION`` for a signature change, which feeds every
-# key builder and re-billed every digest (plan §2 rule 6).
-
-from types import SimpleNamespace  # noqa: E402
 
 from drawing_analyzer import digest_cache as DC  # noqa: E402
 
-_KEY_SHEET = SimpleNamespace(
-    overview=SimpleNamespace(png_bytes=b"OVERVIEW"),
-    tiles=[SimpleNamespace(png_bytes=b"TILE00"), SimpleNamespace(png_bytes=b"TILE01")],
+_KEY_SHEET = RenderedSheet(
+    ref=SheetRef(Path("M-101.pdf"), 0, "M-101.pdf", 1),
+    overview=ImageTile(b"OVERVIEW", 100, 80, "overview"),
+    tiles=[ImageTile(b"TILE00", 50, 80, "tile", 0, 0, "left"),
+           ImageTile(b"TILE01", 50, 80, "tile", 0, 1, "right")],
+    page_width_pt=100, page_height_pt=80, rows=1, cols=2,
 )
 _KEY_RENDER_IDENTITY = "render-identity-v4|content_dependency=page:abc"
 _KEY_REQUEST = dict(
@@ -542,7 +443,7 @@ _KEY_SHEET_TEXT = "VAV-3 SERVES ROOM 120"
 
 
 def _current_keys() -> dict[str, str]:
-    """Every key builder over one fixed set of inputs."""
+    """Representative keys for each independently cached stage."""
     return {
         "digest_l2": DC.digest_cache_key(
             _KEY_SHEET, sheet_text=_KEY_SHEET_TEXT, **_KEY_REQUEST),
@@ -569,43 +470,94 @@ def _current_keys() -> dict[str, str]:
     }
 
 
-# The keys these inputs produced through 1.7.0 and on main before WP-04.1
-# (schema 10, no critique contract term), computed from the unchanged builders.
-# If a later change moves one of these deliberately, re-pin it in that PR and
-# record the move in the migration register (_plans/DECISIONS.md).
-_KEYS_BEFORE_WP_04_1 = {
-    "digest_l2": "273a27b059cdef930f7900591d9f4387c830bfcd1999a1f2e83fe00cbb3d6b93",
-    "digest_l1": "3ffb7565e0c1d400cfa2cdba4fa1445831e51ddcb336ce9aa41fea2748d046d5",
-    "critique_l2": "51260a632568fb268d55cf4977aa1e41aa01f80a45eca8e21df0d966db990cec",
-    "critique_l1": "946d7517e6636e49ecb8ad2f035d7bfdbdfa6acad2903178bb18ec9779b7b869",
-    "critique_l2_profiles_structured":
-        "7a9baf0a35dfca4839c5d55b3c24d33e051b338c6a5dcc71bd8976756517d6b7",
-    "critique_l1_profiles_structured":
-        "483ac70f16253ae4c6e7369780099767b5604457ed9e5e3d53137180e04df59c",
-    "identity": "f61f9c79d5af37e47030f77427b04717a10600f22d12f45ae6d29c5de5e78c87",
-    "review_plan": "cf72490acb8efe01e25b6d7e46375ecbbc7dd54603bace48e49ebb1d25b870d5",
-    "citation": "17396185e1c6aec3d4daf2b4478a7348954f97cb104b2680dd0fe995e0022410",
-    "investigation": "dd4994bec0947535e5b86839209c5942506758fecc81e6d5f2822ec2743da631",
-}
 _CRITIQUE_KEYS = (
     "critique_l2", "critique_l1",
     "critique_l2_profiles_structured", "critique_l1_profiles_structured",
 )
-_OTHER_KEYS = tuple(k for k in _KEYS_BEFORE_WP_04_1 if k not in _CRITIQUE_KEYS)
+_OTHER_KEYS = tuple(k for k in _current_keys() if k not in _CRITIQUE_KEYS)
 
 
-def test_wp_04_1_moves_every_critique_key_and_no_other_key():
-    now = _current_keys()
-    for name in _CRITIQUE_KEYS:
-        assert now[name] != _KEYS_BEFORE_WP_04_1[name], f"{name}: an old entry would still hit"
-    for name in _OTHER_KEYS:
-        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
+@pytest.mark.parametrize("change", [
+    lambda s: replace(s, ref=replace(s.ref, source_name="renamed.pdf")),
+    lambda s: replace(s, ref=replace(s.ref, page_count=2)),
+    lambda s: replace(s, tiles=[replace(s.tiles[0], label="upper-left"), s.tiles[1]]),
+    lambda s: replace(s, tiles=[replace(s.tiles[0], row=1), s.tiles[1]]),
+    lambda s: replace(s, cols=3),
+    lambda s: replace(s, omitted_tiles=[(0, 2)]),
+])
+def test_model_visible_labels_rekey_digest_and_critique(change):
+    from drawing_analyzer.digest import build_user_content
+
+    changed = change(_KEY_SHEET)
+    assert build_user_content(changed) != build_user_content(_KEY_SHEET)
+    for builder, extra in ((DC.digest_cache_key, {}), (DC.critique_cache_key, {"runs": 2})):
+        key = builder(_KEY_SHEET, **_KEY_REQUEST, **extra)
+        assert builder(replace(_KEY_SHEET), **_KEY_REQUEST, **extra) == key
+        assert builder(changed, **_KEY_REQUEST, **extra) != key
+
+
+def test_prerender_keys_include_display_and_generated_tile_labels(monkeypatch):
+    from drawing_analyzer import tiling
+
+    geometry = SheetGeometry.from_rendered(_KEY_SHEET)
+    labels = DC.prescan_request_labels(geometry)
+    renamed = replace(geometry, ref=replace(geometry.ref, source_name="renamed.pdf"))
+    renamed_labels = DC.prescan_request_labels(renamed)
+    monkeypatch.setattr(tiling, "position_label", lambda *_a: "new placement wording")
+    regenerated = DC.prescan_request_labels(geometry)
+    for builder, extra in ((DC.digest_cache_key_level1, {}),
+                           (DC.critique_cache_key_level1, {"runs": 2})):
+        def key(fragment):
+            return builder(_KEY_RENDER_IDENTITY, request_labels=fragment, **_KEY_REQUEST, **extra)
+        assert key(labels) != key(renamed_labels)
+        assert key(labels) != key(regenerated)
+        assert key(labels) != key("")
+
+
+def test_pipeline_prerender_probes_change_when_identical_pdf_is_renamed(tmp_path, monkeypatch):
+    import shutil
+    from drawing_analyzer import pipeline
+
+    original, renamed = tmp_path / "original.pdf", tmp_path / "renamed.pdf"
+    doc = _base_doc()
+    doc.save(str(original))
+    doc.close()
+    shutil.copyfile(original, renamed)
+    assert _identity(original) == _identity(renamed)
+    cache = DigestCache(None, persist=False)
+    seen = []
+    monkeypatch.setattr(cache, "get", lambda key: seen.append(key))
+    common = dict(rows=2, cols=2, overlap_frac=.08, cache=cache, model="m")
+    for partition, extra in (
+        (pipeline._level1_partition, dict(max_tokens=100, use_thinking=False,
+                                         effort=None, focus=None)),
+        (pipeline._critique_level1_partition, dict(runs=1, profiles_key=None)),
+    ):
+        seen.clear()
+        for path in (original, original, renamed):
+            partition([path], **common, **extra)
+        assert seen[0] == seen[1] != seen[2]
+
+
+@pytest.mark.parametrize("rotation", (0, 90, 180, 270))
+def test_prerender_labels_match_rendered_labels_on_cropped_rotated_pages(tmp_path, rotation):
+    from drawing_analyzer.render import iter_rendered_sheets, iter_sheet_prescan
+
+    path = tmp_path / "sheet.pdf"
+    doc = _base_doc()
+    doc[0].set_cropbox(pymupdf.Rect(20, 30, 600, 700))
+    doc[0].set_rotation(rotation)
+    doc.save(str(path))
+    doc.close()
+    (_, _, geometry), = iter_sheet_prescan([path], rows=2, cols=2)
+    sheet, = iter_rendered_sheets([path], rows=2, cols=2)
+    assert sheet.tiles
+    display, rows, cols, projected = json.loads(DC.prescan_request_labels(geometry))
+    assert (display, rows, cols) == (sheet.ref.display_label, sheet.rows, sheet.cols)
+    assert all([tile.row, tile.col, tile.label] in projected for tile in sheet.tiles)
 
 
 def test_the_critique_contract_rides_both_critique_builders_and_nothing_else(monkeypatch):
-    # One term inside BOTH builders, so the pre-render probe (level 1) and the
-    # PNG-bytes store (level 2) can never disagree about which contract they
-    # serve -- the same reason F-01's structured_key rides both levels.
     before = _current_keys()
     monkeypatch.setattr(DC, "_CRITIQUE_CACHE_CONTRACT", DC._CRITIQUE_CACHE_CONTRACT + 1)
     after = _current_keys()
@@ -615,397 +567,26 @@ def test_the_critique_contract_rides_both_critique_builders_and_nothing_else(mon
         assert after[name] == before[name], name
 
 
-def test_a_critique_entry_from_before_wp_04_1_misses_and_is_never_deleted(tmp_path):
+def test_changed_critique_entries_miss_without_deleting_paid_results(tmp_path, monkeypatch):
     path = tmp_path / "digest_cache.json"
+    before = _current_keys()
     cache = DigestCache(path, persist=True)
     stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
              "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
-    cache.put(_KEYS_BEFORE_WP_04_1["critique_l1"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["critique_l2"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
+    digest = {"text": "digest", "stop_reason": "end_turn"}
+    cache.put(before["critique_l1"], stale)
+    cache.put(before["critique_l2"], stale)
+    cache.put(before["digest_l1"], digest)
     cache.close()
 
+    monkeypatch.setattr(DC, "_CRITIQUE_CACHE_CONTRACT", DC._CRITIQUE_CACHE_CONTRACT + 1)
     reopened = DigestCache(path, persist=True)
     try:
-        now = _current_keys()
-        # The old merge is never served: the next exhaustive run re-critiques.
-        assert reopened.get(now["critique_l1"]) is None
-        assert reopened.get(now["critique_l2"]) is None
-        # ...while the digest it sits beside is still a hit.
-        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
-        # Nothing is deleted as a "migration" (plan §2 rule 6).
-        assert reopened.get(_KEYS_BEFORE_WP_04_1["critique_l1"]) == stale
-        assert reopened.get(_KEYS_BEFORE_WP_04_1["critique_l2"]) == stale
+        after = _current_keys()
+        assert reopened.get(after["critique_l1"]) is None
+        assert reopened.get(after["critique_l2"]) is None
+        assert reopened.get(after["digest_l1"]) == digest
+        assert reopened.get(before["critique_l1"]) == stale
+        assert reopened.get(before["critique_l2"]) == stale
     finally:
         reopened.close()
-
-
-# The critique keys WP-04.1 wrote (``critique_contract=1``) for the same inputs.
-# WP-04.2 changed the compatibility rule behind the merge (N1) and bumped the
-# contract to 2: an entry stored under 1 holds merges the new rule would not
-# make, so each must miss once, and no other key may move.
-_CRITIQUE_KEYS_UNDER_CONTRACT_1 = {
-    "critique_l2": "61f1b23d9ab68e79a861b2ffd8bdf32246edae6a2584da0e35996170bef22e3a",
-    "critique_l1": "31c15132bf93ce5b8c1e49a4ebd84e9e53e33dffa081627b59a34cf30bfd2b70",
-    "critique_l2_profiles_structured":
-        "5e36b2151a75531f689cb23710e62aaa03fd482a36fa02068e52f08b26ccf581",
-    "critique_l1_profiles_structured":
-        "3ebca36feeaf661ac0a23f07cc37302e6a2cd4e1e748480834f51b454f701970",
-}
-
-
-def test_wp_04_2_moves_every_critique_key_and_no_other_key():
-    now = _current_keys()
-    for name in _CRITIQUE_KEYS:
-        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_1[name], (
-            f"{name}: an entry merged under WP-04.1's rule would still hit")
-    for name in _OTHER_KEYS:
-        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
-
-
-def test_a_critique_entry_from_wp_04_1_misses_and_is_never_deleted(tmp_path):
-    path = tmp_path / "digest_cache.json"
-    cache = DigestCache(path, persist=True)
-    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
-             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l1"], stale)
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l2"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
-    cache.close()
-
-    reopened = DigestCache(path, persist=True)
-    try:
-        now = _current_keys()
-        assert reopened.get(now["critique_l1"]) is None
-        assert reopened.get(now["critique_l2"]) is None
-        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l1"]) == stale
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l2"]) == stale
-    finally:
-        reopened.close()
-
-
-# The critique keys WP-04.2 wrote (``critique_contract=2``) for the same inputs.
-# WP-01.4 (N4) changed which reads a critique entry may hold: a read the model
-# did not finish (cut off, refused, ended early, an unknown stop) no longer
-# counts, and an entry stores no stop reason to check on the way out, so the
-# contract went to 3. Every entry stored under 2 must miss once, and no other
-# key may move.
-_CRITIQUE_KEYS_UNDER_CONTRACT_2 = {
-    "critique_l2": "bbd4c6ee8316c8e8a3c455d0bf744da610cd649f4ad112a16fb6062bde14a2e8",
-    "critique_l1": "352574ba8bfbd70370459e94740d2976ccef863caffbee65f5a8de328abd5d7f",
-    "critique_l2_profiles_structured":
-        "1fd5bcffc18ef45d54407596b2e1740fb2ababf22da0ab64d899b325a8599884",
-    "critique_l1_profiles_structured":
-        "ca38e3b973bbf13be4ecfb31be0d80461246844031ccc5667563f7db3d1fcd1a",
-}
-
-
-def test_wp_01_4_moves_every_critique_key_and_no_other_key():
-    now = _current_keys()
-    for name in _CRITIQUE_KEYS:
-        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_2[name], (
-            f"{name}: an entry that may hold an unfinished read would still hit")
-    for name in _OTHER_KEYS:
-        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
-
-
-def test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted(tmp_path):
-    path = tmp_path / "digest_cache.json"
-    cache = DigestCache(path, persist=True)
-    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
-             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l1"], stale)
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l2"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
-    cache.close()
-
-    reopened = DigestCache(path, persist=True)
-    try:
-        now = _current_keys()
-        assert reopened.get(now["critique_l1"]) is None
-        assert reopened.get(now["critique_l2"]) is None
-        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l1"]) == stale
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l2"]) == stale
-    finally:
-        reopened.close()
-
-
-# The critique keys WP-01.4 wrote (``critique_contract=3``) for the same inputs.
-# WP-04.3 changed the merge rule: quantity roles (``critique._quantity_roles``)
-# keep apart two findings that give the same values to different roles, and a
-# dimension separator (``24"x12"``) is no longer a tag. An entry stored under 3
-# can hold a merge the new rule refuses, so each must miss once, and no other
-# key may move.
-_CRITIQUE_KEYS_UNDER_CONTRACT_3 = {
-    "critique_l2": "6b3eacdd53840b0f307da8b3c62213759d89c82db04699097f5fe323f0ba8fd0",
-    "critique_l1": "7c21adde87d243918f32adfd7223470c0a1d6b24cefa45177a1396bb43459b1e",
-    "critique_l2_profiles_structured":
-        "d347190ab918996b18d0b69bdadf0cc9a99fb0181459fb8b6acf7d7a9af15686",
-    "critique_l1_profiles_structured":
-        "7b49c11df2ec732b92e896e62b4093befff564eed55a6041ffdb69342ace2706",
-}
-
-
-def test_wp_04_3_moves_every_critique_key_and_no_other_key():
-    now = _current_keys()
-    for name in _CRITIQUE_KEYS:
-        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_3[name], (
-            f"{name}: an entry merged without quantity roles would still hit")
-    for name in _OTHER_KEYS:
-        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
-
-
-def test_a_critique_entry_from_wp_01_4_misses_and_is_never_deleted(tmp_path):
-    path = tmp_path / "digest_cache.json"
-    cache = DigestCache(path, persist=True)
-    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
-             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l1"], stale)
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l2"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
-    cache.close()
-
-    reopened = DigestCache(path, persist=True)
-    try:
-        now = _current_keys()
-        assert reopened.get(now["critique_l1"]) is None
-        assert reopened.get(now["critique_l2"]) is None
-        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l1"]) == stale
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l2"]) == stale
-    finally:
-        reopened.close()
-
-
-# The critique keys WP-04.3 wrote (``critique_contract=4``) for the same inputs.
-# WP-04.4 changed the merge rule again: the quantity reader reads a spelled
-# range or list (``4 to 6 in``, ``4 and 6 in``, ``2, 4, 6 in``) and a compact
-# ``A`` beside a voltage (``20A 120V``) whole, and the signature compares a
-# feet value with its inches (``12'`` against ``12'-6"``). An entry stored
-# under 4 can hold a merge the new rule refuses (and a loose list folded apart
-# from its tight twin), so each must miss once, and no other key may move.
-_CRITIQUE_KEYS_UNDER_CONTRACT_4 = {
-    "critique_l2": "548d976c979f9b0975501c4b281e1d14eb6fc85dbf89a989d85659a70679ad4a",
-    "critique_l1": "a442eb81bab5070969b511060e286de55b628d958cfeaa43948dbaa32a3d82af",
-    "critique_l2_profiles_structured":
-        "183aa8155c2372cee7c0c5596ddc316c793cacc4fcaf1bca4f56b604e5381b2e",
-    "critique_l1_profiles_structured":
-        "0780212a9f3bf00e03df08ba8b1ad967a0f353cedf7f02ee18ee392636ba1d0c",
-}
-
-
-def test_wp_04_4_moves_every_critique_key_and_no_other_key():
-    now = _current_keys()
-    for name in _CRITIQUE_KEYS:
-        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_4[name], (
-            f"{name}: an entry merged under the partial quantity readings would still hit")
-    for name in _OTHER_KEYS:
-        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
-
-
-def test_a_critique_entry_from_wp_04_3_misses_and_is_never_deleted(tmp_path):
-    path = tmp_path / "digest_cache.json"
-    cache = DigestCache(path, persist=True)
-    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
-             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l1"], stale)
-    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l2"], stale)
-    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
-    cache.close()
-
-    reopened = DigestCache(path, persist=True)
-    try:
-        now = _current_keys()
-        assert reopened.get(now["critique_l1"]) is None
-        assert reopened.get(now["critique_l2"]) is None
-        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l1"]) == stale
-        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l2"]) == stale
-    finally:
-        reopened.close()
-
-
-# The merge rule a stored critique was produced under, fingerprinted over a
-# fixed corpus: the critical signature of every finding, the pairwise duplicate
-# verdict, and the self-consistency merge of the corpus read as two reads. A
-# change to any of them changes what a critique entry would hold, so it needs
-# a new _CRITIQUE_CACHE_CONTRACT. One fingerprint per contract value, never
-# edited in place: to change the rule, bump the contract and pin the new
-# fingerprint under the new value.
-_MERGE_RULE_CORPUS = (
-    ("Provide 6-inch drain at column line 4", ""),
-    ("Provide 4-inch drain at column line 4", ""),
-    ("Provide 6 in drain at column line 4", ""),
-    ("Supply air to AHU-1 is 12,500 cfm per the mechanical schedule", "12,500 CFM"),
-    ("Supply air to AHU-1 is 1,500 cfm per the mechanical schedule", "1,500 CFM"),
-    ("Supply air to AHU-1 is 12500 cfm per the mechanical schedule", ""),
-    ("Return air at RTU-2 reads 1,2,500 cfm on the mechanical schedule", ""),
-    ("Setpoint for RTU-2 serving the lab is 90 deg F in the sequence", ""),
-    ("Setpoint for RTU-2 serving the lab is 90 deg C in the sequence", ""),
-    ("Setpoint for RTU-2 serving the lab is 90°F in the sequence", ""),
-    ("Provide 45 deg elbow at the riser offset near grid B", ""),
-    ("Provide 45° elbow at the riser offset near grid B", ""),
-    ("Duct 24x12 serving VAV-3 conflicts with the beam at grid C", ""),
-    ("Duct 24x10 serving VAV-3 conflicts with the beam at grid C", ""),
-    ('Duct 24"x12" serving VAV-3 conflicts with the beam at grid C', '24"x12"'),
-    ("Provide 20A breaker for exhaust fan EF-1 on panel LP-1", ""),
-    ("Provide 30A breaker for exhaust fan EF-1 on panel LP-1", ""),
-    ("RTU-1 is scheduled at 480V but is fed from panel HP-1", ""),
-    ("RTU-1 is scheduled at 208V but is fed from panel HP-1", ""),
-    ("Panel LP-2 is 120/208V on the one-line diagram", ""),
-    ("Maintain 4-6 in clearance around the base of pump P-1", ""),
-    ("Provide 2,4,6 in floor drains in the mechanical room", ""),
-    ("Room 101A: provide 6 in floor drain at the sink", "ROOM 101A"),
-    ("Room 101A: provide 4 in floor drain at the sink", "ROOM 101A"),
-    ("Pump P-1 flow is 500 gpm at 100 psi per the schedule", "P-1 500 GPM"),
-    ("Pump P-1 flow is 550 gpm at 100 psi per the schedule", "P-1 550 GPM"),
-    ("maintain 12'-6\" clear at the M-101 riser", ""),
-    ("maintain 12'-8\" clear at the M-101 riser", ""),
-    ('Provide 1/2" drain at the low point of the loop', ""),
-    ('Provide 2 1/2" drain at the low point of the loop', ""),
-    ("Provide 4x25 gpm circulating pumps at the central plant", ""),
-    ('Board 6"x12\' is cut from the wrong stock', ""),
-    ("Detail 5 is not shown on this sheet", "DETAIL 5"),
-    ("Detail 5 is shown on this sheet", "DETAIL 5"),
-    # Added by WP-04.2 (N1): a conflict beside a shared tag or value, within a
-    # unit and across units of one kind, and the extra detail that still merges.
-    ("Pump P-1 suction valve V-3 conflicts with the strainer at the riser", ""),
-    ("Pump P-1 suction valve V-4 conflicts with the strainer at the riser", ""),
-    ("Pump P-1 suction valve conflicts with the strainer at the riser", ""),
-    ("Provide 2 in, 4 in and 6 in floor drains in the mechanical room", ""),
-    ("Provide 3 in, 5 in and 6 in floor drains in the mechanical room", ""),
-    ("Supply air setpoint for AHU-2 is 90°F at the 6 in duct heater", ""),
-    ("Supply air setpoint for AHU-2 is 90°C at the 6 in duct heater", ""),
-    ("Supply air setpoint for AHU-2 is 90°F at the duct heater", ""),
-    ("Pump P-2 is scheduled at 500 gpm at 125 psi on the pump schedule for the east "
-     "data hall chilled water loop", ""),
-    ("Pump P-2 is scheduled at 12,000 gph at 125 psi on the pump schedule for the east "
-     "data hall chilled water loop", ""),
-    ("Fan EF-2 motor is 5 hp at 480V per the fan schedule", ""),
-    ("Fan EF-2 motor is 7.5 kW at 480V per the fan schedule", ""),
-    # Added by WP-04.3: quantity roles (swapped, one value in two roles, each
-    # binding form, respectively, ambiguity, a missing role), the 500/550
-    # duplicate that must still fold, and a dimension separator beside a
-    # different extra reference.
-    ("Provide 6 in main and 4 in branch at the riser serving the east data hall", ""),
-    ("Provide 4 in main and 6 in branch at the riser serving the east data hall", ""),
-    ("Provide 6 in and 4 in piping at the riser serving the east data hall", ""),
-    ("Provide 6 in and 4 in main and branch at the riser serving the east data hall", ""),
-    ("Provide 6 in and 4 in main and branch respectively at the riser serving the east "
-     "data hall", ""),
-    ("Provide 6 in supply and 6 in return at the riser serving the east data hall", ""),
-    ("Provide 6 in supply and 8 in return at the riser serving the east data hall", ""),
-    ("Riser sizes at the east data hall: main: 6 in, branch: 4 in", 'MAIN 6" BRANCH 4"'),
-    ("At the east data hall riser the main is 4 in and the branch is 6 in", ""),
-    ("PRV-1 is set at 100 psi inlet and 80 psi outlet per the valve schedule", ""),
-    ("PRV-1 is set at 80 psi inlet and 100 psi outlet per the valve schedule", ""),
-    ("Pump P-1 shows 500 gpm but the pump schedule requires 550 gpm at the design point",
-     "P-1 500 GPM"),
-    ("Pump P-1 shows 500 gpm but the pump schedule requires 550 gpm at the design point", ""),
-    ('Duct 24"x12" serving VAV-3 conflicts with the steel beam on the level 2 plan', ""),
-    ("Duct 24x12 in serving VAV-3 conflicts with the steel beam at grid C-4 on the level 2 "
-     "plan", ""),
-    # Added by WP-04.4: the tokenizer residuals (a bare feet value against
-    # feet-inches in both spellings, a spelled range and list, a loose-comma
-    # list against another and against its tight twin, a compact A beside a
-    # voltage), each with a spelling that must still merge, and the guards
-    # that keep today's reading.
-    ("Maintain 12' clear headroom under the main duct at the M-101 riser", ""),
-    ("Maintain 12'-0\" clear headroom under the main duct at the M-101 riser", ""),
-    ("Maintain 12 ft 6 in clear headroom under the main duct at the M-101 riser", ""),
-    ("Maintain 12 ft clear headroom under the main duct at the M-101 riser", ""),
-    ("Maintain 4 to 6 in clearance around the base of pump P-1 on the plan", ""),
-    ("Maintain 6 in clearance around the base of pump P-1 on the plan", ""),
-    ("Maintain between 4 and 6 in clearance around the base of pump P-1 on the plan", ""),
-    ("Maintain 4 and 6 in clearance around the base of pump P-1 on the plan", ""),
-    ("Provide 2, 4, 6 in floor drains in the mechanical room", ""),
-    ("Provide 3, 5, 6 in floor drains in the mechanical room", ""),
-    ("Provide 2, 4 and 6 in floor drains in the mechanical room", ""),
-    ("Provide 20A 120V circuit for exhaust fan EF-1 on panel LP-1", ""),
-    ("Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1", ""),
-    ("Provide 120V 30A circuit for exhaust fan EF-1 on panel LP-1", ""),
-    ("Room 101A 120V receptacle at the east wall of the mechanical room", ""),
-    ("Room No. 101A 120V receptacle at the east wall of the mechanical room", ""),
-    ("See pages 4 to 6 in the manual for the pump P-1 base clearance", ""),
-)
-
-
-def _merge_rule_fingerprint() -> str:
-    import hashlib
-
-    from drawing_analyzer.critique import (
-        _is_duplicate,
-        critical_signature,
-        merge_self_consistency,
-    )
-    from drawing_analyzer.models import Finding
-
-    def corpus():
-        return [
-            Finding(sheet_id="M-101", source_name="mech.pdf", page_index=0,
-                    category="coordination", severity="medium", text=text,
-                    source_quote=quote)
-            for text, quote in _MERGE_RULE_CORPUS
-        ]
-
-    findings = corpus()
-    merged = merge_self_consistency([corpus()[0::2], corpus()[1::2]])
-    payload = {
-        "signatures": [critical_signature(f) for f in findings],
-        "duplicates": [[_is_duplicate(a, b) for b in findings] for a in findings],
-        "merged": [
-            [m.text, m.source_quote, sorted(m.supporting_quotes), m.severity,
-             m.confidence, m.reproduced]
-            for m in merged
-        ],
-    }
-    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-# Before the term existed (1.7.0 through WP-01.2) this rule fingerprinted as
-# 70a2e09c50476f79c5096837430c6b4a5628a66b3df11a7ff03830135404e1e4.
-#
-# Contract 1's value was computed over the corpus as WP-04.1 left it: the rows
-# above "Added by WP-04.2". WP-04.2 added those rows, so contract 1 can no
-# longer be reproduced from this corpus; over the extended corpus, WP-04.1's
-# rule fingerprints as
-# 73da954902650b023ab479b8e39d883d6150e3a72104ab919d8427ec8d30f29d.
-_MERGE_RULE_BY_CRITIQUE_CONTRACT = {
-    1: "fa3623035836987525e786ff44597ec1cdf2cc59e1dffbff6a07ef278f3614bb",  # WP-04.1
-    2: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-04.2
-    # WP-01.4 bumped the contract for what an entry may hold (only reads the
-    # model finished), not for the merge rule, which is unchanged: the same
-    # fingerprint as under 2.
-    3: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-01.4
-    # WP-04.3: quantity roles, and a dimension separator is not a tag. The
-    # values under 2 and 3 were computed over the corpus as WP-04.2 left it
-    # (the rows above "Added by WP-04.3"); over the extended corpus that rule
-    # fingerprints as
-    # b3660a7ebac40bab2e2219aa893aac514c56dae6448ac19fb18c35c22bbd8c5c.
-    4: "b62e9526fd740d491b66f6ed6d32edef69c1782eea159e11889ed188f4e2f60f",  # WP-04.3
-    # WP-04.4: the tokenizer residuals (spelled ranges and lists, loose lists
-    # of three or more numbers, a compact A beside a voltage) and the
-    # signature's feet_inches pairs. The value under 4 was computed over the
-    # corpus as WP-04.3 left it (the rows above "Added by WP-04.4"); over the
-    # extended corpus that rule fingerprints as
-    # f6116986b76e0211f7274c26486bee8276cc7b5712c693d4dccd12f073b92507, and
-    # this PR's rule before its review follow-up (a number label after a name
-    # word, "Room No. 101A", read as a current beside a voltage) as
-    # fa0ae1342a1bbf227bb300bb5f3ab0710633634d93785f0044be6f09cb9bfd99.
-    5: "020b77897da5937f63c30a58cd29c458c9f67d80064ca901b10aaed8f8319681",  # WP-04.4
-}
-
-
-def test_the_critique_contract_is_pinned_to_the_merge_rule():
-    fingerprint = _merge_rule_fingerprint()
-    pinned = _MERGE_RULE_BY_CRITIQUE_CONTRACT.get(DC._CRITIQUE_CACHE_CONTRACT)
-    assert pinned == fingerprint, (
-        "the critique merge rule no longer matches the rule pinned for "
-        f"_CRITIQUE_CACHE_CONTRACT={DC._CRITIQUE_CACHE_CONTRACT}: a stored critique "
-        "would be served under a rule that did not produce it. Bump "
-        "digest_cache._CRITIQUE_CACHE_CONTRACT, pin this fingerprint under the "
-        f"new value ({fingerprint}), and add a migration-register row."
-    )

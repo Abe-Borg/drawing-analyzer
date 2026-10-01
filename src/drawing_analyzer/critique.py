@@ -1,42 +1,17 @@
-"""The critique pass — "the reviewer" (Phase 11).
+"""Independent full-sheet vision reads that produce QC findings.
 
-The digest *describes* a sheet; the critique *attacks* it. This is a second
-full-coverage vision read of the same sheet (the identical overview + tile grid +
-verbatim text layer the digest saw — full coverage is inviolable here too), but
-under a different persona and with a single job: find everything a senior
-engineer back-checking a check print before issue would mark up — errors, code
-concerns, RFI-worthy ambiguities, internal inconsistencies, stale/copy-paste
-text, and *absences* (content that should be on the sheet but isn't).
+Each read receives the same overview, complete tile grid and text layer as the
+digest. Critique adds findings without changing ``combined_text``. With default
+self-consistency enabled, two reads are merged conservatively: reproduced
+findings are labeled, and singletons remain available. Reproduction is not
+proof that a finding is correct.
 
-It emits only the machine-readable findings block (the §4.1 contract, extended
-with an optional ``anchor_hint`` of ``"SHEET"`` for sheet-level / absence
-findings) — no prose digest. The prose digest stays the digest pass's job, so
-``combined_text`` is untouched (I-2).
+Only completed, parseable reads count. Failed or unfinished reads leave surviving
+findings marked NOT_ASSESSED_PARTIAL. Cache the merged outcome only when every
+requested read completed successfully; individual reads are not cached.
 
-Self-consistency (default ON): the critique runs **twice**. Two independent
-reads of the same sheet disagree at the margins, and that disagreement is signal
-— a finding both runs surface is corroborated (``reproduced=True``); a singleton
-one run raised is kept (more markups is better) but flagged ``reproduced=False``.
-The merge (:func:`merge_self_consistency`) deduplicates by position and text; the
-downstream verification pass and the report *surface* the ``reproduced`` flag but
-it never suppresses a finding. Only a read the model **finished** counts (D-1;
-remediation WP-01.4, N4): a read cut off, refused, ended early or stopped for
-any other reason fails like a malformed one and keeps nothing
-(:func:`outcome_from_message`), so the surviving read's findings are marked
-``NOT_ASSESSED_PARTIAL`` and the pipeline's critique stage counts the sheet
-short of its reads.
-
-Caching: the *merged* critique result is cached under its own
-(:func:`drawing_analyzer.digest_cache.critique_cache_key`, a distinct namespace
-from the digest) so a re-run skips the model calls. The run-to-run sampling
-variance the merge feeds on is not reproducible, so only the merged outcome is
-stored — never an individual run — and only when every requested read finished
-and parsed.
-
-Isolation (I-5): this module imports no PDF engine. It consumes already-rendered
-:class:`~drawing_analyzer.models.RenderedSheet` objects and reuses the digest's
-request/parse helpers; the pipeline owns rendering.
-"""
+Consume already-rendered sheets and shared request/parse helpers. Rendering and
+PDF-engine imports belong elsewhere."""
 from __future__ import annotations
 
 import functools
@@ -649,9 +624,8 @@ _TAG_RE = re.compile(
 # splitting ``1,2,500`` would recreate the trailing fragment ``500`` that a
 # malformed grouping must never yield (plan WP-04 step 2).
 #
-# The critique cache stores post-merge findings, so a change here changes what a
-# stored critique means. Bump ``digest_cache._CRITIQUE_CACHE_CONTRACT`` with it;
-# ``tests/test_drawing_cache_identity.py`` pins the merge rule to that value.
+# Cached critiques contain merged findings. Invalidate the affected processing
+# contract when a merge change makes stored results incompatible.
 
 # Where a number may start (item 23, extended). The "not mid-token" guard is TWO
 # lookbehinds rather than one class, and the split is load-bearing:
@@ -839,12 +813,8 @@ def _sig_text(f: Finding) -> str:
     # survivor's signature retains every member's quoted tokens, so a later
     # conflicting finding ("550 gpm" after "500 gpm" folded in) is still blocked.
     #
-    # The survivor's sets therefore GROW as it absorbs members (WP-04.2 states
-    # how the rule treats that; see ``signature_conflicts``). The complete-link
-    # checks never compare a grown signature: they compare members as they
-    # arrived (``_cluster``; ``Ledger.add`` over member snapshots; Pass B over
-    # ``Ledger.member_history`` on BOTH sides since WP-03.1, so its incoming
-    # entry no longer sees one either).
+    # Growing evidence cannot establish pairwise agreement. Clustering and
+    # Ledger.add compare the member snapshots captured before merging.
     extra = " ".join(getattr(f, "supporting_quotes", None) or [])
     return f"{f.text or ''} {f.source_quote or ''} {extra}"
 
@@ -1602,66 +1572,20 @@ def _feet_inches_conflict(a: dict, b: dict) -> bool:
 
 
 def signature_conflicts(a: dict, b: dict) -> list[str]:
-    """The critical axes on which two signatures conflict; ``[]`` when none do.
+    """Return conflicting axes in tags, measurements, absence and legs order.
 
-    The one copy of the §12.1 rule. :func:`signatures_compatible` is its
-    negation, and the A/B harness reports these axis names (``tags``,
-    ``measurements``, ``absence_polarity``, ``cross_sheet_legs``, always in that
-    order) rather than restating the rule. Takes two :func:`critical_signature`
-    records rather than two findings, so a consumer that only has stored
-    signatures (a finished arm's JSON) applies the rule the live merge does.
+    A signal present on only one side never conflicts. Tags must form an inclusion
+    relationship. For each quantity kind carried by both sides, one token set must
+    include the other; disjoint measurements conflict even across kinds. Compare
+    whole tokens without unit conversion. Bound quantity roles and feet/inches pairs
+    apply their own inclusion checks on the measurements axis. Ambiguous roles can
+    conflict with explicit bindings. Absence polarity must agree, and cross-sheet
+    legs must be equal when both signatures carry them.
 
-    A signal present in only one signature never conflicts. Where both carry it:
-
-    * **Measurements**, per kind (``_QUANTITY_KIND``: a unit, or a group of units
-      measuring one kind of quantity). For every kind both carry, one side's
-      tokens of that kind must include the other's. So one side may add detail
-      (a second value in a unit, another quantity) and still merge, but a value
-      on EACH side that the other lacks conflicts, however many other values they
-      share. Before WP-04.2 one shared token excused everything (N1): ``6 in``
-      and ``4 in`` beside a shared ``100 psi``, ``12'-6"`` and ``12'-8"`` (both
-      ``12ft``), ``2 in, 4 in and 6 in`` and ``3 in, 5 in and 6 in``. Two
-      signatures that share no token at all conflict whatever their kinds, as
-      before (``6 in`` / ``150 mm``, ``6 in`` / ``100 psi``). Tokens compare
-      whole: no value is converted, and a composite is never split.
-      **Quantity roles** (remediation WP-04.3) report on this axis too: for
-      every role and kind both bind, one side's values must include the
-      other's, so ``6 in main, 4 in branch`` and ``4 in main, 6 in branch``
-      (one token set) conflict, and so do ``6 in supply and 6 in return`` and
-      ``6 in supply and 8 in return``; a side whose only roles for a kind are
-      ambiguous conflicts with one that binds a role in it
-      (:func:`_roles_conflict`). A role on one side only never conflicts.
-      **Feet and inches** (remediation WP-04.4) report here as well: each feet
-      value with its inches (``12ft6in``, or ``12ft0in`` when bare), compared
-      by inclusion, so ``12'`` and ``12'-6"`` conflict although ``{12ft}`` is
-      included in ``{12ft, 6in}`` (:func:`_feet_inches_conflict`).
-    * **Tags**: one side's tags must include the other's. A finding may name a
-      reference the other omits (corroboration), but ``P-1 + V-3`` and
-      ``P-1 + V-4`` conflict. Tags are not grouped by prefix: a prefix is too weak
-      a role signal (``LP-1`` and ``HP-1`` are both panels), so two findings that
-      each name a different extra reference are kept apart as well -- the safe
-      error.
-    * **Absence polarity** must agree ("shown" vs "not shown").
-    * **Cross-sheet legs** must be equal.
-
-    **Growing signatures.** A survivor's signature includes its supporting
-    quotes (``_sig_text``), so its sets grow as it absorbs members, and inclusion
-    then accepts any newcomer the grown set contains. The complete-link checks
-    therefore compare members as they arrived, never a grown signature:
-    ``_cluster`` (each read's own finding), ``Ledger.add`` (member snapshots)
-    and Pass B, which compares every member of one entry's history with every
-    member of the other's (``Ledger.member_history`` on both sides). Until
-    WP-03.1 Pass B's incoming entry was its live, grown object (B1). Two places
-    still see a grown signature: a critique representative entering the
-    ledger, whose reads were merged upstream and whose signature holds their
-    quotes but not their texts (WP-03.5); and the A/B harness, which compares
-    final findings. Roles grow the same way (they are read from the text, the
-    quote and every supporting quote), and the same member-wise checks cover
-    them: a survivor whose bundle passed to a finding that names no role
-    carries none in its live signature, and its members still refuse a
-    newcomer that swaps the roles another member named. The feet-inches pairs
-    (WP-04.4) are read the same way and grow the same way.
-    """
+    ``signatures_compatible`` and stored-signature consumers use this same rule.
+    Growing representatives can accumulate evidence, so clustering and ledger
+    checks compare incoming member snapshots rather than treating the accumulated
+    signature as evidence that every pair agrees."""
     out: list[str] = []
     ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
     if ta and tb and not _one_includes_the_other(ta, tb):
@@ -1724,34 +1648,12 @@ def _claims_differ(a: Finding, b: Finding) -> bool:
 
 
 def _is_duplicate(a: Finding, b: Finding) -> bool:
-    """Whether two findings describe the same issue (Phase 20, §12.1).
+    """Whether two findings describe the same issue on the same source page.
 
-    Requires the same source+page and **compatible critical signatures** — a tile
-    is never sufficient, and neither is position. A merge fires only when the two
-    are semantically the same: strong topical overlap, or an identical non-empty
-    quote backed by at least moderate text agreement. When uncertain, keep both
-    (more separate findings is the safe error). Two findings whose claim
-    discriminators disagree are never duplicates, whichever branch would accept
-    them (:func:`_claims_differ`).
-
-    **No rectangle is read** (remediation WP-03.7, N28). A third branch folded two
-    anchored findings whose rectangles overlapped (IoU > 0.5) and whose quotes
-    were equal, with no text check. But the anchor stage resolves each rectangle
-    from the finding's own quote (and its tile, to choose among repeated
-    occurrences), so two findings quoting one string land on one rectangle by
-    construction: the branch was "the quote alone", which the quote branch below
-    refuses on purpose, applied once anchors existed. "pump P-1 voltage listed as
-    480 should be 208" and "pump P-1 impeller diameter conflicts with the curve",
-    both quoting ``PUMP P-1``, stayed apart in Pass A and folded in Pass B, and
-    the impeller issue was lost; auditor findings arrive anchored, so it fired
-    between them in Pass A too. No text threshold separates that pair from the
-    same-spot paraphrases the branch also folded (it shares 3 of 12 content
-    words, the pinned ``CO-1`` paraphrase 1 of 11), so the branch is gone and
-    such a paraphrase stays two findings: the decided cost
-    (``_plans/DECISIONS.md``, D-3). Nothing the branches left read is changed by
-    anchoring, so the ledger's Pass B can fold no pair of members Pass A
-    compared and refused (:func:`~drawing_analyzer.ledger.reconcile_post_anchor`).
-    """
+    Require compatible claims, critical signatures and categories, plus strong text
+    overlap or an identical nonempty quote with moderate text agreement. Position
+    and a shared quote alone never establish identity. Keep separate findings when
+    uncertain; disagreeing explicit claim discriminators always prevent a merge."""
     if not _same_sheet(a, b):
         return False
     if _claims_differ(a, b):

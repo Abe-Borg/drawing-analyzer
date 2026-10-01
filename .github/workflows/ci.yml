@@ -143,6 +143,8 @@ jobs:
           python-version: "3.12"
       - name: Repo secret scan
         run: python scripts/scan_secrets.py
+      - name: Documentation budgets
+        run: python scripts/check_doc_budgets.py
       - name: Static analysis (correctness classes only — no style churn)
         run: |
           python -m pip install --upgrade pip

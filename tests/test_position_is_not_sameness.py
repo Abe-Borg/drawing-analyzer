@@ -1,52 +1,12 @@
-"""Remediation WP-03.7 (N28): a shared quote at a shared spot is not one issue.
+"""Distinct findings sharing a quote/rectangle survive ingestion and exports.
 
-``critique._is_duplicate`` had a geometry branch: two findings on one sheet
-whose rectangles overlapped (IoU > 0.5) and whose quotes were equal were
-duplicates, whatever their texts said. The quote branch beside it refuses
-exactly that pair before anchoring ("the quote alone is NOT enough: quoting a
-tag verbatim is the norm"), and a rectangle adds nothing to the quote: the
-anchor stage resolves each rectangle FROM the finding's own quote (and its
-tile, to pick among repeated occurrences), so two findings quoting one string
-land on one rectangle by construction. The branch was the quote-alone rule,
-applied after anchoring. So "pump P-1 voltage listed as 480 should be 208" and
-"pump P-1 impeller diameter conflicts with the curve", kept apart on purpose in
-Pass A, folded in Pass B, and the impeller issue was gone: its text was
-overwritten and its quote equalled the survivor's. Auditor findings arrive
-anchored, so the branch fired between them in Pass A too.
-
-The decision (``_plans/DECISIONS.md``, D-3 input): the branch is removed, in
-both passes. An equal quote needs text agreement before or after anchoring, a
-rectangle is never evidence that two findings make one claim, and Pass B folds
-nothing Pass A did not already refuse. The cost, accepted: a same-spot
-paraphrase that shares too few words (the ``CO-1`` pair,
-``tests/test_drawing_dedup_lifecycle.py``) stays two findings.
-
-Pinned here:
-
-* the N28 pair: the predicate on one rectangle, and the lifecycle (ingest,
-  seal, anchor, Pass B, number) in both orders, with its numbers and evidence
-  directories;
-* two auditor-shaped findings anchored before ingest (Pass A);
-* the real arithmetic auditor's two same-row mismatches, which no longer need
-  their claim discriminators to stay apart;
-* the predicate reads no rectangle, over a corpus of same-quote pairs;
-* over generated same-sheet sets, Pass B's partition is Pass A's;
-* the pipeline: two digest findings quoting one tag are two findings after the
-  anchor stage and Pass B;
-* what still folds: text duplicates, before and after anchoring;
-* the reviewed PDF: two findings clouded on one rectangle get two QC tags that
-  do not cover each other (Codex review of this slice), laid out in QC-number
-  order, a lone tag keeping its old spot.
-
-Hermetic: synthetic findings; the pipeline test builds a one-page PDF with
-PyMuPDF (tests may import it; I-5 binds ``src``) and uses the scripted fake
-client of ``tests/test_drawing_qc_pipeline.py``. No network.
+Tests cover stable QC numbers, coherent evidence, and separate visible PDF tags
+using synthetic findings and an offline scripted API client.
 """
 from __future__ import annotations
 
 import copy
 import itertools
-import random
 
 import pytest
 
@@ -55,7 +15,7 @@ from drawing_analyzer.critique import (
     _signatures_compatible,
     _token_overlap,
 )
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
+from drawing_analyzer.ledger import Ledger
 from drawing_analyzer.models import Anchor, Finding, Verification
 
 _RECT = [100.0, 200.0, 160.0, 212.0]
@@ -90,18 +50,17 @@ def _exported(entry: Finding) -> str:
     return " ".join([entry.text or "", entry.source_quote or "", *entry.supporting_quotes])
 
 
-def _lifecycle(findings: list[tuple[Finding, str]], rect: list[float]) -> tuple[Ledger, int]:
+def _lifecycle(findings: list[tuple[Finding, str]], rect: list[float]) -> Ledger:
     """Ingest in the given order, seal, anchor every live entry to ``rect`` (as
-    the anchor stage does for findings that quote one string), Pass B, number."""
+    the anchor stage does for findings that quote one string), then number."""
     ledger = Ledger()
     for finding, tag in findings:
         ledger.add([copy.deepcopy(finding)], tag)
     ledger.seal()
     for entry in ledger.entries:
         entry.anchor = Anchor(status="EXACT", rect_pdf=list(rect), method="exact")
-    folded = reconcile_post_anchor(ledger)
     ledger.number()
-    return ledger, folded
+    return ledger
 
 
 # --------------------------------------------------------------------------- #
@@ -124,8 +83,7 @@ def test_the_n28_pair_is_not_a_duplicate_on_one_rectangle():
 def test_the_n28_pair_survives_the_lifecycle(order):
     items = {"V": (_f(_VOLTAGE, "PUMP P-1"), "digest_json"),
              "I": (_f(_IMPELLER, "PUMP P-1"), "critique_1")}
-    ledger, folded = _lifecycle([items[k] for k in order], _RECT)
-    assert folded == 0
+    ledger = _lifecycle([items[k] for k in order], _RECT)
     assert len(ledger) == 2
     by_text = {e.text: e for e in ledger.entries}
     assert set(by_text) == {_VOLTAGE, _IMPELLER}
@@ -145,7 +103,7 @@ def test_the_n28_pair_gets_the_same_numbers_and_evidence_in_both_orders():
     for order in ("VI", "IV"):
         items = {"V": (_f(_VOLTAGE, "PUMP P-1"), "digest_json"),
                  "I": (_f(_IMPELLER, "PUMP P-1"), "critique_1")}
-        ledger, _ = _lifecycle([items[k] for k in order], _RECT)
+        ledger = _lifecycle([items[k] for k in order], _RECT)
         used: set[str] = set()
         seen.append({e.text: (e.qc_id, _reserve_evidence_dir(e, used))
                      for e in ledger.entries})
@@ -180,7 +138,6 @@ def test_two_findings_anchored_before_ingest_that_quote_one_tag_stay_apart(order
         ledger.add([copy.deepcopy(items[key][0])])
     assert len(ledger) == 2                                      # Pass A
     ledger.seal()
-    assert reconcile_post_anchor(ledger) == 0                    # Pass B
     assert {e.text for e in ledger.entries} == {_MISSING, _DRIFT}
 
 
@@ -210,7 +167,6 @@ def test_two_arithmetic_mismatches_on_one_row_stay_apart_without_their_discrimin
         ledger.add([copy.deepcopy(second)])
         assert len(ledger) == 2
         ledger.seal()
-        assert reconcile_post_anchor(ledger) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -261,54 +217,10 @@ def test_the_merge_predicate_reads_no_rectangle(pair):
 def test_the_pairs_that_fold_on_text_still_fold():
     for pair in ("quote + moderate text (folds)", "strong text (folds)"):
         ta, tb, quote = _SAME_QUOTE_PAIRS[pair]
-        ledger, folded = _lifecycle([(_f(ta, quote), "digest_json"),
+        ledger = _lifecycle([(_f(ta, quote), "digest_json"),
                                      (_f(tb, quote), "critique_1")], _RECT)
-        assert len(ledger) == 1 and folded == 0, pair     # folded in Pass A
+        assert len(ledger) == 1, pair
         assert set(ledger.entries[0].sources) == {"digest_json", "critique_1"}
-
-
-# --------------------------------------------------------------------------- #
-# Pass B adds no fold to Pass A
-# --------------------------------------------------------------------------- #
-
-
-def _same_spot_pairs(ledger: Ledger) -> int:
-    """Live entry pairs of the shape the geometry branch used to fold: one
-    quote, one rectangle, compatible signatures and categories, and too little
-    shared text for either text branch."""
-    from drawing_analyzer.critique import _categories_compatible, _quotes_equal
-
-    return sum(
-        1
-        for a, b in itertools.combinations(ledger.entries, 2)
-        if _quotes_equal(a, b)
-        and a.anchor.rect_pdf is not None and a.anchor.rect_pdf == b.anchor.rect_pdf
-        and _signatures_compatible(a, b) and _categories_compatible(a, b)
-        and _token_overlap(a.text, b.text) < 0.4
-    )
-
-
-def test_anchoring_adds_no_fold_over_generated_sets():
-    """Over generated same-sheet sets (every live entry anchored by its quote,
-    two quotes sharing one place), Pass B folds nothing: every accepting
-    branch of the predicate reads only what Pass A already compared, so a
-    pair Pass A kept apart stays apart. Seeded and bounded (1,080 runs); the
-    seed is one whose sets contain the same-spot shape, counted below so the
-    test cannot pass by never meeting it (the old rule folded 36 times here)."""
-    from tests.test_pass_b_complete_link import _generated, _ingest, _partition
-
-    rng = random.Random(2026)
-    shapes = 0
-    for size, count in ((3, 100), (4, 20)):
-        for _ in range(count):
-            specs = _generated(rng, size)
-            for order in itertools.permutations(range(size)):
-                ledger = _ingest(specs, order)
-                before = _partition(ledger)
-                shapes += _same_spot_pairs(ledger)
-                assert reconcile_post_anchor(ledger) == 0, (specs, order)
-                assert _partition(ledger) == before
-    assert shapes > 0
 
 
 # --------------------------------------------------------------------------- #
@@ -329,7 +241,7 @@ _AIRFLOW = {
 
 @pytest.mark.parametrize("order", ["CA", "AC"])
 def test_two_digest_findings_quoting_one_tag_stay_two_through_the_pipeline(tmp_path, order):
-    """A standard run anchors the digest's findings offline and runs Pass B.
+    """A standard run anchors the digest's findings offline before numbering.
     Both quote the tag, which is printed once, so both anchor EXACT to one
     rectangle; they are two different issues and stay two findings."""
     from drawing_analyzer.pipeline import extract_drawing_context

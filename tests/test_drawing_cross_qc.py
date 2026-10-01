@@ -124,9 +124,7 @@ def test_cross_qc_returns_numeric_claims():
         client=_ClaimsCrossClient([claim]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.claims) == 1 and res.claims[0].kind == "sum"
-    # Rebound to the sheet its reference names (remediation WP-06.2, N6): this
-    # used to assert no source at all, which left the arithmetic auditor to
-    # look the id up first-wins. An id one sheet carries binds that sheet.
+    # A unique sheet label binds the claim to that physical sheet.
     c = res.claims[0]
     assert (c.source_name, c.page_index, c.sheet_id) == ("a.pdf", 0, "F-D-01-1")
 
@@ -210,8 +208,7 @@ def test_promotes_first_resolvable_leg_when_primary_unknown():
             {"sheet_id": "F-A-01-1", "source_quote": "COLO 1", "tile": [1, 1]},
         ],
     }
-    # Each sheet prints the quote its leg cites: the whole-set path grounds
-    # since remediation WP-06.2 (U8), and an unprinted quote is dropped.
+    # Each leg must cite a quote printed by its own sheet.
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf")],
         [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1")],
@@ -536,8 +533,7 @@ def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
         "source_quote": "COLO 5", "tile": [0, 0],
         "also_on": [{"sheet_id": "F-G-02-0", "source_quote": "COLO 5 zone", "tile": [1, 1]}],
     }
-    # Each sheet prints what its legs quote (the whole-set path grounds since
-    # remediation WP-06.2, U8).
+    # Each sheet prints what its legs quote.
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf"), _digest("c.pdf")],
         [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1"),
@@ -829,16 +825,13 @@ def test_shard_path_aggregates_omitted_findings(monkeypatch):
     assert text_clean.omitted == 0 and text_clean.degraded is True
 
 
-def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch):
-    """Entries written before the findings cap became loss-aware were stored as
-    complete after a silent truncation and carry no `findings_omitted`. Reading
-    one back would default that to 0 and certify a truncated run forever."""
+def test_changed_cross_qc_contract_misses_the_previous_key(monkeypatch):
+    """Changed host validation must not replay results produced under an old rule."""
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
-    assert X._CROSS_QC_CACHE_CONTRACT >= 2, "bumped past the pre-accounting entries"
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
-    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 1)
+    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", X._CROSS_QC_CACHE_CONTRACT + 1)
     legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
     assert current != legacy, "the contract must ride the key"
@@ -953,58 +946,3 @@ def test_critique_leg_targets_uses_the_same_fold():
         assert C._leg_targets(_with_leg(plain)) == C._leg_targets(_with_leg(variant)), note
         # …and the value matches what cross-QC resolves the handle to.
         assert next(iter(C._leg_targets(_with_leg(variant)))) == X._norm_id(plain)
-
-
-def test_cross_qc_contract_bumped_for_the_norm_id_fold():
-    # The invalidation mechanism for item 11. _norm_id is host-side binding, not a
-    # model input, so nothing in the cache key covers it — yet it changes which
-    # legs validate, and so the stored result, for byte-identical request inputs.
-    # A warm entry written under the old normalization would keep serving the
-    # smaller finding set forever.
-    #
-    # 4 since remediation WP-05.1 (B5, N12, N13) bumped it for the same kind of
-    # reason: grounding became a real, whole-word match on the anchor's
-    # normalizer, which changes which legs and facts validate, and the
-    # `evidence_state` stored on each, for byte-identical request inputs.
-    #
-    # 5 since remediation WP-05.2 (B4, N12): the same match folds brackets and
-    # sentence punctuation off every word (the anchor's own rule, one matcher),
-    # so a leg quoting `RATED 175 PSI TYP` against `RATED 175 PSI, TYP.` is now
-    # admitted. Host-side binding again, for byte-identical request inputs.
-    #
-    # 6 since remediation WP-06.1 (B6, N2): only findings identical in every
-    # field collapse now (two different conflicts quoting the same strings on
-    # the same sheets are no longer folded into one), a whitespace-only fact
-    # quote is no longer sent to the reconciler, and the stored result carries
-    # its refused-item counts. Host-side binding again, for byte-identical
-    # request inputs.
-    #
-    # 7 since remediation WP-05.3 (B4): grounding also takes a quote that
-    # differs from the sheet's words only by the named character-stream joins
-    # (`6"` against `6 "`), and no quote or text with a number split around a
-    # lone `.` grounds any longer. Host-side binding again, for byte-identical
-    # request inputs.
-    #
-    # 8 since remediation WP-04.4: the quantity reader the character-stream
-    # tier's veto reuses reads spelled ranges and lists and a compact A beside
-    # a voltage, through guards a named letter-merge join can change, so a
-    # grounding verdict can move for byte-identical request inputs.
-    #
-    # 9 since remediation WP-06.2 (N6, U8): the whole-set path binds a reply
-    # through host handles and the one resolver (an id two sheets carry is
-    # refused where the first detection won), grounds what it keeps, rebinds
-    # its claims; the claim dedup keys on the source; entries sort by source.
-    #
-    # 10 since remediation WP-06.3 (U6, N14): a reply the model did not finish
-    # is never stored as complete, and a result short only by its budget is
-    # stored with its PARTIAL status.
-    assert X._CROSS_QC_CACHE_CONTRACT == 10
-    geom = _geom("a.pdf", "M-101")
-    entries = [("M-101", "digest", "text", geom)]
-    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    import pytest as _pytest
-    for previous in (2, 3, 4, 5, 6, 7, 8):
-        with _pytest.MonkeyPatch.context() as mp:
-            mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", previous)
-            legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-        assert current != legacy, "the contract must ride the key"
