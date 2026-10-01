@@ -2298,11 +2298,12 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
         # cross-QC entry just as thoroughly as a contract bump, which is why the
         # contract is deliberately NOT bumped here.
         #
-        # Reachability, recorded so this is not "dead" code: a >15,000-character
-        # sheet also exceeds the 4,000-character cross-QC budget, so today such a
-        # run is budget-degraded and never cache-admitted at all. This becomes
-        # load-bearing the moment ``_TEXT_LAYER_BUDGET`` rises above
-        # ``SHEET_TEXT_MAX_CHARS``. Computed once per sheet per key build.
+        # Reachability: a >15,000-character sheet also exceeds the
+        # 4,000-character cross-QC budget, so such a run is budget-degraded.
+        # It was never cache-admitted; since remediation WP-06.3 (N14) a
+        # budget-only shortfall is stored with its PARTIAL status, so this term
+        # is load-bearing now: the stored result's grounding read the tail it
+        # hashes. Computed once per sheet per key build.
         evidence = sheet_evidence_text(geom)
         if evidence != text_layer:
             entry["evidence_sha256"] = hashlib.sha256(

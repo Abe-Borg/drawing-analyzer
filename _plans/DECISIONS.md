@@ -661,6 +661,58 @@ before the read is judged failed.
   digest's retry decision and budget helpers (refactored, byte-identical); the
   WP-01.5 and WP-01.4 tests re-baselined with the owner's approval.
 
+Added by WP-06.3: **cross-QC adopts the classifier, streams, retries a cut
+reply once and keeps a cut reply's complete items** (U6, N4's cross-QC part,
+WP-01's acceptance for cross-QC; the owner's rules, decided in two rounds with
+measured case tables). It conforms to the classifier, the WP-01.6 ladder and
+the WP-01.7 interruption rules, and restates none of them.
+- **Measured first** (zero API calls, the real SDK 1.8.0 over
+  `AnthropicAPIStub`, the mini set, on the whole-set, shard map and reconcile
+  calls): `cross_qc._call` was a plain `create` that read `stop_reason` only
+  for an empty reply. A reply stopped at `max_tokens` with its object closed
+  (fenced or not), a refusal carrying a findings block, `None`, the context
+  window, `tool_use` and `pause_turn` read COMPLETE and were cached (warm run:
+  no call); a refusal with text read "no parseable findings object"; a cut
+  findings array lost every item; a reconcile failure lost its own error
+  ("cross-qc reconciliation incomplete" only). The suite, instrumented: 418
+  cross-QC calls (275 whole-set, 77 map, 66 reconcile), all `create`, one
+  unfinished (WP-02.3's recorded limit); replayed offline with 0 mismatches.
+- **Streaming (round 1):** every call streams through `digest.stream_reply`
+  with `cross_qc.stream_message` (one loop for a single reply, WP-01.7): a
+  transient failure or an interrupted stream is retried (2 per call), and once
+  the retries are spent an interrupted stream's partial read is the reply,
+  judged by the classifier (UNFINISHED). Not taken: streaming only the
+  raised-cap retry (two transports in one stage).
+- **The ladder:** `digest.unfinished_reply_error` with a noun per call
+  (`cross-qc`, `cross-qc shard`, `cross-qc reconciliation`); a finished empty
+  reply keeps `empty cross-qc (…)`; a reconcile failure is named in the run's
+  error (`cross-qc reconciliation incomplete (<each distinct error>)`).
+- **The raised cap (round 1):** a `max_tokens` stop only
+  (`raised_cap_may_finish`), once, at `min(2 × 16,000, MAX_TOKENS_RETRY_CEILING)`
+  clamped by `output_cap_for_model` (32,000), on every path. The two reads
+  fold by the digest's N16 rule through its own pieces (`_read_rank`,
+  `_name_discarded_retry`, read off `cross_qc._Reply`): the later read wins
+  when it ranks at least as high; else the first is kept and names it. Both
+  attempts' usage is summed. Not taken: not on reconcile; no retry.
+- **Salvage (round 1):** only `TRUNCATED` and `UNFINISHED` replies with text
+  keep anything: their closed object, else the complete items of their
+  `findings` / `facts` / `claims` arrays (one linear `raw_decode` pass), each
+  validated and grounded as any item; the item cut part way is dropped and
+  counted. The call stays failed (its error), so the read is never cached
+  and the stage never COMPLETE on it. A refusal (even with JSON), a
+  continuation or an unknown stop keeps nothing. Why not WP-01.6's "keep
+  nothing" for cross-QC: every kept item is re-checked against the sheets'
+  own text (grounding) and later crop-verified, which a digest or a report's
+  prose is not. Not taken: keep nothing (the critique's rule); also salvage
+  continuations and unknown stops.
+- **Version / cache changes:** D-4's WP-06.3 note and one migration-register
+  row.
+- **Consumers affected:** the cross-QC stage's status, errors, warnings and
+  usage record (`ctx.errors`, `run.log`, the report's stage table,
+  `run_manifest.json`); the arithmetic auditor's claims (a cut reply's
+  complete claims; none from a refusal); the ledger's cross-QC findings (a cut
+  reply's complete conflicts, which go to dual-crop verification as any).
+
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,
@@ -1009,6 +1061,25 @@ pinned status moved outside the re-baselined tests; a transient or expired read
 answered once, a routed refusal and a `max_tokens` read whose retry finishes
 now read COMPLETE (4 of 4) where they read PARTIAL (3 of 4). No cache or key
 change.
+
+Added by WP-06.3: **the cross-QC stage reads FAILED when it obtained nothing**
+(the owner's rule; D-2's failure flag before counts and its all-failed rule,
+applied at the call level). `CrossQCResult.stage_status` is the one rule the
+pipeline records, its usage record too: `failed` first, set when the whole-set
+call failed and kept nothing (a refusal, an empty or raised call, a finished
+reply with no findings object, a continuation or unknown stop), when every
+shard failed and kept nothing, or when no client could be made (it read
+COMPLETE beside its error, WP-16.2's finding); else COMPLETE when `complete`,
+else PARTIAL (a failed or cut-off call, a reconcile shortfall, a budget-only
+shortfall). A cut-off call that kept its complete items is PARTIAL, not
+FAILED: it judged part of its input. The new counts are observational:
+`CrossQCSalvage` (what a cut-off reply kept; one warning) and the three
+`CrossQCDiscardCounts` fields (`facts_over_cap`, `facts_not_object`,
+`legs_not_object`; one warning, the manifest's `cross_qc_discards`); neither
+sets `complete`, `failed` or `budget_degraded`. Measured: 19 suite results
+(finished replies with no findings object, the sabotage fixtures) read FAILED
+instead of PARTIAL; every test accepts both. Not taken: PARTIAL for every
+failed call (today's ladder).
 
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
@@ -1396,6 +1467,24 @@ never deleted (plan §2 rule 6, WP-10).
   critique holds a merge it decided (the fingerprint corpus has no legs and
   measured unchanged). The A/B record contract moves (5 → 6): a record stores
   the leg targets.
+- **Added by WP-06.3: the cross-QC term 9 → 10, and N14 decided** (the owner's
+  rules). What is admitted, and what an admitted entry may be, changed for
+  byte-identical request inputs, which is what the term exists for: a reply
+  the model did not finish is no longer stored as complete (U6; it was), a
+  cut-off reply's complete items are kept for the run and never stored, and
+  **a result short only by its budget is now stored with its status** (N14):
+  every call finished and parsed, the shortfall is the text budget or the
+  per-response findings cap, both a function of the keyed inputs (the
+  `[TRUNCATED N chars]` marker rides the key since WP-06.2, K2; the
+  truncated sheet's `evidence_sha256` term is load-bearing now). It is stored
+  with `complete=False` and replays PARTIAL with the same warnings, where every
+  warm run used to re-bill it (measured: 1 call warm before, 0 now). A result
+  with an error, a salvage or `failed` is never stored, and the read side
+  refuses an entry claiming both complete and degraded, or neither. One
+  mechanism: no key term (the raised cap is derived from the keyed
+  `max_tokens`), never `_SCHEMA_VERSION`. Measured: 15 suite results (14
+  tests) are now stored; no test moved. Not taken: leave N14 to WP-25.4 (the
+  budget redesign stays there).
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -1634,3 +1723,4 @@ migration.
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=8` | `_CROSS_QC_CACHE_CONTRACT=9` | Every field; `discards` gains two additive counters (`legs_ambiguous_label`, `facts_ambiguous_label`), which an older entry reads back as 0 | None: every cross-QC entry written under contract 8 misses once, on both paths | Host-side binding changed for byte-identical request inputs (remediation WP-06.2; N6, U8; the owner's rules): the whole-set path addresses sheets by host handles and binds every reply through the one resolver (a handle, else an id exactly one sheet carries; an id two sheets carry is refused where the first detection used to win), grounds every quote against the uncapped text and counts what it drops (`discards` is recorded there now), and rebinds its claims to their pages; the sharded path reads a reply's `sheet_id` through the same resolver; `_dedup_claims` keys on the page first; entries are ordered by source id and page (a no-op for every pipeline call, measured). No key input covers any of it. One mechanism: the existing term, bumped; no key term for it, never `_SCHEMA_VERSION`. The six tripwires that pinned 8 are re-pinned to 9 (the approved bump). No release shipped contracts 4 to 8, so a user upgrading from 1.7.0 pays one miss for all of them: one paid cross-QC pass per set. A conflict between two same-id sheets is new paid work downstream (a dual-crop verification call), and a whole-set conflict whose quote its sheet does not print is no longer reported; the verification and investigation keys are unchanged, and a conflict kept before keeps its entries. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass with new tests only). Old entries stay on disk | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |
 | Cross-QC cache (`_cross_qc_cache_key`), its `prompt` payload | the three system prompts | the three system prompts and the user-turn framing (`user_framing`: `cross_qc_user_framing()`, the strings in `CROSS_QC_USER_FRAMING_NAMES`, verbatim) | Every field; the entry shape is unchanged | None, once: every cross-QC key changes (in the same release as the contract row above, so the same one miss) | K2 (remediation WP-06.2; the owner's rule): the task line, the set and shard headers, the sheet title and body, the shard task, the reconcile manifest and fact lines and task, the unknown-discipline mark and the `[TRUNCATED N chars]` marker were inline literals outside the key, so editing one changed the request while every key stayed the same. They are named module strings now, held verbatim beside the prompts, so a later edit re-keys through the key's own inputs (the `digest.SHARED_USER_FRAMING_STRINGS` precedent). The truncation marker never reaches a stored entry (a degraded result is never admitted); it is keyed so it need not be remembered when WP-06.3 decides N14. A separate change with its own mechanism, beside the contract bump for the binding: not a bump and a term for one change | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |
 | A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 5 | 6 | Every field; `critical_signature["leg_targets"]` names pages (`SRC-0002#p1`) instead of sheet ids | None: `load_arm_records` refuses a v5 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran, and `critique._leg_targets` now names each leg's page (remediation WP-06.2, N6). A v5 record holds sheet ids there, which never equal a page, so a v5 baseline against a v6 variant would report every unchanged cross-sheet conflict as one with different legs, and a conflict whose leg moved to another PDF carrying the same id would have matched EXACT under v5. Refused, never deleted: re-run the arm | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |
+| Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=9`; only a complete result stored | `_CROSS_QC_CACHE_CONTRACT=10`; a complete result, or one short only by its budget (text omitted, the findings cap) stored with `complete=False` | Every field; the entry shape is unchanged (`complete` / `budget_degraded` already stored); `discards` gains three additive counters (`facts_over_cap`, `facts_not_object`, `legs_not_object`), which an older entry reads back as 0 | None: every cross-QC entry written under contract 9 misses once, on both paths | Admission changed for byte-identical request inputs (remediation WP-06.3; U6, U7, N14; the owner's rules): a reply the model did not finish (`max_tokens`, a refusal, `None`, the context window, a continuation) was parsed as finished and could be stored complete; now it is a failed call, never stored (a cut-off reply's complete items are kept for the run only). A budget-only shortfall is now stored with its PARTIAL status and replays warm; the read side refuses an entry claiming both complete and degraded, or neither. One mechanism: the term, no key term, never `_SCHEMA_VERSION`. The first cross-sheet QC run after upgrading re-runs once. `tests/test_cross_qc_terminal_outcomes.py::test_the_cross_qc_contract_moved_for_terminal_honesty`, the N14 tests there, and the seven re-pinned contract tests | WP-06.3 |

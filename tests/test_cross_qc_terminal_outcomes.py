@@ -564,7 +564,8 @@ def _interrupt(target: str, times: int, end: str = "error", error: dict | None =
     return stream
 
 
-@pytest.mark.parametrize("target", ["whole_set", "map", "reconcile"])
+@pytest.mark.parametrize("target", ["whole_set", "map", "reconcile"],
+                         ids=["whole_set", "map", "reconcile"])
 def test_an_interrupted_stream_is_retried_and_counted(tmp_path, monkeypatch, target):
     monkeypatch.setattr(D, "_retry_backoff_seconds", lambda attempt: 0.0)
     stub = AnthropicAPIStub(_route(), stream=_interrupt(target, 1))
@@ -577,8 +578,8 @@ def test_an_interrupted_stream_is_retried_and_counted(tmp_path, monkeypatch, tar
     assert len(_requests_on(stub, target)) == (2 if target != "map" else 3)
 
 
-@pytest.mark.parametrize("end", ["error", "drop"])
-@pytest.mark.parametrize("target", ["whole_set", "reconcile"])
+@pytest.mark.parametrize("end", ["error", "drop"], ids=["error", "drop"])
+@pytest.mark.parametrize("target", ["whole_set", "reconcile"], ids=["whole_set", "reconcile"])
 def test_a_stream_interrupted_every_time_is_a_partial_read(tmp_path, monkeypatch, target, end):
     monkeypatch.setattr(D, "_retry_backoff_seconds", lambda attempt: 0.0)
     stub = AnthropicAPIStub(_route(), stream=_interrupt(target, 99, end))
