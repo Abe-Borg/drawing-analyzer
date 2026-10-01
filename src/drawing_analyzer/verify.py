@@ -51,7 +51,9 @@ from .core.api_config import (
     call_with_refusal_fallback,
     phase_output_cap,
 )
+from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
+from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -60,7 +62,6 @@ from .digest import (
     _get,
     _image_block,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
@@ -84,7 +85,7 @@ _log = get_logger()
 # One crop image + a short prompt, answered with a 1-2 sentence JSON verdict.
 #
 # The output itself is tiny, but adaptive thinking draws from the SAME
-# ``max_tokens`` envelope as the answer — and on Opus 5 / Sonnet 5 thinking runs
+# ``max_tokens`` envelope as the answer — and on the 5 / 5.5 models thinking runs
 # whether or not the request asks for it (omitting the key does not disable it).
 # The previous 1k cap therefore had to fit the reasoning *and* the verdict, and
 # frequently fit neither: an empty body parses as no verdict, which degrades to
@@ -270,15 +271,29 @@ def _verdict_from_response(resp: Any) -> tuple[str, str, bool]:
     Verification requests are the ones most likely to hit this: they run
     adaptive thinking, which draws from the same ``max_tokens`` envelope as the
     answer.
+
+    The stop reason is read through the one classifier
+    (:func:`~drawing_analyzer.core.terminal_outcome.classify_stop_reason`,
+    D-1; remediation WP-01.6), and only a ``FINISHED`` reply is parsed. This
+    used to test ``max_tokens`` and ``refusal`` alone, so a context-window
+    stop, a reply with no stop reason, a continuation (verification declares
+    no tools) or an unknown reason was parsed as a verdict and cached. Every
+    kind but ``FINISHED`` is "no verdict", and the note names it; the two
+    notes that existed keep their wording (the owner's table).
     """
     stop = _get(resp, "stop_reason")
-    if stop in ("max_tokens", "refusal"):
-        reason = (
-            "truncated at max_tokens" if stop == "max_tokens"
-            else "declined by the model"
-        )
+    outcome = classify_stop_reason(stop)
+    if not outcome.finished:
+        if outcome.kind == REFUSED:
+            reason = "declined by the model"
+        elif outcome.raised_cap_may_finish:
+            reason = "truncated at max_tokens"
+        elif outcome.kind == TRUNCATED:
+            reason = "context window exceeded"
+        else:
+            reason = f"unfinished: stop_reason={stop!r}"
         return "UNCERTAIN", f"no verdict ({reason})", False
-    return _parse_verdict_with_validity(_message_text(resp))
+    return _parse_verdict_with_validity(reply_text(resp))
 
 
 def parse_verdict(text: str) -> tuple[str, str]:
@@ -294,7 +309,10 @@ def parse_verdict(text: str) -> tuple[str, str]:
 
 #: Why a live reply produced no settled verdict. ``None`` means it did.
 DEGRADE_MALFORMED = "malformed"     # the model answered, but not as a verdict
-DEGRADE_TRUNCATED = "truncated"     # cut off at max_tokens, or declined
+# The reply did not finish: cut off (max_tokens or the context window),
+# declined, no stop reason, a continuation or an unknown reason (every kind but
+# FINISHED; its meaning widened by remediation WP-01.6, the owner's rule).
+DEGRADE_TRUNCATED = "truncated"
 DEGRADE_FAILED = "failed"           # the call itself failed (non-fatal error)
 
 
@@ -312,8 +330,12 @@ def _degrade_kind(resp: Any, valid_model_verdict: bool) -> str | None:
     """
     if valid_model_verdict:
         return None
-    stop = _get(resp, "stop_reason")
-    return DEGRADE_TRUNCATED if stop in ("max_tokens", "refusal") else DEGRADE_MALFORMED
+    # The same classifier as :func:`_verdict_from_response` (D-1): a reply the
+    # model did not finish is counted ``truncated``, a finished one that did
+    # not parse ``malformed``. Both are "no judgment" under D-2.
+    if not classify_stop_reason(_get(resp, "stop_reason")).finished:
+        return DEGRADE_TRUNCATED
+    return DEGRADE_MALFORMED
 
 
 def _build_request(
@@ -342,7 +364,7 @@ def _build_request(
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
-    # Explicit, never implicit: on Opus 5 / Sonnet 5 an omitted ``thinking`` key
+    # Explicit, never implicit: on the 5 / 5.5 models an omitted ``thinking`` key
     # runs adaptive anyway, so saying nothing is not the same as saying no.
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
     apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)

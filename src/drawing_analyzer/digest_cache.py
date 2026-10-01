@@ -1,6 +1,6 @@
 """Persistent, content-keyed cache for per-sheet drawing digests.
 
-A digest is the dominant cost in the drawing pipeline — one Opus 5 vision
+A digest is the dominant cost in the drawing pipeline — one Opus 5.5 vision
 request per sheet (image tokens + minutes of latency). The result is
 deterministic given the rendered sheet images + the model + the digest prompt +
 the request params, so re-running a set (after editing one sheet, or just
@@ -120,7 +120,26 @@ _SCHEMA_VERSION = 10
 #   stores no stop reason to check on the way out, so it misses once and is
 #   re-critiqued. It is left on disk, never deleted. The merge rule itself is
 #   unchanged (its fingerprint is pinned under 3 as it was under 2).
-_CRITIQUE_CACHE_CONTRACT = 3
+# 4 (remediation WP-04.3): the merge rule reads quantity roles
+#   (``critique._quantity_roles``): two findings that give the same values to
+#   different roles (``6 in main, 4 in branch`` / ``4 in main, 6 in branch``)
+#   or one value to two roles (``6 in supply and return`` / ``6 in supply, 8
+#   in return``) no longer merge, and an ambiguous role is kept apart from a
+#   bound one. And an ``x`` glued to a digit's inch or foot mark (``24"x12"``)
+#   is no longer a tag. An entry stored under 3 can hold a merge the new rule
+#   refuses (and, through a stray ``X12``, a pair it now makes), so it misses
+#   once and is re-critiqued. It is left on disk, never deleted.
+# 5 (remediation WP-04.4): the tokenizer residuals WP-04.1 read only in part.
+#   The quantity reader reads a spelled range or list whole (``4 to 6 in`` and
+#   ``between 4 and 6 in`` are ``4..6in``; ``4 and 6 in``, ``4 or 6 in`` and a
+#   loose list of three or more numbers, ``2, 4, 6 in``, are lists) and a compact
+#   ``A`` beside a voltage (``20A 120V``); the signature compares each feet value
+#   with its inches (``feet_inches``: ``12'`` is ``12ft0in``, ``12'-6"`` is
+#   ``12ft6in``). An entry stored under 4 can hold a merge the new rule refuses
+#   (``4 to 6 in`` folded into ``6 in``), or a loose list kept apart from its
+#   tight twin, so it misses once and is re-critiqued. It is left on disk, never
+#   deleted.
+_CRITIQUE_CACHE_CONTRACT = 5
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

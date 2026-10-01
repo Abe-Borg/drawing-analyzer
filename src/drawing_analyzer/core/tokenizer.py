@@ -6,9 +6,9 @@ authoritative number is Anthropic's ``count_tokens`` endpoint
 (:func:`count_tokens_via_api`).
 
 Token limits (v2.3.0):
-    - Claude Opus 5 context window: 1,000,000 tokens
-    - Opus 5 max output: 128,000 tokens
-    - Sonnet 5 max output: 128,000 tokens
+    - Claude Opus 5.5 context window: 1,000,000 tokens
+    - Opus 5.5 max output: 128,000 tokens
+    - Sonnet 5.5 max output: 128,000 tokens
     - Per-spec recommended input limit: 500,000 tokens
       (practical limit — individual specs are reviewed one at a time)
     - Cross-check recommended input limit: ~822,000 tokens
@@ -35,7 +35,7 @@ _log = logging.getLogger(__name__)
 # Model limits
 # ---------------------------------------------------------------------------
 
-# Claude Opus 5 context window (1M tokens, no beta header required).
+# Claude Opus 5.5 context window (1M tokens, no beta header required).
 MAX_CONTEXT_TOKENS = 1_000_000
 
 
@@ -60,7 +60,7 @@ PROJECT_CONTEXT_MAX_TOKENS = 100_000
 # Cross-check limits (v2.2.0)
 # ---------------------------------------------------------------------------
 
-# Cross-check uses Sonnet 5 with full spec content and adaptive thinking.
+# Cross-check uses Sonnet 5.5 with full spec content and adaptive thinking.
 # With thinking enabled, thinking tokens + text output share the max_tokens budget.
 # We keep a 128K output reserve (matches the api_config cross-check cap before
 # the per-model clamp) so the input budget stays stable across model changes.
@@ -104,12 +104,15 @@ _LOCAL_SAFETY_FACTORS: dict[str, float] = {
     # undercount is small but non-zero.
     #
     # Opus 5 and Sonnet 5 both use the tokenizer introduced with Opus 4.7,
-    # the same one Opus 4.8 uses, so they carry Opus 4.8's factor. Note this
+    # the same one Opus 4.8 uses, so they carry Opus 4.8's factor, and Opus 5.5
+    # and Sonnet 5.5 keep their predecessors' tokenizer unchanged. Note this
     # pads the *ratio* to cl100k, not the absolute count: for identical text
     # Sonnet 5 emits roughly 30% more Claude tokens than Sonnet 4.6 because
     # of that tokenizer change, which is exactly why its budget must not be
     # estimated with a Sonnet-4.6-era assumption. The authoritative number
     # remains the ``count_tokens`` preflight; this table is the fallback gate.
+    "claude-opus-5-5": 1.10,
+    "claude-sonnet-5-5": 1.10,
     "claude-opus-5": 1.10,
     "claude-sonnet-5": 1.10,
     "claude-opus-4-8": 1.10,
@@ -193,7 +196,7 @@ def exceeds_per_call_limit_for_model(
 
 _IMAGE_TOKEN_DIVISOR = 750
 
-_IMAGE_TOKEN_CAP_HIRES = 4784      # Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7
+_IMAGE_TOKEN_CAP_HIRES = 4784      # Opus/Sonnet 5.5 and 5, Opus 4.8 / 4.7
 _IMAGE_LONG_EDGE_HIRES = 2576
 _IMAGE_TOKEN_CAP_DEFAULT = 1568    # Sonnet 4.6 / Haiku 4.5 / unknown
 _IMAGE_LONG_EDGE_DEFAULT = 1568

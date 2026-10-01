@@ -220,7 +220,13 @@ _HOW_TO_USE = HelpDocument(
             _bullet(
                 "It is remembered for next launch in your OS keyring (or, only with "
                 "your explicit consent, a local file). An environment variable always "
-                "wins over a saved key."
+                "wins over a saved key: it fills the field at launch."
+            ),
+            _bullet(
+                "An analysis keeps the key it started with: the field is locked "
+                "until the run ends. The app keeps the key out of its own "
+                "environment, so it does not pass it on to programs it starts (a key "
+                "you set system-wide is visible to every program anyway)."
             ),
             _bullet(
                 "Don't have a key yet? Click “How do I get one?” beside the key field "
@@ -460,7 +466,7 @@ _HOW_IT_WORKS = HelpDocument(
             _para(
                 "Each sheet is rendered to an overview image plus a 6×6 grid of "
                 "high-resolution tiles and sent, together with its text layer, to Claude "
-                "Opus 5 in a single request. The model returns a structured Markdown "
+                "Opus 5.5 in a single request. The model returns a structured Markdown "
                 "digest plus a machine-readable findings block."
             ),
             _bullet(
@@ -973,24 +979,24 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "variable if your firm standardizes on something else."
             ),
             _bullet(
-                "Claude Opus 5 — reading the sheets, the critique, working out the set's "
-                "identity, writing the review plan, the cross-sheet conflict hunt, and the "
-                "investigation loop. The deep-reasoning work."
+                "Claude Opus 5.5 — reading the sheets, the critique, writing the review "
+                "plan, the set-level synthesis and focus report, the cross-sheet conflict "
+                "hunt, and the investigation loop. The deep-reasoning work."
             ),
             _bullet(
-                "Claude Sonnet 5 — the first verification look at each finding. Smaller, "
+                "Claude Sonnet 5.5 — the first verification look at each finding. Smaller, "
                 "faster and cheaper, because the question is narrow: does this one thing "
                 "hold in this one crop? It also runs the report's Ask-AI assistant, which "
-                "needs to fetch web pages — a thing Opus 5 cannot do."
+                "searches and fetches web pages on the reader's own key, where half the "
+                "price matters."
             ),
             _bullet(
-                "Sonnet 5 also runs three stages outright: the set-identity read "
+                "Sonnet 5.5 also runs three stages outright: the set-identity read "
                 "(advisory only, with a deterministic regex backstop), the prose "
                 "harvest's structuring call (the item is already found — all that "
                 "is left is restating one sentence in the findings format), and "
-                "the citation check. That last one is a capability choice rather "
-                "than a cost one: checking a code citation needs to fetch the page, "
-                "which Opus 5 cannot do."
+                "the citation check, which fetches the cited code section and reads "
+                "it — narrow work that does not need the flagship."
             ),
             _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "
@@ -1351,7 +1357,10 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "API key — stored in your operating system's credential manager (Windows "
                 "Credential Manager, macOS Keychain, Secret Service on Linux). If none is "
                 "available it is NOT quietly written to disk: the app asks first, and "
-                "declining keeps it for the session only."
+                "declining keeps it for the session only. A key file from an older "
+                "setup is moved into the credential manager only when it holds a key, "
+                "and a file holding anything else is left in place and named in the "
+                "activity log."
             ),
             _bullet(
                 "Exports — the report, the reviewed PDFs, the evidence crops, the "
@@ -1514,8 +1523,9 @@ _ABOUT = HelpDocument(
             ),
             _para(
                 "The full license text ships with the source as the LICENSE "
-                "file. This program comes with NO WARRANTY, to the extent "
-                "permitted by law."
+                "file. The Windows installer shows it for you to accept and "
+                "installs a copy as LICENSE.txt in the app's folder. This "
+                "program comes with NO WARRANTY, to the extent permitted by law."
             ),
             _bullet(
                 "Why AGPL: the PDF engine, PyMuPDF, is itself licensed "

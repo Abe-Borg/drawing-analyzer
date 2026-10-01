@@ -73,7 +73,10 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
       (the digest's `call_error` path; verify's `DEGRADE_FAILED`);
     - *interrupted stream*: when the SDK returns, it is `UNFINISHED` (N27).
       When the stream raises, it is a transport failure, and the partial read
-      is lost today; capturing it is WP-01.7;
+      is lost today; capturing it is WP-01.7; *(amended by WP-01.7: the
+      stream's partial read is captured, `core.stream_interruption.StreamInterrupted`,
+      and once the transient retries are spent it is the reply, judged by this
+      classifier like any reply; see the WP-01.7 note below)*
     - *malformed result*: a finished reply the stage cannot parse (verify's
       `DEGRADE_MALFORMED`; the digest's findings-block `MALFORMED_*`
       telemetry, which never fails a sheet, because the prose is the
@@ -216,7 +219,10 @@ above and restates none of it.
     is a failed read, DA-008);
   - `TRUNCATED`: failed, `truncated critique (stop_reason=…)`. Not retried at
     a raised cap: that is not in N4's row (a note on WP-01.5 records the
-    option and the shared retry bound it would need);
+    option and the shared retry bound it would need); *(amended by WP-01.8: a
+    `max_tokens` read gets one retry at twice the cap on both transports
+    first, and fails only if that retry fails too; see the WP-01.8 note
+    below)*
   - `REFUSED`: failed, `refused critique (stop_reason='refusal')`, named even
     when the reply is empty;
   - `UNFINISHED` (`None`, N27): failed, `unfinished critique (stop_reason=None)`;
@@ -261,6 +267,399 @@ above and restates none of it.
   surviving read's findings are `NOT_ASSESSED_PARTIAL`), the claims, both
   cache levels on both transports, the stage status and the per-sheet usage
   record (D-2's WP-01.4 note).
+
+Added by WP-01.5: **a refused batch item is recovered under the selected
+transport, inside one per-sheet retry budget** (R2; the owner's rules, decided
+in two rounds with measured options and a case table per option). It conforms
+to the decision above and restates none of it: a `REFUSED` read is still a
+failed read, and `stop_details` is still informational, never the verdict.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`, SDK
+  1.7.0 and again 1.8.0 in a scratch venv, identical):
+  - the plain `RefusalStopDetails` declares only `category`, `explanation` and
+    `type`, but allows extras, so `recommended_model` survives on a batch
+    result as a pydantic extra. The API sets it only when a server-side
+    fallback attempt could not run (the SDK's own docstring), and a batch item
+    cannot carry `fallbacks`, so in practice it is absent on a batch refusal;
+  - a refusal was failed and never retried at the primary collect, the
+    fresh-batch rounds, the follow-up batch and the direct rescue, whatever its
+    category; the abandoned-batch harvest resubmitted it to the same model;
+    nothing read `stop_details`;
+  - retries per sheet, worst case: 5 submissions on `RECOVERY_BATCH` (primary
+    + 4 rounds, already shared by transient, expired, raised-cap and abandoned
+    rounds), 2 batch items + 3 real-time calls on `RECOVERY_DIRECT`, 6 calls on
+    the real-time digest (2 attempts × (1 + 2 transient));
+  - a prototype swap stored the fallback read under the requested model's key
+    at both levels, a warm run served it free, and the ledger labelled it with
+    the requested model (same price for Opus 4.8).
+- **The gate: a registry route per category.**
+  `ModelCapabilities.refusal_fallback_routes` (pairs of category and target;
+  `api_config.refusal_fallback_target`). Opus 5 declares `cyber` → Opus 4.8,
+  Anthropic's server-side route for Opus 5's cyber-only classifiers. Nothing
+  else is retried: another category, `null` (the model's own decline), no
+  `stop_details`, a model without a route (Sonnet 5 included). A named
+  unrouted category is said in the error: `…; not retried: no fallback for
+  category 'bio' on claude-opus-5`. `supports_refusal_fallback` (the
+  server-side opt-in) is a separate capability and is unchanged. The Opus 5.5
+  and Sonnet 5.5 defaults, registered after this decision (merged into the
+  slice's PR), declare no route: a batch item refused on one is not retried.
+  Whether they get routes, and which, is open for the owner (Sonnet 5.5's
+  server-side fallback retries `cyber` and `frontier_llm` on Sonnet 5;
+  Opus 5.5's targets are Opus 5 and Opus 4.8, per category).
+- **The target:** `recommended_model` when it names a registered model other
+  than the refuser, else the route's; the request is rebuilt for it
+  (`digest.retarget_digest_request`, the builder's rules). **The gate decides
+  whether, the target decides where**: a registered hint does not open an
+  unrouted category. (The round-2 preview's "route target: any" row read as
+  "whatever the route's target is"; the owner's gate choice says everything
+  unrouted is not retried, so the gate applies first. No batch refusal
+  carries the hint in practice, so this changes nothing measured.)
+- **Once per sheet.** A refusal from an item already sent to a fallback ends
+  it (`refused digest on claude-opus-4-8 (…)`); the chain refused.
+- **One per-sheet retry budget** (`_Slot.retries`, `_within_retry_budget`,
+  `_count_retry`): every resubmission of a sheet, whatever the reason and at
+  every site, counts one; the direct rescue counts once per sheet. The budget
+  is `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` (default 4, no new knob), so
+  the pipeline's worst case is unchanged. The real-time digest keeps its own
+  retries (the server-side fallback covers its refusals).
+- **The harvest asks the same predicate.** A refusal it reads is held (it ranks
+  above nothing, so a fallback that comes back worse or never lands leaves it
+  named) and goes to its fallback, or is final. A permanent error it reads is
+  final (held, not resubmitted; it was resubmitted once). An item the
+  harvest's own cancel stopped (`canceled`), a transient or expired item and a
+  truncated one are resubmitted as they were submitted, as before.
+  `_HarvestOutcome.final`, `.retry`, `.rescue_params`. This amends WP-01.3's
+  "a content-free item is parked": a refusal is now held.
+- **The selected transport.** `RECOVERY_BATCH` (the pipeline): a refused sheet
+  is only ever a batch item. `RECOVERY_DIRECT` is the full-rate policy a caller
+  selects: a refused sheet takes any failed item's path. A refusal from the
+  primary gets its fallback item in the follow-up batch; the rescue takes, on
+  its fallback, whatever still fails after that batch, including a refusal the
+  follow-up itself returned, and everything when the follow-up cannot run or
+  stalls. (The round-2 preview said "only if that batch cannot run or stalls";
+  the follow-up-refusal case is the same rule, measured after implementation
+  and pinned.)
+- **Cache admission:** a finished fallback read is admitted under the requested
+  model's key, like the server-side fallback's. No key, entry or schema
+  changed, so no migration-register row. The ledger still labels the attempt
+  with the requested model: a recorded limit for WP-14.3.
+- **`billing_error` is permanent**; `request_too_large` (the API's 413 type, not
+  an SDK batch type) stays permanent.
+- **Logged, no secrets.** The ladder takes `category=` and a refusal's error
+  names it on both digest transports and the critique; the diagnostics log
+  carries category, hint, target and explanation (`redact_secrets`, one line,
+  200 characters). Nothing new in the manifest.
+- **The batch critique:** an errored read keeps its type through the digest's
+  one helper (`_batch_item_error_text(noun="item")`). Retrying failed batch
+  critique reads, and WP-01.4's raised-cap question, is a new row, WP-01.8.
+  *(Done by WP-01.8: the note below.)*
+- **Rejected:** retrying every refusal (a model's own decline re-read
+  elsewhere); a guessed Sonnet 5 route; sending `recommended_model` verbatim
+  (an unregistered id may 400); a refusal round outside the budget; storing
+  under the serving model's key or not caching (a refusal plus a fallback paid
+  on every run); a `served_model` field in the entry (it changes what is
+  stored; WP-14.3's); `billing_error` transient; the explanation in the error or
+  the manifest; direct rescue only when passed explicitly (a sentinel default).
+- **Consumers affected:** the refused sheet's error (its category, and the
+  fallback's naming), `ctx.errors`, `run.log`, the report and the per-sheet
+  export through it; the digest stage's status (a recovered sheet is no longer
+  a failure); both cache levels (a finished fallback read is stored); the usage
+  ledger (one more attempt record, labelled with the requested model); the
+  critique's failed-read errors (the type).
+
+Added by WP-01.6 ([PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184)): **the remaining response consumers and one text join** (N4
+for the set-level stages, N27, U2, plan WP-09 step 6; the owner's rules,
+decided in two rounds with measured options and a case table per option). It
+conforms to the decision above and restates none of it.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`, SDK
+  1.7.0 and again 1.8.0 in a scratch venv, identical):
+  - **The five consumers** (the review planner, set identity, synthesis, the
+    focus report, the prose harvest's structuring call) read no stop reason.
+    Under `max_tokens`, `model_context_window_exceeded`, `None` (the planner,
+    synthesis and focus stream, so the real N27 shape, a stream cut before
+    `message_delta`), `tool_use`, `pause_turn`, `compaction` and an unknown
+    reason, every one kept its reply, read COMPLETE and cached it whenever its
+    content parsed. A refusal whose content parsed did too. A refusal with an
+    explanation failed the planner and identity (`no parseable … block`, not
+    cached) and degraded the harvest item, but synthesis and the focus report
+    kept the explanation as their text, COMPLETE, cached. A textless refusal
+    failed synthesis and focus (`empty … result`) and recorded no usage.
+  - **Verification** already failed `max_tokens` and `refusal`; the six other
+    shapes were parsed as verdicts, the stage read COMPLETE, and the verdict
+    was cached.
+  - **The fallback block.** A streamed reply declined part way is
+    `[text, fallback, text]`, and the second text *continues* the first
+    (Anthropic's refusals-and-fallback page: "The fallback model continues
+    from the partial output"); a non-streamed one omits the partial and starts
+    over, `[fallback, text]`. On both namespaces, create and stream, Opus 5.5
+    and Sonnet 5.5, the SDK keeps the order; the beta namespace parses the
+    block as `BetaFallbackBlock`, the plain one as a `TextBlock` (or
+    `ParsedTextBlock`) whose `type` is `"fallback"`. The `"\n"` join put a
+    newline inside a word, broke the digest's findings JSON (the finding lost,
+    the read cached as finished) and failed a good critique read.
+  - **Over the whole suite** (an instrumented run, 3,882 joins in 12 modules):
+    6 replies had more than one text block, all `[text, fallback, text]` from
+    WP-02.3's recorded limits; none had two ordinary text blocks. 7 of the 237
+    identity corpora carried an errored sheet's digest text.
+- **The join** (`core.reply_text.reply_text`, stdlib only, the one reader of a
+  reply's text blocks): two text blocks with a `fallback` block anywhere
+  between them join with nothing; any other two with `between`, default
+  `"\n"`, as before. A reply without a fallback block therefore reads
+  byte-identical, and no stored text changes except a fallback-split reply's.
+  A block is known by `type`, never class. `digest._message_text` is gone; its
+  11 importers and the digest read this. WP-12.1 passes `between=""` for
+  citation splits.
+- **The consumers** each ask `digest.unfinished_reply_error(resp, text, noun=)`
+  first: `None` for `FINISHED` (the stage's own parse then decides, in its own
+  wording: `planner reply carried no parseable plans block`, `empty synthesis
+  result`, …), else `digest_terminal_error` with the stage's noun (`review
+  plan`, `identity`, `synthesis`, `focus report`, `harvest structuring
+  reply`), a refusal naming its category, its `stop_details` logged. What each
+  does with a non-finished read (keep nothing, cache nothing):
+  - the planner and identity fail their stage (the critique runs without plan
+    profiles, as on any planner failure);
+  - synthesis and the focus report fail and ship no text (the export's "no
+    overview produced" path), so the harvest mirrors nothing from them; their
+    billed reply is recorded as one FAILED usage attempt
+    (`SynthesisResult.replied` / `FocusReportResult.replied`; a failed one
+    recorded nothing before, which the planner and identity already did);
+  - a harvest item takes its degraded verbatim entry (`call="live"`), under
+    either structured-outputs contract: a schema never overrides the stop
+    reason (plan WP-09 step 6).
+- **Verification** reads the classifier in `_verdict_from_response` and
+  `_degrade_kind`: every kind but `FINISHED` is "no verdict", UNCERTAIN, never
+  cached, counted under the existing `truncated` counter, whose meaning widens
+  to "did not finish" (no new field; WP-01.1's counters and D-2 unchanged).
+  The notes `no verdict (truncated at max_tokens)` and `no verdict (declined by
+  the model)` keep their wording; new: `no verdict (context window exceeded)`,
+  `no verdict (unfinished: stop_reason=…)`.
+- **The identity corpus** skips an errored sheet's digest text: the sheet
+  gives its `[digest failed: …]` line (what it gave with no text) and keeps its
+  text-layer slice and edition windows (the PDF's words, not the model's). It
+  re-keys the identity cache only for a set with such a sheet.
+- **Not in this note:** cross-QC's terminal handling (WP-06.3; its replies
+  already read through the join), the citation cache gate (WP-12.6), the
+  investigation (WP-13.4), interrupted-stream capture (WP-01.7).
+- **Rejected:** "" between every text block (widens into WP-12.1 and changes
+  multi-block replies); "" also between cited blocks (part of WP-12.1 here);
+  shipping a cut-off synthesis or focus report under an "incomplete" banner;
+  using a parseable non-finished reply for the run without caching it (D-1 and
+  N15 rule unfinished output out); a fourth verification counter; the ladder's
+  wording for verification (re-baselines two pinned notes); keeping the
+  identity corpus as it was; dropping the errored sheet's text-layer windows
+  too; a stage-neutral error sentence (a second wording).
+- **Version / cache changes:** D-4's WP-01.6 note and two migration-register
+  rows.
+- **Consumers affected:** the five stages' results, errors and stage statuses
+  (`ctx.errors`, `run.log`, the report's stage table), `ctx.synthesis_text` and
+  `ctx.focus_report_text` (empty on a non-finished reply) and through them the
+  exports and the prose harvest's synthesis channel; the planner's profiles and
+  so the critique's `profiles_key`; the usage ledger (a FAILED synthesis or
+  focus record); verification's counters, notes, stage status and cache; the
+  identity corpus and its key; every reply read through the join (the digest,
+  its batch transport, the critique, cross-QC, citation, investigation).
+
+Added by WP-01.7 ([PR #185](https://github.com/Abe-Borg/drawing-analyzer/pull/185)): **an interrupted stream's partial read, its retry
+and its usage** (U1's partial-stream part, plan WP-14 step 7; the owner's rules,
+decided in two rounds and one follow-up with measured options and a case table
+per option). It amends the "interrupted stream" line above: a stream that
+raises is no longer a transport failure whose read is lost. It conforms to the
+classifier and restates none of it.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`,
+  every `CUTS` x `ENDS`, both namespaces, Opus 5.5 and Sonnet 5.5, SDK 1.7.0 and
+  again 1.8.0 in a scratch venv, identical):
+  - the SDK raises the transport's own `httpx2.RemoteProtocolError` for a
+    dropped connection (not wrapped), `APIStatusError` with `status_code` 200
+    and the event's type on `.type` for an SSE `error` event, and its own
+    `AssertionError` for a clean end with no event;
+    `digest._is_transient_error` recognised none, so every streamed stage failed
+    after one request (`HTTP 200: {'type': 'error', …}`, `peer closed
+    connection without sending complete message body`);
+  - the SDK's `max_retries` re-sends a request, never a started stream (1
+    request with `max_retries=2`), so a host retry doubles no layer;
+  - `current_message_snapshot` stays readable after the `with` exits: before
+    `message_delta`, no stop reason and `message_start`'s usage (input, cache
+    counters, the `cache_creation` split; output 0); after it, the complete
+    read (stop reason, final usage) even when the stream then drops; no
+    `message_start`, the SDK's `AssertionError`;
+  - the ladder and `unfinished_reply_error` read a snapshot as `unfinished …
+    (stop_reason=None)` (`empty …` with no text); `keep_digest_read` ranks one
+    with content a partial read, above an empty or raised retry;
+  - today, per consumer (m3, 66 cases, both SDKs): the digest failed with 0/0
+    recorded; the critique read failed and its tokens were dropped from the
+    sheet's record; the planner failed with a 0-token record; synthesis and
+    focus recorded nothing; the investigation's turn failed 0/0, the stage
+    PARTIAL. Nothing retried. Over the whole suite, 5 of 2,589 streamed calls
+    raised inside `get_final_message`, all in WP-02.3's recorded limits.
+  - **The investigation streams too** (every turn), a seventh streamed path
+    the request's list did not name.
+- **The capture site** is `core.api_config._dispatch_messages`: a failure
+  inside `get_final_message()` raises `StreamInterrupted(cause, partial)` from
+  its cause (the class in its own stdlib-only module,
+  `core/stream_interruption.py`, so a reload of `api_config`, which the
+  report-chat tests do, cannot make two classes: measured, it did in the full
+  suite before the move) (`kind`: `error_event`, `connection`, `timeout`, `no_event`,
+  `other`; `error_type` / `error_message` from the event). A failure before the
+  stream exists is not wrapped (the latches read it). **A snapshot that
+  already got `message_delta` is the reply at once** (the follow-up question:
+  the round-1 retry table said "any cut", the round-2 usage preview showed one
+  attempt; the owner chose one attempt): nothing retried, judged by its stop
+  reason, cached when finished, as its clean-end twin always was.
+- **Retry: transient ones, one predicate.** `_is_transient_error` learns the
+  interruption: `connection`, `no_event` (read as dropped) and `timeout` are
+  transient; an `error_event` is transient exactly when its type stands for a
+  status in `_TRANSIENT_STATUSES` (`digest._ERROR_TYPE_STATUS`, pinned to the
+  SDK's `ErrorObject` types plus `request_too_large`): `overloaded_error`,
+  `api_error`, `rate_limit_error`, `timeout_error`; `other` is judged as its
+  cause. Inside each stage's existing transient retries (2 per call; the batch
+  rescue also inside its per-sheet and collection budgets): no bound moved.
+  Not taken: every interruption (re-sends an `invalid_request_error` twice); a
+  dropped connection only (an `overloaded_error` mid-stream reported, not
+  retried); no retry.
+- **The partial read is the reply** once the retries are spent (or at once for
+  a permanent cause), judged by this classifier: no stop reason is
+  `UNFINISHED`, so each stage takes its N27 path. The digest keeps its text
+  under an error (the per-sheet export shows it), holds its findings out (N15),
+  caches nothing, and folds every attempt's read through `keep_digest_read`
+  (N16, the owner's second-round choice): a partial read with content
+  outranks a later empty or raised attempt, a finished retry wins with no
+  suffix, and a call that ended with nothing in hand is named once (`"; retry
+  failed: stream interrupted (…)"`), as a raised-cap retry that raised always
+  was. The critique fails the read and keeps nothing (WP-01.4). The review
+  plan, synthesis and the focus report keep nothing (WP-01.6), through one
+  loop, `digest.stream_reply`. The batch direct rescue folds the partial read
+  like any rescue read. The investigation retries its turn and never uses a
+  partial turn (no tool from it runs). Not taken: never finished even after
+  `message_delta` (a complete read failed and re-read); discarding the partial
+  (the digest's export loses billed text); the last attempt's read for the
+  digest (a drop mid-text then two with no event would lose the text).
+- **The wording** is the ladder's with the cause in its parentheses, as a
+  refusal carries `category=` (`digest_terminal_error(…, interrupted=)`):
+  `unfinished digest (stop_reason=None, interrupted='overloaded_error')`,
+  `empty synthesis (stop_reason=None, interrupted='connection dropped')`. With
+  nothing in hand (`_clean_error`): `stream interrupted (<type>: <message>)`,
+  `stream interrupted (connection dropped — try again)` (a stream with no
+  event reads the same), `stream interrupted (timed out — try again)`; an
+  `other` cause keeps its own wording. Unchanged without an interruption. Not
+  taken: the ladder alone (a partial read indistinguishable from a clean early
+  end); a new ladder word `interrupted`.
+- **The usage** (plan WP-14 step 7): every attempt's reported usage is the
+  stage's (`digest.StreamUsage`), an interrupted one's being `message_start`'s,
+  and `UsageRecord.interrupted_attempts` (additive, default 0) counts the
+  attempts whose final usage never arrived. `RunUsage.interrupted_attempts`
+  totals it (`usage.interrupted_attempts` in `run_manifest.json`, schema v1
+  additive), and run.log's usage section says the output and cost totals are
+  then lower bounds. Each record keeps its stage's terminal status; the cost
+  stays a number and `is_billable_but_unpriced` is unchanged: D-7 (WP-14.4)
+  decides whether unreported output makes a total unknown, WP-14.5 per-attempt
+  records. A synthesis or focus call that got nothing back but was interrupted
+  is one FAILED record. Not taken: a terminal status `INTERRUPTED` only (a
+  recovered interruption leaves no mark); the counter plus an unknown cost
+  (moves into D-7); input only, no mark.
+- **Version / cache changes:** none (D-4's WP-01.7 note); no migration-register
+  row.
+- **Consumers affected:** every streamed stage's retries, errors and usage
+  records (`ctx.errors`, the stage tables, `run.log`, `run_manifest.json`); the
+  digest's kept read, its export and its held-out count; the critique's read
+  tally (an interrupted read that was retried to a finish is judged; one that
+  was not is "returned no judgment"); the investigation's per-finding record;
+  the batch rescue's attempt records; the SDK-contract test's patch point
+  (each set-level stage passes its own `stream_message` to `stream_reply`).
+
+Added by WP-01.8 ([PR #186](https://github.com/Abe-Borg/drawing-analyzer/pull/186)): **a failed batch critique read is retried, and a critique
+cut off at `max_tokens` gets one raised-cap retry, on both transports** (N4's
+critique part, R2, WP-01 step 5; the owner's rules, decided in three rounds with
+measured options and a case table per option). It conforms to the classifier
+and the WP-01.4 and WP-01.5 notes above, and restates none of them: a read that
+is not `FINISHED` is still a failed read that keeps nothing; a retry happens
+before the read is judged failed.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`,
+  Opus 5.5, Sonnet 5.5 and Opus 5, SDK 1.7.0 and again 1.8.0 in a scratch
+  venv, identical):
+  - every failed batch critique read failed in one batch and was never
+    retried: the nine SDK error types, `request_too_large`, canceled, expired,
+    a refusal of every category with and without `stop_details`, `max_tokens`
+    (empty, or with a complete-looking object), the context window, `None`,
+    `pause_turn`, an unknown stop, a malformed read;
+  - through the pipeline (Hybrid and Economy) the critique stage read PARTIAL,
+    3 of 4 reads judged, the sheet's usage record PARTIAL, and the warm run
+    read the sheet again (2 batch items); on Fast a real-time read cut at
+    64k failed in one call, and the warm run read it again;
+  - the digest's recovery could be reused, not copied: its retry decision read
+    only a slot's params and its `SheetDigest`'s verdict, and its budget
+    helpers only a slot's `retries`; its rounds loop is bound to its harvest,
+    abandonment records and rescue, so the critique keeps its own loop.
+- **Which reads** (round 1): **the digest's one predicate**,
+  `batch_digest._retry_params_for` (slot-agnostic; `_item_retry_params` is its
+  digest wrapper, byte-identical decisions): a transient errored item
+  (`api_error`, `overloaded_error`, `rate_limit_error`, `timeout_error`) and an
+  expired one as they were sent; a refusal on its registry route
+  (`refusal_fallback_routes`), once, the gate and target rules of the WP-01.5
+  note unchanged; a `max_tokens` stop at twice the cap, up to
+  `MAX_TOKENS_RETRY_CEILING`, clamped to the model's cap. Not retried: a
+  permanent error, `canceled` (as the digest's primary collect), an unrouted
+  or category-less refusal (a named category says so: `…; not retried: no
+  fallback for category 'cyber' on claude-opus-5-5`, the digest's words), the
+  context window, `None`, a continuation, an unknown stop, a malformed read.
+  `CritiqueRunOutcome.stop_reason` (runtime only) is what the predicate reads.
+  Not taken: the same with one follow-up batch only; the same plus canceled;
+  transient and expired only.
+- **Where:** fresh critique batches (`batch_critique._recover_failed_reads`),
+  between the primary collect and the merge, up to
+  `_max_batch_resubmit_rounds()` rounds (a rejected submit counts a round,
+  spends no retry, backs off), inside the remaining collection bound. Never
+  full-rate real time. No stall watch, like the primary critique poll.
+- **The budget** (round 1): **WP-01.5's per-sheet budget**, the same knob
+  (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4): `_CSlot.retries`
+  counts every resubmitted read of the sheet; `_within_retry_budget` and
+  `_count_retry` read it through `_CRead.retry_budget`, and the check counts
+  the reads it keeps within one call (two reads of one sheet in one round
+  spend two). Worst case per sheet: 2 + 4 items. Not taken: per read (2 + 8);
+  per sheet on its own knob; one count shared with the digest's.
+- **The read kept** (round 1): **a finished retry is the read; a failed chain is
+  named.** A failed read keeps nothing (WP-01.4), so `critique.keep_critique_read`
+  (both transports) makes a finished retry the read (same `run_id`, so the
+  merge's provenance is unchanged) and names a failed one in the read's error
+  with the digest's one wording (`digest._name_discarded_retry`): `; retry: …`,
+  `; N retries, the last: …`, `; retry on <model>: …`; `note_failed_critique_retry`
+  names a call that raised (`; retry failed: …`). A fallback read is worded
+  with its model (`refused critique on claude-opus-4-8 (…)`). Every attempt's
+  usage is the read's. Not taken: the latest attempt's error only (the
+  digest's equal-rank rule taken literally); every error joined.
+- **Real time** (round 1): **one raised-cap retry per read** in
+  `critique._critique_read` (so also batch's upload-failure fallback),
+  streamed, the read's own retry outside the batch budget, as the real-time
+  digest's. Not taken: batch only; neither.
+- **Merge, tally, cache** (round 2): **the recovered read is the read; no
+  bump.** It merges as any read, is judged in D-2's tally (the D-2 WP-01.8
+  note), and a sheet whose every read finished is stored at both levels
+  under the requested key (requested model, requested cap), as the WP-01.5
+  digest fallback read is. Not taken: the same with `_CRITIQUE_CACHE_CONTRACT`
+  3 -> 4; used this run and never cached.
+- **Usage** (round 2): **summed on the sheet's one critique record**, BATCH for
+  batch retries; per-attempt records stay WP-14.5's. Not taken: a record per
+  retried read.
+- **A follow-up batch that never ends** (round 3): **canceled, the recovery
+  stops, its reads named** `; retry: critique batch not collected (<status>);
+  remote batch id=… was canceled` (`may still be running` when the cancel
+  failed, and then the files are kept). A read a round returned no envelope
+  for goes again as it was sent. The files are released only once every
+  batch that references them is terminal or canceled. Not taken: cancel and
+  carry the reads to the next round (pays a canceled round's finished items
+  again, with no harvest to read them back).
+- **Left on other rows** (round 2 and 3): the digest harvest's truncated item
+  keeps its cap one round (WP-14.1); a real-time refusal's `recommended_model`
+  is logged, not retried (WP-14.3); the batch critique has no harvest of an
+  abandoned batch (a new row, WP-18.6). WP-01 stays open: its acceptance waits
+  on WP-06.3, WP-12.6 and WP-13.4 (the plan's WP-01 Acceptance note).
+- **Version / cache changes:** none (D-4's WP-01.8 note); no migration-register
+  row.
+- **Consumers affected:** the batch critique's reads, errors, merge and cache
+  (both levels, through the pipeline's `_ingest_miss`); the critique stage's
+  status, items, coverage line and errors (`critique_shortfall`), `ctx.errors`,
+  `run.log` and the report's stage table through them; the sheet's critique
+  usage record (tokens, terminal status); the real-time critique's calls; the
+  digest's retry decision and budget helpers (refactored, byte-identical); the
+  WP-01.5 and WP-01.4 tests re-baselined with the owner's approval.
 
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
@@ -574,6 +973,21 @@ transport, a caller's callback, the cache, the level-1 store, the accounting.
   event type (`DIGEST_PHASE_STOPPED`) and a `stopped` field on `RUN_END`. No
   migration-register row.
 
+Added by WP-01.8: **a recovered critique read is judged; the items stay
+reads** (the owner's decision; D-1's WP-01.8 note). The critique's terms from
+WP-01.4's note are unchanged. A read the batch follow-up rounds or the
+real-time raised-cap retry recover is the read, so it is *judged* (it finished
+with a valid findings object) and the sheet's `completed_runs` counts it; a read
+still failing after its retries is *failed* ("returned no judgment"), its error
+naming the retries. *Eligible* stays `runs` x the sheets the run set out to
+read: a retry is an attempt, never an item, so it adds nothing to either side
+of the ratio. The coverage line, `items_in` / `items_out` and the usage record's
+terminal status read the final reads. Measured: under the chosen rules no
+pinned status moved outside the re-baselined tests; a transient or expired read
+answered once, a routed refusal and a `max_tokens` read whose retry finishes
+now read COMPLETE (4 of 4) where they read PARTIAL (3 of 4). No cache or key
+change.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,
@@ -627,6 +1041,64 @@ nothing Pass A refused.
 - For WP-03.4 and WP-03.6: an anchor rectangle is evidence of *where*, never of
   *which claim*. Per-observation anchors (WP-03.6) map evidence; they do not
   make two observations one.
+
+Added by WP-04.3 ([PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)), as an input, not a decision: **a quantity's
+role is part of what a finding claims.** Two findings that give the same values
+to different roles (`6 in main and 4 in branch` / `4 in main and 6 in branch`),
+or one value to two roles (`6 in supply and 6 in return` / `6 in supply and 8 in
+return`), make different claims although their quantity sets agree. The merge
+predicate (`critique._is_duplicate` through `critique.signature_conflicts`, in
+the critique's `_cluster`, both ledger passes and the prose harvest's veto) now
+refuses such a pair: `critical_signature` carries `roles` (`"main=6in"`, read by
+`critique._quantity_roles` from a closed list of role words) and
+`ambiguous_roles`, compared per role and kind by inclusion on the
+`measurements` axis. The owner's rules, recorded in the WP-04.3 handoff: a role
+on one side only never blocks (so the same "500 gpm shown, 550 gpm required"
+from both critique reads, which names no role, stays one claim); a finding whose
+only roles for a kind are ambiguous (a value list with a role list and no
+`respectively`; a bare role word between two values) is kept apart from one
+that binds a role in that kind, the plan's "retain separate claims when role
+ambiguity prevents safe compatibility"; status words (shown, required) are not
+roles. For WP-03.4: a role binding is a structured, host-derived part of a
+claim, like `claim_discriminator`, but it is read from prose by a closed
+vocabulary, so it is evidence of *which claim* only where it is read; its
+absence says nothing (one-sided, never blocking). A `claim_id` built on
+signatures would inherit that asymmetry. For WP-03.5: roles grow with a
+survivor's supporting quotes like every signature axis, and the member-wise
+checks cover them; a representative whose bundle came from a role-less member
+carries no role in its live signature (pinned in `tests/test_quantity_roles.py`).
+- Considered and not taken, with the owner's choice recorded in the handoff:
+  status words as roles; an open vocabulary (any noun after the value; it read
+  noise such as `hall is 480V` and moved 8 suite decisions outside the two
+  flips); retaining every pair where one side names roles and the other does
+  not; reading a bare preceding label (`MAIN 6"`).
+
+Added by WP-04.4 ([PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189)), as an input, not a decision: **a spelled range
+or list is one quantity, and a feet value's inches are part of its claim.** The
+quantity reader (`critique._quantity_tokens`) signed only the part of four
+spellings it could read, so four pairs of different claims agreed and merged:
+a bare `12'` against `12'-6"`, `4 to 6 in` against `6 in`, `2, 4, 6 in` against
+`3, 5, 6 in`, and `20A 120V` against `30A 120V`. The owner's rules, recorded in
+the WP-04.4 handoff: `4 to 6 in` and `between 4 and 6 in` claim the range
+`4..6in` (the token `4-6 in` already signs), and `4 and 6 in`, `4 or 6 in` and a
+loose list of three or more numbers claim the list, as their tight spellings
+do; a compact `A` beside a voltage is a current; and `critical_signature` gains
+`feet_inches`, each feet value with its inches (`12ft6in`, `12ft0in` when bare,
+any spelling of feet), compared by inclusion on the `measurements` axis beside
+the tokens, never in them. For WP-03.4: a from-to change now claims a range
+(`increase from 4 to 6 in` stays apart from `increase to 6 in`), and a
+two-number comma list still claims only its last number (a recorded limit);
+the feet-inches pair, like a role, is host-derived and one-sided (a finding
+with no feet value never conflicts on it), so a `claim_id` built on signatures
+would inherit that asymmetry too. For WP-03.5: the pairs are read part by part
+and grow with a survivor's supporting quotes like every signature axis; the
+member-wise checks cover them (pinned in `tests/test_quantity_residuals.py`).
+- Considered and not taken, with the owner's choice recorded in the handoff: a
+  bare feet value as `{12ft, 0in}` tokens (a `6 in` elsewhere in the text
+  still masked it); feet-inches as one token (it split `12 ft 6 in` from
+  `12'-6"`); the foot mark only; `to` ranges without `and`/`or` lists; loose
+  lists of two numbers (`Relocate valve 4, 10 ft` read as a list); `circuit`
+  after a compact `A` as context (`connect to 2A circuit 12` names a panel).
 
 - Decision: —
 - Rejected shortcuts: —
@@ -716,7 +1188,13 @@ never deleted (plan §2 rule 6, WP-10).
   `tests/test_drawing_cache_identity.py` pins the merge rule's fingerprint per
   contract value, so a rule change that forgets the bump fails.
   WP-04.2 bumped it to 2 for the compatibility rule (N1); see the migration
-  register.
+  register. WP-04.3 bumped it to 4 for quantity roles and the
+  dimension-separator tag rule (the merge rule, so its fingerprint is pinned
+  under 4); see the migration register. WP-04.4 bumped it to 5 for the
+  tokenizer residuals and the feet-inches pairs (fingerprint pinned under 5);
+  the same change moved `cross_qc._CROSS_QC_CACHE_CONTRACT` 7 → 8, because
+  cross-QC grounding reuses the quantity reader, and the A/B
+  `RECORD_CONTRACT_VERSION` 4 → 5; see the migration register.
 - **Added by WP-01.4: the critique's admission, and the same term, 2 → 3**
   (N4, critique part). A critique entry is written, at either level and on
   either transport, only for a result whose every requested read the model
@@ -805,6 +1283,78 @@ never deleted (plan §2 rule 6, WP-10).
   change" (plan §2 rule 15): each mechanism covers its own change, and if the
   prompt edit were ever reverted the bump would still keep a warm entry from
   serving a finding set the host no longer produces. No key term was added.
+- **Added by WP-05.3 ([PR #187](https://github.com/Abe-Borg/drawing-analyzer/pull/187)): the same term, 6 → 7** (the owner's decision: one
+  matcher). Cross-QC grounds through the anchor's character-stream tier too
+  (`anchor.SourceWords.joined_spans`: a quote that differs from the text only
+  by the named spacing joins), and no quote or text with a number split around
+  a lone `.` grounds any longer (B4). For byte-identical inputs that changes
+  which legs and facts are admitted and the `evidence_state` stored on each,
+  and a fact whose quote splits a number joins no leg (its folded form is
+  `""`); no key input covers any of it. One mechanism: the term, no key term,
+  never `_SCHEMA_VERSION`. The fact-tile join keeps its folded key (a recorded
+  limit, the owner's choice). The anchor stage has no cache; a newly anchored
+  finding gets new verification and investigation entries (their keys carry
+  the anchor: status, method and rect), which is new paid work, not a
+  contract change; an anchor that loses its rect (the sub-phrase rule, the
+  split-number rule) leaves its old entries unread. Measured over the suite:
+  0 of 1,064 recorded anchors and 0 of 738 grounding verdicts moved outside
+  the new tests, so no stored fixture entry changes meaning. The critique
+  contract (3), its merge-rule fingerprint, and the A/B
+  `RECORD_CONTRACT_VERSION` (3) are unchanged: the merge rule reads no
+  rectangle (WP-03.7) and the quantity reader is reused as it is.
+- **Added by WP-01.6 ([PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184)): three stage terms for three admission changes** (the
+  owner's decision). Synthesis, the focus report and the prose harvest's
+  structuring call now store only a reply the model finished, and none of
+  their entries stores a stop reason, so an entry written before cannot be
+  checked on the way out: a 1.5.0-1.7.0 entry may hold a refusal's explanation
+  served as the overview or a finding from a cut-off structuring reply. Each
+  stage's existing term is bumped, 1 -> 2 (`_SYNTHESIS_CACHE_CONTRACT`,
+  `_FOCUS_CACHE_CONTRACT`, `_HARVEST_CACHE_CONTRACT`; the WP-01.4 precedent: a
+  change to what an entry admits bumps its term). No key term, no read-side
+  reject, never `_SCHEMA_VERSION`.
+  - **Left, recorded residuals.** The planner, identity and verification keys
+    have no host-contract term, and adding one would be the only mechanism: a
+    re-keyed planner or identity that comes back different re-keys the
+    critique (`profiles_key`), a full critique re-read. So an entry an earlier
+    version stored from a non-finished plan, identity or verdict keeps serving
+    until its inputs change. The plan and identity must still have parsed and
+    sanitized, and a verdict's non-finished shapes (context window, `None`, a
+    continuation, unknown) are rare on a non-streaming verify call.
+  - **The join moves no key.** A reply without a fallback block reads
+    byte-identical. A digest an earlier version cached from a fallback-split
+    reply (possible since the fallback shipped in 1.3.0, on real-time Opus 5
+    digests) keeps its `"\n"` and whatever findings it lost: no digest-only
+    term exists and `_SCHEMA_VERSION` is barred. A critique split that way
+    failed and was never cached.
+  - **The identity corpus** re-keys through the key's own input (the corpus
+    hash): only a set with an errored sheet that carried text.
+- **Added by WP-01.7 (D-1's WP-01.7 note): nothing moved.** An interrupted
+  stream's partial read has no stop reason, so `digest_cache_admits`, the
+  critique's all-reads-counted admission and the set-level stages'
+  `unfinished_reply_error` refuse it at every writer, and no loader changes. A
+  snapshot that already got `message_delta` is stored like any finished reply,
+  the same payload under the same key (the owner's choice; its clean-end twin
+  was always admitted). No stored entry ever held an interrupted read (the
+  stream raised and nothing was stored), so nothing needs to miss. No key,
+  contract or `_SCHEMA_VERSION` change, and no migration-register row. The new
+  `UsageRecord.interrupted_attempts` is a run artifact field (manifest schema
+  v1, additive), not a cache payload. The digest's level-2 entry's
+  `input_tokens` / `output_tokens` now sum an interrupted attempt too when a
+  retry finished; they are informational (a hit bills nothing) and every
+  previously possible read stores the same values.
+- **Added by WP-01.8 (D-1's WP-01.8 note): nothing moved, the owner's choice.** A
+  critique result whose every read finished, one of them on a retry (a raised
+  cap, a refusal fallback, a resubmitted transient or expired item), is stored
+  at both levels under the requested key (requested model, requested cap),
+  with the same payload shape and admission rule (`completed_runs ==
+  requested_runs`). No key, `_CRITIQUE_CACHE_CONTRACT` (3) or `_SCHEMA_VERSION`
+  change: a contract-3 entry was written only when both reads finished on
+  their first attempt, which is exactly what the new code stores for the same
+  inputs, so nothing needs to miss; a retry happens only where nothing was
+  stored. An entry may now hold a read served by a fallback model or produced
+  at 128k, and nothing marks it (the serving model in a payload is WP-14.6's).
+  `CritiqueRunOutcome.stop_reason`, `read_error` and `retries_discarded` are
+  runtime-only; no stored field changed. No migration-register row.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -872,7 +1422,12 @@ TTLs. Missing usage is unknown, never zero, and nothing is counted twice
 `core.pricing.usage_record_cost`, `PRICING_EFFECTIVE_DATE`,
 `RunUsage.is_billable_but_unpriced` (the single rule; never restate it),
 `digest._message_cache_usage` (the dict-tolerant reader), `_record_usage`
-(drops zero tool-use counts).
+(drops zero tool-use counts). Since WP-01.7: `digest.StreamUsage` (every
+attempt's reported usage, an interrupted stream's `message_start` counters
+included) and `UsageRecord.interrupted_attempts` / `RunUsage.interrupted_attempts`
+(attempts whose output was never reported). WP-01.7 kept the cost a number
+and left `is_billable_but_unpriced` alone: whether an interrupted attempt's
+unreported output makes a total unknown is this decision's.
 
 - Decision: —
 - Rejected shortcuts: —
@@ -973,3 +1528,11 @@ migration.
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=4` | `_CROSS_QC_CACHE_CONTRACT=5` | Every field; the entry shape is unchanged | None: every cross-QC entry written under contract 4 misses once, on the whole-set path too | Host-side grounding changed again (B4, N12; the owner's decisions): cross-QC now grounds through the anchor's own whole-word matcher (`anchor.SourceWords`), which folds the brackets and sentence punctuation off every word of the evidence and of the quote (`anchor.fold_word`; never `"` `'` `<` `>`). For byte-identical request inputs that admits legs and facts the old match dropped (`RATED 175 PSI TYP` against `RATED 175 PSI, TYP.`, a quote-side `P-1,` against `P-1`), and changes the counters and the `evidence_state` stored on each; the fact-tile join keys on the same folded form (the Codex review of this slice), so such a leg also inherits its fact's tile, and two facts spelled apart only by that punctuation in different tiles collide and give none; no key input covers any of it. The fold only adds matches, with one exception: a quote made only of brackets and sentence punctuation (`,`, `(`, `.`) folds to nothing and now matches nothing, where it used to ground on a lone punctuation word (measured over 20,057 pairs: 174 gained, and every one of the 1,146 lost was such a quote). One mechanism: the existing contract term, bumped; no key term, no `_SCHEMA_VERSION` bump. No release has shipped contract 4 (WP-05.1 is unreleased), so a user upgrading from 1.7.0 pays one miss for both bumps. The anchor stage is not cached; a finding whose anchor moved re-keys its verification and investigation entries through their own inputs (the anchor is one), which is new paid work by design, not a register row. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass unchanged), and the A/B `RECORD_CONTRACT_VERSION` stays 3. Old entries stay on disk | WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166) |
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=5`; the persona asked for severity `question` | `_CROSS_QC_CACHE_CONTRACT=6`; the persona asks for category `question` with severity `low` | Every field; one additive field, `invalid` (the refused-item counts), which an entry written without it reads back as "not recorded" | None: every cross-QC entry misses once, on both paths | Two changes, two mechanisms (D-4 note). **The prompt (B6):** the persona sentence changed, and the three prompts ride the key verbatim, so every entry re-keys through the key's own mechanism. **Host-side binding (N2 and the WP-05.1 note):** for byte-identical request inputs, `_drop_exact_repeats` keeps every finding that is not identical in every field, where `_dedup_findings` folded two different conflicts sharing a primary sheet, category, quote and legs; a fact whose quote is only whitespace is no longer admitted and sent to the reconciler; and the stored result carries its refused-item counts, which a warm run shows as the same stage warning. The existing term is bumped for it; no key term, no `_SCHEMA_VERSION` bump. No release shipped contract 4 or 5 (WP-05.1 and WP-05.2 are unreleased), so a user upgrading from 1.7.0 pays one miss for all three bumps: one paid cross-QC pass per set (one Opus call for 40 sheets or fewer; the map and reconcile calls above). A newly kept conflict is new paid work downstream (a dual-crop verification call, and an investigation if the crop cannot settle it), not a re-key: the verification and investigation keys are unchanged, and a conflict kept before keeps its entries. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass unchanged), and the A/B `RECORD_CONTRACT_VERSION` stays 3 (a record's shape and meaning are unchanged; more findings in an arm run after this is the behaviour change it is). Old entries stay on disk | WP-06.1, [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167) |
 | Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=2` | schema 10, `critique_contract=3` | Every field; the entry shape is unchanged (no stop reasons are stored) | None: every critique entry written under contract 2 misses once | A critique read the model did not finish no longer counts as a completed read (N4, critique part; D-1's WP-01.4 note): before, a read cut off at `max_tokens` or the context window, a refusal, a stream that ended without a stop reason, a `tool_use`/`pause_turn`/`compaction` continuation or an unknown stop counted whenever its findings object parsed, was merged as corroboration and was stored at both levels on both transports. A critique entry stores no stop reason, so an entry written under 2 cannot be checked on the way out; the existing critique-only term is bumped (no read-side reject beside it, no key term, never `_SCHEMA_VERSION`). The merge rule is unchanged: its fingerprint is pinned under 3 as under 2 (`63dbfe17…`). Digest, identity, review-plan, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py::test_wp_01_4_moves_every_critique_key_and_no_other_key`, with the contract-2 keys pinned). Old entries stay on disk (`test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted`); the next exhaustive run re-critiques each sheet once. No release shipped contract 1 or 2 (WP-04.1 and WP-04.2 are unreleased), so a user upgrading from 1.7.0 pays one miss per sheet for all three bumps. The A/B `RECORD_CONTRACT_VERSION` stays 3 (a record stores signatures, which did not change) | WP-01.4, [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171) |
+| Synthesis, focus report and prose-harvest structuring stage caches (`stage_cache_key("synthesis" / "focus" / "prose_harvest_item")`) | `_SYNTHESIS_CACHE_CONTRACT=1`, `_FOCUS_CACHE_CONTRACT=1`, `_HARVEST_CACHE_CONTRACT=1` | each 2 | Every field; the payloads are unchanged (`text`, `text`, `finding`) | None: every entry written under 1 misses once | An entry is now written only for a reply the model finished (D-1's WP-01.6 note): before, a reply cut off at `max_tokens` or the context window, one with no stop reason, a continuation or an unknown reason was stored whenever it parsed, and synthesis and the focus report stored a refusal's explanation as their text (served as the overview on every warm run). None stores a stop reason, so no read-side reject is possible; each stage's existing term is bumped (the WP-01.4 precedent), no key term, never `_SCHEMA_VERSION`. The next run pays one synthesis call per set (Opus 5.5), one focus call per focus run, and each harvest straggler once (Sonnet 5.5, low effort). Recorded residuals, left by the owner's decision: the review-plan, identity and verification keys have no term, so an entry an earlier version stored from a non-finished plan, identity or verdict keeps serving until its inputs change (a new term there could re-key the critique through `profiles_key`). Digest, critique, cross-QC, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py` passes unchanged). Old entries stay on disk (`tests/test_consumer_terminal_outcomes.py::test_an_entry_written_under_contract_1_misses_and_stays_on_disk`) | WP-01.6, [PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184) |
+| Identity cache (`identity_cache_key`, its corpus hash) and every reply's text (`core.reply_text.reply_text`) | corpus: an errored sheet's digest text; join: `"\n"` between every text block | corpus: its `[digest failed: …]` line; join: nothing across a `fallback` block | Every field | Identity: every entry for a set with no errored sheet carrying text. Every other namespace: every entry | Two changes, no term and no version. **The identity corpus** skips an errored sheet's digest text (a refusal's explanation, a cut-off read's prose); the corpus is a key input, so only a set with such a sheet re-keys (the key's own mechanism): one identity call, and the planner and critique re-key only if the new identity differs. **The join** moves no key: a reply without a fallback block reads byte-identical. Residual, recorded: a digest an earlier version cached from a fallback-split reply (possible since 1.3.0, real-time Opus 5) keeps its `"\n"` inside a word and any findings the broken JSON lost; no digest-only term exists and `_SCHEMA_VERSION` is barred. A critique split that way failed and was never cached | WP-01.6, [PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184) |
+| Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=6` | `_CROSS_QC_CACHE_CONTRACT=7` | Every field; the entry shape is unchanged | None: every cross-QC entry written under contract 6 misses once, on the whole-set path too | Host-side grounding changed again (B4; the owner's decisions): cross-QC grounds through the anchor's character-stream tier too (`anchor.SourceWords.joined_spans`), so for byte-identical request inputs a leg or fact whose quote differs from the sheet's text only by the named spacing joins (a number and a separated `"` `'` `%`, the feet-inches hyphen, letters merged by extraction; the quantity-aware veto through `critique._quantity_tokens`) is now admitted as TEXT_GROUNDED; and a quote or text with a number split around a lone `.` no longer grounds (`SET AT 5 IN` grounded on `SET AT . 5 IN`), and such a fact's quote joins no leg (its folded form is `""`). No key input covers any of it. One mechanism: the existing contract term, bumped; no key term, no `_SCHEMA_VERSION` bump. No release shipped contracts 4 to 6 (WP-05.1, WP-05.2 and WP-06.1 are unreleased), so a user upgrading from 1.7.0 pays one miss for all four bumps: one paid cross-QC pass per set. Measured over the suite: 0 of 738 grounding verdicts changed outside the new tests. The anchor stage is not cached; a newly anchored finding gets new verification and investigation entries through their own inputs (new paid work, by design, not a register row). Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass unchanged; the critique merge-rule fingerprint and `_CRITIQUE_CACHE_CONTRACT=3` are unchanged, since the quantity reader is reused as it is), and the A/B `RECORD_CONTRACT_VERSION` stays 3 (a record stores the anchor as an arm output whose shape and meaning are unchanged). Old entries stay on disk | WP-05.3, [PR #187](https://github.com/Abe-Borg/drawing-analyzer/pull/187) |
+| Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=3` | schema 10, `critique_contract=4` | Every field; the entry shape is unchanged | None: every critique entry written under contract 3 misses once | The merge rule behind the stored post-merge findings changed (remediation WP-04.3, the owner's rules): `critique.critical_signature` carries quantity roles (`roles`, `ambiguous_roles`, read by `critique._quantity_roles`) and `critique.signature_conflicts` compares them, so two findings that give the same values to different roles, or one value to two roles, no longer merge, and an ambiguous role is kept apart from a bound one; and `critique._TAG_RE` no longer reads the `x12` of a tight `24"x12"` as a tag, so a pair it kept apart through that stray tag can now merge. An entry stored under 3 can hold either kind of merge the new rule would not make. One mechanism: the existing critique-only term, bumped (the WP-04.2 precedent); no key term, never `_SCHEMA_VERSION`. The merge-rule fingerprint is pinned under 4 (`b62e9526…`), computed over a corpus that gained 15 role and separator rows; over the extended corpus the contract-3 rule fingerprints as `b3660a7e…` (recorded in the test), and the values under 1 to 3 are untouched. Digest, identity, review-plan, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py::test_wp_04_3_moves_every_critique_key_and_no_other_key`, with the contract-3 keys pinned). Old entries stay on disk (`test_a_critique_entry_from_wp_01_4_misses_and_is_never_deleted`); the next exhaustive run re-critiques each sheet once. No release shipped contracts 1 to 3 (WP-04.1, WP-04.2 and WP-01.4 are unreleased), so a user upgrading from 1.7.0 pays one miss per sheet for all four bumps. The quantity reader's tokens are unchanged (`_quantity_tokens` is `_quantity_readings`' tokens), so no anchor and no cross-QC grounding verdict moved (measured: 0 of 1,072 and 0 of 769 in the suite) and the cross-QC contract stays 7. The prose harvest's structuring key hashes the item and the sheet, never the match, so no stage cache holds a merge outcome besides the critique's | WP-04.3, [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188) |
+| A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 3 | 4 | Every field; `critical_signature` gains `roles` and `ambiguous_roles` | None: `load_arm_records` refuses a v3 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran, and a v3 record has no role keys, which the rule reads as "no role" (a one-sided signal never conflicts), so a v3 baseline against a v4 variant would call a swapped `6 in main, 4 in branch` / `4 in main, 6 in branch` pair EXACT: the silent failure the version exists for (the owner's decision: store the roles and bump, rather than derive them at comparison time from the record's text). Refused, never deleted: re-run the arm | WP-04.3, [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188) |
+| Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=4` | schema 10, `critique_contract=5` | Every field; the entry shape is unchanged | None: every critique entry written under contract 4 misses once | The merge rule behind the stored post-merge findings changed (remediation WP-04.4, the owner's rules): the quantity reader behind `critique.critical_signature` reads a spelled range or list whole (`4 to 6 in`, `between 4 and 6 in`, `4 and 6 in`, `4 or 6 in`, and three or more numbers joined by commas, `critique._read_spelled`) and a compact `A` beside a voltage (`20A 120V`), and the signature carries `feet_inches` (`critique._feet_inches`: `12'` is `12ft0in`, `12'-6"` is `12ft6in`), which `critique.signature_conflicts` compares. An entry stored under 4 can hold a merge the new rule refuses (`4 to 6 in` folded into `6 in`), or a loose list kept apart from its tight twin, which now merge. One mechanism: the existing critique-only term, bumped (the WP-04.2 precedent); no key term, never `_SCHEMA_VERSION`. The merge-rule fingerprint is pinned under 5 (`020b7789…`), computed over a corpus that gained 17 residual rows; over the extended corpus the contract-4 rule fingerprints as `f6116986…` (recorded in the test), and the values under 1 to 4 are untouched. Digest, identity, review-plan, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py::test_wp_04_4_moves_every_critique_key_and_no_other_key`, with the contract-4 keys pinned). Old entries stay on disk (`test_a_critique_entry_from_wp_04_3_misses_and_is_never_deleted`); the next exhaustive run re-critiques each sheet once. No release shipped contracts 1 to 4 (WP-04.1, WP-04.2, WP-01.4 and WP-04.3 are unreleased), so a user upgrading from 1.7.0 pays one miss per sheet for all five bumps. The prose harvest's structuring key hashes the item and the sheet, never the match, so no stage cache holds a merge outcome besides the critique's (re-verified) | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |
+| Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=7` | `_CROSS_QC_CACHE_CONTRACT=8` | Every field; the entry shape is unchanged | None: every cross-QC entry written under contract 7 misses once, on the whole-set path too | Host-side grounding changed for byte-identical request inputs (remediation WP-04.4, the owner's decision): the character-stream tier's quantity veto (`anchor._same_quantities`) reuses `critique._quantity_tokens`, whose new readings are guarded by the word after `in` and the word before the number, and a named letter-merge join can change those words. So a leg quoting `4 TO 6 IN A CLEAR` against a sheet printing `4 TO 6 IN ACLEAR`, or `ELEC ROOM 101A 120V` against `ELECROOM 101A 120V`, grounded before and does not now (constructed and pinned in `tests/test_quantity_residuals.py`); none of the suite's 908 grounding verdicts moved. One mechanism: the existing contract term, bumped; no key term. The five tripwires that pinned 7 are re-pinned to 8 (the approved bump) | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |
+| A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 4 | 5 | Every field; `critical_signature` gains `feet_inches` | None: `load_arm_records` refuses a v4 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran: a v4 record holds the partial readings (`4 to 6 in` as `6in`, `2, 4, 6 in` as `6in`, no `20amp` beside `120V`) and no feet-inches pairs, which the rule reads as agreeing, so a v4 baseline against a v5 variant would call `12'` / `12'-6"` or `4 to 6 in` / `6 in` EXACT: the silent failure the version exists for. Refused, never deleted: re-run the arm | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |

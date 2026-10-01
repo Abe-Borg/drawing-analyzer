@@ -34,11 +34,17 @@ path.
 
 Additive & non-fatal (I-3): the critique is optional QC, so — unlike the digest,
 whose loss zeroes a run and which therefore carries an elaborate follow-up-batch
-+ direct-call rescue — this collector keeps things simple. A per-read failure
-just fails that read (the surviving read still merges, honestly marked
++ direct-call rescue — this collector keeps things simpler. A failed read that
+the digest's own retry predicate retries (a transient errored or an expired
+item, a refusal with a registry route, a ``max_tokens`` stop at a raised cap)
+is resubmitted in follow-up critique batches, inside the collection bound and
+its sheet's one retry budget (remediation WP-01.8, :func:`_recover_failed_reads`);
+never as a full-rate real-time call. A read still failing after that just
+fails (the surviving read still merges, honestly marked
 ``NOT_ASSESSED_PARTIAL``); a batch that never terminates degrades the affected
-sheets' critique to an empty result with a clear error. The standard digest
-deliverable and the digest's own findings are never touched.
+sheets' critique to an empty result with a clear error (there is no harvest:
+a new row, WP-18.6). The standard digest deliverable and the digest's own
+findings are never touched.
 
 Isolation (I-5): imports no PDF engine; consumes already-rendered
 :class:`~drawing_analyzer.models.RenderedSheet` objects and reuses the digest's
@@ -51,14 +57,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .batch_digest import (
+    DEFAULT_POLL_INTERVAL_SECONDS,
     MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES,
     LogCallback,
     ProgressCallback,
     StatusCallback,
+    _batch_item_error_text,
     _batch_max_elapsed_seconds,
     _cancel_batch,
+    _count_retry,
+    _max_batch_resubmit_rounds,
+    _note_not_retried,
     _poll_until_terminal,
     _release_uploaded_files,
+    _retry_params_for,
+    _within_retry_budget,
 )
 from .critique import (
     _CRITIQUE_TASK_INSTRUCTION,
@@ -73,12 +86,13 @@ from .critique import (
     critique_result_from_entry,
     critique_runs,
     critique_sheet_self_consistent,
+    keep_critique_read,
     outcome_from_message,
     result_from_outcomes,
     run_checklists,
 )
 from .diagnostics import get_logger, summarize_exc
-from .digest import _get
+from .digest import _get, _retry_backoff_seconds
 from .digest_cache import critique_cache_key
 from .file_upload import (
     ReusableSheetUpload,
@@ -112,6 +126,49 @@ class _CSlot:
     # The sheet's critique was produced via a synchronous real-time fallback (its
     # Files-API upload failed), so the pipeline prices it REAL_TIME not BATCH.
     rescued: bool = False
+    # Remediation WP-01.8 (the owner's rule: WP-01.5's per-sheet budget): the
+    # resubmissions of this sheet's reads so far, every read counting one.
+    # Bounded by ``batch_digest._max_batch_resubmit_rounds``.
+    retries: int = 0
+
+
+@dataclass
+class _CRead:
+    """One submitted self-consistency read of a sheet (remediation WP-01.8).
+
+    What the follow-up rounds need to resubmit it: its ``custom_id`` (reused in
+    every round, as a digest item's is), the ``params`` it was first submitted
+    with (the requested model and cap), ``last_params`` (its latest
+    submission, so a raised cap doubles from the cap that just came back and a
+    fallback's read knows its model) and its ``outcome`` so far. Its sheet's
+    slot holds the one retry budget (``retry_budget``, which
+    ``batch_digest._within_retry_budget`` and ``_count_retry`` read).
+    """
+
+    slot: _CSlot
+    run_id: str
+    custom_id: str
+    params: dict
+    last_params: dict | None = None
+    outcome: CritiqueRunOutcome | None = None
+
+    @property
+    def ref(self) -> Any:
+        return self.slot.ref
+
+    @property
+    def retry_budget(self) -> _CSlot:
+        return self.slot
+
+    @property
+    def requested_model(self) -> str:
+        return str(self.params.get("model") or "")
+
+    def fallback_model(self, params: dict | None = None) -> str | None:
+        """The model ``params`` (default: the latest submission) sent this read
+        to, when a refusal fallback moved it off the requested one."""
+        sent = str((params or self.last_params or self.params).get("model") or "")
+        return sent if sent and sent != self.requested_model else None
 
 
 @dataclass
@@ -125,6 +182,9 @@ class CritiqueBatch:
     # custom_id -> (slot, run_id) so a collected item maps back to its sheet and
     # its self-consistency read without re-parsing the id string.
     by_custom_id: dict[str, tuple[_CSlot, str]] = field(default_factory=dict)
+    # Every submitted read, in submit order (remediation WP-01.8): what the
+    # follow-up rounds resubmit a failed read from.
+    reads: list[_CRead] = field(default_factory=list)
 
     @property
     def submitted_slots(self) -> list[_CSlot]:
@@ -184,6 +244,7 @@ def submit_critique_batch(
     slots: list[_CSlot] = []
     reqs: list[dict] = []
     by_custom_id: dict[str, tuple[_CSlot, str]] = {}
+    reads: list[_CRead] = []
     uploaded_all: list[str] = []  # every id uploaded so far, for submit-failure cleanup
 
     # Upload circuit breaker, mirroring the digest batch path (§10.1). A
@@ -360,6 +421,10 @@ def submit_critique_batch(
                 reqs.append({"custom_id": custom_id, "params": params})
                 slot.custom_ids.append(custom_id)
                 by_custom_id[custom_id] = (slot, f"critique_{i + 1}")
+                reads.append(_CRead(
+                    slot=slot, run_id=f"critique_{i + 1}", custom_id=custom_id,
+                    params=params,
+                ))
             slots.append(slot)
             _log.debug(
                 "critique sheet %d %s %d image(s) as %d read(s): %s",
@@ -429,11 +494,13 @@ def submit_critique_batch(
         total=total or len(slots),
         runs=runs,
         by_custom_id=by_custom_id,
+        reads=reads,
     )
 
 
 def _outcome_from_envelope(
-    env: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0
+    env: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
+    fallback_model: str | None = None,
 ) -> CritiqueRunOutcome:
     """Turn one batch result envelope into a :class:`CritiqueRunOutcome`.
 
@@ -446,6 +513,9 @@ def _outcome_from_envelope(
     the request was served, not that the model finished, so a read inside it
     cut off at ``max_tokens``, refused, with no stop reason or with an unknown
     one fails there, however complete its findings object looks.
+
+    ``fallback_model`` names the model a follow-up round sent the read to on
+    its refusal fallback (remediation WP-01.8), for its wording.
     """
     if env is None:
         return CritiqueRunOutcome(
@@ -454,14 +524,231 @@ def _outcome_from_envelope(
         )
     rr = _get(env, "result")
     if _get(rr, "type") != "succeeded":
-        rtype = _get(rr, "type", "errored")
-        error = _get(rr, "error", None)
-        inner = _get(error, "error", error) if error is not None else None
-        detail = str(_get(inner, "message", "") or "").strip() or f"batch item {rtype}"
-        return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=detail)
+        # The digest's one item-error helper (remediation WP-01.5): an errored
+        # read names its type with its message (``overloaded_error: …``), as a
+        # digest item does; the type used to be dropped. A canceled or expired
+        # read keeps its wording, ``batch item canceled``.
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", error=_batch_item_error_text(rr, noun="item"),
+        )
     return outcome_from_message(
-        _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols
+        _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols,
+        fallback_model=fallback_model,
     )
+
+
+_TERMINAL_STATUSES = ("ended", "failed", "expired", "canceled")
+
+
+def _read_retry_params(
+    read: _CRead, envelope: Any, outcome: CritiqueRunOutcome, *, params: dict | None,
+) -> dict | None:
+    """What to resubmit a failed read with, or ``None`` (remediation WP-01.8).
+
+    The digest's one retry predicate
+    (:func:`~drawing_analyzer.batch_digest._retry_params_for`, the owner's
+    rule): a transient errored or an expired item as it was sent, a routed
+    refusal on its fallback (once: the chain ends when the fallback refuses
+    too), a ``max_tokens`` stop at twice the cap while there is headroom.
+    ``params`` is the request the read was last sent with. A refusal whose
+    named category has no route says so in the read's error (``…; not
+    retried: no fallback for category 'bio' on claude-opus-5``), as a digest
+    item's does.
+    """
+    return _retry_params_for(
+        _get(envelope, "result") if envelope is not None else None,
+        params=params or None,
+        requested_model=read.requested_model,
+        stop_reason=outcome.stop_reason,
+        failed=not outcome.ok,
+        label=f"{read.custom_id} ({read.ref.display_label})",
+        noun="critique",
+        on_not_retried=lambda reason: _note_not_retried(outcome, reason),
+    )
+
+
+def _fold_retry(read: _CRead, later: CritiqueRunOutcome, *, params: dict) -> None:
+    """The read keeps the better of what it holds and ``later`` (WP-01.8).
+
+    :func:`~drawing_analyzer.critique.keep_critique_read`, the one rule the
+    real-time raised-cap retry applies too: a finished retry is the read; a
+    failed one is named in the read's error, with the model when a refusal
+    fallback sent it elsewhere; every attempt's usage is the read's.
+    """
+    assert read.outcome is not None
+    read.outcome = keep_critique_read(read.outcome, later, model=read.fallback_model(params))
+
+
+def _recover_failed_reads(
+    reads: list[_CRead],
+    raw: dict[str, Any],
+    *,
+    client: Any,
+    sleep: Callable[[float], None],
+    on_log: LogCallback | None,
+    max_elapsed_seconds: float,
+) -> bool:
+    """Retry the primary batch's failed reads in follow-up critique batches.
+
+    Remediation WP-01.8 (the owner's rules). Each read the primary batch
+    returned failed, and that the digest's predicate retries
+    (:func:`_read_retry_params`), is resubmitted in a **fresh critique batch**
+    reusing its sheet's uploaded ``file_id`` references, never as a full-rate
+    real-time call:
+
+    * **Bounded twice, as the digest's batch recovery is.** At most
+      ``batch_digest._max_batch_resubmit_rounds()`` rounds (default 4, a
+      rejected submit included), inside the remaining collection bound; and
+      each sheet's one retry budget (the same value, WP-01.5's rule: every
+      resubmitted read of the sheet counts one) is checked before every round
+      (``batch_digest._within_retry_budget``) and spent after an accepted
+      submit (``_count_retry``).
+    * **No stall watch**, like the primary critique poll: nothing can recover
+      a canceled read, so a round rides the remaining bound. A round that ends
+      non-terminal (out of bound, unpollable) is canceled best effort and ends
+      the recovery; its reads are named ``…; retry: critique batch not
+      collected (<status>); remote batch id=… was canceled``.
+    * **What a round returns** folds into each read (:func:`_fold_retry`); a
+      read still failing goes to the next round with the predicate's params
+      (a raised cap doubles from the cap just sent), and a read the round
+      returned no envelope for goes again as it was sent (it was retryable).
+
+    Never fatal (I-3): a failure inside leaves every read as it stands and
+    cancels a round it had submitted. Returns ``True`` when every follow-up
+    batch it submitted is terminal or confirmed canceled, i.e. none may still
+    reference the uploaded files.
+    """
+    pending: list[tuple[_CRead, dict]] = []
+    for read in reads:
+        if read.outcome is None or read.outcome.ok:
+            continue
+        params = _read_retry_params(read, raw.get(read.custom_id), read.outcome,
+                                    params=read.params)
+        if params is not None:
+            pending.append((read, params))
+    if not pending:
+        return True
+
+    started = time.monotonic()
+    files_safe = True
+    attempted = len(pending)
+    recovered = 0
+    open_batch: str | None = None
+    max_rounds = _max_batch_resubmit_rounds()
+    try:
+        for round_no in range(1, max_rounds + 1):
+            pending = _within_retry_budget(
+                pending, where=f"critique follow-up batch round {round_no}",
+            )
+            if not pending:
+                break
+            budget_left = max_elapsed_seconds - (time.monotonic() - started)
+            if budget_left < DEFAULT_POLL_INTERVAL_SECONDS:
+                _log.warning(
+                    "critique follow-up batches out of collection budget after %d "
+                    "round(s): %d read(s) not retried", round_no - 1, len(pending),
+                )
+                break
+            reqs = [{"custom_id": read.custom_id, "params": p} for read, p in pending]
+            _log.info(
+                "critique follow-up batch round %d/%d: resubmitting %d failed read(s)",
+                round_no, max_rounds, len(pending),
+            )
+            if on_log is not None:
+                on_log(
+                    f"Retrying {len(pending)} failed critique read(s) in a follow-up "
+                    f"batch (round {round_no}/{max_rounds})"
+                )
+            try:
+                mb = client.messages.batches.create(requests=reqs)
+            except Exception as exc:  # noqa: BLE001 - recovery is best-effort; reads keep their errors
+                # A rejected submit bills nothing and spends no retry; back off
+                # (inside the bound) and let the next round try again.
+                _log.warning(
+                    "critique follow-up batch round %d submit failed: %s",
+                    round_no, summarize_exc(exc),
+                )
+                backoff = _retry_backoff_seconds(round_no - 1)
+                if backoff >= max_elapsed_seconds - (time.monotonic() - started):
+                    break
+                sleep(backoff)
+                continue
+            retry_id = _get(mb, "id")
+            open_batch = retry_id
+            for read, p in pending:
+                _count_retry(read, p)
+            _log.info(
+                "critique follow-up batch submitted: id=%s items=%d", retry_id, len(reqs),
+            )
+            status = _poll_until_terminal(
+                client, retry_id, total=len(pending), cached_done=0, progress=None,
+                on_log=on_log, sleep=sleep, max_elapsed_seconds=budget_left,
+            )
+            if status not in _TERMINAL_STATUSES:
+                canceled = _cancel_batch(client, retry_id, on_log=on_log)
+                open_batch = None
+                if not canceled:
+                    files_safe = False
+                tail = "was canceled" if canceled else "may still be running"
+                why = (f"critique batch not collected ({status}); "
+                       f"remote batch id={retry_id} {tail}")
+                for read, p in pending:
+                    _fold_retry(read, CritiqueRunOutcome(
+                        run_id=read.run_id, status="FAILED", error=why), params=p)
+                _log.warning(
+                    "critique follow-up batch %s %s; %d read(s) keep their errors",
+                    retry_id, status, len(pending),
+                )
+                pending = []
+                break
+            open_batch = None
+            try:
+                raw_retry: dict[str, Any] = {}
+                for result in client.messages.batches.results(retry_id):
+                    raw_retry[_get(result, "custom_id")] = result
+            except Exception as exc:  # noqa: BLE001 - recovery is best-effort; reads keep their errors
+                why = f"critique batch results could not be read ({summarize_exc(exc)})"
+                for read, p in pending:
+                    _fold_retry(read, CritiqueRunOutcome(
+                        run_id=read.run_id, status="FAILED", error=why), params=p)
+                _log.warning("critique follow-up batch %s: %s", retry_id, why)
+                pending = []
+                break
+            still: list[tuple[_CRead, dict]] = []
+            for read, p in pending:
+                env = raw_retry.get(read.custom_id)
+                oc = _outcome_from_envelope(
+                    env, run_id=read.run_id, ref=read.ref,
+                    rows=getattr(read.slot, "rows", 0), cols=getattr(read.slot, "cols", 0),
+                    fallback_model=read.fallback_model(p),
+                )
+                # The predicate reads THIS round's reply, before the fold names
+                # it, so a note it adds (an unrouted category) is in the name.
+                again = (
+                    None if oc.ok
+                    else p if env is None
+                    else _read_retry_params(read, env, oc, params=p)
+                )
+                _fold_retry(read, oc, params=p)
+                if oc.ok:
+                    recovered += 1
+                elif again is not None:
+                    still.append((read, again))
+            pending = still
+    except Exception as exc:  # noqa: BLE001 - critique is additive/non-fatal (I-3)
+        _log.warning("critique follow-up batch recovery failed: %s", summarize_exc(exc))
+        if open_batch is not None and not _cancel_batch(client, open_batch, on_log=on_log):
+            files_safe = False
+        pending = []
+    if pending:
+        _log.warning(
+            "critique follow-up batches exhausted: %d read(s) keep their errors",
+            len(pending),
+        )
+    _log.info("critique follow-up batches recovered %d/%d failed read(s)", recovered, attempted)
+    if on_log is not None:
+        on_log(f"Recovered {recovered} of {attempted} failed critique read(s)")
+    return files_safe
 
 
 def collect_critique_batch(
@@ -484,6 +771,12 @@ def collect_critique_batch(
     batched sheet's self-consistency verdict is identical to a real-time one. A
     complete result (every read parsed) is written to the level-2 cache.
 
+    Between the collect and the merge, a failed read the digest's predicate
+    retries goes to follow-up critique batches (remediation WP-01.8,
+    :func:`_recover_failed_reads`): a read that finishes there is the read, and
+    a sheet whose every read finished is cached under its requested key, as
+    if the primary batch had returned it.
+
     Returns ``[(SheetRef, CritiqueResult), …]`` in page order.
 
     **Cleanup (DA-034):** the uploaded files are released on every exit where the
@@ -501,6 +794,7 @@ def collect_critique_batch(
     submitted = batch.submitted_slots
     if not (batch.batch_id and submitted):
         return _assemble(batch)
+    collect_started = time.monotonic()
 
     # The poll / results / cancel / delete below all talk to the API; the pipeline
     # may have deferred client creation and passed ``None`` (as the digest collect
@@ -513,6 +807,9 @@ def collect_critique_batch(
 
     terminal = False
     canceled = False
+    # Every follow-up batch is terminal or confirmed canceled (WP-01.8), so
+    # none of them can still reference the uploaded files.
+    followups_safe = True
     try:
         # The poll counts batch ITEMS (reads = sheets x runs), but the critique
         # stage's progress contract is per-SHEET (pipeline.py) — the submit and
@@ -541,20 +838,29 @@ def collect_critique_batch(
             sleep=sleep,
             max_elapsed_seconds=max_elapsed_seconds,
         )
-        if status in ("ended", "failed", "expired", "canceled"):
+        if status in _TERMINAL_STATUSES:
             terminal = True
             raw: dict[str, Any] = {}
             for result in client.messages.batches.results(batch.batch_id):
                 raw[_get(result, "custom_id")] = result
-            # Group each sheet's reads (keyed by slot identity, order-independent).
-            outcomes: dict[int, list[CritiqueRunOutcome]] = {id(s): [] for s in submitted}
-            for custom_id, (slot, run_id) in batch.by_custom_id.items():
-                outcomes[id(slot)].append(
-                    _outcome_from_envelope(
-                        raw.get(custom_id), run_id=run_id, ref=slot.ref,
-                        rows=getattr(slot, "rows", 0), cols=getattr(slot, "cols", 0),
-                    )
+            reads = _reads_of(batch)
+            for read in reads:
+                read.outcome = _outcome_from_envelope(
+                    raw.get(read.custom_id), run_id=read.run_id, ref=read.ref,
+                    rows=getattr(read.slot, "rows", 0), cols=getattr(read.slot, "cols", 0),
                 )
+            # Remediation WP-01.8 (the owner's rules): a failed read the
+            # digest's predicate retries goes to follow-up critique batches,
+            # inside the remaining bound and its sheet's retry budget.
+            followups_safe = _recover_failed_reads(
+                reads, raw, client=client, sleep=sleep, on_log=on_log,
+                max_elapsed_seconds=max_elapsed_seconds - (time.monotonic() - collect_started),
+            )
+            # Group each sheet's reads (keyed by slot identity, in read order).
+            outcomes: dict[int, list[CritiqueRunOutcome]] = {id(s): [] for s in submitted}
+            for read in reads:
+                if read.outcome is not None and id(read.slot) in outcomes:
+                    outcomes[id(read.slot)].append(read.outcome)
             for slot in submitted:
                 res = result_from_outcomes(
                     outcomes[id(slot)], requested_runs=batch.runs,
@@ -620,19 +926,39 @@ def collect_critique_batch(
         # longer needs them — a terminal (fully-collected) batch or one we
         # confirmed canceled. A non-terminal batch we could NOT cancel may still be
         # running, so its files are retained (safe detach) and expire server-side.
-        if terminal or canceled:
+        # The same holds for a follow-up batch (remediation WP-01.8): the files
+        # go only once every batch that references them is done with them.
+        if (terminal or canceled) and followups_safe:
             _release_uploaded_files(
                 client, batch.all_file_ids,
                 in_background=cleanup_in_background, on_log=on_log,
             )
         elif batch.all_file_ids:
             _log.warning(
-                "critique batch %s not collected and not canceled; retaining %d "
-                "uploaded file(s) (they expire server-side)",
-                batch.batch_id, len(batch.all_file_ids),
+                "critique batch %s %s; retaining %d uploaded file(s) (they expire "
+                "server-side)",
+                batch.batch_id,
+                "has a follow-up batch that could not be canceled"
+                if (terminal or canceled) else "not collected and not canceled",
+                len(batch.all_file_ids),
             )
 
     return _assemble(batch)
+
+
+def _reads_of(batch: CritiqueBatch) -> list[_CRead]:
+    """The batch's submitted reads, in submit order.
+
+    ``batch.reads`` for a batch :func:`submit_critique_batch` built; for one
+    built by hand with only ``by_custom_id``, reads without params (collected,
+    never resubmitted).
+    """
+    if batch.reads:
+        return batch.reads
+    return [
+        _CRead(slot=slot, run_id=run_id, custom_id=custom_id, params={})
+        for custom_id, (slot, run_id) in batch.by_custom_id.items()
+    ]
 
 
 def _assemble(batch: CritiqueBatch) -> list[tuple[Any, CritiqueResult]]:

@@ -56,6 +56,8 @@ from tests.fixtures.fake_anthropic import (
     FakeUsage,
     FinalMessageStream,
     StreamingMessagesMixin,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -175,9 +177,9 @@ class _BatchClient:
             create=self._create, retrieve=self._retrieve,
             results=self._results, cancel=self._cancel,
         )
-        self.messages = _Obj(stream=self._stream, batches=batches)
-        self.beta = _Obj(
-            messages=_Obj(stream=self._stream, batches=batches), files=self.files,
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            stream=self._stream, batches=batches, files=self.files,
         )
 
     def _next(self):
@@ -189,7 +191,6 @@ class _BatchClient:
         return _Obj(id=f"file_{len(self.order)}_{id(file)}")
 
     def _stream(self, **kwargs):
-        kwargs.pop("betas", None)
         self.stream_calls.append(kwargs)
         reply = self._next()
         if isinstance(reply, Exception):
@@ -198,7 +199,8 @@ class _BatchClient:
             raise ValueError("direct call failed")
         return FinalMessageStream(reply)
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         if (
             self.create_raises_after is not None
             and len(self.order) >= self.create_raises_after
@@ -898,9 +900,9 @@ class _PipelineClient:
             create=self._create, retrieve=self._retrieve, results=self._results,
             cancel=lambda batch_id: _Obj(id=batch_id, processing_status="canceling"),
         )
-        self.messages = _Obj(stream=self._stream, batches=batches)
-        self.beta = _Obj(
-            messages=_Obj(stream=self._stream, batches=batches), files=self.files,
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            stream=self._stream, batches=batches, files=self.files,
         )
 
     def _reply_for(self, params: dict):
@@ -916,10 +918,10 @@ class _PipelineClient:
         return _Obj(id=f"file_{self._n}")
 
     def _stream(self, **kwargs):
-        kwargs.pop("betas", None)
         return FinalMessageStream(self._reply_for(kwargs))
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self._submitted = [(r, self._reply_for(r["params"])) for r in requests]
         return _Obj(id=f"batch_{self._n}")
 

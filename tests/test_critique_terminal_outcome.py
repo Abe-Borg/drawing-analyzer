@@ -71,6 +71,8 @@ from tests.fixtures.fake_anthropic import (
     FakeUsage,
     FinalMessageStream,
     StreamingMessagesMixin,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 _NOOP = lambda _s: None  # noqa: E731 - tests never wait
@@ -114,6 +116,18 @@ NOT_FINISHED = {
     "unknown": ("not_a_stop_reason", "unfinished critique (stop_reason='not_a_stop_reason')"),
 }
 FINISHED = ("end_turn", "stop_sequence")
+
+# The stop reasons whose read gets one raised-cap retry (remediation WP-01.8,
+# the owner's rules; re-baselined here with the owner's approval): these
+# fakes answer the retry cut off too, so the read still fails, its error names
+# the retry, and the retry's tokens and call are the read's.
+RETRIED = {"max"}
+
+
+def _after_retry(key: str, expected: str) -> str:
+    """The error a read that stopped for ``key`` carries once its retry
+    (if it gets one) came back the same."""
+    return f"{expected}; retry: {expected}" if key in RETRIED else expected
 
 
 def _ref():
@@ -290,8 +304,11 @@ def test_rt_both_reads_unfinished(key):
                                          runs=2, max_retries=0, sleep=_NOOP)
     assert (res.completed_runs, res.requested_runs) == (0, 2)
     assert res.findings == [] and res.claims == []
-    assert res.error == f"{expected}; {expected}"
-    assert (res.input_tokens, res.output_tokens) == (200, 40)
+    per_read = _after_retry(key, expected)
+    assert res.error == f"{per_read}; {per_read}"
+    calls = 4 if key in RETRIED else 2
+    assert client.calls == calls
+    assert (res.input_tokens, res.output_tokens) == (100 * calls, 20 * calls)
     assert _critique_entries(cache) == []
 
 
@@ -308,8 +325,10 @@ def test_rt_one_read_unfinished(key):
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
     assert res.findings[0].reproduced is False and res.findings[0].sources == ["critique_1"]
     assert res.claims == []
-    assert res.read_errors == [expected]
-    assert (res.input_tokens, res.output_tokens) == (200, 40)
+    assert res.read_errors == [_after_retry(key, expected)]
+    calls = 3 if key in RETRIED else 2
+    assert client.calls == calls
+    assert (res.input_tokens, res.output_tokens) == (100 * calls, 20 * calls)
     assert _critique_entries(cache) == []
 
 
@@ -320,7 +339,7 @@ def test_rt_a_finished_read_and_an_empty_cut_read():
     res = critique_sheet_self_consistent(_rendered(), client=client, cache=cache,
                                          runs=2, max_retries=0, sleep=_NOOP)
     assert res.findings == [] and res.completed_runs == 1
-    assert res.error == "truncated critique (stop_reason='max_tokens')"
+    assert res.error == _after_retry("max", "truncated critique (stop_reason='max_tokens')")
     assert _critique_entries(cache) == []
 
 
@@ -329,7 +348,7 @@ def test_rt_a_single_read_run_that_is_cut_off():
     res = critique_sheet_self_consistent(_rendered(), client=client, runs=1,
                                          max_retries=0, sleep=_NOOP)
     assert res.completed_runs == 0 and res.findings == []
-    assert res.error == "truncated critique (stop_reason='max_tokens')"
+    assert res.error == _after_retry("max", "truncated critique (stop_reason='max_tokens')")
 
 
 @pytest.mark.parametrize("stop", FINISHED)
@@ -368,9 +387,9 @@ def test_rt_structured_read_cut_off(_structured):
     client = _Scripted([(_obj([F1], [CLAIM]), "max_tokens")])
     oc = _critique_read(_rendered(), run_id="critique_1", client=client,
                         model=MODEL_OPUS_5, max_retries=0, sleep=_NOOP)
-    assert client.calls == 1 and STRUCTURED_OUTPUTS.available   # the schema was sent
+    assert client.calls == 2 and STRUCTURED_OUTPUTS.available   # the schema was sent
     assert oc.status == "FAILED"
-    assert oc.error == "truncated critique (stop_reason='max_tokens')"
+    assert oc.error == _after_retry("max", "truncated critique (stop_reason='max_tokens')")
     assert oc.findings == [] and oc.claims == []
 
 
@@ -449,7 +468,8 @@ class _BatchClient:
         self._n += 1
         return _Obj(id=f"file_{self._n}")
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self.create_calls += 1
         self.submitted = list(requests)
         return _Obj(id="batch_1")
@@ -486,6 +506,18 @@ def test_batch_one_read_unfinished(key):
     cache = DigestCache(None, persist=False)
     client = _BatchClient([(_fenced([F1]), "end_turn"), (_fenced([F1, F2], [CLAIM]), stop)])
     ((_ref_, res),) = _batch_run(client, cache)
+    if key in RETRIED:
+        # This fake answers the follow-up batch's one item with its first
+        # reply (a finished read), so the raised-cap retry recovers read 2:
+        # both reads judged, the finding corroborated, the result cached.
+        assert client.create_calls == 2
+        assert (res.completed_runs, res.requested_runs) == (2, 2)
+        assert [f.text for f in res.findings] == [F1["text"]] and res.claims == []
+        assert res.findings[0].confidence == CONFIDENCE_REPRODUCED
+        assert res.read_errors == []
+        assert (res.input_tokens, res.output_tokens) == (300, 60)
+        assert len(_critique_entries(cache)) == 1
+        return
     assert (res.completed_runs, res.requested_runs) == (1, 2)
     assert [f.text for f in res.findings] == [F1["text"]] and res.claims == []
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
@@ -554,9 +586,10 @@ class _Pipe:
         self.files = _Obj(upload=self._upload, delete=lambda file_id: None)
         batches = _Obj(create=self._create, retrieve=self._retrieve, results=self._results,
                        cancel=lambda batch_id: _Obj(id=batch_id, processing_status="canceling"))
-        self.messages = _Obj(stream=self._stream, create=self._direct, batches=batches)
-        self.beta = _Obj(messages=_Obj(stream=self._stream, create=self._direct,
-                                       batches=batches), files=self.files)
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            create=self._direct, stream=self._stream, batches=batches, files=self.files,
+        )
 
     def _critique_reply(self, params):
         text = _joined_text(params)
@@ -591,20 +624,17 @@ class _Pipe:
         return _message("ok", "end_turn", 1, 1)
 
     def _stream(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return FinalMessageStream(self._reply(kw))
 
     def _direct(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return self._reply(kw)
 
     def _upload(self, *, file):
         self._n += 1
         return _Obj(id=f"file_{self._n}")
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self._submitted = []
         for r in requests:
             try:
@@ -671,13 +701,15 @@ def test_pipeline_one_read_unfinished(tmp_path, transport, key):
                             (_fenced([F1, F2], [CLAIM]), stop)]})
     ctx = _run(tmp_path, client, cache, transport)
     stage = _stage(ctx)
-    assert client.critique_calls == 2
+    calls = 3 if key in RETRIED else 2
+    assert client.critique_calls == calls
     assert stage.status == "PARTIAL"
     assert (stage.items_in, stage.items_out) == (2, 1)
     assert stage.warnings[0] == (
         "critique: 1 of 2 requested read(s) judged; 0 skipped, 1 returned no judgment")
     assert len(stage.errors) == 1
-    assert stage.errors[0].endswith(f": 1 of 2 critique read(s) finished: {expected}")
+    assert stage.errors[0].endswith(
+        f": 1 of 2 critique read(s) finished: {_after_retry(key, expected)}")
     assert any(e.startswith("Critique: 1 sheet(s)") for e in ctx.errors)
     assert ctx.qc_status == "PARTIAL"
     # The cut read left nothing: no finding of its own, no claim for the auditor.
@@ -686,9 +718,9 @@ def test_pipeline_one_read_unfinished(tmp_path, transport, key):
     assert not [f for f in ctx.all_findings if f.claim_discriminator]
     kept = next(f for f in ctx.all_findings if f.text == F1["text"])
     assert kept.confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
-    # Both reads billed; the sheet's record says what the stage says.
+    # Every read and retry billed; the sheet's record says what the stage says.
     (rec,) = _critique_records(ctx)
-    assert (rec.input_tokens, rec.output_tokens) == (200, 40)
+    assert (rec.input_tokens, rec.output_tokens) == (100 * calls, 20 * calls)
     assert (rec.terminal_status, rec.parse_success) == ("PARTIAL", False)
     # Neither level stored it, so the next run reads the sheet again.
     assert _critique_entries(cache) == []
@@ -711,12 +743,15 @@ def test_pipeline_both_reads_unfinished(tmp_path, transport, key):
     assert (stage.items_in, stage.items_out) == (2, 0)
     assert stage.warnings[0] == (
         "critique: 0 of 2 requested read(s) judged; 0 skipped, 2 returned no judgment")
-    assert stage.errors[0].endswith(f": {expected}; {expected}")
+    per_read = _after_retry(key, expected)
+    assert stage.errors[0].endswith(f": {per_read}; {per_read}")
     assert ctx.qc_status == "PARTIAL"
     assert not [f for f in ctx.all_findings if any(s.startswith("critique") for s in f.sources)]
     (rec,) = _critique_records(ctx)
     assert (rec.terminal_status, rec.parse_success) == ("FAILED", False)
-    assert (rec.input_tokens, rec.output_tokens) == (200, 40)
+    calls = 4 if key in RETRIED else 2
+    assert client.critique_calls == calls
+    assert (rec.input_tokens, rec.output_tokens) == (100 * calls, 20 * calls)
     assert _critique_entries(cache) == []
 
 

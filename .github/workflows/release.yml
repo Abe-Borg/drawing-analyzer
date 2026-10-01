@@ -64,6 +64,7 @@ on:
     paths:
       - "packaging/windows/**"
       - ".github/workflows/release.yml"
+      - "LICENSE"   # installer.iss embeds it as the License Agreement page
       - "src/drawing_analyzer/core/updates.py"
       - "pyproject.toml"
   workflow_dispatch:

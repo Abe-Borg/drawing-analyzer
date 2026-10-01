@@ -970,12 +970,23 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # quote is no longer sent to the reconciler, and the stored result carries
     # its refused-item counts. Host-side binding again, for byte-identical
     # request inputs.
-    assert X._CROSS_QC_CACHE_CONTRACT == 6
+    #
+    # 7 since remediation WP-05.3 (B4): grounding also takes a quote that
+    # differs from the sheet's words only by the named character-stream joins
+    # (`6"` against `6 "`), and no quote or text with a number split around a
+    # lone `.` grounds any longer. Host-side binding again, for byte-identical
+    # request inputs.
+    #
+    # 8 since remediation WP-04.4: the quantity reader the character-stream
+    # tier's veto reuses reads spelled ranges and lists and a compact A beside
+    # a voltage, through guards a named letter-merge join can change, so a
+    # grounding verdict can move for byte-identical request inputs.
+    assert X._CROSS_QC_CACHE_CONTRACT == 8
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     import pytest as _pytest
-    for previous in (2, 3, 4, 5):
+    for previous in (2, 3, 4, 5, 6, 7):
         with _pytest.MonkeyPatch.context() as mp:
             mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", previous)
             legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

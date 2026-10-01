@@ -660,4 +660,13 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # field collapse, a whitespace-only fact quote is no longer sent to the
     # reconciler, and the stored result carries its refused-item counts, for
     # byte-identical inputs. WP-03B still added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 6
+    #
+    # 7 since remediation WP-05.3 (B4): grounding also takes a quote that
+    # differs from the sheet's words only by the named character-stream joins,
+    # and no quote or text with a number split around a lone `.` grounds any
+    # longer, for byte-identical inputs. WP-03B still added nothing.
+    #
+    # 8 since remediation WP-04.4: the quantity reader the character-stream
+    # veto reuses changed, so a grounding verdict can move for byte-identical
+    # inputs. WP-03B still added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 8

@@ -59,6 +59,7 @@ from .core.api_config import (
     system_prompt_with_cache,
     tools_with_cache,
 )
+from .core.reply_text import reply_text
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -67,10 +68,10 @@ from .digest import (
     _error_status,
     _image_block,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
+    StreamUsage,
     stream_message,
 )
 from .models import Finding, Verification, source_page_key
@@ -205,13 +206,13 @@ on what you actually saw"}"""
 
 
 # Whether this process may still send the advisory task budget. The beta is
-# documented for Opus 5, but an org without it enabled would get a 400 on every
-# turn — which, on a stage designed to be additive and non-fatal (I-3), would
-# silently disable investigations altogether rather than degrade. So the first
-# such rejection turns the feature off for the process and the run continues on
-# the plain streaming transport, with the host-side round cap still enforcing a
-# bound. Only a budget-specific rejection flips it; transient errors re-raise to
-# the caller's existing retry.
+# documented for Opus 5 and Opus 5.5, but an org without it enabled would get a
+# 400 on every turn — which, on a stage designed to be additive and non-fatal
+# (I-3), would silently disable investigations altogether rather than degrade.
+# So the first such rejection turns the feature off for the process and the run
+# continues on the plain streaming transport, with the host-side round cap still
+# enforcing a bound. Only a budget-specific rejection flips it; transient errors
+# re-raise to the caller's existing retry.
 _task_budget_available = True
 
 _TASK_BUDGET_REJECTION_MARKERS = ("task_budget", "task-budgets", "output_config")
@@ -315,7 +316,7 @@ def _investigation_message_turn(client: Any, kwargs: dict, *, task_budget: int) 
         config["task_budget"] = {"type": "tokens", "total": int(task_budget)}
         budgeted = {**kwargs, "output_config": config, "betas": [TASK_BUDGET_BETA]}
         try:
-            # Also opts into (and self-heals) the Opus 5 refusal fallback —
+            # Also opts into (and self-heals) the refusal fallback —
             # see call_with_refusal_fallback — orthogonally to the task-budget
             # rejection handled below.
             return call_with_refusal_fallback(
@@ -804,6 +805,9 @@ class _InvestigationOutcome:
     fatal: bool = False
     note: str = ""
     tool_trace: list = field(default_factory=list)
+    # Remediation WP-01.7: turns whose stream was interrupted before its final
+    # usage arrived; the token counts are then lower bounds.
+    interrupted_attempts: int = 0
 
 
 def _build_initial_content(
@@ -990,6 +994,17 @@ def _investigate_one(
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
+                # An interrupted turn is retried like any transient failure,
+                # and its reported usage is the finding's; its partial read is
+                # never used, so no tool from it runs (remediation WP-01.7,
+                # the owner's rule; the turn's replay is WP-13.4's).
+                lost = StreamUsage()
+                lost.add_interrupted(exc)
+                out.input_tokens += lost.input_tokens
+                out.output_tokens += lost.output_tokens
+                out.cache_read_tokens += lost.cache_read_tokens
+                out.cache_write_tokens += lost.cache_write_tokens
+                out.interrupted_attempts += lost.interrupted_attempts
                 if _is_transient_error(exc) and attempt < max_retries:
                     sleep(_retry_backoff_seconds(attempt))
                     attempt += 1
@@ -1079,7 +1094,7 @@ def _investigate_one(
             # A genuine NOT_VISIBLE conclusion and a garbled reply both map to
             # UNCERTAIN through parse_verdict — distinguish them on the raw
             # verdict token so garble is "not_concluded", never a conclusion.
-            text = _message_text(resp)
+            text = reply_text(resp)
             obj = _tolerant_json_object(text)
             raw = (
                 str(obj.get("verdict", "")).strip().upper()
@@ -1302,6 +1317,8 @@ class InvestigationRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cached: bool = False
+    # Remediation WP-01.7 (:attr:`_InvestigationOutcome.interrupted_attempts`).
+    interrupted_attempts: int = 0
 
 
 @dataclass
@@ -1467,6 +1484,7 @@ def investigate_findings(
             output_tokens=outcome.output_tokens,
             cache_read_tokens=outcome.cache_read_tokens,
             cache_write_tokens=outcome.cache_write_tokens,
+            interrupted_attempts=outcome.interrupted_attempts,
         )
         result.per_finding.append(record)
         if outcome.outcome == "concluded":

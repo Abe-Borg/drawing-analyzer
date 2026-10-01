@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from ab_findings_diff import (  # noqa: E402
@@ -225,15 +227,26 @@ def test_thousands_grouped_quantities_compare_by_value():
     assert same["exact"][0]["text_changed"] is True
 
 
-def test_records_are_written_under_the_wp_04_1_contract():
+def test_records_are_written_under_the_wp_04_4_contract():
     """A record stores ``critical_signature`` computed when the arm ran, so a v2
     record holds the old tokens (``6-inch`` signed as nothing, ``12,500`` as
-    ``500``). Comparing it with a v3 arm would report a tokenizer change as a
-    model difference; ``load_arm_records`` refuses it
-    (``tests/test_ab_sweep.py``)."""
-    assert RECORD_CONTRACT_VERSION == 3
+    ``500``), a v3 record holds no quantity roles (remediation WP-04.3), which
+    the rule reads as "no role", so a swapped main and branch would match
+    EXACT, and a v4 record holds the partial readings (``4 to 6 in`` as
+    ``6in``) and no feet-inches pairs (remediation WP-04.4), so a bare ``12'``
+    against ``12'-6"`` would match EXACT. Comparing any of them with a v5 arm
+    would report a code change as a model difference; ``load_arm_records``
+    refuses it (``tests/test_ab_sweep.py``). Re-pinned 3 -> 4 by WP-04.3 and
+    4 -> 5 by WP-04.4 (the owner's decisions)."""
+    assert RECORD_CONTRACT_VERSION == 5
     record = finding_record(_f(text="provide 6-inch drain at 12,500 cfm"))
     assert record["critical_signature"]["measurements"] == ["12500cfm", "6in"]
+    record = finding_record(_f(text="provide 6 in main and 4 in branch"))
+    assert record["critical_signature"]["roles"] == ["branch=4in", "main=6in"]
+    assert record["critical_signature"]["ambiguous_roles"] == []
+    record = finding_record(_f(text="maintain 4 to 6 in clear, 12'-6\" headroom"))
+    assert record["critical_signature"]["measurements"] == ["12ft", "4..6in", "6in"]
+    assert record["critical_signature"]["feet_inches"] == ["12ft6in"]
 
 
 # --------------------------------------------------------------------------- #
@@ -293,12 +306,15 @@ def test_the_named_axes_come_from_the_production_rule():
         assert cand["signature_conflicts"]
 
 
-def test_a_v3_record_is_compared_under_the_current_rule_without_a_bump():
+def test_a_v5_record_is_compared_under_the_current_rule_without_a_bump():
     """A record stores the signature's tokens, and the rule is re-applied when
-    two records are compared. WP-04.2 changed the rule, not the tokens, so a v3
+    two records are compared. WP-04.2 changed the rule, not the tokens, so a
     record read back from disk still means what it says: no
-    ``RECORD_CONTRACT_VERSION`` bump (see the version's comment)."""
-    assert RECORD_CONTRACT_VERSION == 3
+    ``RECORD_CONTRACT_VERSION`` bump for a rule-only change (see the version's
+    comment). Renamed from the v3 test by WP-04.3, whose bump was for what a
+    record stores (the roles), and from the v4 test by WP-04.4, whose bump was
+    for the tokens and the feet-inches pairs a record stores."""
+    assert RECORD_CONTRACT_VERSION == 5
     base = finding_records([_f(text="pump discharge is 6 in at 100 psi", anchor=_rect())])
     var = finding_records([_f(text="pump discharge is 4 in at 100 psi",
                               anchor=_rect(12.0, 12.0, 112.0, 62.0))])
@@ -307,6 +323,112 @@ def test_a_v3_record_is_compared_under_the_current_rule_without_a_bump():
     m = match_records(sidecar["records"], var)
     assert m["counts"]["exact"] == 0
     assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-04.3 — quantity roles, stored in the record
+# --------------------------------------------------------------------------- #
+
+def test_swapped_roles_are_never_an_exact_match():
+    """The two arms name the same sizes for opposite roles. The token sets are
+    equal, so before WP-04.3 this matched EXACT."""
+    for base_text, var_text in (
+        ("provide 6 in main and 4 in branch at the riser",
+         "provide 4 in main and 6 in branch at the riser"),
+        ("provide 6 in supply and 6 in return at the riser",
+         "provide 6 in supply and 8 in return at the riser"),
+    ):
+        m = _overlapping_pair(base_text, var_text)
+        assert m["counts"]["exact"] == 0, base_text
+        assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+
+
+def test_the_roles_are_compared_from_the_stored_record():
+    """The rule reads the roles a record stored when its arm ran, read back
+    from JSON, never recomputed from the record's text."""
+    base = finding_records([_f(text="provide 6 in main and 4 in branch", anchor=_rect())])
+    var = finding_records([_f(text="provide 4 in main and 6 in branch",
+                              anchor=_rect(12.0, 12.0, 112.0, 62.0))])
+    stored = json.loads(json.dumps({"contract_version": RECORD_CONTRACT_VERSION, "records": base}))
+    m = match_records(stored["records"], var)
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+    # The same records with the roles removed (what a v3 arm stored) would
+    # have matched EXACT, which is why a v3 sidecar is refused.
+    for record in stored["records"] + var:
+        record["critical_signature"].pop("roles", None)
+        record["critical_signature"].pop("ambiguous_roles", None)
+    assert match_records(stored["records"], var)["counts"]["exact"] == 1
+
+
+def test_a_v3_sidecar_is_refused(tmp_path):
+    from ab_findings_diff import RECORDS_STALE_CONTRACT
+    from ab_sweep_drawing_analyzer import _findings_path, load_arm_records
+
+    arm = tmp_path / "arm_baseline.json"
+    records = finding_records([_f(text="provide 6 in main and 4 in branch")])
+    for record in records:           # what a v3 arm stored: no roles
+        record["critical_signature"].pop("roles", None)
+        record["critical_signature"].pop("ambiguous_roles", None)
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": 3, "records": records}), encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-04.4 — the tokenizer residuals, stored in the record
+# --------------------------------------------------------------------------- #
+
+_RESIDUAL_PAIRS = {
+    "a bare feet value": ("maintain 12'-6\" clear headroom at the riser",
+                          "maintain 12' clear headroom at the riser"),
+    "a to range": ("maintain 4 to 6 in clearance at the pump",
+                   "maintain 6 in clearance at the pump"),
+    "a loose-comma list": ("provide 2, 4, 6 in floor drains at the east wall",
+                           "provide 3, 5, 6 in floor drains at the east wall"),
+    "a compact A beside a voltage": ("provide 20A 120V circuit for fan EF-1",
+                                     "provide 30A 120V circuit for fan EF-1"),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_RESIDUAL_PAIRS), ids=sorted(_RESIDUAL_PAIRS))
+def test_a_changed_residual_quantity_is_never_an_exact_match(pair):
+    """Each side signed only part of its quantity (or, for feet, nothing that
+    told a bare ``12'`` from ``12'-6"``), and the parts agreed, so before
+    WP-04.4 each pair matched EXACT."""
+    m = _overlapping_pair(*_RESIDUAL_PAIRS[pair])
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+
+
+def test_the_feet_inches_pairs_are_compared_from_the_stored_record():
+    """The rule reads the pairs a record stored when its arm ran, read back
+    from JSON, never recomputed from the record's text."""
+    base = finding_records([_f(text="maintain 12'-6\" clear headroom", anchor=_rect())])
+    var = finding_records([_f(text="maintain 12' clear headroom",
+                              anchor=_rect(12.0, 12.0, 112.0, 62.0))])
+    stored = json.loads(json.dumps({"contract_version": RECORD_CONTRACT_VERSION, "records": base}))
+    m = match_records(stored["records"], var)
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+    # The same records without the pairs (what a v4 arm stored) would have
+    # matched EXACT, which is why a v4 sidecar is refused.
+    for record in stored["records"] + var:
+        record["critical_signature"].pop("feet_inches", None)
+    assert match_records(stored["records"], var)["counts"]["exact"] == 1
+
+
+def test_a_v4_sidecar_is_refused(tmp_path):
+    from ab_findings_diff import RECORDS_STALE_CONTRACT
+    from ab_sweep_drawing_analyzer import _findings_path, load_arm_records
+
+    arm = tmp_path / "arm_baseline.json"
+    records = finding_records([_f(text="maintain 12' clear headroom")])
+    for record in records:           # what a v4 arm stored: no feet-inches pairs
+        record["critical_signature"].pop("feet_inches", None)
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": 4, "records": records}), encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
 
 
 # --------------------------------------------------------------------------- #

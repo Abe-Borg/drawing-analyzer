@@ -15,6 +15,9 @@ which tier fired:
 2. **FUZZY** — no exact run, but a sliding window of whole words overlaps the
    quote's tokens ≥ 85%, or the longest distinctive sub-phrase (≥ 3 tokens) of
    the quote appears verbatim, as whole words; both carry the numeric veto.
+   Last, the **character stream** (``char_stream``, remediation WP-05.3): the
+   whole quote on a contiguous run of whole words that differs from it only in
+   spacing, through the named joins and the quantity-aware veto.
 3. **TILE** — a graphics-only finding (empty quote) is anchored to its reported
    tile's rectangle: coarse, but honest.
 4. **UNANCHORED** — a *non-empty* quote that matches nothing anywhere. This is
@@ -28,9 +31,13 @@ tier. And every word, of the sheet and of the quote alike, is normalized
 fractions, infix hyphens) and then loses the brackets and sentence punctuation
 at its edges (:func:`fold_word`, B4): ``RATED 175 PSI TYP`` matches ``RATED 175
 PSI, TYP.`` and ``150 GPM 568 L/MIN`` matches ``150 GPM (568 L/MIN)``. What the
-fold does not cover is a character-stream difference: an inch mark or percent
+fold does not cover is a spacing difference: an inch mark or percent
 extracted as its own word (``6 "``, ``2 %``), words merged by extraction
-(``INCHDRAIN``), and a split dimension (``12' - 6"``) (remediation WP-05.3).
+(``INCHDRAIN``), and a split dimension (``12' - 6"``). The character-stream
+tier takes those (remediation WP-05.3, B4; the owner's rules, below at
+:meth:`SourceWords.joined_spans`). And a number split around a lone ``.`` (a
+decimal point the extraction put in a word of its own) stays whole in every
+tier, on the sheet and in the quote: ``5`` never matches ``. 5``.
 
 Like :mod:`tiling`, this module imports **no PDF engine** — it works purely on
 the plain (already view-space) word tuples ``render.py`` extracted and the
@@ -133,20 +140,44 @@ def _normalize(text: str) -> str:
     return " ".join(t.split())
 
 
+def _folded_words(text: str) -> list[tuple[int, str]]:
+    """``text``'s words that say something, each normalized and folded
+    (:func:`fold_word`), with its place in ``text.split()``.
+
+    A word that normalizes or folds to nothing (a lone comma, a word of
+    invisibles) is dropped, except that a number split around a lone ``.``
+    cannot be told from its parts: ``. 5`` would fold to ``5``. So a text with
+    a lone ``.`` right before a word starting with a digit has no matchable
+    form at all, ``[]`` (remediation WP-05.3; the owner's rule, applied to the
+    quote as :class:`SourceWords` applies it to the sheet).
+    """
+    out: list[tuple[int, str]] = []
+    point = False                   # the last word dropped was a lone "."
+    for i, word in enumerate((text or "").split()):
+        norm = _normalize(word)
+        if not norm:
+            continue                # a word of invisibles says nothing
+        folded = fold_word(norm)
+        if not folded:
+            point = norm == "."
+            continue
+        if point and folded[0].isdigit():
+            return []
+        point = False
+        out.append((i, folded))
+    return out
+
+
 def _fold_text(text: str) -> str:
     """``text``'s words, each normalized and folded (:func:`fold_word`), joined
     by single spaces; a word that folds to nothing is dropped.
 
     The form a quote is matched in, by every tier: word by word, exactly as the
     sheet's words are folded, so the two compare whichever side carries the
-    punctuation.
+    punctuation. ``""`` when the quote has no matchable form: nothing but
+    punctuation, or a number split around a lone ``.`` (:func:`_folded_words`).
     """
-    parts = []
-    for word in (text or "").split():
-        folded = fold_word(_normalize(word))
-        if folded:
-            parts.append(folded)
-    return " ".join(parts)
+    return " ".join(folded for _, folded in _folded_words(text))
 
 
 def _tokenize(text: str) -> list[str]:
@@ -252,10 +283,18 @@ class SourceWords:
     space before it), so the string alone cannot tell ``vav 2`` from a whole
     word. A word that normalizes or folds to nothing (a word of invisibles, a
     lone comma) says nothing and takes no part in a match.
+
+    One exception, a **number split around a lone** ``.`` (remediation WP-05.3,
+    the owner's rule): a word starting with a digit right after a lone ``.``
+    that folded away, and the digit-ending word right before that ``.``, are
+    parts of one number (``. 5`` is ``.5``, ``5 . 25`` is ``5.25``), so no match
+    may start on, end on or cover either, in any tier. The quote gets the same
+    rule (:func:`_folded_words`).
     """
 
-    __slots__ = ("normalized", "folded", "index", "_parts", "_starts",
-                 "_core_starts", "_core_ends", "_found")
+    __slots__ = ("normalized", "folded", "index", "split_number", "_parts", "_starts",
+                 "_core_starts", "_core_ends", "_split_before", "_found", "_joined",
+                 "_joined_found")
 
     def __init__(self, text: str = "", *, words: "Iterable[Any] | None" = None) -> None:
         if words is None:
@@ -266,6 +305,8 @@ class SourceWords:
         parts: list[str] = []
         index = array("l")
         starts, core_starts, core_ends = array("l"), array("l"), array("l")
+        split_number: list[int] = []
+        dropped: list[str] = []            # what folded away since the last kept word
         at = 0
         for i, piece in pieces:
             norm = _normalize(piece)
@@ -274,7 +315,15 @@ class SourceWords:
             normalized.append(norm)
             folded = fold_word(norm)
             if not folded:
-                continue                    # nor does a lone comma or bracket
+                dropped.append(norm)        # nor does a lone comma or bracket
+                continue
+            if dropped and dropped[-1] == "." and folded[0].isdigit():
+                # A decimal point extracted as a word of its own: this word
+                # and a number right before the point are one number.
+                if parts and dropped == ["."] and parts[-1][-1].isdigit():
+                    split_number.append(len(parts) - 1)
+                split_number.append(len(parts))
+            dropped = []
             if parts:
                 at += 1                     # the joining space
             core_start, core_end = word_core(folded)
@@ -289,6 +338,9 @@ class SourceWords:
         #: For each folded word, the index of the word it came from: its place
         #: in ``text.split()``, or in the ``words`` given.
         self.index = index
+        #: The folded words that are part of a number split around a lone
+        #: ``.``, in order: no match may start on, end on or cover one.
+        self.split_number = tuple(sorted(set(split_number)))
         self._parts = parts
         # Each word's core is found once, here, never per occurrence: a quote
         # can recur thousands of times inside one long whitespace-free run (a
@@ -298,7 +350,23 @@ class SourceWords:
         self._starts = starts
         self._core_starts = core_starts
         self._core_ends = core_ends
+        # How many split-number words come before each folded word, for a
+        # constant-time check of a span; None when the text has none.
+        self._split_before = None
+        if self.split_number:
+            before, seen = array("l", [0]), set(self.split_number)
+            for k in range(len(parts)):
+                before.append(before[-1] + (k in seen))
+            self._split_before = before
         self._found: dict[str, tuple[tuple[int, int], ...]] = {}
+        self._joined = None
+        self._joined_found: dict[str, tuple[tuple[int, int], ...]] = {}
+
+    def covers_split_number(self, first: int, last: int) -> bool:
+        """Whether folded words ``first`` … ``last`` include part of a number
+        split around a lone ``.``."""
+        before = self._split_before
+        return before is not None and before[last + 1] > before[first]
 
     def contains(self, quote: str) -> bool:
         """Whether ``quote`` occurs here covering whole source words.
@@ -338,7 +406,8 @@ class SourceWords:
         the word it ends in. One that starts inside a word's core rules out the
         rest of that word, so the scan moves to the next word: the work is
         bounded by the number of words, not by how often the query recurs
-        inside one.
+        inside one. An occurrence that starts on, ends on or covers part of a
+        number split around a lone ``.`` is no match.
         """
         found: list[tuple[int, int]] = []
         if not query:
@@ -354,7 +423,7 @@ class SourceWords:
                 continue
             end = at + len(query)
             j = bisect_right(starts, end - 1) - 1
-            if end >= self._core_ends[j]:
+            if end >= self._core_ends[j] and not self.covers_split_number(i, j):
                 span = (self.index[i], self.index[j])
                 if first:
                     return [span]
@@ -362,6 +431,184 @@ class SourceWords:
                     found.append(span)
             at = text.find(query, at + 1)
         return found
+
+    # ----------------------------------------------------------------------- #
+    # The character-stream tier (remediation WP-05.3, B4; the owner's rules)
+    # ----------------------------------------------------------------------- #
+
+    def joined_spans(self, quote: str) -> tuple[tuple[int, int], ...]:
+        """Every place ``quote`` matches a run of whole words that differs from
+        it only in spacing, through the named joins; like :meth:`spans`.
+
+        B4's other four pairs are verbatim sheet text that the extraction
+        spaced differently: ``6"`` printed as ``6 "``, ``2%`` as ``2 %``,
+        ``12'-6"`` as ``12' - 6"``, and ``INCH DRAIN`` as ``INCHDRAIN``. So the
+        quote's tokens and the sheet's are compared as one character stream,
+        with every space removed, and a match must:
+
+        - cover a **contiguous run of whole words**, in reading order: it
+          starts on a word's first token and ends on a word's last, and no
+          word between is left out (plan §2 rule 15: never a joined string
+          assembled from fragments);
+        - differ only where one side has a space the other lacks, and each
+          such **join** must be one the owner named: a number and a separated
+          ``"`` ``'`` or ``%`` (either side spaced); the feet-inches hyphen
+          (``12' - 6"``, either side); or letters merged by extraction, one
+          sheet word for several quote words, each quote word letters only.
+          A number is a word with no letter, on the side that has the space:
+          an identifier's digits are not one (``ROOM12 %``, a tag's ``101``
+          in ``M-101 "``), and the reader reads nothing there to refuse them
+          (Codex review).
+          Anything else refuses the match: a join between two digits, at a
+          sign, a decimal point, a fraction slash or a comma (so every number
+          is read whole, with its sign, as often as the quote states it), a
+          tag's letter and number, a unit word, ``x``, ``°``, and two sheet
+          words for one quote word;
+        - read the same quantities on both sides, through the one WP-04
+          reader, ``critique._quantity_tokens``, reused as it is (the
+          quantity-aware veto: ``12' -6"`` reads a negative six inches, so it
+          is not ``12'-6"``);
+        - never start on, end on or cover part of a number split around a
+          lone ``.`` (:meth:`covers_split_number`).
+
+        Scanned like :meth:`_scan`: an occurrence that cannot start a whole
+        word moves the search to the next word, so the work is bounded by the
+        number of words. Remembered per quote.
+        """
+        words = _folded_words(quote)
+        if not words:
+            return ()
+        tokens: list[str] = []
+        owner: list[int] = []                 # per quote token, its quote word
+        for k, (_, folded) in enumerate(words):
+            for piece in folded.split():
+                tokens.append(piece)
+                owner.append(k)
+        query = "".join(tokens)
+        key = "\x00".join(folded for _, folded in words)
+        found = self._joined_found.get(key)
+        if found is not None:
+            return found
+        letters = [folded.isalpha() for _, folded in words]
+        lettered = [any(ch.isalpha() for ch in folded) for _, folded in words]
+        quote_breaks: dict[int, tuple[int, int]] = {}
+        at = 0
+        for t in range(len(tokens) - 1):
+            at += len(tokens[t])
+            quote_breaks[at] = (owner[t], owner[t + 1])
+        spans = tuple(self._joined_scan(tokens, query, quote_breaks, letters, lettered))
+        self._joined_found[key] = spans
+        return spans
+
+    def _joined_index(self):
+        """The sheet's tokens as one string with every space removed, built
+        once: the string, each token's start in it, the folded word each token
+        belongs to, each folded word's first token, and whether each folded
+        word has a letter."""
+        if self._joined is None:
+            tokens: list[str] = []
+            owner = array("l")
+            first = array("l")
+            for k, part in enumerate(self._parts):
+                first.append(len(tokens))
+                for piece in part.split():
+                    tokens.append(piece)
+                    owner.append(k)
+            first.append(len(tokens))
+            starts, at = array("l"), 0
+            for token in tokens:
+                starts.append(at)
+                at += len(token)
+            lettered = [any(ch.isalpha() for ch in part) for part in self._parts]
+            self._joined = ("".join(tokens), tokens, starts, owner, first, lettered)
+        return self._joined
+
+    def _joined_scan(self, qtokens, query, quote_breaks, letters, quote_lettered):
+        text, tokens, starts, owner, first, lettered = self._joined_index()
+        n = len(tokens)
+        found: list[tuple[int, int]] = []
+        at = text.find(query)
+        while at != -1:
+            t0 = bisect_right(starts, at) - 1
+            if starts[t0] == at and first[owner[t0]] == t0:
+                end = at + len(query)
+                # It must end where a word ends: at the text's end, or where a
+                # later word's first token starts.
+                t1 = n if end == len(text) else bisect_left(starts, end)
+                if t1 == n and end != len(text):
+                    t1 = -1
+                elif t1 < n and (starts[t1] != end or first[owner[t1]] != t1):
+                    t1 = -1
+                if t1 != -1:
+                    w0, w1 = owner[t0], owner[t1 - 1]
+                    sheet_breaks = {starts[t] - at: (owner[t - 1], owner[t]) for t in range(t0 + 1, t1)}
+                    if (not self.covers_split_number(w0, w1)
+                            and _joins_allowed(query, quote_breaks, sheet_breaks, letters,
+                                               quote_lettered, lettered)
+                            and _same_quantities(qtokens, tokens[t0:t1])):
+                        span = (self.index[w0], self.index[w1])
+                        if not found or found[-1] != span:
+                            found.append(span)
+            # The next occurrence that can start a whole word starts at a later
+            # word's first token.
+            nxt = owner[t0] + 1
+            if nxt >= len(first) - 1:
+                break
+            at = text.find(query, starts[first[nxt]])
+        return found
+
+
+#: The marks a number may be joined to across a space (remediation WP-05.3,
+#: the owner's rule): an inch mark, a foot mark, a percent sign. Not ``°``.
+JOIN_MARKS = frozenset("\"'%")
+
+
+def _joins_allowed(query, quote_breaks, sheet_breaks, letters, quote_lettered,
+                   sheet_lettered) -> bool:
+    """Whether every place the quote and the sheet's run are spaced apart is a
+    named join (see :meth:`SourceWords.joined_spans`).
+
+    ``query`` is the joined string both sides share. ``quote_breaks`` and
+    ``sheet_breaks`` map each offset where that side has a space to the words
+    on either side of it: the quote's words (``letters``: letters only;
+    ``quote_lettered``: has a letter) and the sheet's folded words
+    (``sheet_lettered``).
+    """
+    for p in sorted(set(quote_breaks).symmetric_difference(sheet_breaks)):
+        left, right = query[p - 1], query[p]
+        # The side that has the space here, and the words on either side of it.
+        if p in quote_breaks:
+            before, after = quote_breaks[p]
+            number_words = not quote_lettered[before] and not quote_lettered[after]
+        else:
+            before, after = sheet_breaks[p]
+            number_words = not sheet_lettered[before] and not sheet_lettered[after]
+        # A mark and the feet-inches hyphen join only a number: a word with no
+        # letter (ROOM12 %, and M-101 " whose 101 the infix hyphen split off,
+        # are an identifier and a mark).
+        if left.isdigit() and right in JOIN_MARKS and number_words:
+            continue                                    # 6 "  /  2 %
+        if left == "'" and right == "-" and query[p + 1:p + 2].isdigit() and number_words:
+            continue                                    # 12' - 6"
+        if left == "-" and right.isdigit() and query[p - 2:p - 1] == "'" and number_words:
+            continue
+        if left.isalpha() and right.isalpha() and p in quote_breaks:
+            # Letters merged by extraction: one sheet word for two quote
+            # words, each of them letters only.
+            before, after = quote_breaks[p]
+            if before != after and letters[before] and letters[after]:
+                continue
+        return False
+    return True
+
+
+def _same_quantities(quote_tokens, sheet_tokens) -> bool:
+    """The quantity-aware veto: both sides read the same quantities through
+    the one WP-04 reader, ``critique._quantity_tokens`` (reused as it is; a
+    function-local import, as the arithmetic auditor imports this module)."""
+    from .critique import _quantity_tokens
+
+    return _quantity_tokens(" ".join(quote_tokens)) == _quantity_tokens(" ".join(sheet_tokens))
 
 
 @lru_cache(maxsize=128)
@@ -389,7 +636,8 @@ class _Stream:
     the token range of its source word, for the window's word rules.
     """
 
-    __slots__ = ("source", "tokens", "word_of", "freq", "_word_start", "_word_end", "_bearing")
+    __slots__ = ("source", "tokens", "word_of", "freq", "_word_start", "_word_end", "_bearing",
+                 "_split_before")
 
     def __init__(self, words: list[Any]) -> None:
         self.source = SourceWords(words=[str(w[4]) for w in words])
@@ -397,13 +645,18 @@ class _Stream:
         self.word_of: list[int] = []
         self._word_start: list[int] = []     # per token: its source word's first token
         self._word_end: list[int] = []       # per token: one past its source word's last
-        for part, i in zip(self.source._parts, self.source.index):
+        split = set(self.source.split_number)
+        self._split_before = array("l", [0]) if split else None
+        for k, (part, i) in enumerate(zip(self.source._parts, self.source.index)):
             start = len(self.tokens)
             pieces = part.split()
             self.tokens.extend(pieces)
             self.word_of.extend([i] * len(pieces))
             self._word_start.extend([start] * len(pieces))
             self._word_end.extend([start + len(pieces)] * len(pieces))
+            if self._split_before is not None:
+                for _ in pieces:
+                    self._split_before.append(self._split_before[-1] + (k in split))
         self.freq = Counter(self.tokens)
         # The sheet words that carry a token, in reading order: what a match
         # from one word to another covers (a lone comma between them does not).
@@ -427,6 +680,12 @@ class _Stream:
     def word_tokens(self, pos: int) -> range:
         """The token positions of the source word token ``pos`` belongs to."""
         return range(self._word_start[pos], self._word_end[pos])
+
+    def covers_split_number(self, start: int, length: int) -> bool:
+        """Whether a token span covers part of a number split around a lone
+        ``.`` (:meth:`SourceWords.covers_split_number`)."""
+        before = self._split_before
+        return before is not None and before[start + length] > before[start]
 
 
 def _rect_union(rects: list[tuple[float, float, float, float]]) -> list[float]:
@@ -729,6 +988,8 @@ def _try_fuzzy_window(
     slack = _fuzzy_window_slack(m)
     vetted = []
     for score, k in qualifying:
+        if stream.covers_split_number(k, m):
+            continue                    # never across a split decimal (WP-05.3)
         used = _numbers_aligned(query, stream.tokens[k : k + m], slack)
         if used is not None and _measurements_whole(stream, k, m, used):
             vetted.append((score, k))
@@ -768,6 +1029,14 @@ def _try_fuzzy_subphrase(
             # carried the number.
             if not _numbers_agree(query, sub):
                 continue
+            # Nor may it stop at a number the quote goes on from (remediation
+            # WP-05.3, the owner's rule): the word it leaves behind may be that
+            # number's unit, printed as a word of its own (``568 L/S``), which
+            # the WP-04 reader does not always know. The rule reads positions,
+            # not units, so a word that is no unit of the number refuses it
+            # too; the safe direction.
+            if s + length < m and _DIGIT_RE.search(sub[-1]):
+                continue
             spans = stream.source.find(" ".join(sub))
             if not spans:
                 continue
@@ -801,7 +1070,10 @@ def _try_fuzzy_subphrase(
 # the window tier aligns each measurement at its position (``_numbers_aligned``);
 # the sub-phrase tier matches a verbatim run holding the quote's whole digit
 # multiset (``_numbers_agree``). A method not listed here does not ground a
-# number until it carries the veto, so a new tier fails closed.
+# number until it carries the veto, so a new tier fails closed. The character
+# stream (``char_stream``, ``char_stream_ambiguous``, remediation WP-05.3) is
+# left out by the owner's decision: an arithmetic mismatch it anchors stays
+# model-transcribed and is crop-verified.
 _NUMBER_GROUNDING_METHODS = {
     "EXACT": frozenset({"exact", "exact_ambiguous"}),
     "FUZZY": frozenset({"fuzzy_window", "fuzzy_subphrase"}),
@@ -819,6 +1091,33 @@ def numbers_grounded(anchor: Anchor | None) -> bool:
     if anchor is None:
         return False
     return anchor.method in _NUMBER_GROUNDING_METHODS.get(anchor.status, frozenset())
+
+
+def _try_char_stream(
+    finding: Finding, stream: _Stream, words: list[Any],
+    tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
+) -> _QuoteMatch | None:
+    """The whole quote on a run of whole words that differs from it only in
+    spacing (remediation WP-05.3, B4; the owner's rules).
+
+    The last quote tier, so no anchor an older tier places can move. Matched
+    through the sheet's :class:`SourceWords` (:meth:`SourceWords.joined_spans`:
+    the named joins, the quantity-aware veto, a split number kept whole), the
+    matcher cross-sheet QC grounds through too. Its own method, never EXACT:
+    ``char_stream``, or ``char_stream_ambiguous`` when the reported tile does
+    not settle two occurrences (the ``exact_ambiguous`` precedent). Not in
+    :data:`_NUMBER_GROUNDING_METHODS` (the owner's decision).
+    """
+    spans = stream.source.joined_spans(finding.source_quote)
+    if not spans:
+        return None
+    candidates = list(dict.fromkeys(stream.covered(first, last) for first, last in spans))
+    chosen, disambiguated = _tile_preferred(candidates, words, tile, w, h, rows, cols)
+    rect = _words_rect(words, chosen)
+    if rect is None:
+        return None
+    method = "char_stream" if (len(candidates) == 1 or disambiguated) else "char_stream_ambiguous"
+    return Anchor(status="FUZZY", rect_pdf=_padded(rect, w, h), method=method), chosen
 
 
 def _tile_anchor(
@@ -843,7 +1142,7 @@ def _anchor_one(
         # it unanchored if no usable tile was reported.
         return _tile_anchor(tile, tile_rects, method="tile"), None
 
-    for attempt in (_try_exact, _try_fuzzy_window, _try_fuzzy_subphrase):
+    for attempt in (_try_exact, _try_fuzzy_window, _try_fuzzy_subphrase, _try_char_stream):
         hit = attempt(finding, stream, words, tile, w, h, rows, cols)
         if hit is not None:
             return hit

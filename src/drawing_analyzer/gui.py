@@ -78,9 +78,13 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
 from . import __version__, diagnostics
 from .core import updates
 from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_key_format import looks_like_api_key
 from .core.api_key_store import (
+    KeyNote,
     SecureKeyStorageUnavailable,
     load_api_key_from_file,
+    load_api_key_with_notes,
+    normalize_api_key,
     save_api_key,
 )
 from .core.app_paths import api_key_paths, app_config_dir
@@ -137,6 +141,10 @@ _log = diagnostics.get_logger()
 # the small triangles as tofu.
 _CARET_OPEN = "▾"
 _CARET_SHUT = "▸"
+
+# The key status while an analysis runs (WP-16.2): a locked CTkEntry looks
+# exactly like an editable one, so the label beside it says why it ignores keys.
+_KEY_LOCKED_STATUS = "locked while analyzing"
 
 
 class CollapsibleSection:
@@ -333,6 +341,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
+        # The key the app uses (WP-16.2): the normalized field value, which the
+        # launch key pre-fills. Analyze and the exports read it; nothing reads
+        # or writes ANTHROPIC_API_KEY after the launch load.
+        self._applied_key = self._initial_key or ""
         # Tracks what's currently persisted so finishing an edit only rewrites
         # the store when the key actually changed (and never auto-persists an
         # unchanged, env-supplied key).
@@ -377,15 +389,37 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     # ------------------------------------------------------------------ setup
 
     def _load_api_key(self) -> str:
-        """Resolve a key from the environment or saved store and apply it.
+        """Resolve the launch key from the environment or the saved store.
 
-        Returns the resolved key (or ``""``) so the caller can both flip the
-        ``_has_key`` flag and pre-fill the key field. The env var wins over the
-        saved store, matching the precedence the rest of the app expects.
+        Returns the resolved key (or ``""``) so the caller can flip the
+        ``_has_key`` flag, pre-fill the key field and start the applied key.
+        The env var wins over the saved store, matching the precedence the rest
+        of the app expects.
+
+        Remediation WP-16.2 (G2; the owner's rules): an ``ANTHROPIC_API_KEY``
+        inherited from the shell is read here once and then **removed** from
+        the process environment, so no child process (the annotation pool's
+        spawned workers, the file opener, the update installer) inherits it,
+        and the GUI never writes it back. It goes through the one normalizer; a
+        value that is not an ``sk-ant-`` key is still used (like a typed value,
+        so a future key format keeps working for the session) with a warning
+        that names the variable, never the value.
+
+        What the store refused, repaired or kept (WP-16.1) is held in
+        ``_key_load_notes`` until the activity log exists
+        (:meth:`_report_key_at_startup`).
         """
-        key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
-        if key:
-            os.environ["ANTHROPIC_API_KEY"] = key
+        self._key_load_notes = ()
+        key = normalize_api_key(os.environ.pop("ANTHROPIC_API_KEY", None) or "")
+        if key and not looks_like_api_key(key):
+            self._key_load_notes = (KeyNote(
+                "The ANTHROPIC_API_KEY environment variable does not look like an "
+                "Anthropic API key (one starts with sk-ant-). It is used for this "
+                "session as it is; if calls fail to authenticate, check it.",
+            ),)
+        if not key:
+            loaded = load_api_key_with_notes()
+            key, self._key_load_notes = loaded.key, loaded.notes
         return key
 
     def _build_ui(self) -> None:
@@ -415,7 +449,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=(
                 "Drop construction drawing PDFs "
                 "(one or many; multi-sheet PDFs are split page-by-page). "
-                "Each sheet is read by Claude Opus 5 and summarized to text."
+                "Each sheet is read by Claude Opus 5.5 and summarized to text."
             ),
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_secondary"],
@@ -425,7 +459,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
         # environment. It applies the moment it's entered (no button), and is
-        # saved (OS keyring, or a local key file) when editing finishes.
+        # saved to the OS keyring when editing finishes; a plain-text key file
+        # is written only with the user's consent (DA-032). The field holds the
+        # key the app uses (WP-16.2): it is never written to the environment,
+        # and it is locked while an analysis runs.
         # Collapsed on launch when a key is already loaded (the common case);
         # expanded when there's none, so a first-run user is prompted for it.
         self._key_sec = CollapsibleSection(
@@ -846,6 +883,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 f"below to view it any time.",
                 level="info",
             )
+        self._report_key_at_startup()
+
+    def _report_key_at_startup(self) -> None:
+        """Say what the key store did, then whether a key is loaded.
+
+        The store's notes (a key file refused or kept, a keyring entry repaired;
+        WP-16.1) name the file and the reason, never the value. They come first,
+        so the one-line status that follows reads as their outcome.
+        """
+        for note in self._key_load_notes:
+            self._log(note.text, level="warning" if note.warning else "muted")
         if not self._has_key:
             self._set_key_status("no key", COLORS["warning"])
             self._log(
@@ -1098,27 +1146,61 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=text, text_color=color or COLORS["text_muted"]
         )
 
+    def _set_key_editable(self, enabled: bool) -> None:
+        """Lock the key field while an analysis runs, and unlock it after.
+
+        A courtesy, not the correctness (remediation WP-16.2): the run's client
+        is built from the key snapshotted at Analyze, so an edit could not
+        reach a running analysis anyway. A disabled ``CTkEntry`` refuses typing,
+        Backspace, paste and cut, but looks exactly like an enabled one (real
+        Tk 8.6 + customtkinter 6.0.0: the same colours), so the status label
+        says why it is locked. Show stays live: the field shows the run's key.
+        Unlocking restores the status shown before, unless something reported
+        since (a save on ``<FocusOut>``, which still fires on a disabled entry).
+        """
+        label = self.key_status_label
+        if enabled:
+            self.key_entry.configure(state="normal")
+            before = getattr(self, "_key_status_before_lock", None)
+            self._key_status_before_lock = None
+            if before is not None and label.cget("text") == _KEY_LOCKED_STATUS:
+                label.configure(text=before[0], text_color=before[1])
+            return
+        self._key_status_before_lock = (label.cget("text"), label.cget("text_color"))
+        self.key_entry.configure(state="disabled")
+        self._set_key_status(_KEY_LOCKED_STATUS, COLORS["text_secondary"])
+
     def _on_key_changed(self, *_args) -> None:
-        """Apply the field's current value to the process as it is edited.
+        """Apply the field's current value to the app as it is edited.
 
         Bound to the entry's text variable so typing, Ctrl+V, and right-click
         paste all take effect immediately — the app is ready to analyze the
-        moment a non-empty key is present, with no button to press.
-        ``client.get_client`` re-reads ``ANTHROPIC_API_KEY`` on its next call
-        and rebuilds its cached client when the key changes, so setting the env
-        var is enough. Writing to disk is deferred to :meth:`_persist_key` (on
-        finish) so a half-typed key is never persisted.
+        moment a non-empty key is present, with no button to press. The value
+        becomes the applied key (``_applied_key``), which Analyze snapshots for
+        its run and the exports read; it is never written to the process
+        environment (remediation WP-16.2), so no running stage and no child
+        process can see an edit. Writing to disk is deferred to
+        :meth:`_persist_key` (on finish) so a half-typed key is never persisted.
+
+        The value is normalized first (WP-16.1: a paste from a "UTF-8 with BOM"
+        file carries an invisible BOM), and the field is rewritten to show it,
+        so the field, the key in use and the key saved agree. Tcl runs no trace
+        on a variable while one of its traces is running, so the ``set`` does
+        not re-enter this method (measured with Tk 8.6 and customtkinter); and
+        normalizing is idempotent, so a toolkit that did would stop at once.
         """
-        key = self._key_var.get().strip()
+        raw = self._key_var.get()
+        key = normalize_api_key(raw)
+        if key != raw:
+            self._key_var.set(key)
+        self._applied_key = key
         if key:
-            os.environ["ANTHROPIC_API_KEY"] = key
             self._has_key = True
             # Show "set" only while there are unsaved edits, so we don't stomp
             # the "saved"/"loaded" indicator when nothing actually changed.
             if key != self._persisted_key:
                 self._set_key_status("set", COLORS["text_secondary"])
         else:
-            os.environ.pop("ANTHROPIC_API_KEY", None)
             self._has_key = False
             self._set_key_status("no key", COLORS["warning"])
 
@@ -1136,7 +1218,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         silently written to a plaintext file — the user is asked for explicit
         informed consent; declining keeps the key session-only.
         """
-        key = self._key_var.get().strip()
+        key = normalize_api_key(self._key_var.get())
         if not key or key == self._persisted_key:
             return
         try:
@@ -1794,7 +1876,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if not self._pdfs:
             messagebox.showinfo("No drawings", "Add one or more drawing PDFs first.")
             return
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        # The run's credential (remediation WP-16.2, G2): the applied key, read
+        # once here, before the cost dialog. The worker builds the run's one
+        # client from it, so no later edit, in the field or in the process
+        # environment, can reach a stage of this run.
+        run_key = self._applied_key
+        if not run_key:
             messagebox.showerror(
                 "No API key",
                 "No Anthropic API key is set. Paste your key in the field at the "
@@ -1857,6 +1944,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.export_btn.configure(state="disabled")
         self._set_focus_editable(False)
         self.upload_specs_btn.configure(state="disabled")
+        self._set_key_editable(False)
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
@@ -1909,6 +1997,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
                   use_batch, critique_use_batch, save_tiles),
+            kwargs={"api_key": run_key},
             daemon=True,
         ).start()
 
@@ -1925,10 +2014,26 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         use_batch: bool = True,
         critique_use_batch: bool | None = None,
         save_tiles: bool = False,
+        *,
+        api_key: str,
     ) -> None:
+        """Run the analysis on the run's own client (remediation WP-16.2, G2).
+
+        ``api_key`` is the key :meth:`_on_process` snapshotted. The one client
+        every stage uses is built from it here, off the UI thread (the first
+        build also imports the SDK, measured at 0.6-0.7 s), with the same
+        constructor ``client.get_client`` uses; ``extract_drawing_context``
+        then never resolves a client from the environment.
+        """
         try:
+            # Imported here, on the worker: importing ``client`` imports the SDK,
+            # which the GUI otherwise loads only once a run needs it.
+            from .client import new_client
+
+            client = new_client(api_key)
             ctx = extract_drawing_context(
                 pdfs,
+                client=client,
                 model=REVIEW_MODEL_DEFAULT,
                 progress=self._progress_from_thread,
                 on_log=self._log_from_thread,
@@ -2018,6 +2123,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
+        self._set_key_editable(True)
         self._ctx = ctx
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
@@ -2214,6 +2320,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_error(self, message: str) -> None:
         self._busy = False
+        self._set_key_editable(True)
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
@@ -2280,11 +2387,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         embed_key = self._embed_key_var.get()
         try:
             source_names = [p.name for p in self._pdfs]
-            # The same key that ran the analysis powers the report's built-in
-            # Ask-AI assistant. By default it is NOT written into the file (the
-            # panel prompts for a key at runtime); the checkbox embeds it for a
-            # zero-friction, but unshareable, report.
-            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+            # The applied key (the key field) powers the report's built-in
+            # Ask-AI assistant (WP-16.2: the app's own attribute, never the
+            # process environment, so a session-only key is still found). By
+            # default it is NOT written into the file (the panel prompts for a
+            # key at runtime); the checkbox embeds it for a zero-friction, but
+            # unshareable, report. The saved-key fallback is WP-16.3's to decide.
+            api_key = self._applied_key or load_api_key_from_file()
             html_doc = build_html_report(
                 self._ctx, source_names=source_names, api_key=api_key or None,
                 embed_api_key=embed_key,
@@ -2342,9 +2451,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.export_btn.configure(state="disabled", text="Exporting...")
         self._set_progress_text("Exporting full run record...", color=COLORS["text_secondary"])
         self._log("Exporting the full run record in the background...", level="muted")
+        # The applied key is read here, on the UI thread at the click (WP-16.2):
+        # a later edit cannot reach the export running in the background.
         threading.Thread(
             target=self._export_all_worker,
-            args=(ctx, folder, [p.name for p in self._pdfs], embed_key),
+            args=(ctx, folder, [p.name for p in self._pdfs], embed_key,
+                  self._applied_key),
             daemon=True,
         ).start()
 
@@ -2354,12 +2466,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         folder: str,
         source_names: list[str],
         embed_key: bool,
+        applied_key: str = "",
     ) -> None:
         """Build/hash/copy a complete export without blocking Tk's event loop."""
         from .export import write_drawing_export
 
         try:
-            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+            api_key = applied_key or load_api_key_from_file()
             out = write_drawing_export(
                 ctx, folder, source_names=source_names,
                 api_key=api_key or None, embed_api_key=embed_key,

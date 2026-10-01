@@ -36,6 +36,8 @@ from tests.fixtures.fake_anthropic import (
     FakeMessage,
     FakeTextBlock,
     FakeUsage,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -82,7 +84,8 @@ class _FakeBatches:
     def __init__(self, client):
         self._c = client
 
-    def create(self, *, requests, betas=None):
+    @checked_batch_create
+    def create(self, *, requests):
         if self._c.create_raises is not None:
             raise self._c.create_raises
         self._c.create_calls.append({"requests": list(requests)})
@@ -137,21 +140,17 @@ class _FakeClient:
         self.messages_create_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        # Files API + Message Batches are GA (production calls the stable
-        # namespace); ``.beta.messages.stream`` is kept as a mirror because
-        # ``digest.stream_message`` routes the Opus 5 refusal-fallback params
-        # (see ``apply_refusal_fallback``) through the beta client namespace.
+        # Files API + Message Batches are GA (production submits on the plain
+        # namespace); the real-time fallback streams through
+        # ``digest.stream_message``, on the beta namespace for the Opus 5
+        # refusal fallback (see ``apply_refusal_fallback``). Each namespace is
+        # its own SDK-checked entry point (remediation WP-02.2).
         stream = lambda **kw: FinalMessageStream(self._messages_create(**kw))  # noqa: E731
-        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches, stream=stream))
-        self.messages = _Obj(
-            batches=batches,
-            create=self._messages_create,
-            stream=stream,
+        self.messages, self.beta = sdk_namespaces(
+            create=self._messages_create, stream=stream, batches=batches, files=self.files,
         )
 
     def _messages_create(self, **kwargs):
-        kwargs.pop("betas", None)
-        kwargs.pop("fallbacks", None)
         self.messages_create_calls.append(kwargs)
         return (self.inline_responder or _crit_message)(kwargs)
 

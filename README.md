@@ -3,7 +3,7 @@
 Extract structured information from a set of construction-drawing PDFs using Claude
 vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
 overview image plus a 6×6 grid of high-resolution tiles — **and its vector text
-layer is extracted and sent verbatim alongside the images** — to Claude Opus 5
+layer is extracted and sent verbatim alongside the images** — to Claude Opus 5.5
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
 cross-sheet **synthesis** pass reconciles tags and conflicts across the set, and an
@@ -43,12 +43,18 @@ instead of telling them to regenerate a report they cannot regenerate). **Use my
 own key** opens the field, **Use the report's key** hands it back, and **Forget
 key** clears the reader's key while saying plainly that the file's own credential
 is still in the file. Pass `include_chat=False` to omit the assistant entirely.
-The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
-Opus 5 does not support — and can be overridden with
-`DRAWING_ANALYZER_CHAT_MODEL`. It runs at a fixed `high` reasoning effort: there
-is deliberately no per-question "deep" switch, because asking a reader to
-predict, before seeing the answer, whether their question deserves more
-reasoning is a question they cannot answer. The footer meter reports how much
+The chat model defaults to Sonnet 5.5 — it needs the web-fetch server tool, which
+Opus 5 does not support, and Sonnet 5.5 has it at half Opus 5.5's price, which
+matters because the reader's key pays — and can be overridden with
+`DRAWING_ANALYZER_CHAT_MODEL`. Sonnet 5.5 ties each of its thinking blocks to the
+conversation it was produced in, so a transcript loaded from a different report,
+saved by a report built with another chat model or app version, or trimmed to fit
+browser storage, is resumed without its thinking blocks (the text and tool calls
+stay; an exchange whose only answer was thinking is dropped): on the accounts the
+API enforces that check for, replaying them would make every later question fail. It runs at a fixed `high`
+reasoning effort: there is deliberately no per-question "deep" switch, because
+asking a reader to predict, before seeing the answer, whether their question
+deserves more reasoning is a question they cannot answer. The footer meter reports how much
 context is **left**, since the only question it exists to answer is whether the
 next question still fits.
 
@@ -79,7 +85,12 @@ own PC and talks only to the Anthropic API using your own API key.
    **"Windows protected your PC"** notice — click **More info → Run anyway**.
    This is expected for independent software; you'll see it on the first install
    and on each update.
-3. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
+3. Read the **License Agreement** page: it summarizes the license and shows its
+   full text (the GNU AGPL, version 3 or later — see [Licensing](#licensing)).
+   The installer will not continue until you select **I accept the agreement**.
+   The page appears on every install and update, and a copy of the license is
+   installed alongside the app as `LICENSE.txt`.
+4. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
    launches. Paste your Anthropic API key into the field at the top and you're
    ready.
 
@@ -110,9 +121,40 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 Or skip the env var and paste the key into the **Anthropic API Key** field at the
 top of the GUI — it takes effect as soon as you enter it (no extra step), and is
-saved (OS keyring when available, otherwise a local key file) once you finish
-editing so it's remembered next launch. The env var still takes precedence when
-both are set.
+saved to your OS keyring (Windows Credential Manager, macOS Keychain, Secret
+Service) once you finish editing so it's remembered next launch. Where no
+secure keyring works, the app asks before writing a plain-text key file; decline
+and the key lasts for this session only. The env var still takes precedence when
+both are set: it fills the field at launch.
+
+Spaces and invisible characters around a key (a byte-order mark from Notepad's
+"UTF-8 with BOM", a zero-width space from a web page, a carriage return from a
+`.env` file) are removed wherever a key enters: the field, a saved key, the
+`ANTHROPIC_API_KEY` environment variable, and a legacy
+`drawing_analyzer_api_key.txt` key file (UTF-8 or UTF-16). A key must start with
+`sk-ant-` to be saved, or to be loaded from the keyring or a key file. An
+environment variable that does not is still used for the session (so is a value
+typed into the field), and the activity log warns about it by the variable's
+name, never its value.
+A legacy key file is moved into the keyring only when it holds such a key, and
+only the key files that hold that same key are then deleted; a file holding
+anything else is left in place and named in the activity log, never quoted.
+
+**A run keeps the key it started with.** When you click **Analyze**, the app
+reads the key in the field once and builds the run's one API client from it;
+every stage of that run (the digest, the critique, cross-sheet QC, verification,
+investigation, the citation check) uses that client, so nothing you do to the
+field or to the environment afterwards can reach a running analysis. The field
+is locked until the run ends or fails, and the label beside it reads *locked
+while analyzing* (**Show** still works, so you can check which key is in use).
+The app never writes the key into its process environment: an
+`ANTHROPIC_API_KEY` present when it launches fills the field and is then removed,
+so the programs the app starts (the reviewed-PDF worker processes, the file and
+folder opener, your browser, the update installer) do not inherit it from the
+app. **Save HTML Report** and **Export All** embed the key in the field, when you
+opt in, a session-only key included; Export All takes it when you click. Library
+and script callers are unchanged: with no `client=`, each stage still reads
+`ANTHROPIC_API_KEY` through `client.get_client()`.
 
 ## Usage
 
@@ -428,7 +470,7 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   Three vision reads is **not** three full-price image reads: the two
   self-consistency **critique** reads are byte-identical in their image prefix,
   so the second bills those ~90k image tokens at the cache-read multiplier
-  (~0.1×) — identical tokens in, so findings are unchanged (see the cost note
+  (~0.05× on the default Opus 5.5, ~0.1× on the other models) — identical tokens in, so findings are unchanged (see the cost note
   below). What a run cost is what its usage records say it cost; multiplying one
   read's price by three quotes a configuration nobody ran.
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
@@ -522,12 +564,15 @@ reads ride the Message Batches path at the ~50% batch rate (Phase 23C), so the
 reviewer is no longer double-priced at real time. On the **real-time** path the two
 self-consistency reads instead **prompt-cache their shared image prefix**: they are
 byte-identical requests issued back-to-back, so the first writes the cache and the
-second serves the ~90k image tokens at ~0.1× — the cache write/read tokens are
-priced by their own rate class in the usage ledger, so `total_estimated_cost` stays
-honest. An exhaustive `critique=True` run lands around **$2–3.5/sheet** once
-verification (real-time) is included. The offline stages (reference audit,
-anchoring, markup, text extraction) stay $0. Every stage is individually cached, so
-a re-run of an unchanged set skips the model calls.
+second serves the ~90k image tokens at ~0.05× on Opus 5.5 (~0.1× on other models) —
+the cache write/read tokens are priced by their own rate class in the usage ledger,
+so `total_estimated_cost` stays honest. An exhaustive `critique=True` run lands
+around **$2–3.5/sheet** once verification (real-time) is included. These per-sheet
+figures were measured on Opus 5 ($5/$25 per million tokens). Opus 5.5 lists at
+$4/$20 with cache reads at $0.20, but its token counts at a given effort level are
+not Opus 5's, so treat them as a guide until a set is re-measured on it. The
+offline stages (reference audit, anchoring, markup, text extraction) stay $0. Every
+stage is individually cached, so a re-run of an unchanged set skips the model calls.
 
 **Usage & cost accounting.** Every API call/attempt appends a priced
 `UsageRecord` to an **append-only** ledger on `DrawingContext.run_usage`
@@ -581,7 +626,8 @@ explanation, and a stream that ends before its final event still hands back
 the text received so far. Only a read that ended normally (`end_turn`, or a
 `stop_sequence`) counts. Everything else fails the sheet:
 
-- a **refusal**, with or without text: `refused digest (stop_reason='refusal')`;
+- a **refusal**, with or without text: `refused digest (stop_reason='refusal',
+  category='cyber')`, naming the refusal's category when the API gives one;
 - a **truncation**: `truncated digest (stop_reason='max_tokens')`, or
   `model_context_window_exceeded` when the model ran out of context window;
 - a read that **never reported how it ended**, which is what a stream that
@@ -591,9 +637,13 @@ the text received so far. Only a read that ended normally (`end_turn`, or a
   reason the app does not recognise: `unfinished digest (stop_reason=…)`.
 
 When a digest stops at `max_tokens`, the request is first retried once at a
-raised output cap; if it is still cut off, it fails as above. The others are not
-retried, because a larger cap cannot finish a refusal, a stream that ended
-early, or a full context window. A failed read is **never cached**, at either
+raised output cap; if it is still cut off, it fails as above. A larger cap cannot
+finish a refusal, a stream that ended early, or a full context window, so none
+of those gets one. A refusal on a real-time call has already had Anthropic's
+server-side fallback (a model that declares it, the 5.5 defaults included,
+re-runs a declined request on the model Anthropic recommends for that category,
+inside the same call). A refusal on the batch transport is covered below. A
+failed read is **never cached**, at either
 level: a stored one would be served on every later run, indistinguishable from
 a complete read. Whatever text it returned is kept: the sheet's own export file
 and the HTML report show it under a *Failed* status, while `combined_text`
@@ -619,6 +669,36 @@ Every attempt's usage is still counted, whichever read is kept. Before this, the
 later read replaced the earlier one whenever it came back at all, so a retry
 that came back empty or refused threw away a partial read that had been paid
 for.
+
+**A refused batch sheet can be retried on a fallback model, once.** The Batches
+API does not accept the server-side fallback, so on the batch transport (the
+GUI's default) the app does it itself. When a sheet comes back refused in a
+category the model's registry entry routes, the sheet is resubmitted as one more
+batch item on the route's model. For Opus 5 that is a `cyber` refusal, sent to
+Opus 4.8, which takes the same request at the same price. The app's batch
+recovery never sends it to a full-price real-time call. Other categories, and a
+refusal with no category,
+are not retried; a named one says why (`…; not retried: no fallback for category
+'bio' on claude-opus-5`). A fallback that refuses too ends it: `refused digest
+on claude-opus-4-8 (…)`. Opus 5 is the only model with a route so far: the
+default Opus 5.5 and Sonnet 5.5 have none yet, so a batch sheet refused on one
+fails with its category named (`…; not retried: no fallback for category 'cyber'
+on claude-opus-5-5`), and a re-run reads it again. When the fallback read finishes, the sheet is cached
+like any finished digest, so a later run does not pay again. The diagnostics log
+records the refusal's category, the model it went to, and the API's explanation,
+redacted and cut to one line.
+
+**One retry budget per sheet.** On the batch transport, every resubmission of a
+sheet counts against one budget, whatever the reason and wherever it happens.
+The reasons are a server error or an expired item, a raised output cap, a
+refusal fallback, and a batch abandoned as stuck. The places are a fresh-batch
+round, the follow-up batch and a direct-call rescue.
+`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` sets it (default 4), so a sheet is
+submitted at most five times. The batch critique uses the same budget for its
+two reads together (every retried read counts one), so a sheet's critique is at
+most two reads plus four retries. A batch item that fails on the account itself
+(`billing_error`) is named and not resubmitted, like any other rejection of the
+request.
 
 **The findings of an unfinished read are held out of the review.** A read the
 model did not finish can still carry a findings block: the model writes it last,
@@ -647,6 +727,60 @@ judged by its stop reason first, with the same wording (`truncated critique
 a read the model did not finish is a failed read even when its findings object
 parsed. What that means for the critique's merge, its stage status and its
 cache is under [Self-consistency](#critique-pass-the-reviewer).
+
+**So do the set-level calls and verification.** The review plan, the set
+identity, the cross-sheet synthesis, the focus report and the prose harvest's
+structuring call are judged by their stop reason first too, with the same
+wording and the stage's name (`refused synthesis (stop_reason='refusal',
+category='cyber')`, `truncated review plan (stop_reason='max_tokens')`,
+`unfinished focus report (stop_reason=None)`). A reply the model did not finish
+is not used and not cached, even when it parsed: the plan and the identity
+stage fail (the critique then runs without the plan); the synthesis and the
+focus report fail and ship no text, so a refusal's explanation is never
+exported as the overview, and the reply's tokens still count as one failed
+attempt; a prose item whose structuring reply did not finish keeps its verbatim
+sheet-level entry. Before this, each of them used, and cached, whatever parsed.
+A crop verification whose reply did not finish, for any reason, is "no
+verdict" (`no verdict (context window exceeded)`, `no verdict (unfinished:
+stop_reason=None)`), counted with the truncated calls, and never cached as a
+verdict. The set identity no longer reads a failed sheet's text (a refusal's
+explanation, a cut-off read): that sheet contributes its failure line and its
+PDF text only.
+
+**A reply split by Anthropic's refusal fallback reads as one text.** When a
+streamed reply is declined part way and the fallback model takes over, it
+continues the text where it stopped, even mid-word, with a `fallback` marker in
+between. The app joins the two parts with nothing between them, so the prose
+digest, its findings block, the critique's JSON and every set-level reply read
+exactly as the two models wrote them. Before this, a line break was inserted at
+the boundary: a word split in two in the prose, and a boundary inside the
+findings JSON lost the sheet's findings. Replies without a fallback marker read
+exactly as before.
+
+**A stream that breaks mid-reply is retried, and what it delivered is kept and
+billed.** Every large call streams its reply (the digest, the critique, the
+review plan, the synthesis, the focus report, the batch rescue, and every
+investigation turn). If the connection drops part way, or the API sends an
+error event in the middle of the reply (an `overloaded_error` when it is busy,
+say), the call is retried like any other temporary failure, twice at most; an
+error event that says the request itself is wrong (`invalid_request_error`,
+`authentication_error`, …) is not. Once the retries are spent, the part of the
+reply that arrived is judged like any reply the model did not finish: a digest
+keeps its text under a *Failed* status with its findings held out
+(`unfinished digest (stop_reason=None, interrupted='overloaded_error')`), the
+other calls keep nothing, and nothing unfinished is cached. When nothing arrived
+at all, the error says so: `stream interrupted (connection dropped — try
+again)`, `stream interrupted (overloaded_error: Overloaded)`. A stream that
+broke after its last real event, when the reply was already complete, is used
+as it is. Before this, the call failed at once with `HTTP 200: {'type':
+'error', …}` or `peer closed connection without sending complete message
+body`, and was recorded as costing nothing.
+
+Each attempt's usage is recorded, including the input tokens an interrupted
+stream reported when it started. An interrupted stream never reports its output
+tokens, so the usage record counts such attempts (`interrupted_attempts` in
+`run_manifest.json`), and `run.log`'s usage section adds a line saying the
+output and cost totals are lower bounds when any attempt was interrupted.
 
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
@@ -730,6 +864,29 @@ had failed outright, was never cached, and was critiqued (and billed) again on
 every warm run while still reading `COMPLETE`; and a critique in which no read
 counted read `PARTIAL`.
 
+**A failed critique read is retried before it counts as failed.** A read cut
+off at `max_tokens` gets one more try at twice the output cap (64k → 128k), on
+either transport, like the digest. On the batch transport (Hybrid and Economy)
+a read that came back with a server error (`overloaded_error`, `api_error`,
+`rate_limit_error`, `timeout_error`) or expired is sent again as it was, and a
+refused read goes to its fallback model when the model declares a route for the
+refusal's category (so far only Opus 5's `cyber` → Opus 4.8; the default
+Opus 5.5 and Sonnet 5.5 have none yet). These retries ride follow-up critique
+batches at the batch rate, never full-rate real-time calls, and share the digest's
+per-sheet budget (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4: every
+retried read of a sheet counts one). A read that finishes on a retry is an
+ordinary read: merged, counted, and, once both reads of the sheet finished,
+cached, so a warm run does not pay for it again. A read that still fails says
+what its retries got: `overloaded_error: busy; 4 retries, the last:
+overloaded_error: busy`, `truncated critique (stop_reason='max_tokens'); retry:
+truncated critique (stop_reason='max_tokens')`. A rejected request, a canceled
+item, a refusal with no route, a full context window and a malformed reply are
+not retried; a refusal that is not retried says why (`…; not retried: no
+fallback for category 'cyber' on claude-opus-5-5`). A follow-up batch that does
+not finish within the collection time is canceled, and its reads say so. Before
+remediation WP-01.8 every failed batch read, and a real-time read cut off at the
+cap, simply failed, and the sheet was read again on every run.
+
 The merged critique is cached under its own key, so a re-run skips the extra
 calls. Because the entry holds findings already merged by the app's own
 deduplication rule, an update that changes that rule re-keys the critique cache,
@@ -743,8 +900,12 @@ run re-runs the critique on every sheet once more, while digests stay cached. So
 is the rule that a read the model did not finish no longer counts (remediation
 WP-01.4): an entry written before it may hold such a read, merged as a complete
 one, so it is not served, and the first exhaustive run after upgrading re-runs
-the critique on every sheet once (none of these three changes has shipped in a
-release yet, so a 1.7.0 install pays that cold pass once for all three). Only a
+the critique on every sheet once. So is reading a quantity's role (remediation
+WP-04.3), and so is reading the spellings remediation WP-04.4 closed (a bare
+feet value against feet-inches, a spelled range or list, a compact `A` beside a
+voltage); WP-04.4 also re-runs the cross-sheet check once, since its grounding
+reuses the same quantity reader. None of these five changes has shipped in a
+release yet, so a 1.7.0 install pays that cold pass once for all five. Only a
 critique whose every read the model finished is stored, at either level, on
 either transport, so a sheet whose read keeps getting cut off is read again,
 and billed, on each run until one run finishes both reads. The digest's images are gone by the time the critique runs (the batch path
@@ -757,7 +918,8 @@ time — is a deferred follow-up; today the reuse is within the critique's two r
 `critique=True` is still more expensive than a plain digest (see
 [Performance](#performance)), just no longer double-priced. It is additive and
 non-fatal: a failure is recorded and the standard deliverable ships — a critique
-batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 5
+batch that can't be collected degrades those sheets' critique, never the digest
+(the reads such a batch had already finished are not read back yet). The model defaults to Opus 5.5
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
@@ -810,7 +972,7 @@ and billed, so the transport that cannot degrade does not opt in.
 The same contract is available, behind its own flag, on the two other stages
 whose reply is JSON and nothing else. The **prose harvest**'s per-straggler
 structuring call (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS=1`) is text-only,
-Sonnet 5, one flat finding object — the lowest-risk place to try the feature —
+Sonnet 5.5, one flat finding object — the lowest-risk place to try the feature —
 and its schema mirrors the prompt's field list one-for-one, with the same
 category and severity enums the host validator checks. The **verifier**'s
 verdict (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS=1`) becomes `verdict` as a
@@ -841,7 +1003,7 @@ harvest is always unioned in as a backstop, so a stated edition can never be
 argued away. The identity is **advisory**: it steers the stages below but never
 gates or suppresses a finding; a wrong detection is visible (not laundered) in
 `set_identity.json`, the run manifest, and the combined text's *Set Identity*
-section. The identity call runs on Sonnet 5 by default
+section. The identity call runs on Sonnet 5.5 by default
 (`DRAWING_ANALYZER_IDENTITY_MODEL`): it is structured extraction, it is
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
@@ -977,7 +1139,12 @@ a space, and the brackets and sentence punctuation around each word, so
 `RATED 175 PSI TYP` is found in `RATED 175 PSI, TYP.`), so a quote that
 differs from the sheet only in those is not thrown away. Since remediation
 WP-05.2 the check and the anchor resolver are one matcher, so a quote this
-check finds is one the anchor places on the same words. (Before remediation
+check finds is one the anchor places on the same words. Since remediation
+WP-05.3 that matcher also takes a quote that differs from the sheet only in
+its spacing, through the anchor's character-stream tier (`6"` against a
+printed `6 "`, `INCH DRAIN` against `INCHDRAIN`; see
+[Anchoring findings](#anchoring-findings)), and never matches part of a number
+split around a lone `.`. (Before remediation
 WP-05.1 a quote under six characters, which is most equipment tags, was
 accepted without any check.) Each sheet's text layer is budgeted with
 the omission **counted and surfaced** (never a silent truncation) — and so is the
@@ -1022,7 +1189,7 @@ more `also_on` legs on the other sheets in the conflict, each resolved to its ow
 sheet (via the set's title-block sheet-ids). The markup writer then clouds
 **both** sheets — each cloud's popup cross-references the other (*"Conflicts with
 F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict and
-where its counterpart lives. The model defaults to Opus 5
+where its counterpart lives. The model defaults to Opus 5.5
 (`DRAWING_ANALYZER_CROSS_QC_MODEL`).
 
 A cross-sheet conflict can't be judged from one sheet's crop, so these findings
@@ -1064,9 +1231,33 @@ call, using a tiered strategy that records which tier fired:
   unanchored, and so was drawn as the hallucination signal. Such a match still
   counts as EXACT. Quote marks (`"` and `'`, which are also inch and foot marks),
   `<`, `>`, `%`, `/` and a leading `.` never fold, so `6"` never matches `6'` and
-  `.5` never matches `5`. What folding cannot fix, and what still goes unanchored
-  for now: a mark extracted as its own word (`6 "`, `2 %`), words merged by
-  extraction (`INCHDRAIN`), and a split dimension (`12' - 6"`).
+  `.5` never matches `5`.
+
+  What folding cannot fix is **spacing**, which the last tier takes (remediation
+  WP-05.3, the **character stream**, recorded as FUZZY with its own method,
+  `char_stream`): the whole quote is compared with a run of whole sheet words,
+  in reading order, with every space removed, so a mark extracted as its own
+  word (`PROVIDE 6" DRAIN` on `PROVIDE 6 " DRAIN`, `SLOPE 2% MIN` on `SLOPE 2 %
+  MIN`), a feet-inches dimension split around its hyphen (`12'-6"` on `12' -
+  6"`) and words merged by extraction (`PROVIDE INCH DRAIN` on `PROVIDE
+  INCHDRAIN`) now anchor. Only those three kinds of spacing difference are
+  allowed: a number and a separated `"`, `'` or `%`; the feet-inches hyphen;
+  and several quote words printed as one word, each of them letters only. A
+  number here is a word with no letters, so an identifier's digits never take
+  a mark (`ROOM12 %`, or the `101` of `M-101 "`).
+  Anything else refuses the match, so two numbers never join and one never
+  splits (`ROOM 12` does not match `ROOM 1 2`, nor `VAV-21` match `VAV-2-1`),
+  signs, decimal points and fraction slashes stay where they are, a tag's
+  letter and number stay together (`P1` does not match `P-1`), and one quote
+  word is never spread over two printed ones (`THERAPIST` does not match `THE
+  RAPIST`). Both sides must also read the same quantities (`12' -6"`, read as
+  a negative six inches, is not `12'-6"`). When the quote matches in two places
+  and the finding's tile does not settle it, the first is used and flagged
+  `char_stream_ambiguous`. The arithmetic auditor does not treat this tier as
+  proof that the numbers are printed: a mismatch it anchors is still
+  crop-verified. And a decimal point the extraction put in a word of its own
+  (`. 5`) stays with its number in every tier: `5` never matches `. 5`, nor
+  `SET AT 5 IN` match `SET AT . 5 IN`.
 
   A fuzzy match must additionally clear the **numeric veto**. Token overlap is
   blind to the substitution that matters most on a drawing: swap one digit and
@@ -1079,7 +1270,10 @@ call, using a tiered strategy that records which tier fired:
   appear at **its own position** in the matched span, within a drift budget
   derived from the overlap floor itself, and each position in the span counts
   once — a note reading `4 4-INCH DRAINS` cannot satisfy both mentions from a
-  sheet's single `4`. A sub-phrase match may not drop a measurement either. A
+  sheet's single `4`. A sub-phrase match may not drop a measurement either, nor
+  stop at a number the quote goes on from, since the next word may be that
+  number's unit printed on its own (`150 GPM 568 L/S` is not placed on `150 GPM
+  (568`, leaving `L/S` behind). A
   quote carrying no digits is unaffected, and ordinary transcription variance (an
   extra word on the sheet, an abbreviation, a paraphrase) still matches. The 85%
   threshold itself is unchanged: this is a veto, not a stricter score.
@@ -1180,7 +1374,7 @@ The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
 thread-safe) while the small verify calls run on a bounded pool; a per-finding
 failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
 rest `SKIPPED` — the run always completes. Each call sends one ~1–2k-token crop
-image and a short prompt. The model defaults to Sonnet 5, overridable with
+image and a short prompt. The model defaults to Sonnet 5.5, overridable with
 `DRAWING_ANALYZER_VERIFY_MODEL`.
 
 **Not every `UNCERTAIN` is a judgment.** A garbled reply, a reply cut off by
@@ -1293,7 +1487,7 @@ the model can see while it works, so it converges on an answer rather than being
 cut off mid-thought when the host withdraws its tools. At the budget the host
 forces a final text-only answer, and a finding that still can't be decided
 **stays UNCERTAIN — a budget cap or a garbled reply can never mark a finding
-wrong**. Runs on the escalation model (Opus 5) by default, overridable with
+wrong**. Runs on the escalation model (Opus 5.5) by default, overridable with
 `DRAWING_ANALYZER_INVESTIGATION_MODEL`. Concluded verdicts cache
 content-addressed against a whole-set content fingerprint; a warm re-run
 *replays* the tool trace (re-render + hash-compare, zero API calls) so the
@@ -1547,9 +1741,9 @@ set adopts *and* in the current edition — actually support the finding citing 
 
 Web fetch matters here more than the search does. With search alone the model
 answers from result *snippets*; with fetch it can open the publisher's page and
-read the section text before ruling. That is why this stage runs on **Sonnet 5**
-rather than the review flagship — web fetch is not available on Opus 5 — and it
-is cheaper besides. Both tools carry a shared source-quality blocklist, so a
+read the section text before ruling. That is why this stage runs on **Sonnet 5.5**
+rather than the review flagship: it has web fetch, which Opus 5 lacked, at half
+Opus 5.5's price. Both tools carry a shared source-quality blocklist, so a
 code verdict is never grounded on a forum post or another assistant's output.
 Fetch can only retrieve URLs a prior search surfaced in the same request, so the
 model cannot reach a page it invented.
@@ -1616,10 +1810,14 @@ compared by its **value**, not by how it was typed, so `1/2"` is half an inch an
 never the denominator — *Provide 1/2" drain* and *Provide 2" drain* are two pipe
 sizes, not one finding twice — while `2 1/2"`, `2-1/2"` and `2.5"` are one
 quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
-neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
-are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
-and absolute are different measurements, and collapsing them would hide a real
-conflict rather than a formatting one. The same holds for the other ways drawings
+neither negative), and each feet value is also compared with its inches
+(remediation WP-04.4): a bare `12'`, `12 ft` or `12'-0"` is 12 ft 0 in and
+`12'-6"`, `12' - 6"` or `12 ft 6 in` is 12 ft 6 in, so `12'` against `12'-6"`
+stays two findings while `12'` against `12 ft` is one. A plural unit folds to
+its singular so `6 amps` and `6 amp` are not read as a conflict. `psig` is
+deliberately *not* folded into `psi`: gauge and absolute are different
+measurements, and collapsing them would hide a real conflict rather than a
+formatting one. The same holds for the other ways drawings
 write a quantity. `6-inch`, `6-in.` and `6 in` are one size. `12,500 cfm` and
 `12500 cfm` are one flow, and a garbled grouping such as `1,2,500` is kept as
 written, never read as the `500` at its end. `45 deg` and `45°` are one angle, and
@@ -1628,11 +1826,21 @@ written, never read as the `500` at its end. `45 deg` and `45°` are one angle, 
 Fahrenheit. A duct size (`24x12`, `24"x12"`), a range (`4-6 in`), a list written
 without spaces (`2,4,6 in`) and a voltage system (`120/208V`, the same as
 `208Y/120V`) each count as one quantity, so `2,4,6 in` and `3,5,6 in` stay two
-findings instead of agreeing on `6 in`. `480V` and `208V` differ. `20A` counts as
-a current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, or
-a rating label (`MOCP 25A`), because `room 101A`, `grid 2A` and `panel 2A` are
-names, and a name mistaken for a quantity would make two findings about the same
-room look as if they shared one.
+findings instead of agreeing on `6 in`. A range or list spelled out counts the
+same way (remediation WP-04.4): `4 to 6 in` and `between 4 and 6 in` are the
+range `4-6 in`, and `4 and 6 in`, `4 or 6 in` and three or more numbers with
+spaces after their commas (`2, 4, 6 in`, `2, 4 and 6 in`) are the list. Where a
+name comes before the numbers (`grid 4 to 6 in`, `notes 1 and 2`) or `in` is a
+preposition (`pages 4 to 6 in the manual`, `2, 4, 6 in plan`), the app reads
+only what it read before, and two numbers joined by a comma alone (`at column 4,
+10 ft from the wall`) are prose. `480V` and `208V` differ. `20A` counts as a
+current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, a
+rating label (`MOCP 25A`) or a voltage (`20A 120V`, `120V 20A`; remediation
+WP-04.4), because `room 101A`, `grid 2A` and `panel 2A` are names, and a name
+mistaken for a quantity would make two findings about the same room look as if
+they shared one. A name word still wins over a voltage (`Room 101A 120V` and
+`Room No. 101A 120V` are rooms), but a room or panel label with nothing before it (`101A 120V
+receptacle`) is read as a current.
 
 One shared quantity or tag no longer excuses a conflict beside it. A `6 in` /
 `4 in` pipe size beside a shared `100 psi`, `12'-6"` against `12'-8"` (both
@@ -1657,13 +1865,37 @@ when they checked the same relationship (the same operation, the same numbers,
 the same stated result), however alike their wording and wherever they sit, so
 two mistakes on one table row stay two findings (see
 [the numeric-claims contract](#the-numeric-claims-contract-arithmetic-auditor)).
-A few pairs still merge, because
-nothing in the finding shows the conflict: two sizes with their roles swapped
-(`6 in main, 4 in branch` against `4 in main, 6 in branch`), because the app does
-not yet read which quantity belongs to what; a bare `12'` against `12'-6"`; and
-three spellings the app reads only in part: a range written with `to`
-(`4 to 6 in`), a list with spaces after its commas (`2, 4, 6 in`), and a bare
-`20A` with no breaker, fuse or rating beside it. A merge keeps
+
+A value's **role** is compared too (remediation WP-04.3). Two findings that give
+the same sizes to different roles, `6 in main and 4 in branch` against `4 in main
+and 6 in branch`, or one size to two roles, `6 in supply and 6 in return` against
+`6 in supply and 8 in return`, stay two findings. The app reads a role from a
+fixed list of role words (main, branch, riser, drop, header, supply, return,
+suction, discharge, inlet, outlet, upstream, downstream, entering, leaving,
+primary, secondary, min/max, static, residual, cold, hot), written right after the
+value (`6 in main`, `6 in (main)`, `6 in supply and return`), as a label (`main:
+6 in`) or with `is` (`the main is 6 in`). It works the same for any quantity:
+`100 psi inlet and 80 psi outlet`, `65 psi static and 45 psi residual`, `500 gpm
+primary`, `480V primary`, a `24x12 supply` duct, `44°F entering`. A role only one
+finding names never keeps two findings apart, so the same "500 gpm shown, 550 gpm
+required" from both critique reads (no role word) is still one finding. Where the
+wording does not say which value takes which role (`6 in and 4 in main and
+branch`, with no "respectively"; `MAIN 6" BRANCH 4"`), the finding stays apart
+from one that names the roles: keeping both is the safe error. Nothing off the
+list is a role: a location, a tag, a word after `at`, `per`, `for` or `with`, an
+ordinal, or a status word such as "shown" or "required" (two reads of one
+conflict can call different values "shown"). And an `x` glued to an inch or foot
+mark (`24"x12"`) is part of the size, not a tag named `X12`.
+
+A few pairs still merge, because nothing in the finding shows the conflict in a
+form the app reads: values swapped around a word that is not on the role list
+(`6 in floor drain and 4 in roof drain` against the reverse; two tags; `at the
+inlet`), a bare label (`MAIN 6" BRANCH 4"` against `MAIN 4" BRANCH 6"`); two
+numbers joined by a comma alone (`2, 4 in` against `3, 4 in`), which is prose as
+often as a list; and a compact `20A` with nothing electrical beside it (`20A
+circuit` against `30A circuit`). Kept apart, although each may be one issue:
+`increase from 4 to 6 in` against `increase to 6 in`, `4 in to 6 in` against
+`4 to 6 in`, and `12 ft, 6 in` (a comma) against `12'-6"`. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,
@@ -2018,23 +2250,24 @@ runs.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
-| `DRAWING_ANALYZER_MODEL` | Opus 5 | Vision model for per-sheet digests. |
-| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5 | Cross-sheet synthesis model (text-only). |
-| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5 | Focus-report model (text-only). |
-| `DRAWING_ANALYZER_VERIFY_MODEL` | Sonnet 5 | Per-finding verification model (crop + short prompt). |
-| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5) | The Phase C investigation loop's model (multi-turn, vision + tools). |
+| `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). The GUI reads it once at launch to fill the key field, then removes it from its own environment; library callers that pass no `client=` read it on every call. |
+| `DRAWING_ANALYZER_MODEL` | Opus 5.5 | Vision model for per-sheet digests. |
+| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5.5 | Cross-sheet synthesis model (text-only). |
+| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5.5 | Focus-report model (text-only). |
+| `DRAWING_ANALYZER_VERIFY_MODEL` | Sonnet 5.5 | Per-finding verification model (crop + short prompt). |
+| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5.5) | The Phase C investigation loop's model (multi-turn, vision + tools). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET` | `40000` | Advisory token budget handed to the model per investigation, so it paces itself instead of being cut off at the round cap. Anthropic's 20,000 floor is enforced; rides the verdict-cache key. |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | scales with the set | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). Defaults to `10 + one per 4 sheets`, capped at `40`; setting this pins an absolute number at any set size. |
-| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5 | Critique-pass vision model (`critique=True`). |
-| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
-| `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
-| `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
-| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
+| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5.5 | Critique-pass vision model (`critique=True`). |
+| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5.5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
+| `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5.5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship started as a capability choice (web fetch is unavailable on Opus 5, so an Opus 5 citation check can only read search snippets rather than the cited section's text) and is a cost one on the 5.5 models: Sonnet 5.5 fetches too, at half Opus 5.5's price. A model without web fetch degrades to search-only. |
+| `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5.5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
+| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5.5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
-| `DRAWING_ANALYZER_HARVEST_MODEL` | Sonnet 5 | Prose-harvest structuring model (one small call per straggler, at low effort). |
-| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
+| `DRAWING_ANALYZER_HARVEST_MODEL` | Sonnet 5.5 | Prose-harvest structuring model (one small call per straggler, at low effort). |
+| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5.5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
+| `DRAWING_ANALYZER_REFUSAL_FALLBACK` | on | Opt every real-time call to a model that declares it (Opus 5.5, Sonnet 5.5, Opus 5) into Anthropic's server-side refusal fallback (`fallbacks: "default"`): a request the model's safety classifiers decline is re-run on the substitute Anthropic recommends for that category (Opus 5 or Opus 4.8 for Opus 5.5, Sonnet 5 for Sonnet 5.5) inside the same call. Any falsy value (`0`, `false`, `no`, `off`) turns it off. A platform that rejects the parameter turns it off for the rest of the process. Batch requests never carry it. The usage ledger prices a fallback-served call at the requested model's rates. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Lower than the search budget by design: each fetch pulls up to 40k tokens of page text into the request. Rides the verdict-cache key. |
@@ -2042,7 +2275,7 @@ runs.
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
-| `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Sonnet 5, one flat finding object whose schema mirrors the prompt's field list — the lowest-risk stage to try it on. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
+| `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Sonnet 5.5, one flat finding object whose schema mirrors the prompt's field list — the lowest-risk stage to try it on. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
 | `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` | off | The same contract on the verifier's two-field verdict (`verdict` as a three-way enum + `note`), on the single-crop and cross-sheet calls alike. Vision-involved, so it carries the critique's caveat; the prompt is unchanged (it already asks for a bare object), so the requests differ only by the schema. Structured and plain verdicts cache under separate keys. Prove it with `-k verify_under_output_config_format`. Whether it is worth turning on is answered by the parse-loss line the verification stage now writes (see *Verification pass*). |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
@@ -2050,7 +2283,7 @@ runs.
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
-| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. Also each sheet's retry budget: how many times one sheet may be resubmitted, for any reason (a server error, a raised output cap, a refusal fallback, an abandoned batch), on either recovery path. The batch critique's follow-up batches use the same value, as a round ceiling and as the sheet's budget for its reads together. |
 | `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
@@ -2195,13 +2428,16 @@ sheet looked unresolved, including the ones already produced and billed. A real
 nothing after paying for 12 digests. The harvest is bounded and never spends the
 recovery's budget: if the batch will not settle, the run resubmits everything
 exactly as it used to, which costs money but never loses sheets. Only a finished
-read is taken from the abandoned batch: an item it answered with an empty,
-cut-off or refused read is resubmitted with the unresolved sheets, within the
-same bounded rounds, and its billed attempt stays in the usage ledger. A cut-off
-read that carries prose or findings is also kept for its sheet, so the
-resubmission can only improve on it; if no resubmission lands, the sheet keeps
-that read and its own error rather than reporting the batch as not collected
-(see *A retry never costs a sheet a better read*).
+read is taken from the abandoned batch: an item it answered with an empty or
+cut-off read is resubmitted with the unresolved sheets, within the same bounded
+rounds, and its billed attempt stays in the usage ledger. A refused read goes to
+its fallback model when its category has one, and otherwise stays the sheet's
+result. An item rejected outright (a permanent error such as
+`invalid_request_error`) is not resubmitted either, since it would fail the same
+way. A cut-off read that carries prose or findings, or a refusal, is also kept
+for its sheet, so the resubmission can only improve on it; if no resubmission
+lands, the sheet keeps that read and its own error rather than reporting the
+batch as not collected (see *A retry never costs a sheet a better read*).
 
 The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
 what makes the app's "can run overnight" wording true rather than aspirational.
@@ -2227,7 +2463,8 @@ consecutive frozen hours before its third batch completed in 589 s — 2 h 16 m 
 wall clock for ~25 min of work. Set `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`
 to apply one window to every watch (an operator who names a threshold means it
 for the whole run); `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` bounds how many
-fresh batches recovery will try before the sheets keep a clean retriable error.
+fresh batches recovery will try before the sheets keep a clean retriable error,
+and how many times any one sheet is resubmitted.
 
 While a batch is queued the run is **not** silent: a heartbeat every five
 minutes reports elapsed time, items done, and how long the watch will keep
@@ -2461,7 +2698,12 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   fact whose quote is only whitespace is no longer sent to the reconciler, and
   a stored result now carries its count of refused items (remediation WP-06.1;
   its prompt fix also re-keys every entry, through the prompt text the key
-  holds). Each is a host-side change that no key input covers, so each one made
+  holds), and 7 because grounding also takes the anchor's character-stream
+  tier (a quote that differs from the sheet only in spacing) and never matches
+  part of a number split around a lone `.` (remediation WP-05.3), and 8
+  because that tier's quantity check reuses the quantity reader, which now reads
+  spelled ranges and lists and a compact `A` beside a voltage (remediation
+  WP-04.4). Each is a host-side change that no key input covers, so each one made
   every stored cross-QC result miss once. None of them records the two evidence
   changes above.
 - **Evidence coverage (zero API calls):**

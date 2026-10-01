@@ -24,7 +24,7 @@ ANTHROPIC_API_KEY=... python scripts/benchmark_drawing_analyzer.py \
 ```bash
 # Price both arms first — spends nothing, needs no API key
 python scripts/ab_sweep_drawing_analyzer.py --pdf setA/M-101.pdf \
-    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 --estimate
+    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5-5 --estimate
 
 # Then run it (billable, both arms cold)
 ANTHROPIC_API_KEY=... python scripts/ab_sweep_drawing_analyzer.py \
@@ -229,7 +229,14 @@ of which `signatures_compatible` is the negation; the harness kept its own copy
 of the axis test until remediation WP-04.2 changed the rule. A changed
 quantity, a changed equipment tag, or a flipped absence polarity therefore can
 never become an exact match — nor, since WP-04.2, can one that changed beside
-an unchanged one (`6 in` to `4 in` beside the same `100 psi`) — and geometry
+an unchanged one (`6 in` to `4 in` beside the same `100 psi`), nor, since
+WP-04.3, one whose values swapped roles (`6 in main, 4 in branch` to `4 in main,
+6 in branch`: a record stores each quantity's role in its `critical_signature`,
+so a record written before that is refused as a stale contract), nor, since
+WP-04.4, one whose spelled range or list, bare feet value or compact `A` beside a
+voltage changed (`4 to 6 in` to `6 in`, `12'-6"` to `12'`: a record stores the
+readings and each feet value with its inches, `feet_inches`, so a record written
+before that is refused too, `RECORD_CONTRACT_VERSION` 5) — and geometry
 never produces one at all: rect
 overlap only ever *suggests* a candidate. Nothing is deleted, no fuzzy score is
 promoted to an equivalence, and no second model is asked to adjudicate — that
