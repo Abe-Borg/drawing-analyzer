@@ -996,7 +996,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_primary"], justify="left",
         )
         heading.pack(anchor="w", padx=18, pady=(16, 2))
-        card.bind("<Configure>", lambda e: heading.configure(wraplength=max(160, e.width - 42)), add="+")
+        card.bind("<Configure>", lambda e: heading.configure(
+            wraplength=max(40, heading._reverse_widget_scaling(e.width) - 42)), add="+")
         if doc.intro:
             intro = ctk.CTkLabel(
                 card, text=doc.intro,
@@ -1004,7 +1005,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 text_color=COLORS["text_secondary"], wraplength=640, justify="left",
             )
             intro.pack(anchor="w", padx=18, pady=(0, 8))
-            card.bind("<Configure>", lambda e: intro.configure(wraplength=max(160, e.width - 42)), add="+")
+            card.bind("<Configure>", lambda e: intro.configure(
+                wraplength=max(40, intro._reverse_widget_scaling(e.width) - 42)), add="+")
 
         # Bottom bar first so the scrollable body fills the space between it and
         # the header (pack reserves the bottom before the expand widget claims
@@ -1040,18 +1042,30 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._help_focus_targets[doc.key] = [*getattr(body, "_help_buttons", []), close]
         # Labels reflow with the viewport, including a narrow screen.
+        last_width = None
         def reflow(event):
+            nonlocal last_width
+            # Configure events use physical pixels; CTk wrap lengths use
+            # logical pixels and apply widget scaling themselves.
+            width = body._reverse_widget_scaling(event.width)
+            if width == last_width:
+                return
+            # Rewrapping changes the frame's height and fires Configure again.
+            # Ignore those events so scrollbar redraws cannot re-enter the loop.
+            last_width = width
             for label in getattr(body, "_help_labels", []):
-                label.configure(wraplength=max(160, event.width - 48))
+                wraplength = max(40, width - 48)
+                if label.cget("wraplength") != wraplength:
+                    label.configure(wraplength=wraplength)
             for button in getattr(body, "_help_buttons", []):
                 label = getattr(button, "_text_label", None)
                 if label is not None:
-                    label.configure(wraplength=max(160, event.width - 64))
-            for button in getattr(body, "_help_buttons", []):
-                label = getattr(button, "_text_label", None)
-                if label is not None:
-                    label.configure(wraplength=max(160, event.width - 56))
-        body.bind("<Configure>", reflow, add="+")
+                    wraplength = max(40, width - 56)
+                    if int(label.cget("wraplength")) != int(wraplength):
+                        label.configure(wraplength=wraplength)
+        # Reflow after the canvas finishes allocating its viewport. Running
+        # inside a frame-height change can recursively redraw its scrollbar.
+        body._parent_canvas.bind("<Configure>", lambda event: body.after(0, lambda: reflow(event)), add="+")
         win.after(160, close.focus_set)
 
     def _help_escape(self, key: str) -> str:
@@ -1113,12 +1127,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                     ).pack(side="left", anchor="n", padx=(4, 6))
-                    ctk.CTkLabel(
+                    label = ctk.CTkLabel(
                         row, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
                         wraplength=wrap - 28, justify="left", anchor="w",
-                    ).pack(side="left", anchor="w")
+                    )
+                    label.pack(side="left", anchor="w")
+                    body._help_labels.append(label)
                 elif block.kind == "link" and block.href:
                     link = ctk.CTkLabel(
                         body, text=block.text,
@@ -1127,6 +1143,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         wraplength=wrap, justify="left", cursor="hand2",
                     )
                     link.pack(anchor="w", padx=10, pady=(2, 2))
+                    body._help_labels.append(link)
                     link.bind(
                         "<Button-1>",
                         lambda _e, url=block.href: webbrowser.open(url),

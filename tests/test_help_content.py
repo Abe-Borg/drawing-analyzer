@@ -721,6 +721,18 @@ def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
         1 for s in doc.sections for b in s.blocks if b.kind == "bullet"
     )
     assert bullet_marks == expected_bullets
+    # Every text block that wraps must participate in viewport resizing;
+    # bullet and external-link text used to keep their wide fixed lengths.
+    tracked = [label.kw["text"] for label in body._help_labels]
+    expected = [
+        text
+        for section in doc.sections
+        for text in (
+            section.heading,
+            *(block.text for block in section.blocks if block.kind not in {"pre", "modal"}),
+        )
+    ]
+    assert tracked == expected
 
 
 def test_render_help_body_keeps_pre_blocks_unwrapped() -> None:

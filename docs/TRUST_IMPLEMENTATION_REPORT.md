@@ -172,5 +172,21 @@ behavior changes, outside this task.
   the contents rail and simulated 1.5×/2× scaling. Actual Windows screen-reader
   behavior and Windows installer compilation require their own platform checks.
 
-No live model calls, paid evaluations, release, installer execution or
-publication were run. No answer or approval remains pending for this task.
+### Review follow-up
+
+The narrow-dialog review comment on PR #195 was confirmed: bullet text and
+external-link labels were missing from the help renderer's resize tracking.
+Both now wrap with the viewport. Reflow converts physical pixels to
+CustomTkinter's logical units and runs after canvas allocation, avoiding
+recursive scrollbar redraws; repeated height changes do not rewrap the text.
+
+Four native regression cases check How to use and About on a narrow simulated
+screen at normal and doubled widget/window scaling, including each text label's
+requested width so a clipped container cannot masquerade as fitting text. The
+content renderer checks every wrappable block, and native callback exceptions
+fail tests instead of opening an unattended error dialog. The affected suite
+passed **130 tests**, including the existing focus/Escape and browser checks;
+the wheel/source build and correctness checks also passed.
+
+No live model calls, paid evaluations, release or installer execution were run.
+No answer or approval remains pending for this task.

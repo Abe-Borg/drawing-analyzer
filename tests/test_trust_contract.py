@@ -261,10 +261,15 @@ def native_app(monkeypatch, tmp_path):
     # Avoid reading/writing the operator's credential store; no Analyze invoked.
     monkeypatch.setattr(DrawingAnalyzerApp, "_report_key_at_startup", lambda self: None)
     app = DrawingAnalyzerApp()
+    callback_errors = []
+    # Surface callback failures as test failures instead of blocking on an
+    # interactive error dialog while the test waits for Tk to finish updating.
+    app.report_callback_exception = lambda _type, error, _traceback: callback_errors.append(error)
     def pump():
         until = time.monotonic() + .25
         while time.monotonic() < until:
             app.update(); time.sleep(.005)
+        assert not callback_errors, callback_errors
     app._test_pump = pump
     pump()
     yield app
@@ -358,4 +363,44 @@ def test_native_scaled_dialog_stays_inside_screen(native_app, scale):
         assert win.winfo_height() <= win.winfo_screenheight() * .88 + 2
         assert win.tk.call("wm", "maxsize", str(win))[1] <= win.winfo_screenheight() * .88
     finally:
+        ctk.set_window_scaling(1.0)
+
+
+@pytest.mark.parametrize("doc_key", ("how_to_use", "about"))
+@pytest.mark.parametrize("scale", (1.0, 2.0))
+def test_native_standard_help_reflows_bullets_and_links(native_app, monkeypatch, doc_key, scale):
+    import customtkinter as ctk
+    app = native_app
+    doc = help_document(doc_key)
+    # Screen-bounded sizing can open below the former 520 logical-pixel floor.
+    monkeypatch.setattr(ctk.CTkToplevel, "winfo_screenwidth", lambda self: 480)
+    try:
+        ctk.set_window_scaling(scale)
+        ctk.set_widget_scaling(scale)
+        app._open_help_modal(doc)
+        app._test_pump()
+        win = app._help_windows[doc_key]
+        assert win.winfo_width() <= 480 * .92 + 2
+
+        def widgets(root):
+            for widget in root.winfo_children():
+                yield widget
+                yield from widgets(widget)
+
+        body = next(w for w in widgets(win) if isinstance(w, ctk.CTkScrollableFrame))
+        labels = [w for w in widgets(body) if isinstance(w, ctk.CTkLabel)]
+        for section in doc.sections:
+            for block in section.blocks:
+                if block.kind not in {"para", "bullet", "link"}:
+                    continue
+                label = next(w for w in labels if w.cget("text") == block.text)
+                canvas = body._parent_canvas
+                # Check text's requested size: pack can shrink its container
+                # while silently clipping the internal label's unwrapped text.
+                assert label._label.winfo_reqwidth() <= label.winfo_width() + 2
+                assert label.winfo_rootx() >= canvas.winfo_rootx()
+                assert label.winfo_rootx() + label.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width() + 2
+    finally:
+        app._close_help_modal(doc_key)
+        ctk.set_widget_scaling(1.0)
         ctk.set_window_scaling(1.0)
