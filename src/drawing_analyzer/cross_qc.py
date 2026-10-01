@@ -22,13 +22,20 @@ of groups is reconciled, so any two facts meet in at least one call
 (:func:`_reconcile_facts`; this docstring called it "a balanced reduction tree"
 until remediation WP-06.1).
 
-**Opaque handles (§16.1).** Source identity stays host-owned: in the sharded path
-the model sees a request-local opaque ``sheet_handle`` (``S001`` …), never a
-``source_id``. Every returned handle is validated against the request manifest and
-translated to a real sheet on the host; an unknown handle leaves the item unbound.
-Every fact's ``exact_quote`` (and every reconciliation quote) is validated against
-the retained source text before it is trusted — an ungrounded quote never becomes a
-trusted dual-anchor finding.
+**Opaque handles (§16.1; remediation WP-06.2, N6, U8).** Source identity stays
+host-owned: on **both** paths the model sees a request-local opaque
+``sheet_handle`` (``S001`` …), never a ``source_id``, with the sheet's human id
+shown beside it (``S001 = M-101``) as display metadata. Every returned reference
+goes through one resolver (:func:`_resolve_sheet_ref`): a handle, else a sheet id
+that names exactly one sheet of the set (a legacy reply). An id more than one
+sheet carries is refused and counted (``legs_ambiguous_label`` /
+``facts_ambiguous_label``), never bound to the first; an unknown reference leaves
+the item unbound. Every quote is validated against the sheet's **uncapped**
+source text (:func:`classify_quote_evidence`) before it is trusted, on the
+whole-set path too — an ungrounded quote never becomes a trusted dual-anchor
+finding. The whole-set path used to label sheets by their human id, bind replies
+through a first-wins id map and ground nothing (U8): two PDFs carrying one id
+could not be told apart, and a conflict between them could not be expressed.
 
 **Loss-aware budgeting (§16.2, DA-028).** Each sheet's text layer is capped, but the
 omission is *counted and surfaced* (``text_chars_omitted`` / ``budget_degraded``),
@@ -54,8 +61,11 @@ ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
+import re
+import string
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
@@ -192,7 +202,18 @@ _TEXT_LAYER_BUDGET = 4_000
 # ``4 TO 6 IN ACLEAR``, or ``ELEC ROOM 101A 120V`` against ``ELECROOM 101A
 # 120V``, grounded before and does not now (the owner's decision; none of the
 # suite's grounding verdicts moved). One mechanism: no key term was added.
-_CROSS_QC_CACHE_CONTRACT = 8
+#
+# Bumped to 9 (remediation WP-06.2; N6, U8, the owner's rules): host-side
+# binding changed for byte-identical request inputs. The whole-set path binds
+# replies through host handles and the one resolver both paths now share (a
+# handle, else an id that names exactly one sheet; an id two sheets carry is
+# refused where the first detection used to win), grounds every quote against
+# the uncapped text and drops what it cannot place, rebinds its claims to their
+# sources; the sharded path reads a reply's ``sheet_id`` as a reference too; the
+# claim dedup keys on the claim's source; and entries are ordered by source id
+# and page. The user-turn framing joined the key in the same release (K2), as
+# its own mechanism (the key's own inputs), not as a term beside this bump.
+_CROSS_QC_CACHE_CONTRACT = 9
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -247,21 +268,30 @@ _CROSS_QC_TASK = (
     "format in your instructions. Output only the fenced json findings block."
 )
 
+# How the model addresses a sheet (remediation WP-06.2, the owner's rule): by
+# its handle in the json, by its sheet id in prose a reviewer reads. One
+# sentence, spliced into the whole-set and map instructions alike.
+_HANDLE_RULE = (
+    "Each sheet is labeled with an opaque HANDLE and its sheet id beside it "
+    "(e.g. S001 = M-101). Refer to sheets in the json ONLY by their handle; "
+    "in text, name them by their sheet id."
+)
+
 _CROSS_QC_FINDINGS_INSTRUCTION = """\
 
 
 FINDINGS (machine-read — the ONLY thing you output):
 Output a SINGLE fenced code block labeled json and nothing else — no prose — \
-containing {"findings": [ ... ], "claims": [ ... ]}. Each finding is a \
-CROSS-SHEET conflict with: sheet_id (the PRIMARY sheet, one of the sheets \
-involved); category (one of code, conflict, coordination, question); severity \
-(one of high, medium, low); text (the conflict in <= 2 sentences, naming the \
+containing {"findings": [ ... ], "claims": [ ... ]}. """ + _HANDLE_RULE + """ \
+Each finding is a CROSS-SHEET conflict with: sheet_handle (the PRIMARY sheet's \
+handle, one of the sheets involved); category (one of code, conflict, \
+coordination, question); severity (one of high, medium, low); text (the conflict in <= 2 sentences, naming the \
 sheets); recommended_action (one sentence, imperative: what the reviewer should \
 DO about it - e.g. "Confirm the correct rating with the engineer of record and \
 update both sheets"); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
 sheet's text layer); tile_label (the label printed on the primary sheet's tile \
 where you saw it — e.g. "r1c1" — or omit); also_on (an \
-array of the OTHER sheets in the conflict, each an object {"sheet_id", \
+array of the OTHER sheets in the conflict, each an object {"sheet_handle", \
 "source_quote" (verbatim from THAT sheet), "tile_label"}); refs (optional array of \
 codes/specs). Every finding MUST list at least one also_on sheet — a conflict is \
 between sheets. Emit at most 60 findings, most important first; emit \
@@ -269,9 +299,9 @@ between sheets. Emit at most 60 findings, most important first; emit \
 
 Also include a "claims" array in the SAME object for numeric relationships a \
 reviewer should verify by CALCULATION (you only transcribe the numbers — never do \
-the arithmetic). Each claim: sheet_id (the sheet the numbers are on); quote (COPY \
-VERBATIM the on-sheet text); kind (one of sum, product, factor); terms (the \
-numbers as printed); expected (the stated result they should combine to); note (a \
+the arithmetic). Each claim: sheet_id (set this to the HANDLE of the sheet the \
+numbers are on); quote (COPY VERBATIM the on-sheet text); kind (one of sum, \
+product, factor); terms (the numbers as printed); expected (the stated result they should combine to); note (a \
 short phrase naming the relationship). Emit "claims": [] if there are none."""
 
 # Map instruction (sharded path): handle-based findings + comparable facts. The
@@ -279,8 +309,7 @@ short phrase naming the relationship). Emit "claims": [] if there are none."""
 _CROSS_QC_MAP_INSTRUCTION = """\
 
 
-This is ONE SHARD of a larger set. Each sheet is labeled with an opaque HANDLE \
-(e.g. S001). Refer to sheets ONLY by their handle.
+This is ONE SHARD of a larger set. """ + _HANDLE_RULE + """
 
 Output a SINGLE fenced code block labeled json and nothing else, containing \
 {"findings": [ ... ], "claims": [ ... ], "facts": [ ... ]}.
@@ -395,15 +424,27 @@ class CrossQCDiscardCounts:
       _grounded(...)``, so a leg carrying no quote is accepted unchecked. This
       is an *acceptance* count, not a discard, and is the one number here that
       counts evidence being trusted rather than dropped.
+    - ``legs_ambiguous_label`` / ``facts_ambiguous_label`` (remediation
+      WP-06.2, N6) — a reference that named a sheet id more than one sheet of
+      the set carries. Refused, never bound to the first such sheet; counted
+      apart from an unknown reference (``*_unresolved_handle``). Run-level only
+      (no one sheet is meant), and the one discard that also becomes a stage
+      warning (:meth:`ambiguity_note`, the owner's rule).
+
+    Recorded on **both** paths since remediation WP-06.2 (U8): the whole-set
+    path now grounds through the same validator, so ``None`` means only "not
+    recorded" (a result cached before the field existed, or no call made).
     """
 
     legs_unresolved_handle: int = 0
+    legs_ambiguous_label: int = 0
     legs_admitted_no_text_evidence: int = 0
     legs_ungrounded_quote_text_bearing_sheet: int = 0
     legs_accepted_without_quote: int = 0
     legs_accepted_grounded: int = 0
     findings_dropped_under_two_legs: int = 0
     facts_unresolved_handle: int = 0
+    facts_ambiguous_label: int = 0
     facts_no_quote: int = 0
     facts_admitted_no_text_evidence: int = 0
     facts_ungrounded_quote_text_bearing_sheet: int = 0
@@ -433,6 +474,21 @@ class CrossQCDiscardCounts:
             dest = self.by_sheet.setdefault(key, {})
             for name, n in counters.items():
                 dest[name] = dest.get(name, 0) + n
+
+    def ambiguity_note(self) -> str:
+        """The stage warning for refused ambiguous references, or ``""``.
+
+        Observational (the owner's rule, remediation WP-06.2; a D-2 note): the
+        stage keeps its status and the cached result carries the counts, so a
+        warm run shows the same warning.
+        """
+        legs, facts = self.legs_ambiguous_label, self.facts_ambiguous_label
+        if not legs + facts:
+            return ""
+        return (
+            f"{legs + facts} sheet reference(s) named a sheet id that more than "
+            f"one sheet carries and were not bound ({legs} leg(s), {facts} fact(s))"
+        )
 
     def to_dict(self) -> dict:
         out = {name: getattr(self, name) for name in self._counter_names()}
@@ -479,8 +535,9 @@ class CrossQCInvalidCounts:
     - Each refused item counts **once**, under the first check that refused it
       (:func:`_invalid_field`: not an object, then the category, the severity,
       the text), so the counts sum to the items lost.
-    - Recorded on **both** paths, unlike :class:`CrossQCDiscardCounts`, whose
-      grounding counters the whole-set path does not measure (U8, WP-06.2).
+    - Recorded on **both** paths, like :class:`CrossQCDiscardCounts` since
+      remediation WP-06.2, and kept apart from it: a refused item never reaches
+      a sheet, so it is no grounding discard.
     - Run-level only: an item is refused before any of its sheets is resolved.
     - **Observational** (``_plans/DECISIONS.md`` D-2): nothing here feeds
       ``complete`` or ``budget_degraded``. The pipeline turns a non-zero total
@@ -601,8 +658,10 @@ class CrossQCResult:
     budget_degraded: bool = False
     cached: bool = False
     # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed,
-    # or the whole-set path, which grounds nothing yet), which is not the same
-    # as "nothing was discarded".
+    # or no call was made), which is not the same as "nothing was discarded".
+    # Recorded on both paths since remediation WP-06.2 (U8); a call that failed
+    # before its reply was parsed discarded nothing, and its error is recorded
+    # apart, as for ``invalid``.
     discards: "CrossQCDiscardCounts | None" = None
     # Remediation WP-06.1 (B6): items refused for an invalid field, recorded on
     # both paths. ``None`` = not recorded (a result cached before it existed),
@@ -636,7 +695,152 @@ def _norm_id(sheet_id: str) -> str:
 
 
 def _fallback_id(ref: Any) -> str:
+    """The display id of a sheet with no detectable id: ``<stem>-p<page>``.
+
+    Display metadata only (remediation WP-06.2, D-8). Two PDFs with one
+    basename in two folders share it, which is why it never addresses a sheet:
+    the request uses host handles, and a reply that names a shared fallback id
+    is ambiguous and refused (:func:`_resolve_sheet_ref`).
+    """
     return f"{Path(getattr(ref, 'source_name', 'sheet')).stem}-p{int(getattr(ref, 'page_index', 0) or 0) + 1}"
+
+
+_NUMBER_RUN = re.compile(r"(\d+)")
+
+
+def _natural_key(text: str) -> tuple:
+    """``SRC-9999`` before ``SRC-10000``: digit runs compare as numbers."""
+    return tuple(int(part) if part.isdigit() else part
+                 for part in _NUMBER_RUN.split(text or ""))
+
+
+def _canonical_order(entries: list[tuple]) -> list[tuple]:
+    """Entries in source order: by ``(source_id, page_index)`` (remediation WP-06.2).
+
+    The owner's rule: handles follow the host's identity, never the caller's
+    list order, so a reordered input gets the same handles, the same request
+    and the same cache key, and binds every reply to the same pages. Ordered
+    only when every entry carries a ``source_id`` (the pipeline assigns one to
+    every accepted input, in input order, so its order is unchanged); a set
+    with an entry that has none keeps the input order, since there is no host
+    identity to order it by. Stable, deterministic (I-7).
+    """
+    refs = [getattr(e[3], "ref", None) for e in entries]
+    ids = [str(getattr(r, "source_id", "") or "").strip() for r in refs]
+    if not all(ids):
+        return list(entries)
+    pages = [int(getattr(r, "page_index", 0) or 0) for r in refs]
+    order = sorted(range(len(entries)), key=lambda i: (_natural_key(ids[i]), pages[i]))
+    return [entries[i] for i in order]
+
+
+@dataclass
+class _SheetHandles:
+    """The request-local handles of one cross-QC run, shared by both paths.
+
+    ``entry_by_handle`` maps ``S001`` … to ``(sheet id, geometry)``;
+    ``by_label`` maps a normalized sheet id to every handle that carries it, so
+    an id two sheets carry stays visibly ambiguous instead of shadowing one.
+    """
+
+    entry_by_handle: dict = field(default_factory=dict)
+    handle_by_key: dict = field(default_factory=dict)
+    discipline_by_handle: dict = field(default_factory=dict)
+    manifest: list = field(default_factory=list)        # (handle, sheet id, discipline)
+    by_label: dict = field(default_factory=dict)
+
+
+# The handle prefixes, in order of preference: ``S`` for every set none of
+# whose sheet ids is one of its handles, then these, then every other letter
+# and every longer run of letters (:func:`_handle_prefix`).
+_HANDLE_PREFIXES = ("S", "H", "K", "Q", "X", "Z")
+
+
+def _handle(prefix: str, i: int) -> str:
+    return f"{prefix}{i:03d}"
+
+
+def _candidate_prefixes():
+    yield from _HANDLE_PREFIXES
+    for width in itertools.count(1):
+        for letters in itertools.product(string.ascii_uppercase, repeat=width):
+            prefix = "".join(letters)
+            if prefix not in _HANDLE_PREFIXES:
+                yield prefix
+
+
+def _handle_prefix(labels: set, count: int) -> str:
+    """The first prefix none of whose ``count`` handles is a sheet id in ``labels``.
+
+    Handles and sheet ids are kept disjoint (remediation WP-06.2, Codex review):
+    a reply may name a sheet by its id, and an id that was also a handle would
+    bind the handle's sheet, so a set with ``S001 = A-101`` and a sheet whose
+    own id is ``S001`` sent a legacy reply's numbers to the wrong PDF. A sheet
+    id spells at most one prefix's handle (its letters), so at most
+    ``len(labels)`` prefixes are refused and the search ends. Deterministic
+    (I-7): it reads only the set's normalized ids.
+    """
+    for prefix in _candidate_prefixes():
+        if not any(_handle(prefix, i) in labels for i in range(1, count + 1)):
+            return prefix
+    raise AssertionError("unreachable: the prefixes are unbounded")
+
+
+def _assign_handles(entries: list[tuple]) -> _SheetHandles:
+    """Opaque handles ``S001`` … for ``entries`` in order, with the manifest.
+
+    One assignment for the whole-set and sharded paths (remediation WP-06.2, the
+    owner's rule). A handle resolves to one page, ``(source_id, page_index)``
+    (D-8); the sheet id is display metadata shown beside it. No handle is a
+    sheet id of the set (:func:`_handle_prefix`): a set that uses ``S002`` as a
+    sheet id gets ``H001`` …, so a reference is a handle or an id, never both.
+    """
+    from .auditors.sheet_ids import discipline_token
+
+    handles = _SheetHandles()
+    labels = {_norm_id(e[0]) for e in entries} - {""}
+    prefix = _handle_prefix(labels, len(entries))
+    for i, (sheet_id, _t, _tl, geom) in enumerate(entries, start=1):
+        handle = _handle(prefix, i)
+        disc = discipline_token(sheet_id)
+        handles.entry_by_handle[handle] = (sheet_id, geom)
+        handles.handle_by_key[source_page_key(geom.ref)] = handle
+        handles.discipline_by_handle[handle] = disc
+        handles.manifest.append((handle, sheet_id, disc))
+        label = _norm_id(sheet_id)
+        if label:
+            handles.by_label.setdefault(label, []).append(handle)
+    return handles
+
+
+# Why a reference bound to no sheet (``_resolve_sheet_ref``'s second value).
+_REF_UNKNOWN = "unknown"
+_REF_AMBIGUOUS = "ambiguous"
+
+
+def _resolve_sheet_ref(
+    raw: Any, entry_by_handle: dict, by_label: "dict | None" = None,
+) -> tuple[str, str]:
+    """The handle ``raw`` names, as ``(handle, "")``, else ``("", why)``.
+
+    The one resolver both paths bind a reply's references through (remediation
+    WP-06.2, N6; the owner's rules). A handle names its own sheet: no handle
+    is a sheet id of the set (:func:`_handle_prefix`), so the two lookups
+    cannot both match. Otherwise ``raw`` may be a sheet id (a legacy reply, or
+    a model that wrote the id it saw beside a handle): it binds when exactly
+    one sheet of the set carries it, and an id more than one sheet carries is
+    ``_REF_AMBIGUOUS`` and binds none of them, where the old whole-set map let
+    the first detection win. Both forms are compared after :func:`_norm_id`.
+    """
+    norm = _norm_id(str(raw or ""))
+    if not norm:
+        return "", _REF_UNKNOWN
+    if norm in entry_by_handle:
+        return norm, ""
+    handles = (by_label or {}).get(norm) or []
+    if len(handles) == 1:
+        return handles[0], ""
+    return "", (_REF_AMBIGUOUS if handles else _REF_UNKNOWN)
 
 
 def _norm_for_match(text: str) -> str:
@@ -793,8 +997,9 @@ def _findings_array(obj: dict) -> list:
 def _invalid_field(item: Any) -> str:
     """The first reason ``item`` cannot become a finding, or ``""`` (remediation WP-06.1).
 
-    The one field check both validators apply, so the whole-set and sharded
-    paths refuse, and count, the same items. The checks run in a fixed order
+    The one field check the validator applies (since remediation WP-06.2 one
+    validator serves both paths), so the whole-set and sharded paths refuse,
+    and count, the same items. The checks run in a fixed order
     (not an object, then the category, the severity, the text), and an item is
     counted under the first one it fails. The accepted set is exactly what it
     was: a severity must be high, medium or low whatever a prompt once asked for
@@ -811,88 +1016,6 @@ def _invalid_field(item: Any) -> str:
     if not isinstance(text, str) or not text.strip():
         return "findings_invalid_text"
     return ""
-
-
-def _validate_cross_item(
-    item: Any, sheet_map: dict[str, Any],
-    invalid: "CrossQCInvalidCounts | None" = None,
-) -> Finding | None:
-    """Build a dual-anchored :class:`Finding` from one whole-set cross-QC item.
-
-    Requires a recognized category/severity and non-empty text
-    (:func:`_invalid_field`, counted in ``invalid`` when refused), and at least
-    **two** of the item's referenced sheet ids (primary + ``also_on``) that
-    resolve in the set. The first resolvable ref becomes the primary; the rest
-    become ``also_on`` legs. An item that can't be placed on two real sheets is
-    dropped; that is a binding outcome, not a refused field, and is not counted
-    here.
-    """
-    reason = _invalid_field(item)
-    if reason:
-        if invalid is not None:
-            invalid.bump(reason)
-        return None
-    category = str(item.get("category", "")).strip().lower()
-    severity = str(item.get("severity", "")).strip().lower()
-    text = item.get("text", "")
-
-    # Keep each ref's raw dict so its tile_label is resolved against ITS OWN
-    # sheet's grid once the sheet is bound (Phase 25 §17.1).
-    refs_raw = [{
-        "sheet_id": str(item.get("sheet_id", "")).strip(),
-        "source_quote": _quote(item.get("source_quote", "")),
-        "raw": item,
-    }]
-    for leg in item.get("also_on") or []:
-        if isinstance(leg, dict):
-            refs_raw.append({
-                "sheet_id": str(leg.get("sheet_id", "")).strip(),
-                "source_quote": _quote(leg.get("source_quote", "")),
-                "raw": leg,
-            })
-
-    resolved = []
-    seen_sheets: set[tuple] = set()
-    for r in refs_raw:
-        geom = sheet_map.get(_norm_id(r["sheet_id"]))
-        if geom is None:
-            continue
-        sheet_key = source_page_key(geom.ref)
-        if sheet_key in seen_sheets:
-            continue
-        seen_sheets.add(sheet_key)
-        r["tile"] = _resolve_tile(
-            r["raw"], getattr(geom, "rows", 0), getattr(geom, "cols", 0)
-        )
-        resolved.append((r, geom))
-    if len(resolved) < 2:
-        return None
-
-    (pr, pgeom), *legs = resolved
-    return Finding(
-        sheet_id=pr["sheet_id"],
-        source_name=pgeom.ref.source_name,
-        source_id=pgeom.ref.source_id,
-        page_index=pgeom.ref.page_index,
-        category=category,
-        severity=severity,
-        text=text.strip(),
-        source_quote=pr["source_quote"],
-        recommended_action=_action(item),
-        tile=pr["tile"],
-        refs=_coerce_refs(item.get("refs")),
-        also_on=[
-            ConflictLeg(
-                sheet_id=r["sheet_id"],
-                source_name=g.ref.source_name,
-                source_id=g.ref.source_id,
-                page_index=g.ref.page_index,
-                source_quote=r["source_quote"],
-                tile=r["tile"],
-            )
-            for r, g in legs
-        ],
-    )
 
 
 def _action(item: dict) -> str:
@@ -961,15 +1084,25 @@ def _finding_from_handles(
     counts: "CrossQCDiscardCounts | None" = None,
     tile_lookup: dict | None = None,
     invalid: "CrossQCInvalidCounts | None" = None,
+    *,
+    by_label: "dict | None" = None,
 ) -> Finding | None:
-    """Build a dual-anchored :class:`Finding` from a handle-keyed item (map/reconcile).
+    """Build a dual-anchored :class:`Finding` from one returned item, on either path.
 
-    Refuses an invalid field first, exactly as the whole-set validator does
-    (:func:`_invalid_field`, counted in ``invalid``). Then resolves each opaque
-    ``sheet_handle`` against the request manifest (an unknown handle is
-    dropped — never authority) and **validates the quote is grounded** in the
-    referenced sheet's text before trusting the leg (§16.1). Needs >= 2 distinct
-    grounded sheets or it is dropped.
+    The one validator for the whole-set, map and reconcile replies (remediation
+    WP-06.2, the owner's rule; the whole-set path had its own, label-keyed and
+    ungrounded). Refuses an invalid field first (:func:`_invalid_field`,
+    counted in ``invalid``). Then binds each reference through
+    :func:`_resolve_sheet_ref` (``sheet_handle``, else ``handle``, else a
+    legacy ``sheet_id``): an unknown reference is dropped, never authority, and
+    one that names an id ``by_label`` holds for more than one sheet is refused
+    and counted ``legs_ambiguous_label``, never bound to the first. Then it
+    **validates the quote is grounded** in the referenced sheet's uncapped text
+    before trusting the leg (§16.1). Needs >= 2 distinct grounded sheets or it
+    is dropped (``findings_dropped_under_two_legs``). The first sheet that
+    survives is the primary: a primary that does not resolve or ground
+    promotes its first leg that does. A finding carries each sheet's own id
+    from the manifest, never the reply's spelling of it.
     """
     reason = _invalid_field(item)
     if reason:
@@ -981,7 +1114,8 @@ def _finding_from_handles(
     text = item.get("text", "")
 
     def _handle(d: dict) -> str:
-        return str(d.get("sheet_handle", "") or d.get("handle", "")).strip()
+        return str(d.get("sheet_handle", "") or d.get("handle", "")
+                   or d.get("sheet_id", "")).strip()
 
     # Keep each ref's own dict so its ``tile_label`` resolves against ITS OWN
     # sheet's grid (§8.4 Part 1), exactly as the whole-set validator does.
@@ -992,12 +1126,14 @@ def _finding_from_handles(
 
     resolved = []
     seen_sheets: set[tuple] = set()
-    for handle, quote, raw in refs_raw:
-        entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
-        if entry is None:                    # unknown handle → unbound
-            if counts is not None:           # no geom: run-level only
-                counts.bump("legs_unresolved_handle")
+    for ref, quote, raw in refs_raw:
+        handle, why = _resolve_sheet_ref(ref, entry_by_handle, by_label)
+        if not handle:                       # unknown or ambiguous → unbound
+            if counts is not None:           # no one sheet: run-level only
+                counts.bump("legs_ambiguous_label" if why == _REF_AMBIGUOUS
+                            else "legs_unresolved_handle")
             continue
+        entry = entry_by_handle[handle]
         sheet_id, geom = entry
         key = source_page_key(geom.ref)
         if key in seen_sheets:               # dedup, not a discard
@@ -1011,7 +1147,7 @@ def _finding_from_handles(
         if tile is None and tile_lookup:
             match_quote = _norm_for_match(quote)
             if match_quote:
-                tile = tile_lookup.get((_norm_id(handle), match_quote))
+                tile = tile_lookup.get((handle, match_quote))
         # WP-03A grounds against the host's *source* evidence, not the capped
         # string the model saw. WP-03B turns the verdict into three states, so a
         # sheet that could never satisfy a text check is not treated as refuting
@@ -1088,16 +1224,23 @@ _NO_FINDINGS_OBJECT = (
 
 
 def _resolve_claim_handles(
-    claims: list[NumericClaim], entry_by_handle: dict[str, tuple]
+    claims: list[NumericClaim], entry_by_handle: dict[str, tuple],
+    by_label: "dict | None" = None,
 ) -> list[NumericClaim]:
     """Translate handle-keyed claims (``sheet_id`` carries the handle) to real sheets.
 
-    A claim whose handle is unknown is kept but left with its (handle) id so the
-    arithmetic auditor can still try to resolve it by id; a resolvable handle is
-    rebound to the real sheet id / source identity.
+    On both paths since remediation WP-06.2 (whole-set claims carried only the
+    model's id, which the arithmetic auditor then looked up first-wins). A
+    reference :func:`_resolve_sheet_ref` binds (a handle, or an id one sheet
+    carries) is rebound to that sheet's id and source identity. Any other claim
+    is kept with its reference as written and no source: an unknown one may
+    still name a sheet the auditor can find, and an id two sheets carry is
+    refused there too (``arithmetic_ambiguous_sheet``), never bound to the
+    first.
     """
     for c in claims:
-        entry = entry_by_handle.get(_norm_id(c.sheet_id))
+        handle, _why = _resolve_sheet_ref(c.sheet_id, entry_by_handle, by_label)
+        entry = entry_by_handle.get(handle) if handle else None
         if entry is not None:
             sheet_id, geom = entry
             c.sheet_id = sheet_id
@@ -1110,6 +1253,76 @@ def _resolve_claim_handles(
 # --------------------------------------------------------------------------- #
 # Input assembly + budgeting
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# User-turn framing (remediation WP-06.2, K2)
+#
+# Every string the three request builders put around the sheets' own content.
+# They used to be inline literals outside the cache key: editing one changed
+# what the model was sent while every key stayed the same (K2). They ride the
+# key verbatim now, beside the three system prompts
+# (:func:`cross_qc_user_framing`, the owner's rule), so an edit re-keys. A
+# model-visible string added to a builder belongs here, or it is outside the
+# key again.
+# --------------------------------------------------------------------------- #
+
+_WHOLE_SET_HEADER_TEMPLATE = (
+    "DRAWING SET — {count} sheet(s). For each sheet you get its structured "
+    "digest and its verbatim text layer.\n"
+)
+_MAP_HEADER_TEMPLATE = (
+    "DRAWING SET SHARD — {count} sheet(s), each labeled with an opaque HANDLE. "
+    "Refer to sheets only by handle.\n"
+)
+_SHEET_TITLE_TEMPLATE = "===== SHEET {handle} = {sheet_id} =====\n"
+_SHEET_BODY_TEMPLATE = "DIGEST:\n{digest}\n\nTEXT LAYER:\n{text}\n"
+_MAP_TASK = (
+    "\nReport this shard's within-shard conflicts, comparable facts, and claims "
+    "in the required json block."
+)
+_RECONCILE_MANIFEST_HEADER = "SHEET MANIFEST (handle = sheet-id (discipline)):"
+_RECONCILE_MANIFEST_LINE_TEMPLATE = "  {handle} = {sheet_id} ({discipline})"
+_UNKNOWN_DISCIPLINE = "?"
+_RECONCILE_FACTS_HEADER = (
+    "\nFACTS (sheet_handle | entity_or_tag | attribute | value | exact_quote):"
+)
+_RECONCILE_FACT_LINE_TEMPLATE = '  {handle} | {entity} | {attribute} | {value} | "{quote}"'
+_RECONCILE_TASK = (
+    "\nCompare the facts across the whole manifest and report cross-sheet "
+    "conflicts in the required json block."
+)
+# Written by ``_budgeted_text_layer`` after a capped text layer. A degraded
+# result is never cached, so it never reaches a stored entry; it is keyed so it
+# never has to be remembered when that changes (WP-06.3, N14).
+_TRUNCATION_MARKER_TEMPLATE = "\n[TRUNCATED {omitted} chars]"
+
+#: The framing strings by name, in a fixed order: what the key holds.
+CROSS_QC_USER_FRAMING_NAMES = (
+    "_CROSS_QC_TASK",
+    "_WHOLE_SET_HEADER_TEMPLATE",
+    "_MAP_HEADER_TEMPLATE",
+    "_SHEET_TITLE_TEMPLATE",
+    "_SHEET_BODY_TEMPLATE",
+    "_MAP_TASK",
+    "_RECONCILE_MANIFEST_HEADER",
+    "_RECONCILE_MANIFEST_LINE_TEMPLATE",
+    "_UNKNOWN_DISCIPLINE",
+    "_RECONCILE_FACTS_HEADER",
+    "_RECONCILE_FACT_LINE_TEMPLATE",
+    "_RECONCILE_TASK",
+    "_TRUNCATION_MARKER_TEMPLATE",
+)
+
+
+def cross_qc_user_framing() -> dict[str, str]:
+    """The user-turn framing as the builders read it now: ``{name: string}``.
+
+    Read from the module at call time, as the builders read it, so the key and
+    the request cannot disagree about what was framed.
+    """
+    module = globals()
+    return {name: module[name] for name in CROSS_QC_USER_FRAMING_NAMES}
 
 
 @dataclass
@@ -1138,7 +1351,8 @@ def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
     budget.included += _TEXT_LAYER_BUDGET
     budget.omitted += len(text_layer) - _TEXT_LAYER_BUDGET
     kept = text_layer[:_TEXT_LAYER_BUDGET]
-    return kept + f"\n[TRUNCATED {len(text_layer) - _TEXT_LAYER_BUDGET} chars]"
+    return kept + _TRUNCATION_MARKER_TEMPLATE.format(
+        omitted=len(text_layer) - _TEXT_LAYER_BUDGET)
 
 
 def _fold_budget(aggregate: _Budget, local: _Budget) -> _Budget:
@@ -1192,20 +1406,28 @@ def _identity_preamble(identity: Any) -> str:
     return identity.context_block() + "\n\n"
 
 
-def _build_whole_set_input(entries: list[tuple], budget: _Budget, preamble: str = "") -> str:
-    """The whole-set user text: each sheet's id, digest, and budgeted text layer."""
-    parts = [
-        preamble
-        + f"DRAWING SET — {len(entries)} sheet(s). For each sheet you get its "
-        f"structured digest and its verbatim text layer.\n"
-    ]
-    for sheet_id, digest_text, text_layer, _geom in entries:
+def _sheet_block(handle: str, sheet_id: str, digest_text: str, text_layer: str) -> str:
+    """One sheet of a whole-set or shard request: its handle with its id beside it.
+
+    One helper for both paths (remediation WP-06.2, the owner's rule): the
+    handle is the address, the sheet id beside it is display metadata the model
+    needs to read a cross-reference ("see M-501") and to name the sheet in text.
+    """
+    return (
+        _SHEET_TITLE_TEMPLATE.format(handle=handle, sheet_id=sheet_id)
+        + _SHEET_BODY_TEMPLATE.format(digest=(digest_text or "").strip(), text=text_layer)
+    )
+
+
+def _build_whole_set_input(
+    entries: list[tuple], handles: "_SheetHandles", budget: _Budget, preamble: str = "",
+) -> str:
+    """The whole-set user text: each sheet's handle and id, digest, and budgeted text layer."""
+    parts = [preamble + _WHOLE_SET_HEADER_TEMPLATE.format(count=len(entries))]
+    for sheet_id, digest_text, text_layer, geom in entries:
         tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(
-            f"===== SHEET {sheet_id} =====\n"
-            f"DIGEST:\n{(digest_text or '').strip()}\n\n"
-            f"TEXT LAYER:\n{tl}\n"
-        )
+        handle = handles.handle_by_key[source_page_key(geom.ref)]
+        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
     parts.append("\n" + _CROSS_QC_TASK)
     return "\n".join(parts)
 
@@ -1214,23 +1436,12 @@ def _build_map_input(
     shard: list[tuple], handle_by_key: dict, budget: _Budget, preamble: str = ""
 ) -> str:
     """One shard's user text, sheets labeled by opaque handle (never source id)."""
-    parts = [
-        preamble
-        + f"DRAWING SET SHARD — {len(shard)} sheet(s), each labeled with an opaque "
-        f"HANDLE. Refer to sheets only by handle.\n"
-    ]
+    parts = [preamble + _MAP_HEADER_TEMPLATE.format(count=len(shard))]
     for sheet_id, digest_text, text_layer, geom in shard:
         handle = handle_by_key[source_page_key(geom.ref)]
         tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(
-            f"===== SHEET {handle} =====\n"
-            f"DIGEST:\n{(digest_text or '').strip()}\n\n"
-            f"TEXT LAYER:\n{tl}\n"
-        )
-    parts.append(
-        "\nReport this shard's within-shard conflicts, comparable facts, and claims "
-        "in the required json block."
-    )
+        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
+    parts.append(_MAP_TASK)
     return "\n".join(parts)
 
 
@@ -1238,19 +1449,17 @@ def _build_reconcile_input(
     manifest: list[tuple], facts: list[CrossQCFact], preamble: str = ""
 ) -> str:
     """The reconciliation user text: the full handle manifest + every collected fact."""
-    lines = [preamble + "SHEET MANIFEST (handle = sheet-id (discipline)):"]
+    lines = [preamble + _RECONCILE_MANIFEST_HEADER]
     for handle, sheet_id, discipline in manifest:
-        lines.append(f"  {handle} = {sheet_id} ({discipline or '?'})")
-    lines.append("\nFACTS (sheet_handle | entity_or_tag | attribute | value | exact_quote):")
+        lines.append(_RECONCILE_MANIFEST_LINE_TEMPLATE.format(
+            handle=handle, sheet_id=sheet_id,
+            discipline=discipline or _UNKNOWN_DISCIPLINE))
+    lines.append(_RECONCILE_FACTS_HEADER)
     for f in facts:
-        lines.append(
-            f"  {f.sheet_handle} | {f.entity_or_tag} | {f.attribute} | {f.value} | "
-            f'"{f.exact_quote}"'
-        )
-    lines.append(
-        "\nCompare the facts across the whole manifest and report cross-sheet "
-        "conflicts in the required json block."
-    )
+        lines.append(_RECONCILE_FACT_LINE_TEMPLATE.format(
+            handle=f.sheet_handle, entity=f.entity_or_tag, attribute=f.attribute,
+            value=f.value, quote=f.exact_quote))
+    lines.append(_RECONCILE_TASK)
     return "\n".join(lines)
 
 
@@ -1299,40 +1508,46 @@ def _call(
 
 
 def _one_cross_qc_call(
-    entries: list[tuple], sheet_map: dict[str, Any], *,
+    entries: list[tuple], handles: _SheetHandles, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", invalid: "CrossQCInvalidCounts | None" = None,
+    counts: "CrossQCDiscardCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
-    """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``."""
+    """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``.
+
+    Since remediation WP-06.2 (N6, U8) the request addresses sheets by
+    ``handles`` and every item goes through the sharded path's validator
+    (:func:`_finding_from_handles`): bound through the one resolver, grounded
+    against each sheet's uncapped text, its losses counted in ``counts``. Its
+    claims are rebound through the same handles (:func:`_resolve_claim_handles`).
+    """
+    ebh, by_label = handles.entry_by_handle, handles.by_label
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_system_prompt(),
-        user_text=_build_whole_set_input(entries, budget, preamble),
+        user_text=_build_whole_set_input(entries, handles, budget, preamble),
         max_retries=max_retries, sleep=sleep,
     )
     if err is not None or raw is None:
         return [], [], in_tok, out_tok, err
     obj = _last_json_object(raw)
     if obj is None:
-        return [], parse_numeric_claims(raw), in_tok, out_tok, _NO_FINDINGS_OBJECT
-    findings: list[Finding] = []
-    refused = CrossQCInvalidCounts()
-    unplaceable = 0
-    for item in _findings_array(obj):
-        before = refused.total
-        f = _validate_cross_item(item, sheet_map, refused)
-        if f is None:
-            # A refused field is counted (and logged by the caller, once per
-            # run); what remains is an item that could not be placed on two
-            # sheets of the set.
-            if refused.total == before:
-                unplaceable += 1
-            continue
-        findings.append(f)
-    if invalid is not None:
-        invalid.merge(refused)
-    if unplaceable:
-        _log.info("cross-qc parse: dropped %d unplaceable finding(s)", unplaceable)
-    return _cap_findings(findings, budget), parse_numeric_claims(raw), in_tok, out_tok, None
+        claims = _resolve_claim_handles(parse_numeric_claims(raw), ebh, by_label)
+        return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
+    local = CrossQCDiscardCounts()
+    findings = [
+        f for item in _findings_array(obj)
+        if (f := _finding_from_handles(item, ebh, local, invalid=invalid, by_label=by_label))
+        is not None
+    ]
+    if local.findings_dropped_under_two_legs:
+        # Refused fields are counted (and logged by the caller, once per run);
+        # these are the items that could not be placed on two grounded sheets.
+        _log.info("cross-qc parse: dropped %d unplaceable finding(s)",
+                  local.findings_dropped_under_two_legs)
+    if counts is not None:
+        counts.merge(local)
+    claims = _resolve_claim_handles(parse_numeric_claims(raw), ebh, by_label)
+    return _cap_findings(findings, budget), claims, in_tok, out_tok, None
 
 
 def _map_call(
@@ -1340,9 +1555,13 @@ def _map_call(
     discipline_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
-    invalid: "CrossQCInvalidCounts | None" = None,
+    invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
-    """One shard-map call → local findings + claims + grounded facts (handle-keyed)."""
+    """One shard-map call → local findings + claims + grounded facts (handle-keyed).
+
+    ``by_label`` (the run's :class:`_SheetHandles`) lets a reply's sheet id bind
+    when one sheet carries it, exactly as on the whole-set path.
+    """
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_map_system_prompt(),
         user_text=_build_map_input(shard, handle_by_key, budget, preamble),
@@ -1352,21 +1571,23 @@ def _map_call(
         return [], [], [], in_tok, out_tok, err
     obj = _last_json_object(raw)
     if obj is None:
-        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
+        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
         return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = _cap_findings([
         f for item in _findings_array(obj)
-        if (f := _finding_from_handles(item, entry_by_handle, counts, invalid=invalid))
+        if (f := _finding_from_handles(item, entry_by_handle, counts, invalid=invalid,
+                                       by_label=by_label))
         is not None
     ], budget)
-    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
-    facts = _parse_facts(obj, entry_by_handle, discipline_by_handle, counts)
+    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
+    facts = _parse_facts(obj, entry_by_handle, discipline_by_handle, counts, by_label)
     return findings, claims, facts, in_tok, out_tok, None
 
 
 def _parse_facts(
     obj: dict, entry_by_handle: dict, discipline_by_handle: dict,
     counts: "CrossQCDiscardCounts | None" = None,
+    by_label: "dict | None" = None,
 ) -> list[CrossQCFact]:
     """Validate + build :class:`CrossQCFact` s from a map response's ``facts`` array.
 
@@ -1378,24 +1599,31 @@ def _parse_facts(
     It used to be classified (blank, so TEXT_EVIDENCE_UNAVAILABLE), admitted at
     reduced trust, counted as a no-text admission and sent to the reconciler,
     which compares quotes and could do nothing with it.
+
+    A fact's handle goes through the one resolver (:func:`_resolve_sheet_ref`,
+    remediation WP-06.2): an id more than one sheet carries is refused and
+    counted ``facts_ambiguous_label``. The fact keeps the resolved handle, so the
+    reconciler and the fact-tile join see one spelling of each sheet.
     """
     out: list[CrossQCFact] = []
     for item in (obj.get("facts") or []):
         if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS:
             continue
-        handle = str(item.get("sheet_handle", "") or "").strip()
-        entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
-        if entry is None:
-            if counts is not None:           # no geom: run-level only
-                counts.bump("facts_unresolved_handle")
+        handle, why = _resolve_sheet_ref(
+            str(item.get("sheet_handle", "") or item.get("sheet_id", "") or "").strip(),
+            entry_by_handle, by_label)
+        if not handle:
+            if counts is not None:           # no one sheet: run-level only
+                counts.bump("facts_ambiguous_label" if why == _REF_AMBIGUOUS
+                            else "facts_unresolved_handle")
             continue
-        sheet_id, geom = entry
+        sheet_id, geom = entry_by_handle[handle]
         exact_quote = _quote(item.get("exact_quote", ""))
         if not exact_quote.strip():          # empty or whitespace: no quote
             if counts is not None:
                 counts.bump("facts_no_quote", geom)
             continue
-        # Resolved against THIS sheet's grid, as _validate_cross_item does.
+        # Resolved against THIS sheet's grid, as every leg's tile is.
         # ``_resolve_tile`` prefers ``tile_label`` and bounds-checks it, so a bad
         # label degrades to ``None`` (today's UNANCHORED), never a wrong
         # rectangle. Resolved before classification: the classifier asks whether
@@ -1432,7 +1660,7 @@ def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
-    invalid: "CrossQCInvalidCounts | None" = None,
+    invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
     raw, in_tok, out_tok, err = _call(
@@ -1444,7 +1672,7 @@ def _reconcile_call(
         return [], [], in_tok, out_tok, err
     obj = _last_json_object(raw)
     if obj is None:
-        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
+        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
     # §8.4 Part 2: recover each returned leg's location from the fact its quote
     # came from. Built over the facts THIS call was given, so a leg can only
@@ -1452,10 +1680,11 @@ def _reconcile_call(
     lookup = fact_tile_lookup(facts)
     findings = _cap_findings([
         f for item in _findings_array(obj)
-        if (f := _finding_from_handles(item, entry_by_handle, counts, lookup, invalid))
+        if (f := _finding_from_handles(item, entry_by_handle, counts, lookup, invalid,
+                                       by_label=by_label))
         is not None
     ], budget)
-    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
+    claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle, by_label)
     return findings, claims, in_tok, out_tok, None
 
 
@@ -1469,6 +1698,7 @@ def _reconcile_facts(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     max_workers: int | None = None, invalid: "CrossQCInvalidCounts | None" = None,
+    by_label: "dict | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -1490,6 +1720,7 @@ def _reconcile_facts(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=counts, invalid=invalid,
+            by_label=by_label,
         )
         return f, c, i, o, err is None
 
@@ -1521,7 +1752,7 @@ def _reconcile_facts(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=budget, preamble=preamble, counts=local_counts,
-                invalid=local_invalid,
+                invalid=local_invalid, by_label=by_label,
             ), local_counts, local_invalid)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
             return [], [], 0, 0, _clean_error(exc), local_counts, local_invalid
@@ -1609,13 +1840,19 @@ def _drop_exact_repeats(findings: list[Finding]) -> list[Finding]:
 
 
 def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
-    """De-duplicate transcribed claims across shards + reducers (source/quote aware)."""
+    """De-duplicate transcribed claims across shards + reducers (source/quote aware).
+
+    Keyed on the claim's page first (remediation WP-06.2, N6): two PDFs that
+    carry one sheet id can print the same row, and keyed on the id alone their
+    two claims were one. A claim no reference bound keeps its id (its page key
+    is empty), as before.
+    """
     seen: set[tuple] = set()
     out: list[NumericClaim] = []
     for c in claims:
         # Exact decimals, terms as a multiset: the canonical claim form every
         # claim dedup shares (remediation WP-03.3), so "20" and 20.0 are one.
-        key = (_norm_id(c.sheet_id), (c.quote or "").strip().lower(),
+        key = (source_page_key(c), _norm_id(c.sheet_id), (c.quote or "").strip().lower(),
                *claim_content_key(c.kind, c.terms, c.expected))
         if key in seen:
             continue
@@ -1668,6 +1905,9 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             "whole_set": cross_qc_system_prompt(),
             "map": cross_qc_map_system_prompt(),
             "reconcile": CROSS_QC_RECONCILE_SYSTEM_PROMPT,
+            # K2 (remediation WP-06.2, the owner's rule): the user-turn framing
+            # rides the key verbatim, as the system prompts do.
+            "user_framing": cross_qc_user_framing(),
         },
         inputs={"identity_preamble": preamble, "sheets": cache_inputs},
         params={
@@ -1765,6 +2005,13 @@ def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
     )
 
 
+def _log_ambiguous(discards: CrossQCDiscardCounts) -> None:
+    """Log a run's refused ambiguous references once, at WARNING (remediation WP-06.2)."""
+    note = discards.ambiguity_note()
+    if note:
+        _log.warning("cross-qc: %s", note)
+
+
 def _log_refused(invalid: CrossQCInvalidCounts) -> None:
     """Log a run's refused items once, at WARNING (remediation WP-06.1, B6).
 
@@ -1803,6 +2050,11 @@ def cross_sheet_qc(
     ``identity`` (Phase A §20.1) prepends the same set-context preamble to every
     input (whole-set, shard maps, reconcile) — units/language context that kills
     metric-vs-imperial false conflicts. ``None`` keeps inputs byte-identical.
+
+    Both paths address the set's sheets by the same host handles, assigned in
+    source order (remediation WP-06.2: :func:`_canonical_order`,
+    :func:`_assign_handles`), and both ground and count what they keep
+    (``discards``).
     """
     model = model or cross_qc_model()
     preamble = _identity_preamble(identity)
@@ -1821,6 +2073,11 @@ def cross_sheet_qc(
     if len(entries) < MIN_SHEETS_FOR_CROSS_QC:
         return CrossQCResult(skipped=True)
 
+    # Source order, then one set of handles for either path (remediation
+    # WP-06.2; the owner's rules). The key is built over the ordered entries, so
+    # a reordered input keys, and is sent, identically.
+    entries = _canonical_order(entries)
+    handles = _assign_handles(entries)
     cache_key = _cross_qc_cache_key(entries, model=model, preamble=preamble)
     cached_payload = get_stage_cache_entry(cache, cache_key, stage="cross_qc")
     if cached_payload is not None:
@@ -1832,20 +2089,13 @@ def cross_sheet_qc(
             )
             return cached_result
 
-    # Whole-set sheet-id map (first detection wins on a collision; warn).
-    sheet_map: dict[str, Any] = {}
-    for sheet_id, _t, _tl, geom in entries:
-        key = _norm_id(sheet_id)
-        if not key:
-            continue
-        if key in sheet_map:
-            _log.warning(
-                "cross-qc: duplicate sheet id %r (%s shadows %s); the shadowed "
-                "sheet won't resolve by id", sheet_id,
-                sheet_map[key].ref.source_name, geom.ref.source_name,
-            )
-            continue
-        sheet_map[key] = geom
+    # Remediation WP-06.2 (N6): a sheet id more than one sheet carries no
+    # longer shadows the later sheets. Each is reachable by its handle, and a
+    # reply naming the shared id binds none of them (counted, never first-wins).
+    for label, shared in sorted(handles.by_label.items()):
+        if len(shared) > 1:
+            _log.info("cross-qc: sheet id %r is carried by %d sheets (%s); a reply "
+                      "must name them by handle", label, len(shared), ", ".join(shared))
 
     if client is None:
         try:
@@ -1858,13 +2108,16 @@ def cross_sheet_qc(
     budget = _Budget()
     # Remediation WP-06.1 (B6): refused items are counted on both paths.
     invalid = CrossQCInvalidCounts()
+    # WP-02 §7.2: run-level discard counters, on both paths since remediation
+    # WP-06.2 (U8): the whole-set path grounds through the same validator.
+    discards = CrossQCDiscardCounts()
 
-    # ---- Small set: one whole-set call (unchanged, complete). ----
+    # ---- Small set: one whole-set call (complete). ----
     if len(entries) <= MAX_SHEETS_SINGLE_CALL:
         findings, claims, in_tok, out_tok, err = _one_cross_qc_call(
-            entries, sheet_map, client=client, model=model,
+            entries, handles, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
-            preamble=preamble, invalid=invalid,
+            preamble=preamble, invalid=invalid, counts=discards,
         )
         kept = _drop_exact_repeats(findings)
         _log.info(
@@ -1872,6 +2125,7 @@ def cross_sheet_qc(
             len(kept), len(entries),
         )
         _log_refused(invalid)
+        _log_ambiguous(discards)
         result = CrossQCResult(
             findings=kept, claims=_dedup_claims(claims),
             input_tokens=in_tok, output_tokens=out_tok, error=err,
@@ -1881,6 +2135,7 @@ def cross_sheet_qc(
             text_chars_omitted=budget.omitted,
             findings_omitted=budget.findings_omitted,
             budget_degraded=budget.degraded,
+            discards=discards,
             invalid=invalid,
         )
         _put_cross_qc_cache(cache, cache_key, result)
@@ -1889,26 +2144,14 @@ def cross_sheet_qc(
     # ---- Large set: map → reconcile. ----
     shards = _shard_by_discipline(entries)
 
-    # Assign opaque, request-local handles to every entry (S001 …) + the manifest.
-    entry_by_handle: dict[str, tuple] = {}      # handle -> (sheet_id, geom)
-    handle_by_key: dict[tuple, str] = {}
-    discipline_by_handle: dict[str, str] = {}
-    manifest: list[tuple] = []                  # (handle, sheet_id, discipline)
-    from .auditors.sheet_ids import discipline_token
-    for i, (sheet_id, _t, _tl, geom) in enumerate(entries, start=1):
-        handle = f"S{i:03d}"
-        key = source_page_key(geom.ref)
-        entry_by_handle[handle] = (sheet_id, geom)
-        handle_by_key[key] = handle
-        disc = discipline_token(sheet_id)
-        discipline_by_handle[handle] = disc
-        manifest.append((handle, sheet_id, disc))
+    # The run's handles (S001 …) and the reconcile manifest, shared with the
+    # whole-set path (remediation WP-06.2).
+    entry_by_handle = handles.entry_by_handle
+    handle_by_key = handles.handle_by_key
+    discipline_by_handle = handles.discipline_by_handle
+    manifest = handles.manifest
+    by_label = handles.by_label
 
-    # WP-02 §7.2: run-level discard counters. Only the sharded path grounds
-    # quotes host-side (``_validate_cross_item`` on the whole-set path performs no
-    # grounding at all), so this stays ``None`` there — "not measured", never a
-    # misleading all-zero "nothing was discarded".
-    discards = CrossQCDiscardCounts()
     all_findings: list[Finding] = []
     all_claims: list[NumericClaim] = []
     all_facts: list[CrossQCFact] = []
@@ -1924,7 +2167,7 @@ def cross_sheet_qc(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=local_budget, preamble=preamble, counts=local_counts,
-                invalid=local_invalid,
+                invalid=local_invalid, by_label=by_label,
             ), local_budget, local_counts, local_invalid)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
             return ([], [], [], 0, 0, _clean_error(exc), local_budget, local_counts,
@@ -1967,7 +2210,7 @@ def cross_sheet_qc(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=discards,
-            max_workers=max_workers, invalid=invalid,
+            max_workers=max_workers, invalid=invalid, by_label=by_label,
         )
         total_in += r_in
         total_out += r_out
@@ -1996,6 +2239,7 @@ def cross_sheet_qc(
         "" if not budget.degraded else f"; budget degraded ({budget.omitted} chars omitted)",
     )
     _log_refused(invalid)
+    _log_ambiguous(discards)
     result = CrossQCResult(
         findings=kept,
         claims=_dedup_claims(all_claims),

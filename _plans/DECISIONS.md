@@ -763,6 +763,28 @@ counts, so a warm run shows the same warning.
 - Measured before deciding: the suite's fixtures produce no refused item (84
   validator calls), so no pinned status moved under either option.
 
+Added by WP-06.2 ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191)): **cross-QC's refused ambiguous references stay observational**
+(the owner's decision; N6, D-8). A reply that names a sheet id more than one
+sheet of the set carries binds none of them; the reference is counted in
+`CrossQCDiscardCounts` (`legs_ambiguous_label`, `facts_ambiguous_label`), and a
+non-zero count becomes one cross-QC stage warning
+(`CrossQCDiscardCounts.ambiguity_note()`), placed after the refused-item
+warning. The stage keeps its status and the result is cached with its counts,
+so a warm run shows the same warning. The whole-set path's grounding discards
+(U8) are observational too, as the sharded path's always were: no stage
+warning, `run_manifest.json` only.
+- Why not D-2's item rule: as for refused items, what was lost is part of the
+  model's reply, not a required input left unjudged; every sheet was sent and
+  each stays addressable by its handle.
+- Considered and not taken: the counters with no warning (the loss would be
+  visible in the manifest only); counting under `legs_unresolved_handle` (an
+  ambiguous id and an unknown one would read alike); holding the stage
+  PARTIAL (a stable reply would read PARTIAL on every warm run, N14's shape,
+  WP-06.3's decision).
+- Measured before deciding: 11 of the suite's 295 cross-QC calls had an id two
+  or three PDFs carry, and none of their replies named it, so no pinned
+  status moved.
+
 Added by WP-09.1: **the prose harvest's dropped synthesis assurances are
 counted observationally** (the owner's decision; N11). The harvest's ladder is
 unchanged: `missing` (an enumerated item that reached no ledger entry) alone
@@ -1355,6 +1377,25 @@ never deleted (plan §2 rule 6, WP-10).
   at 128k, and nothing marks it (the serving model in a payload is WP-14.6's).
   `CritiqueRunOutcome.stop_reason`, `read_error` and `retries_discarded` are
   runtime-only; no stored field changed. No migration-register row.
+- **Added by WP-06.2 ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191)): the cross-QC term 8 → 9, beside the user-turn framing
+  joining the key** (the owner's decision; N6, U8, K2). Two changes, each with
+  its own mechanism. The host-side binding changed for byte-identical inputs
+  (the whole-set path binds through handles and the one resolver, refuses an
+  id two sheets carry, grounds and counts what it keeps, rebinds its claims;
+  the sharded path reads a reply's `sheet_id` through the same resolver; the
+  claim dedup keys on the page; entries sort by source), which is what the
+  term exists for, so it is bumped. Separately, the framing strings the
+  builders put around the sheets now ride the key verbatim beside the three
+  system prompts (`cross_qc_user_framing()`, K2), so a framing edit re-keys
+  through the key's own inputs, as a prompt edit does. Not "a bump and a key
+  term for one change" (plan §2 rule 15): if the framing ever moved back out
+  of the key, the bump would still keep a warm entry from serving a binding
+  the host no longer makes. The critique contract (5), its merge-rule
+  fingerprint and `_SCHEMA_VERSION` are unchanged: `critique._leg_targets`
+  now names pages, but no critique finding carries a leg, so no stored
+  critique holds a merge it decided (the fingerprint corpus has no legs and
+  measured unchanged). The A/B record contract moves (5 → 6): a record stores
+  the leg targets.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -1434,7 +1475,7 @@ unreported output makes a total unknown is this decision's.
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-8 Source identity — `open`: the page part decided by WP-11.1 ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), completed by WP-06.2
+## D-8 Source identity — `decided`: the page part by WP-11.1 ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), the binding part by WP-06.2 ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191))
 
 **Required decision:** resolve every sheet and every evidence leg to exactly
 one physical input revision and page, never merely a human sheet label (N6).
@@ -1474,11 +1515,51 @@ markup reopen.
     WP-10.1).
   - **Every page the run owes ends with an outcome**: a digest, or a
     `models.UnreadPage` with a path-free reason (D-2's WP-11.1 note).
-- **Still open, for WP-06.2 (and named):** binding every evidence leg and the
-  whole-set cross-QC's handles to this identity instead of a human label
-  (first-wins label maps, N6); the colliding `stem-pN` fallback ids. Revision
-  binding on every reopen (verify, investigate, markup) is WP-11.3's, under
-  this decision's revision clause.
+- **Decision, WP-06.2's part: every evidence leg and every handle is a page**
+  (the owner's rules, eight choices over two rounds, measured first; N6, U8).
+  The page part above stands unamended.
+  - **Cross-QC addresses sheets by host handles on both paths.** One
+    assignment (`cross_qc._assign_handles`): `S001` … over the entries in
+    source order (`_canonical_order`: `(source_id, page_index)`, natural order,
+    when every entry has a source id; input order otherwise), so a reordered
+    input is sent, keyed and bound identically. A handle names one page, and
+    no handle is a sheet id of the set (`_handle_prefix`, Codex review: `S`
+    unless one of the set's ids is one of its handles, then `H`, `K`, …), so a
+    reference is a handle or an id, never both. The
+    human sheet id is shown beside each handle (`===== SHEET S001 = M-101
+    =====`, whole-set and map requests; the reconcile manifest already did) as
+    display metadata, for cross-references and for the text a reviewer reads.
+  - **One resolver binds every reference** (`_resolve_sheet_ref`): a handle
+    names its own page; else a sheet id binds when exactly one page of
+    the set carries it. An id more than one page carries is refused and
+    counted, never bound to the first (D-2's WP-06.2 note). One validator
+    serves both paths (`_finding_from_handles`), so the whole-set path grounds
+    against the uncapped text like the sharded path (U8; plan WP-06 Step 6
+    reverses WP-03A's scope). Claims are rebound through the same resolver
+    (`_resolve_claim_handles`) and de-duplicated by page first.
+  - **No first-wins label map anywhere a binding is made.** The arithmetic
+    auditor's `_build_maps` maps an id two pages carry to no sheet, and such a
+    claim is refused before it is checked (`arithmetic_ambiguous_sheet`). The
+    prose harvest's synthesis id map does the same, so a statement whose
+    primary is such an id goes set-level and such a second sheet is no leg.
+  - **A cross-sheet leg is its page in the merge gate**:
+    `critique._leg_targets` names `"<source>#p<page>"` (`SRC-0002#p1`); a leg
+    with no source keeps its canonical id.
+  - **Fallback ids stay display labels.** `cross_qc._fallback_id` is still
+    `<stem>-p<n>`; two same-basename PDFs share it, which no longer matters to
+    binding (handles), and a reply that names a shared one is ambiguous.
+  - **Not decided here, named:** `investigate._sheet_id_map` still addresses
+    the investigation tools by sheet id, a later finding overwriting an
+    earlier id (0 collisions in the suite's 247 maps): the tool contract is
+    WP-13's (a note on its row). Revision binding on every reopen (verify,
+    investigate, markup) is WP-11.3's, under this decision's revision clause.
+  - **Rejected shortcuts** (each measured on `acaa55e`): label-derived handles
+    (`M-101`, `M-101#2`: +18 tests, every sharded fixture hardcodes `S###`, and
+    a bare shared id stays ambiguous); keeping the caller's order (a reordered
+    input gets new handles and a new key); keeping `_leg_targets` label-based
+    (two legs to two same-id PDFs read as one target); checking an ambiguous
+    claim unplaced (an unrouted finding and a FAILED receipt) or as a
+    set-level note.
 - **Rejected shortcuts** (each measured on `a7dd050`):
   - catching the open in both iterators and continuing, with the denominator
     from `list_sheets`: every abort became a silent `COMPLETE` (batch, second
@@ -1491,12 +1572,18 @@ markup reopen.
     fact, and pages the inventory never counted are billed;
   - failing a whole source on a page-count change: revision binding by page
     count alone, while a same-count rewrite is still read until WP-11.3.
-- **Version / cache changes:** none. For an unchanged set the refs equal
-  `list_sheets` field for field, and the render identity keeps the opened
-  file's count, so every level-1 and level-2 key is byte-identical
+- **Version / cache changes:** none for WP-11.1's part. For an unchanged set
+  the refs equal `list_sheets` field for field, and the render identity keeps
+  the opened file's count, so every level-1 and level-2 key is byte-identical
   (`tests/test_drawing_cache_identity.py` passes unchanged). No
   migration-register row. `run_manifest.json` gains one additive key,
-  `unread_pages`.
+  `unread_pages`. WP-06.2's part: `_CROSS_QC_CACHE_CONTRACT` 8 → 9, the
+  cross-QC user framing into its key (K2), the A/B `RECORD_CONTRACT_VERSION`
+  5 → 6 (three register rows); digest, critique, identity, review-plan and
+  citation keys byte-identical. `run_manifest.json`'s `cross_qc_discards` is
+  filled on the whole-set path too and gains two additive counters
+  (`legs_ambiguous_label`, `facts_ambiguous_label`); the audit stats gain
+  `arithmetic_ambiguous_sheet`.
 - **Consumers affected:** the pipeline's `total` and everything built on it
   (the digest stage's `items_in`, `ctx.sheet_count`, `RUN_END`'s
   `sheets_total`, the critique's eligible reads, progress), the two iterators
@@ -1504,7 +1591,14 @@ markup reopen.
   (an expected page they could not scan is a miss), `_GeometryOmissionSink`
   (inserts a routed page's geometry in page order), `ctx.unread_pages`,
   run.log's Sheets section, `run_manifest.json`, and the failed count of the GUI
-  and the report (`sheet_count - ok_sheet_count`).
+  and the report (`sheet_count - ok_sheet_count`). WP-06.2's part: the
+  cross-QC request builders and parsers, the cross-QC stage record (a
+  warning), `run_manifest.json` (`cross_qc_discards`), the arithmetic
+  auditor and its stats, the prose harvest's synthesis binding, the ledger's
+  merge gate and the A/B harness (both through `critical_signature`), the
+  markup and verification of whole-set conflicts (now grounded, with an
+  evidence state on each leg), and `scripts/measure_evidence_coverage.py`
+  (reads `cross_qc_discards`, unchanged code).
 
 ---
 
@@ -1537,3 +1631,6 @@ migration.
 | Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=4` | schema 10, `critique_contract=5` | Every field; the entry shape is unchanged | None: every critique entry written under contract 4 misses once | The merge rule behind the stored post-merge findings changed (remediation WP-04.4, the owner's rules): the quantity reader behind `critique.critical_signature` reads a spelled range or list whole (`4 to 6 in`, `between 4 and 6 in`, `4 and 6 in`, `4 or 6 in`, and three or more numbers joined by commas, `critique._read_spelled`) and a compact `A` beside a voltage (`20A 120V`), and the signature carries `feet_inches` (`critique._feet_inches`: `12'` is `12ft0in`, `12'-6"` is `12ft6in`), which `critique.signature_conflicts` compares. An entry stored under 4 can hold a merge the new rule refuses (`4 to 6 in` folded into `6 in`), or a loose list kept apart from its tight twin, which now merge. One mechanism: the existing critique-only term, bumped (the WP-04.2 precedent); no key term, never `_SCHEMA_VERSION`. The merge-rule fingerprint is pinned under 5 (`020b7789…`), computed over a corpus that gained 17 residual rows; over the extended corpus the contract-4 rule fingerprints as `f6116986…` (recorded in the test), and the values under 1 to 4 are untouched. Digest, identity, review-plan, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py::test_wp_04_4_moves_every_critique_key_and_no_other_key`, with the contract-4 keys pinned). Old entries stay on disk (`test_a_critique_entry_from_wp_04_3_misses_and_is_never_deleted`); the next exhaustive run re-critiques each sheet once. No release shipped contracts 1 to 4 (WP-04.1, WP-04.2, WP-01.4 and WP-04.3 are unreleased), so a user upgrading from 1.7.0 pays one miss per sheet for all five bumps. The prose harvest's structuring key hashes the item and the sheet, never the match, so no stage cache holds a merge outcome besides the critique's (re-verified) | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=7` | `_CROSS_QC_CACHE_CONTRACT=8` | Every field; the entry shape is unchanged | None: every cross-QC entry written under contract 7 misses once, on the whole-set path too | Host-side grounding changed for byte-identical request inputs (remediation WP-04.4, the owner's decision): the character-stream tier's quantity veto (`anchor._same_quantities`) reuses `critique._quantity_tokens`, whose new readings are guarded by the word after `in` and the word before the number, and a named letter-merge join can change those words. So a leg quoting `4 TO 6 IN A CLEAR` against a sheet printing `4 TO 6 IN ACLEAR`, or `ELEC ROOM 101A 120V` against `ELECROOM 101A 120V`, grounded before and does not now (constructed and pinned in `tests/test_quantity_residuals.py`); none of the suite's 908 grounding verdicts moved. One mechanism: the existing contract term, bumped; no key term. The five tripwires that pinned 7 are re-pinned to 8 (the approved bump) | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |
 | A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 4 | 5 | Every field; `critical_signature` gains `feet_inches` | None: `load_arm_records` refuses a v4 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran: a v4 record holds the partial readings (`4 to 6 in` as `6in`, `2, 4, 6 in` as `6in`, no `20amp` beside `120V`) and no feet-inches pairs, which the rule reads as agreeing, so a v4 baseline against a v5 variant would call `12'` / `12'-6"` or `4 to 6 in` / `6 in` EXACT: the silent failure the version exists for. Refused, never deleted: re-run the arm | WP-04.4, [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189) |
+| Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=8` | `_CROSS_QC_CACHE_CONTRACT=9` | Every field; `discards` gains two additive counters (`legs_ambiguous_label`, `facts_ambiguous_label`), which an older entry reads back as 0 | None: every cross-QC entry written under contract 8 misses once, on both paths | Host-side binding changed for byte-identical request inputs (remediation WP-06.2; N6, U8; the owner's rules): the whole-set path addresses sheets by host handles and binds every reply through the one resolver (a handle, else an id exactly one sheet carries; an id two sheets carry is refused where the first detection used to win), grounds every quote against the uncapped text and counts what it drops (`discards` is recorded there now), and rebinds its claims to their pages; the sharded path reads a reply's `sheet_id` through the same resolver; `_dedup_claims` keys on the page first; entries are ordered by source id and page (a no-op for every pipeline call, measured). No key input covers any of it. One mechanism: the existing term, bumped; no key term for it, never `_SCHEMA_VERSION`. The six tripwires that pinned 8 are re-pinned to 9 (the approved bump). No release shipped contracts 4 to 8, so a user upgrading from 1.7.0 pays one miss for all of them: one paid cross-QC pass per set. A conflict between two same-id sheets is new paid work downstream (a dual-crop verification call), and a whole-set conflict whose quote its sheet does not print is no longer reported; the verification and investigation keys are unchanged, and a conflict kept before keeps its entries. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass with new tests only). Old entries stay on disk | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |
+| Cross-QC cache (`_cross_qc_cache_key`), its `prompt` payload | the three system prompts | the three system prompts and the user-turn framing (`user_framing`: `cross_qc_user_framing()`, the strings in `CROSS_QC_USER_FRAMING_NAMES`, verbatim) | Every field; the entry shape is unchanged | None, once: every cross-QC key changes (in the same release as the contract row above, so the same one miss) | K2 (remediation WP-06.2; the owner's rule): the task line, the set and shard headers, the sheet title and body, the shard task, the reconcile manifest and fact lines and task, the unknown-discipline mark and the `[TRUNCATED N chars]` marker were inline literals outside the key, so editing one changed the request while every key stayed the same. They are named module strings now, held verbatim beside the prompts, so a later edit re-keys through the key's own inputs (the `digest.SHARED_USER_FRAMING_STRINGS` precedent). The truncation marker never reaches a stored entry (a degraded result is never admitted); it is keyed so it need not be remembered when WP-06.3 decides N14. A separate change with its own mechanism, beside the contract bump for the binding: not a bump and a term for one change | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |
+| A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 5 | 6 | Every field; `critical_signature["leg_targets"]` names pages (`SRC-0002#p1`) instead of sheet ids | None: `load_arm_records` refuses a v5 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran, and `critique._leg_targets` now names each leg's page (remediation WP-06.2, N6). A v5 record holds sheet ids there, which never equal a page, so a v5 baseline against a v6 variant would report every unchanged cross-sheet conflict as one with different legs, and a conflict whose leg moved to another PDF carrying the same id would have matched EXACT under v5. Refused, never deleted: re-run the arm | WP-06.2, [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191) |

@@ -627,4 +627,6 @@ def test_the_anchor_and_cross_qc_refuse_a_join_that_reads_differently(case):
 def test_the_cross_qc_contract_moved_for_the_quantity_reader():
     from drawing_analyzer import cross_qc as X
 
-    assert X._CROSS_QC_CACHE_CONTRACT == 8
+    # 9 since remediation WP-06.2 (whole-set binding through handles, grounded;
+    # the owner's decision).
+    assert X._CROSS_QC_CACHE_CONTRACT == 9

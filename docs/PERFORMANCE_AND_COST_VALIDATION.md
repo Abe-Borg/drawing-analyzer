@@ -236,7 +236,11 @@ so a record written before that is refused as a stale contract), nor, since
 WP-04.4, one whose spelled range or list, bare feet value or compact `A` beside a
 voltage changed (`4 to 6 in` to `6 in`, `12'-6"` to `12'`: a record stores the
 readings and each feet value with its inches, `feet_inches`, so a record written
-before that is refused too, `RECORD_CONTRACT_VERSION` 5) — and geometry
+before that is refused too, `RECORD_CONTRACT_VERSION` 5), nor, since
+remediation WP-06.2, a cross-sheet conflict whose leg moved to another PDF
+that carries the same sheet id (a record stores each leg as its page,
+`SRC-0002#p1`, not its sheet id, so a record written before that is refused,
+`RECORD_CONTRACT_VERSION` 6) — and geometry
 never produces one at all: rect
 overlap only ever *suggests* a candidate. Nothing is deleted, no fuzzy score is
 promoted to an equivalence, and no second model is asked to adjudicate — that

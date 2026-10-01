@@ -124,8 +124,11 @@ def test_cross_qc_returns_numeric_claims():
         client=_ClaimsCrossClient([claim]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.claims) == 1 and res.claims[0].kind == "sum"
-    # No emitting-sheet ref (the pass spans the set) — the auditor resolves by id.
-    assert res.claims[0].source_name == "" and res.claims[0].sheet_id == "F-D-01-1"
+    # Rebound to the sheet its reference names (remediation WP-06.2, N6): this
+    # used to assert no source at all, which left the arithmetic auditor to
+    # look the id up first-wins. An id one sheet carries binds that sheet.
+    c = res.claims[0]
+    assert (c.source_name, c.page_index, c.sheet_id) == ("a.pdf", 0, "F-D-01-1")
 
 
 def test_skips_below_two_readable_sheets():
@@ -207,9 +210,11 @@ def test_promotes_first_resolvable_leg_when_primary_unknown():
             {"sheet_id": "F-A-01-1", "source_quote": "COLO 1", "tile": [1, 1]},
         ],
     }
+    # Each sheet prints the quote its leg cites: the whole-set path grounds
+    # since remediation WP-06.2 (U8), and an unprinted quote is dropped.
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf")],
-        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")],
+        [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1")],
         client=_CrossClient([[item]]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.findings) == 1
@@ -531,9 +536,12 @@ def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
         "source_quote": "COLO 5", "tile": [0, 0],
         "also_on": [{"sheet_id": "F-G-02-0", "source_quote": "COLO 5 zone", "tile": [1, 1]}],
     }
+    # Each sheet prints what its legs quote (the whole-set path grounds since
+    # remediation WP-06.2, U8).
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf"), _digest("c.pdf")],
-        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1"), _geom("c.pdf", "F-G-02-0")],
+        [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1"),
+         _geom_txt("c.pdf", "F-G-02-0", "COLO 5 zone")],
         client=_CrossClient([[_CONFLICT, c2]]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.findings) == 2
@@ -981,12 +989,17 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # tier's veto reuses reads spelled ranges and lists and a compact A beside
     # a voltage, through guards a named letter-merge join can change, so a
     # grounding verdict can move for byte-identical request inputs.
-    assert X._CROSS_QC_CACHE_CONTRACT == 8
+    #
+    # 9 since remediation WP-06.2 (N6, U8): the whole-set path binds a reply
+    # through host handles and the one resolver (an id two sheets carry is
+    # refused where the first detection won), grounds what it keeps, rebinds
+    # its claims; the claim dedup keys on the source; entries sort by source.
+    assert X._CROSS_QC_CACHE_CONTRACT == 9
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     import pytest as _pytest
-    for previous in (2, 3, 4, 5, 6, 7):
+    for previous in (2, 3, 4, 5, 6, 7, 8):
         with _pytest.MonkeyPatch.context() as mp:
             mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", previous)
             legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

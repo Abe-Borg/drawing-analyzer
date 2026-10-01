@@ -274,6 +274,71 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cross-sheet QC on a set of 40 sheets or fewer bound answers by sheet id,
+  first match wins, and checked no quote (remediation WP-06.2; N6, U8, K2).**
+  The whole-set pass labelled each sheet by its printed sheet id and bound the
+  model's answer back through that id, the first sheet with a given id
+  winning, and it never checked a quote against the sheet. So:
+  - two PDFs that both carry `M-101` (two revisions, or two files with one name
+    in two folders) could not be told apart: an answer naming `M-101` was
+    placed on whichever came first, and a conflict *between* the two could not
+    be expressed at all;
+  - a quote the sheet does not print, or a short tag such as `P-1` the sheet
+    never shows, was taken as given (sets above 40 sheets were checked);
+  - a numeric claim carried only the model's sheet id, and the arithmetic
+    auditor looked it up the same first-wins way;
+  - the wording the request puts around the sheets (its headers, the per-sheet
+    titles, the task lines, the truncation marker) was outside the cache key,
+    so editing it changed the request while every stored answer kept serving.
+
+  Now, decided with the owner (see the WP-06.2 handoff in `_plans/PROGRESS.md`):
+  - **Every sheet is addressed by a handle.** Both paths label each sheet
+    `===== SHEET S001 = M-101 =====`: the handle (`S001`) is how the model
+    names a sheet in its answer, and the sheet id beside it is what it names in
+    the text a reviewer reads. Handles follow the source files and pages, so a
+    set given in another order is sent, keyed and bound identically. A handle
+    is never one of the set's own sheet ids: a set with a sheet numbered
+    `S001` gets `H001`, `H002` … instead, so that sheet is still reached by its
+    id and never mistaken for the sheet that would have had the handle `S001`.
+  - **One binding rule on both paths.** A handle binds its own page. An answer
+    that names a sheet id instead still binds when exactly one sheet carries
+    it; an id more than one sheet carries is **refused and counted, never
+    placed on the first**. A run that refused one shows a cross-sheet QC stage
+    warning (*"2 sheet reference(s) named a sheet id that more than one sheet
+    carries and were not bound (2 leg(s), 0 fact(s))"*) and the counts in
+    `run_manifest.json` (`cross_qc_discards`: `legs_ambiguous_label`,
+    `facts_ambiguous_label`). The stage keeps its status.
+  - **Every quote is checked on both paths**, against the sheet's whole text
+    (not the 4,000-character slice the model was shown), with the same matcher
+    as a large set: a conflict whose quote a sheet does not print is dropped
+    and counted, a quote read from a scanned sheet or a pasted image is kept at
+    reduced trust and crop-verified. `run_manifest.json` now carries
+    `cross_qc_discards` for a set of 40 sheets or fewer too.
+  - **Claims are bound to their sheet** through the same handles. A claim the
+    arithmetic auditor can place only by an id more than one sheet carries is
+    refused, not checked, and counted as `arithmetic_ambiguous_sheet` in the
+    deterministic battery's stats; one table row printed on two same-id PDFs
+    stays two claims.
+  - **A cross-sheet conflict's legs are compared by page.** The findings
+    ledger's merge gate (`critical_signature["leg_targets"]`) named each leg by
+    its sheet id, so two conflicts pointing at two different PDFs carrying one
+    id could merge and lose a leg; it names the page now (`SRC-0002#p1`).
+  - **A synthesis conflict naming an id two sheets carry** goes to the
+    set-level review notes instead of the first such sheet.
+  - **The request wording is part of the cross-QC cache key**, as the prompts
+    are.
+
+  **Visible effect:** on a set of 40 sheets or fewer, a cross-sheet conflict
+  whose quotes are not printed on its sheets is no longer reported; conflicts
+  between two same-id sheets can now be reported; a scanned sheet's conflicts
+  carry the reduced-trust caveat and go to the crop re-check, as on a large
+  set. **Caches:** every cross-sheet QC result is re-run once
+  (`_CROSS_QC_CACHE_CONTRACT` 8 → 9, plus the request wording now in the key;
+  no release shipped contracts 4 to 8, so a 1.7.0 user pays one re-run for
+  all of them). Digest, critique, identity, review-plan and citation caches are
+  untouched. A/B harness arm records written before this change are refused
+  (`RECORD_CONTRACT_VERSION` 5 → 6): re-run the arm.
+
 - **Four quantity spellings the app read only in part let two different
   findings merge (remediation WP-04.4; the residuals of N1 and N19, and WP-04's
   acceptance).** A finding's critical signature signed only

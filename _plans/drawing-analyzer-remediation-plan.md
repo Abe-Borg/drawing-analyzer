@@ -697,6 +697,8 @@ Regression matrix: A-to-B/B-to-A same claim; same legs/different claims; three-l
 
 Keep the human id visible beside each handle (`S001 = M-101`, as the reconcile manifest does). Cross-reference conflicts ("see M-501") need it.
 
+*Done in WP-06.2 (the owner's rules, measured first).* Both paths share one handle assignment (`cross_qc._assign_handles`, `S001` … in source order, `_canonical_order`) and show the id beside each handle in the whole-set and map requests (`===== SHEET S001 = M-101 =====`). One resolver (`_resolve_sheet_ref`) and one validator (`_finding_from_handles`; the whole-set `_validate_cross_item` is gone) bind every reference: a handle, else an id exactly one sheet carries; an id more than one sheet carries is refused and counted (`legs_ambiguous_label`, `facts_ambiguous_label`; an observational stage warning). Item by item: (1) `_dedup_findings` was already replaced by WP-06.1's `_drop_exact_repeats`, which is label-free; (2) whole-set claims are rebound through the handles (`_resolve_claim_handles`) and `arithmetic._build_maps` maps an id two pages carry to no sheet, so such a claim is refused, not checked (`arithmetic_ambiguous_sheet`); (3) `critique._leg_targets` names each leg's page (`SRC-0002#p1`; the merge-rule fingerprint is unchanged, the A/B record contract 5 → 6); (4) `_fallback_id` stays a display label, and a reply naming a shared one is ambiguous; (5) a conflict between two same-label sheets is expressed by handle. Also found and fixed under the same rule: `cross_qc._dedup_claims` keyed on the id (now the page first) and the prose harvest's synthesis id map (an id two sheets carry goes set-level). Found, not fixed: `investigate._sheet_id_map` addresses the investigation tools by id (a note on WP-13).
+
 **Step 4 cannot fix B10 as written.**
 - `Ledger.add` buckets entries by primary `source_page_key`, and `_is_duplicate` requires the same primary sheet and equal `leg_targets`. So A→B and B→A are never compared.
 - B10 needs either a predicate that treats the leg set symmetrically, or a symmetric merge inside cross-QC that unions legs and quotes.
@@ -715,6 +717,7 @@ Keep the human id visible beside each handle (`S001 = M-101`, as the reconcile m
 - `discards` becomes non-None on the whole-set path. Update the comments in `pipeline.py` (~603, ~3681), in `cross_qc.py` (~1605), and in CLAUDE.md.
 - Paraphrased quotes will lose recall; measure it with the §7.2 counters.
 - This is required by a standing prohibition (§2 rule 15): a capped-text grounding check on this path would import the truncation defect into the common case.
+- *Reversed in WP-06.2 (the owner's decision).* Whole-set items go through the sharded validator, so they are grounded against the uncapped text with the one matcher and counted. The WP-03A test keeps its assertions and id (they still hold: one whole-set call); its docstrings record the reversal, and two tests beside it pin that the whole-set path grounds a tail quote and never reads the cap. Measured over the suite's 43 whole-set items: 2 newly dropped, both because the fixture's sheets did not print the quote at all (0 paraphrase drops); 10 legs admitted at reduced trust.
 
 **Step 7: truncation.**
 - `cross_qc._call` is the one text stage still on plain `create`: a 16k cap with adaptive thinking, and `stop_reason` read only when the text is empty. It is missing from CLAUDE.md's streaming list.
@@ -932,7 +935,7 @@ Regression matrix: changing a placement label or cross-QC framing causes a miss;
 - A pre-call fingerprint of the effective request cannot cover reconcile requests, because they depend on the map outputs.
 - Hash the framing constants instead, the way `SHARED_USER_FRAMING_STRINGS` does: `_CROSS_QC_TASK`, the whole-set/map/reconcile framing, and the truncation marker.
 - The `[TRUNCATED N chars]` marker never reaches a cached entry today, because degraded results are never admitted. Test only that it is in the key.
-- Implemented in WP-06.2.
+- Implemented in WP-06.2. *Done (the owner's rule):* every framing string the three builders use is a named module string (`cross_qc.CROSS_QC_USER_FRAMING_NAMES`), and `_cross_qc_cache_key` holds them verbatim beside the system prompts (`cross_qc_user_framing()`); one test per string shows it model-visible and keyed, the marker only keyed. Its own mechanism beside WP-06.2's contract bump (8 → 9) for the binding change: two changes, two register rows.
 
 **Steps 4–5, K3: critique contract per transport.**
 - Name `pipeline._critique_level1_partition` and `_ingest_miss`.

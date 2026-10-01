@@ -1628,8 +1628,9 @@ def _enumerate_pending(
     ):
         primary = id_map.get(sids[0])
         if primary is None:
-            # Named an in-set id we cannot map to a geometry — a detect/normalize
-            # disagreement. Don't drop it: keep it as set-level (§14.8).
+            # Named an in-set id we cannot map to one geometry — a detect/normalize
+            # disagreement, or an id more than one sheet carries (remediation
+            # WP-06.2). Don't drop it: keep it as set-level (§14.8).
             pi = ProseItem(
                 prose_item_id=compute_prose_item_id("synthesis_prose", "", "synthesis", ordinal, item),
                 channel="synthesis_prose", scope="SET", source_id=None,
@@ -1714,14 +1715,24 @@ def harvest_prose(
         for g in geometries or []
         if getattr(g, "ref", None) is not None
     }
-    # The set's sheet-id map, for synthesis anchoring.
+    # The set's sheet-id map, for synthesis anchoring. The synthesis names
+    # sheets by id only, so an id more than one sheet carries maps to ``None``:
+    # a statement whose primary is that id goes to the set-level path (§14.8)
+    # and a second sheet named that way is no leg, never the first sheet that
+    # carries it (remediation WP-06.2, N6; the owner's rule). The id stays a
+    # key, so the statement still counts as naming an in-set sheet.
     from .auditors.references import detect_sheet_id
 
     id_map: dict[str, Any] = {}
     for geom in geometries or []:
         sid = detect_sheet_id(geom)
-        if sid and sid not in id_map:
+        if not sid:
+            continue
+        if sid not in id_map:
             id_map[sid] = geom
+        elif (id_map[sid] is not None
+              and source_page_key(id_map[sid].ref) != source_page_key(geom.ref)):
+            id_map[sid] = None
 
     def _sheet_text(ref: SheetRef) -> str:
         geom = geom_by_key.get(source_page_key(ref))

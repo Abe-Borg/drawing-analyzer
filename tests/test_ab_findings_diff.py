@@ -56,9 +56,15 @@ def _f(**kw) -> Finding:
     return Finding(**base)
 
 
+# Each sheet id on its own page of arch.pdf (remediation WP-06.2: a leg is its
+# page, so two ids on one page would be one leg target, as they are one sheet).
+_LEG_PAGES = {"M-201": 1, "M-301": 2}
+
+
 def _leg(sheet_id: str, quote: str = "SEE MECH") -> ConflictLeg:
     return ConflictLeg(sheet_id=sheet_id, source_name="arch.pdf",
-                       source_id="SRC-0002", page_index=1, source_quote=quote)
+                       source_id="SRC-0002", page_index=_LEG_PAGES.get(sheet_id, 1),
+                       source_quote=quote)
 
 
 def _rect(x0=10.0, y0=10.0, x1=110.0, y1=60.0) -> Anchor:
@@ -227,7 +233,7 @@ def test_thousands_grouped_quantities_compare_by_value():
     assert same["exact"][0]["text_changed"] is True
 
 
-def test_records_are_written_under_the_wp_04_4_contract():
+def test_records_are_written_under_the_wp_06_2_contract():
     """A record stores ``critical_signature`` computed when the arm ran, so a v2
     record holds the old tokens (``6-inch`` signed as nothing, ``12,500`` as
     ``500``), a v3 record holds no quantity roles (remediation WP-04.3), which
@@ -237,8 +243,11 @@ def test_records_are_written_under_the_wp_04_4_contract():
     against ``12'-6"`` would match EXACT. Comparing any of them with a v5 arm
     would report a code change as a model difference; ``load_arm_records``
     refuses it (``tests/test_ab_sweep.py``). Re-pinned 3 -> 4 by WP-04.3 and
-    4 -> 5 by WP-04.4 (the owner's decisions)."""
-    assert RECORD_CONTRACT_VERSION == 5
+    4 -> 5 by WP-04.4 (the owner's decisions). A v5 record names each leg by its
+    sheet id, where a v6 record names its page (remediation WP-06.2), so an
+    unchanged cross-sheet conflict would read as one with different legs:
+    re-pinned 5 -> 6 (the owner's decision)."""
+    assert RECORD_CONTRACT_VERSION == 6
     record = finding_record(_f(text="provide 6-inch drain at 12,500 cfm"))
     assert record["critical_signature"]["measurements"] == ["12500cfm", "6in"]
     record = finding_record(_f(text="provide 6 in main and 4 in branch"))
@@ -247,6 +256,8 @@ def test_records_are_written_under_the_wp_04_4_contract():
     record = finding_record(_f(text="maintain 4 to 6 in clear, 12'-6\" headroom"))
     assert record["critical_signature"]["measurements"] == ["12ft", "4..6in", "6in"]
     assert record["critical_signature"]["feet_inches"] == ["12ft6in"]
+    record = finding_record(_f(also_on=[_leg("M-301")]))
+    assert record["critical_signature"]["leg_targets"] == ["SRC-0002#p2"]
 
 
 # --------------------------------------------------------------------------- #
@@ -306,15 +317,16 @@ def test_the_named_axes_come_from_the_production_rule():
         assert cand["signature_conflicts"]
 
 
-def test_a_v5_record_is_compared_under_the_current_rule_without_a_bump():
+def test_a_v6_record_is_compared_under_the_current_rule_without_a_bump():
     """A record stores the signature's tokens, and the rule is re-applied when
     two records are compared. WP-04.2 changed the rule, not the tokens, so a
     record read back from disk still means what it says: no
     ``RECORD_CONTRACT_VERSION`` bump for a rule-only change (see the version's
     comment). Renamed from the v3 test by WP-04.3, whose bump was for what a
-    record stores (the roles), and from the v4 test by WP-04.4, whose bump was
-    for the tokens and the feet-inches pairs a record stores."""
-    assert RECORD_CONTRACT_VERSION == 5
+    record stores (the roles), from the v4 test by WP-04.4, whose bump was for
+    the tokens and the feet-inches pairs a record stores, and from the v5 test
+    by WP-06.2, whose bump was for the leg targets a record stores."""
+    assert RECORD_CONTRACT_VERSION == 6
     base = finding_records([_f(text="pump discharge is 6 in at 100 psi", anchor=_rect())])
     var = finding_records([_f(text="pump discharge is 4 in at 100 psi",
                               anchor=_rect(12.0, 12.0, 112.0, 62.0))])
@@ -428,6 +440,44 @@ def test_a_v4_sidecar_is_refused(tmp_path):
         record["critical_signature"].pop("feet_inches", None)
     _findings_path(arm).write_text(
         json.dumps({"contract_version": 4, "records": records}), encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-06.2 — a leg target is a page, stored in the record
+# --------------------------------------------------------------------------- #
+
+def _to_m201_on(source_id: str) -> Finding:
+    return _f(also_on=[ConflictLeg(sheet_id="M-201", source_name="arch.pdf",
+                                   source_id=source_id, page_index=0,
+                                   source_quote="SEE MECH")])
+
+
+def test_two_pdfs_that_carry_one_id_are_two_leg_targets():
+    """N6: legs to two PDFs that both carry M-201 were one target (the id), so an
+    arm that moved a conflict's leg to the other PDF matched EXACT."""
+    base = finding_records([_to_m201_on("SRC-0002")])
+    var = finding_records([_to_m201_on("SRC-0003")])
+    m = match_records(base, var)
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["cross_sheet_legs"]
+    # The same records with the targets a v5 arm stored (the sheet id) would
+    # have matched EXACT, which is why a v5 sidecar is refused.
+    for record in base + var:
+        record["critical_signature"]["leg_targets"] = ["M-201"]
+    assert match_records(base, var)["counts"]["exact"] == 1
+
+
+def test_a_v5_sidecar_is_refused(tmp_path):
+    from ab_findings_diff import RECORDS_STALE_CONTRACT
+    from ab_sweep_drawing_analyzer import _findings_path, load_arm_records
+
+    arm = tmp_path / "arm_baseline.json"
+    records = finding_records([_to_m201_on("SRC-0002")])
+    for record in records:           # what a v5 arm stored: the leg's sheet id
+        record["critical_signature"]["leg_targets"] = ["M-201"]
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": 5, "records": records}), encoding="utf-8")
     assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
 
 

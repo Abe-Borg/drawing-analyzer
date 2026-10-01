@@ -734,6 +734,10 @@ class ArithmeticResult:
     matched: int = 0       # of those, the ones that added up
     mismatched: int = 0    # of those, the ones that did not (== len(findings))
     unusable: int = 0      # claims dropped (bad kind / unparseable numbers)
+    # Claims refused because no source was given and their sheet id is carried
+    # by more than one sheet (remediation WP-06.2, N6): never attached to the
+    # first such sheet, and not checked (the owner's rule).
+    ambiguous: int = 0
 
 
 def _claim_dedup_key(claim: NumericClaim) -> tuple:
@@ -749,8 +753,18 @@ def _claim_dedup_key(claim: NumericClaim) -> tuple:
     )
 
 
+# ``by_id``'s value for a sheet id more than one sheet carries (remediation
+# WP-06.2, N6). The map used to keep the first such sheet, so a claim naming the
+# id was checked, anchored and inked on whichever PDF came first.
+_AMBIGUOUS_SHEET = object()
+
+
 def _build_maps(rendered_sheets: list[Any]) -> tuple[dict, dict]:
-    """``(by_key, by_id)`` maps: ``source_page_key`` → geom and id → geom."""
+    """``(by_key, by_id)`` maps: ``source_page_key`` → geom and id → geom.
+
+    An id that more than one page carries maps to ``_AMBIGUOUS_SHEET``, never to
+    the first of them (remediation WP-06.2, the owner's rule).
+    """
     by_key: dict[tuple, Any] = {}
     by_id: dict[str, Any] = {}
     for geom in rendered_sheets:
@@ -758,23 +772,53 @@ def _build_maps(rendered_sheets: list[Any]) -> tuple[dict, dict]:
         if ref is not None:
             by_key[source_page_key(ref)] = geom
         sid = detect_sheet_id(geom)
-        if sid and sid not in by_id:
+        if not sid:
+            continue
+        prior = by_id.get(sid)
+        if prior is None:
             by_id[sid] = geom
+        elif prior is not _AMBIGUOUS_SHEET and _page_of(prior) != _page_of(geom):
+            by_id[sid] = _AMBIGUOUS_SHEET
     return by_key, by_id
 
 
-def _resolve_geometry(claim: NumericClaim, by_key: dict, by_id: dict) -> Any:
-    """The sheet a claim belongs to: the emitting sheet when known, else by id."""
+def _page_of(geom: Any) -> Any:
+    """A geometry's page key, or the object itself when it carries no ref."""
+    ref = getattr(geom, "ref", None)
+    return source_page_key(ref) if ref is not None else id(geom)
+
+
+def _by_source(claim: NumericClaim, by_key: dict) -> Any:
+    """The claim's own page, when it names one the set holds."""
     if claim.source_id or claim.source_name:
-        geom = by_key.get(source_page_key(claim))
-        if geom is not None:
-            return geom
+        return by_key.get(source_page_key(claim))
+    return None
+
+
+def _names_shared_id(claim: NumericClaim, by_key: dict, by_id: dict) -> bool:
+    """True when only the claim's sheet id could place it, and more than one
+    sheet carries that id (remediation WP-06.2): the claim is refused."""
+    return (_by_source(claim, by_key) is None
+            and by_id.get(normalize_sheet_id(claim.sheet_id)) is _AMBIGUOUS_SHEET)
+
+
+def _resolve_geometry(claim: NumericClaim, by_key: dict, by_id: dict) -> Any:
+    """The sheet a claim belongs to: the emitting sheet when known, else by id.
+
+    An id more than one sheet carries resolves to no sheet (``None``), never to
+    the first (remediation WP-06.2, N6); :func:`audit_arithmetic` refuses such a
+    claim before checking it.
+    """
+    geom = _by_source(claim, by_key)
+    if geom is not None:
+        return geom
     # ``by_id`` is keyed by ``detect_sheet_id``, which returns
     # ``normalize_sheet_id`` — so the lookup has to use the same canonical form
     # (P8 item 11's twin). A bare ``.strip().upper()`` missed a model-supplied
     # handle carrying a Unicode dash or fullwidth digits against a correctly-keyed
     # map, and the claim then resolved to no sheet at all.
-    return by_id.get(normalize_sheet_id(claim.sheet_id))
+    geom = by_id.get(normalize_sheet_id(claim.sheet_id))
+    return None if geom is _AMBIGUOUS_SHEET else geom
 
 
 def audit_arithmetic(
@@ -791,7 +835,9 @@ def audit_arithmetic(
     relationship (WP-07.2, A8), and ``UNCERTAIN`` otherwise. Claims whose
     numbers can't be parsed (including a term that is not one value, such as
     ``"1e3"``), or whose kind is unknown, are counted ``unusable`` and dropped —
-    never guessed at. Duplicate
+    never guessed at. A claim with no source whose sheet id more than one sheet
+    carries is refused before it is checked and counted ``ambiguous``
+    (remediation WP-06.2, N6), never attached to the first such sheet. Duplicate
     claims (the critique runs twice) are collapsed before checking so the tally
     isn't double-counted: the same sheet, quote and :func:`claim_content_key`
     (exact decimals, terms as a multiset), so ``20`` and ``"20.0"`` are one
@@ -831,6 +877,9 @@ def audit_arithmetic(
             if key in seen:
                 continue
             seen.add(key)
+            if _names_shared_id(claim, by_key, by_id):
+                result.ambiguous += 1
+                continue
 
             kind = claim.kind.strip().lower()
             terms = [parse_number(t) for t in claim.terms]

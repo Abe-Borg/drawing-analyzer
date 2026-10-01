@@ -9,10 +9,19 @@ yet `_finding_from_handles` and `_parse_facts` dropped it, and a finding losing
 a leg that way falls below the two-grounded-sheets bar and disappears entirely.
 
 These tests pin the fix and, just as importantly, the things it must **not**
-change: fabricated quotes still fail, the whole-set (<=40) path is untouched,
-prompt bytes are identical, and every cross-QC cache key for an untruncated
-sheet stays byte-for-byte what it was — WP-03A deliberately throws away no
-stored result (§2.3, §8.5).
+change: fabricated quotes still fail, the whole-set (<=40) path still takes one
+call, prompt bytes are identical, and every cross-QC cache key for an
+untruncated sheet stays byte-for-byte what it was — WP-03A deliberately throws
+away no stored result (§2.3, §8.5).
+
+WP-03A scoped the whole-set path out of grounding: it grounded nothing, and a
+check against the capped prompt text there would have imported the truncation
+defect into the common case (§2.1). Remediation WP-06.2 reversed that scope
+(plan WP-06 Step 6, U8; the owner's decision): the whole-set path now grounds
+through the sharded validator, against the same **uncapped** evidence text, so
+a tail quote survives there too and a capped-text check is still never made.
+Case 3 keeps WP-03A's assertions (one whole-set call, no map, no reconcile) and
+adds the whole-set grounding beside them.
 
 Hermetic: fake clients only, no key, no network.
 """
@@ -239,12 +248,19 @@ def test_quote_present_only_on_another_sheet_is_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# Case 3 — threshold scope: the whole-set path is untouched
+# Case 3 — threshold scope: 40 entries take the one whole-set call, which
+# (since remediation WP-06.2) grounds against the uncapped text, never the cap
 # --------------------------------------------------------------------------- #
 
 
 def test_forty_entries_take_the_whole_set_path_unchanged():
-    """<=40 entries must not gain a capped-text check (that would import §2.1)."""
+    """<=40 entries take one whole-set call, never the map/reconcile path.
+
+    WP-03A's assertion, kept as it was (the owner's decision). Its rule that
+    the whole-set path must not gain a capped-text check (that would import
+    §2.1) still holds: since remediation WP-06.2 that path grounds, against the
+    uncapped evidence text only (the two tests below).
+    """
     sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)
     sheets, geoms = sheets[:MAX_SHEETS_SINGLE_CALL], geoms[:MAX_SHEETS_SINGLE_CALL]
     client = _TailClient(TAIL_QUOTE, TAIL_QUOTE)
@@ -252,6 +268,70 @@ def test_forty_entries_take_the_whole_set_path_unchanged():
     assert client.whole_set_calls == 1, "40 entries take the single whole-set call"
     assert client.map_calls == 0, "40 entries must not shard"
     assert client.reconcile_calls == 0
+
+
+class _WholeSetTailClient(BetaClientMixin):
+    """A whole-set reply naming the tail quote on S001 and a quote on S022."""
+
+    def __init__(self, quote_a: str, quote_b: str):
+        self.whole_set_calls = 0
+        outer = self
+
+        class _Msgs(StreamingMessagesMixin):
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                outer.whole_set_calls += 1
+                assert not kw["messages"][0]["content"][0]["text"].startswith(
+                    "DRAWING SET SHARD")
+                fin = {
+                    "sheet_handle": "S001", "category": "conflict",
+                    "severity": "high", "text": "valve assignment disagrees",
+                    "recommended_action": "Reconcile PV-3.", "source_quote": quote_a,
+                    "also_on": [{"sheet_handle": "S022", "source_quote": quote_b}],
+                }
+                return FakeMessage(
+                    content=[FakeTextBlock(text="```json\n" + json.dumps(
+                        {"findings": [fin], "claims": []}) + "\n```")],
+                    usage=FakeUsage(input_tokens=800, output_tokens=60),
+                )
+
+        self.messages = _Msgs()
+
+
+def _forty_with_the_tail():
+    """40 entries: sheet 1 (S001) holds the tail quote past its cap, and the
+    first mechanical sheet (S022 among the 40 kept) prints the other quote."""
+    sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)    # f0..f20, then m0..
+    return sheets[:MAX_SHEETS_SINGLE_CALL], geoms[:MAX_SHEETS_SINGLE_CALL]
+
+
+def test_forty_entries_ground_the_tail_quote_on_the_whole_set_path():
+    """Remediation WP-06.2 (U8): the whole-set path grounds, against the
+    uncapped text, so the tail quote is TEXT_GROUNDED there as in a shard."""
+    from drawing_analyzer.models import EVIDENCE_TEXT_GROUNDED
+
+    sheets, geoms = _forty_with_the_tail()
+    assert len(sheets) == MAX_SHEETS_SINGLE_CALL
+    client = _WholeSetTailClient(TAIL_QUOTE, TAIL_QUOTE)
+    res = cross_sheet_qc(sheets, geoms, client=client, sleep=lambda *_: None)
+    assert client.whole_set_calls == 1
+    (finding,) = res.findings
+    assert finding.source_quote == TAIL_QUOTE
+    assert finding.evidence_state == EVIDENCE_TEXT_GROUNDED
+    assert [leg.source_name for leg in finding.also_on] == ["m0.pdf"]
+    assert res.discards.legs_accepted_grounded == 2
+
+
+def test_forty_entries_never_ground_against_the_capped_text():
+    """The rule WP-03A's scope protected: with the uncapped text unavailable,
+    the capped string is all there is and the tail quote is refuted (dropped
+    and counted), so a whole-set pass that read the cap would have lost it."""
+    sheets, geoms = _forty_with_the_tail()
+    geoms[0].full_sheet_text = None
+    res = cross_sheet_qc(sheets, geoms, client=_WholeSetTailClient(TAIL_QUOTE, TAIL_QUOTE),
+                         sleep=lambda *_: None)
+    assert res.findings == []
+    assert res.discards.legs_ungrounded_quote_text_bearing_sheet == 1
+    assert res.discards.findings_dropped_under_two_legs == 1
 
 
 def test_forty_one_entries_take_the_sharded_path():
@@ -529,8 +609,12 @@ def test_no_cross_qc_contract_bump_was_needed():
     character-stream veto reuses reads spelled ranges and lists and a compact
     ``A`` beside a voltage, so a grounding verdict can move for byte-identical
     inputs. Still nothing from WP-03A.
+
+    It reads 9 since **remediation WP-06.2** (N6, U8): the whole-set path binds
+    through host handles and grounds against the uncapped text, as this file's
+    sharded path does, for byte-identical inputs. Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 8
+    assert X._CROSS_QC_CACHE_CONTRACT == 9
 
 
 # --------------------------------------------------------------------------- #

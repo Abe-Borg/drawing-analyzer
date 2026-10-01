@@ -108,6 +108,9 @@ def run_auditors(
                 "arithmetic_matched": ares.matched,
                 "arithmetic_mismatched": ares.mismatched,
                 "arithmetic_unusable": ares.unusable,
+                # Remediation WP-06.2 (N6): refused, not checked, never the
+                # first sheet that carries the id.
+                "arithmetic_ambiguous_sheet": ares.ambiguous,
             })
         except Exception as exc:  # noqa: BLE001
             log.warning("arithmetic auditor failed: %s", exc)

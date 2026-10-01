@@ -615,8 +615,10 @@ class _PipelineClient(BetaClientMixin):
                 elif isinstance(system, str) and system.startswith(X.CROSS_QC_SYSTEM_PROMPT):
                     body = kw["messages"][0]["content"][0]["text"]
                     facts = []
+                    # A sheet's title reads "S001 = <its id>" since remediation
+                    # WP-06.2 (the id beside the handle).
                     for handle, chunk in re.findall(
-                            r"===== SHEET (S\d+) =====(.*?)(?======|\Z)", body, re.S):
+                            r"===== SHEET (S\d+) = [^\n]* =====(.*?)(?======|\Z)", body, re.S):
                         textless = "TEXT LAYER:\n\n" in chunk or chunk.rstrip().endswith("TEXT LAYER:")
                         facts.append({"sheet_handle": handle, "entity_or_tag": "P-1",
                                       "attribute": "a", "value": "v", "tile_label": "r1c1",
