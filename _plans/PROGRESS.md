@@ -633,6 +633,18 @@ what could not be verified, risks, and next steps.
     browser security suite (105 collected, 105 executed) and the build and
     clean-install smoke. An earlier run, before `build` was installed, passed
     with the build gate skipped.
+- **Review follow-up (Codex, P2; eebd71a):** a handle could equal another
+  sheet's own id (`S001 = A-101` beside a sheet numbered `S001`), and a reply
+  naming that id bound A-101, its claims too. `_handle_prefix` now keeps every
+  handle out of the set's normalized ids (`S`, else `H`, `K`, `Q`, `X`, `Z`,
+  then every other letter and longer runs); a set with no handle-shaped id
+  keeps `S001` …, so no other request, key or instrumented binding moves. One
+  test (the recorded limit) was replaced by 7 (6 fail on the previous head, 1
+  control): `tests/test_cross_qc_source_binding.py` is now 81, the slice 104
+  new IDs, 102 net (5,909 → 6,011 collected). Full suite after the fix:
+  **6,009 passed, 2 skipped, 10 deselected**; compileall, ruff (correctness
+  classes) and the secret scan clean; the 40-sheet speed pass about 190 ms. CI
+  on eebd71a: all seven checks green.
 - **Docs:** CHANGELOG (Fixed); CLAUDE.md (the finder bullet, a new paragraph
   on both paths binding through host handles, the discard and refused-item
   paragraphs, the handle-canonicalization sites, the signature's leg targets,
