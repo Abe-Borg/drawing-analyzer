@@ -1275,7 +1275,7 @@ def test_citation_pause_turn_resumes_keep_every_earlier_turn():
         {"assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok"}]}
     )
 
-    class _Msgs(StreamingMessagesMixin):      # plain create, SDK-checked (WP-02.2)
+    class _Msgs:
         def __init__(self):
             self.seen: list[list[dict]] = []
 

@@ -1,9 +1,21 @@
-"""Structured outputs remain opt-in, with plain-output fallback and separate
-cache identities. Tests use fake clients and cover host validation, request
-shapes, capability rejection and both cache levels without a network or key.
+"""Structured outputs & strict tool use (F-01 / F-03) + the effort registry (F-06).
+
+Three changes land here, and the property most of these tests defend is the
+same for all three: **nothing changes unless it is asked for.** The pipeline's
+caches hold model reads that cost real money per sheet, and every one of them is
+keyed on the request shape, so a change that silently moves a prompt version, an
+effort level, or a cache key is not a refactor — it is a bill. Several tests
+below therefore assert byte-identity rather than behaviour.
+
+Hermetic (I-4): no key, no network, no real schema compiler. What *cannot* be
+proved here is whether Anthropic honours ``output_config.format`` on a 37-image
+vision request — that is undocumented upstream and needs one live call, which is
+why the feature ships opt-in and ``tests/test_live_api_canary.py`` carries the
+network-marked proof.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -388,8 +400,10 @@ def _key(**kw):
     )
 
 
-def test_a_fenced_key_ignores_an_unset_structured_format():
-    # An unset structured format must not invalidate a paid plain-output read.
+def test_a_fenced_run_keys_exactly_as_it_did_before_this_feature():
+    # This is what lets F-01 land with no _SCHEMA_VERSION bump: every entry
+    # already paid for stays valid, because an unset structured_key is folded in
+    # nowhere at all rather than as an empty string.
     assert _key() == _key(structured_key=None)
 
 
@@ -398,6 +412,28 @@ def test_a_structured_run_keys_differently():
     # schema the model decoded against — so it must not be served from, or to, a
     # fenced run's entry.
     assert _key(structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION) != _key()
+
+
+def test_the_structured_key_covers_the_schema_as_well_as_the_prompt(monkeypatch):
+    # I-6: editing either half must re-key. The version is a hash over both.
+    import hashlib
+    expected = hashlib.sha256(
+        "\x00".join((
+            C._CRITIQUE_STRUCTURED_INSTRUCTION,
+            json.dumps(C.CRITIQUE_FINDINGS_SCHEMA, sort_keys=True),
+        )).encode("utf-8")
+    ).hexdigest()[:16]
+    assert C.CRITIQUE_STRUCTURED_PROMPT_VERSION == expected
+
+
+def test_the_main_prompt_version_is_untouched_by_the_structured_half():
+    # Folding the structured instruction into CRITIQUE_PROMPT_VERSION would
+    # discard every cached critique in existence — including those of users who
+    # never enable this — for a request shape they never sent.
+    assert C.CRITIQUE_STRUCTURED_PROMPT_VERSION not in C.CRITIQUE_PROMPT_VERSION
+    assert C._CRITIQUE_STRUCTURED_INSTRUCTION not in (
+        C.CRITIQUE_SYSTEM_PROMPT + C._CRITIQUE_TASK_INSTRUCTION + C._CRITIQUE_FINDINGS_INSTRUCTION
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -646,7 +682,9 @@ def test_a_flipped_strict_latch_stops_resending_strict_schemas():
 # The critique cache has two levels. Level 2 keys on the rendered PNG bytes;
 # level 1 keys on a pre-render identity so a warm run can skip rasterizing
 # entirely. Level 1 answers FIRST, so separating the contracts only at level 2
-# must not return a plain-output entry before the structured request is built.
+# closes nothing: a warm run enabling structured outputs would hit a stored
+# fenced entry before any render or request and return it, and the feature would
+# read as enabled while changing nothing. (Caught in review on the first commit.)
 
 
 def _l1(**kw):
@@ -657,7 +695,7 @@ def _l1(**kw):
     )
 
 
-def test_level1_fenced_key_ignores_an_unset_structured_format():
+def test_level1_fenced_key_is_unchanged_by_this_feature():
     assert _l1() == _l1(structured_key=None)
 
 
@@ -670,6 +708,26 @@ def test_level1_and_level2_do_not_collide_on_the_structured_key():
     assert _l1(structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION) != _key(
         structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION
     )
+
+
+def test_every_level1_call_site_threads_the_structured_key():
+    # Structural, over the AST, rather than an assertion about today's two call
+    # sites: the bug was a call site that silently omitted the argument, and a
+    # test naming the current ones cannot see the next one added.
+    import ast
+
+    source = Path("src/drawing_analyzer/pipeline.py").read_text(encoding="utf-8")
+    calls = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "critique_cache_key_level1"
+    ]
+    assert calls, "expected the pipeline to build level-1 critique keys"
+    for call in calls:
+        assert "structured_key" in {kw.arg for kw in call.keywords}, (
+            f"critique_cache_key_level1 at pipeline.py:{call.lineno} omits "
+            "structured_key — a warm structured run would serve a fenced result"
+        )
 
 
 def test_the_strict_latch_relaxes_even_once_already_flipped():
@@ -897,6 +955,14 @@ def test_harvest_schema_is_closed_compiler_safe_and_mirrors_the_prompt():
     assert set(root["properties"]["category"]["enum"]) == set(D._MODEL_FINDING_CATEGORIES)
     assert set(root["properties"]["severity"]["enum"]) == set(D._FINDING_SEVERITIES)
     assert root["properties"]["tile"] == {"type": "null"}
+
+
+def test_harvest_structured_version_covers_prompt_and_schema():
+    expected = hashlib.sha256("\x00".join((
+        H.HARVEST_STRUCTURED_SYSTEM_PROMPT,
+        json.dumps(H.HARVEST_FINDING_SCHEMA, sort_keys=True),
+    )).encode("utf-8")).hexdigest()[:16]
+    assert H.HARVEST_STRUCTURED_PROMPT_VERSION == expected
 
 
 def test_harvest_structured_key_folds_in_only_when_enabled(monkeypatch):

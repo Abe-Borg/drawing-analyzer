@@ -1,13 +1,11 @@
-"""Capability-registry tests for the Opus/Sonnet 5 and 5.5 generations.
+"""Capability-registry tests for the Opus 5 / Sonnet 5 generation.
 
 ``_MODEL_CAPABILITIES`` is the single source of truth for the three request-
 shape decisions that used to be keyed off Opus family membership: the output
 ceiling, the ``output_config.effort`` level, and the high-resolution vision
 tier. Sonnet 5 is the model that broke the family shortcut — it matches Opus
 on all three while Sonnet 4.6 matches on none — so these tests pin the
-distinction rather than the family. The 5.5 models are the defaults; the 5
-generation stays registered as a valid override and as their refusal-fallback
-targets.
+distinction rather than the family.
 """
 from __future__ import annotations
 
@@ -17,8 +15,6 @@ from drawing_analyzer.core import api_config as api
 from drawing_analyzer.core.pricing import MODEL_PRICING
 from drawing_analyzer.core.tokenizer import _LOCAL_SAFETY_FACTORS
 
-OPUS_55 = "claude-opus-5-5"
-SONNET_55 = "claude-sonnet-5-5"
 OPUS_5 = "claude-opus-5"
 SONNET_5 = "claude-sonnet-5"
 OPUS_48 = "claude-opus-4-8"
@@ -32,13 +28,12 @@ HAIKU = "claude-haiku-4-5"
 
 
 def test_pipeline_defaults_are_the_current_generation():
-    assert api.REVIEW_MODEL_DEFAULT == OPUS_55
-    assert api.VERIFICATION_ESCALATION_MODEL == OPUS_55
-    assert api.CROSS_CHECK_MODEL_DEFAULT == SONNET_55
-    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_55
-    # Chat is deliberately NOT the Opus flagship — see the web-fetch tests below.
-    assert api.CHAT_MODEL_DEFAULT == SONNET_55
-    assert api.OPUS_MODELS >= {OPUS_55, OPUS_5}
+    assert api.REVIEW_MODEL_DEFAULT == OPUS_5
+    assert api.VERIFICATION_ESCALATION_MODEL == OPUS_5
+    assert api.CROSS_CHECK_MODEL_DEFAULT == SONNET_5
+    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5
+    # Chat is deliberately NOT Opus 5 — see the web-fetch tests below.
+    assert api.CHAT_MODEL_DEFAULT == SONNET_5
 
 
 def test_stages_that_deliberately_run_on_sonnet():
@@ -49,24 +44,21 @@ def test_stages_that_deliberately_run_on_sonnet():
     from drawing_analyzer.prose_harvest import harvest_model
     from drawing_analyzer.set_identity import default_identity_model
 
-    # Citation began as a CAPABILITY choice: web_fetch does not exist on Opus 5,
-    # so an Opus 5 citation check can only read search snippets. Sonnet 5.5
-    # fetches, as Opus 5.5 does again, at half its price.
-    assert citation_model() == SONNET_55
-    assert api.model_capabilities(SONNET_55).supports_web_fetch is True
+    # Citation is a CAPABILITY choice, not a cost one: web_fetch does not exist
+    # on Opus 5, so an Opus citation check can only read search snippets.
+    assert citation_model() == SONNET_5
+    assert api.model_capabilities(SONNET_5).supports_web_fetch is True
     assert api.model_capabilities(OPUS_5).supports_web_fetch is False
     # Advisory-only, with a deterministic regex backstop.
-    assert default_identity_model() == SONNET_55
+    assert default_identity_model() == SONNET_5
     # Pure structuring of one prose item.
-    assert harvest_model() == SONNET_55
+    assert harvest_model() == SONNET_5
 
 
 def test_previous_generation_stays_registered_as_a_valid_override():
-    # Pinning Opus 5 / Sonnet 5 / Opus 4.8 / Sonnet 4.6 must keep full
-    # capabilities rather than falling through to the conservative unknown-model
-    # defaults. Opus 5, Opus 4.8 and Sonnet 5 are also the 5.5 models'
-    # refusal-fallback targets.
-    for model in (OPUS_5, SONNET_5, OPUS_48, SONNET_46):
+    # Pinning Opus 4.8 / Sonnet 4.6 must keep full capabilities rather than
+    # falling through to the conservative unknown-model defaults.
+    for model in (OPUS_48, SONNET_46):
         caps = api.model_capabilities(model)
         assert caps is not api._DEFAULT_CAPABILITIES
         assert caps.supports_adaptive_thinking is True
@@ -77,7 +69,7 @@ def test_previous_generation_stays_registered_as_a_valid_override():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("model", [OPUS_55, SONNET_55, OPUS_5, SONNET_5, OPUS_48, SONNET_46])
+@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48, SONNET_46])
 def test_current_models_share_the_128k_output_ceiling(model):
     # Sonnet 5 must not inherit a 64k cap from a family-shaped check.
     assert api.phase_output_cap(api.PHASE_REVIEW, model=model) == 128_000
@@ -98,7 +90,7 @@ def test_unknown_model_stays_at_the_conservative_ceiling():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("model", [OPUS_55, SONNET_55, OPUS_5, SONNET_5, OPUS_48])
+@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48])
 def test_xhigh_survives_on_models_that_accept_it(model):
     assert api.effort_config_for(model=model, phase=api.PHASE_CROSS_CHECK) == {
         "effort": "xhigh"
@@ -124,26 +116,12 @@ def test_effort_is_omitted_entirely_for_models_without_support():
 
 def test_opus_is_the_verification_escalation_tier():
     # Escalation is a routing decision and stays keyed on family membership.
-    for opus in (OPUS_55, OPUS_5):
-        assert api.effort_config_for(model=opus, phase=api.PHASE_VERIFICATION) == {
-            "effort": "high"
-        }
-    for sonnet in (SONNET_55, SONNET_5):
-        assert api.effort_config_for(model=sonnet, phase=api.PHASE_VERIFICATION) == {
-            "effort": "medium"
-        }
-
-
-def test_every_phase_states_its_level_on_opus_5_5():
-    """Opus 5.5's API default effort is ``medium``, one below Opus 5's ``high``.
-
-    Every phase with a registered level sends it, so the default never applies;
-    a phase that dropped the field would silently run one level lower on the
-    flagship.
-    """
-    for phase, level in api._PHASE_DEFAULT_EFFORT.items():
-        expected = "high" if phase in api._VERIFICATION_PHASES else level
-        assert api.effort_config_for(model=OPUS_55, phase=phase) == {"effort": expected}
+    assert api.effort_config_for(model=OPUS_5, phase=api.PHASE_VERIFICATION) == {
+        "effort": "high"
+    }
+    assert api.effort_config_for(model=SONNET_5, phase=api.PHASE_VERIFICATION) == {
+        "effort": "medium"
+    }
 
 
 def test_every_emitted_effort_level_is_one_the_model_accepts():
@@ -173,7 +151,7 @@ def test_every_emitted_effort_level_is_one_the_model_accepts():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("model", [OPUS_55, SONNET_55, OPUS_5, SONNET_5, OPUS_48, SONNET_46])
+@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48, SONNET_46])
 def test_current_models_support_the_300k_batch_beta(model):
     assert api.model_supports_extended_output_beta(model) is True
 
@@ -221,19 +199,6 @@ def test_opus_5_does_not_support_web_fetch():
     assert api.model_capabilities(SONNET_46).supports_web_fetch is True
 
 
-def test_opus_5_5_has_web_fetch_again():
-    """Opus 5's exception did not carry over to its successor.
-
-    Anthropic's web-fetch tool reference is written against ``claude-opus-5-5``,
-    and the Opus 5.5 migration guide lists no tool exception against Opus 4.8
-    (only Priority Tier). Sonnet 5.5 has both server tools as well.
-    """
-    for model in (OPUS_55, SONNET_55):
-        caps = api.model_capabilities(model)
-        assert caps.supports_web_fetch is True
-        assert caps.supports_web_search is True
-
-
 def test_unknown_model_never_claims_web_fetch():
     # Sending an unsupported server tool is a 400 that fails the whole request,
     # so the fallback must be "don't send it".
@@ -249,8 +214,6 @@ def test_chat_default_can_use_web_fetch():
 
 
 def test_hires_vision_roster_does_not_follow_family_lines():
-    assert api.model_capabilities(SONNET_55).supports_hires_vision is True
-    assert api.model_capabilities(OPUS_55).supports_hires_vision is True
     assert api.model_capabilities(SONNET_5).supports_hires_vision is True
     assert api.model_capabilities(SONNET_46).supports_hires_vision is False
     assert api.model_capabilities(OPUS_5).supports_hires_vision is True

@@ -124,9 +124,8 @@ def test_cross_qc_returns_numeric_claims():
         client=_ClaimsCrossClient([claim]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.claims) == 1 and res.claims[0].kind == "sum"
-    # A unique sheet label binds the claim to that physical sheet.
-    c = res.claims[0]
-    assert (c.source_name, c.page_index, c.sheet_id) == ("a.pdf", 0, "F-D-01-1")
+    # No emitting-sheet ref (the pass spans the set) — the auditor resolves by id.
+    assert res.claims[0].source_name == "" and res.claims[0].sheet_id == "F-D-01-1"
 
 
 def test_skips_below_two_readable_sheets():
@@ -208,10 +207,9 @@ def test_promotes_first_resolvable_leg_when_primary_unknown():
             {"sheet_id": "F-A-01-1", "source_quote": "COLO 1", "tile": [1, 1]},
         ],
     }
-    # Each leg must cite a quote printed by its own sheet.
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf")],
-        [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1")],
+        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")],
         client=_CrossClient([[item]]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.findings) == 1
@@ -533,11 +531,9 @@ def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
         "source_quote": "COLO 5", "tile": [0, 0],
         "also_on": [{"sheet_id": "F-G-02-0", "source_quote": "COLO 5 zone", "tile": [1, 1]}],
     }
-    # Each sheet prints what its legs quote.
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf"), _digest("c.pdf")],
-        [_geom_txt("a.pdf", "F-D-01-1", "COLO 5"), _geom_txt("b.pdf", "F-A-01-1", "COLO 1"),
-         _geom_txt("c.pdf", "F-G-02-0", "COLO 5 zone")],
+        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1"), _geom("c.pdf", "F-G-02-0")],
         client=_CrossClient([[_CONFLICT, c2]]), max_retries=0, sleep=_NOOP,
     )
     assert len(res.findings) == 2
@@ -825,13 +821,16 @@ def test_shard_path_aggregates_omitted_findings(monkeypatch):
     assert text_clean.omitted == 0 and text_clean.degraded is True
 
 
-def test_changed_cross_qc_contract_misses_the_previous_key(monkeypatch):
-    """Changed host validation must not replay results produced under an old rule."""
+def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch):
+    """Entries written before the findings cap became loss-aware were stored as
+    complete after a silent truncation and carry no `findings_omitted`. Reading
+    one back would default that to 0 and certify a truncated run forever."""
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
+    assert X._CROSS_QC_CACHE_CONTRACT >= 2, "bumped past the pre-accounting entries"
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
-    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", X._CROSS_QC_CACHE_CONTRACT + 1)
+    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 1)
     legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
     assert current != legacy, "the contract must ride the key"
@@ -946,3 +945,20 @@ def test_critique_leg_targets_uses_the_same_fold():
         assert C._leg_targets(_with_leg(plain)) == C._leg_targets(_with_leg(variant)), note
         # …and the value matches what cross-QC resolves the handle to.
         assert next(iter(C._leg_targets(_with_leg(variant)))) == X._norm_id(plain)
+
+
+def test_cross_qc_contract_bumped_for_the_norm_id_fold():
+    # The invalidation mechanism for item 11. _norm_id is host-side binding, not a
+    # model input, so nothing in the cache key covers it — yet it changes which
+    # legs validate, and so the stored result, for byte-identical request inputs.
+    # A warm entry written under the old normalization would keep serving the
+    # smaller finding set forever.
+    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    geom = _geom("a.pdf", "M-101")
+    entries = [("M-101", "digest", "text", geom)]
+    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 2)
+        legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+    assert current != legacy, "the contract must ride the key"

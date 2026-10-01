@@ -38,17 +38,17 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
-from .core.reply_text import reply_text
-from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
+    _is_transient_error,
+    _message_text,
+    _message_usage,
+    _retry_backoff_seconds,
     stream_message,
-    stream_reply,
     _tolerant_json_object,
     scan_structured_blocks,
-    unfinished_reply_error,
 )
 from .models import ProfileSnapshot
 from .set_identity import _as_list
@@ -122,7 +122,7 @@ sees the full sheet image and text.
 Output a SINGLE fenced code block labeled json and nothing after it, \
 containing exactly: {"plans": [{"discipline": "...", "title": "...", \
 "items": [{"text": "...", "severity": "...", "refs": ["..."]}]}]} — one plan \
-per discipline actually present, at most 25 items per plan.""" + "\n\n" + SOURCE_CONTENT_RULE
+per discipline actually present, at most 25 items per plan."""
 
 
 _PLANNER_TASK_INSTRUCTION = (
@@ -151,7 +151,7 @@ def build_planner_user_text(identity: Any, sheet_digests: list[SheetDigest]) -> 
     """
     parts: list[str] = []
     if identity is not None and getattr(identity, "has_content", False):
-        parts.append(source_content_block(identity.context_block(), tag="set_identity"))
+        parts.append(identity.context_block())
     else:
         parts.append(
             "SET IDENTITY: unavailable — infer the disciplines and applicable "
@@ -165,13 +165,7 @@ def build_planner_user_text(identity: Any, sheet_digests: list[SheetDigest]) -> 
     omitted = 0
     for i, sd in enumerate(ok_sheets, start=1):
         head = (sd.text or "").strip()[:_PLAN_HEAD_SLICE]
-        block = "\n".join([
-            source_content_block(
-                f"===== Sheet {i}/{total}: {sd.ref.display_label} =====",
-                tag="sheet_metadata",
-            ),
-            source_content_block(head, tag="sheet_digest"),
-        ])
+        block = f"===== Sheet {i}/{total}: {sd.ref.display_label} =====\n{head}"
         if used + len(block) <= _PLAN_TOTAL_BUDGET:
             parts.append(block)
             used += len(block) + 1
@@ -419,9 +413,6 @@ class PlanResult:
     error: str | None = None
     dropped_items: int = 0
     cached: bool = False
-    # Remediation WP-01.7: attempts whose stream was interrupted before its
-    # final usage arrived; the token counts above are then lower bounds.
-    interrupted_attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -512,36 +503,25 @@ def author_review_plan(
     if effort and model_supports_effort(model):
         kwargs["output_config"] = {"effort": effort}
 
-    # Transient retries, an interrupted stream's included; once they are
-    # spent its partial read is the reply (remediation WP-01.7).
-    call = stream_reply(client, kwargs, max_retries=max_retries, sleep=sleep,
-                        send=stream_message)
-    usage = call.usage
-    in_tok, out_tok = usage.input_tokens, usage.output_tokens
-    interrupted = usage.interrupted_attempts
-    if call.message is None:
-        return PlanResult(
-            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
-            error=_clean_error(call.error), interrupted_attempts=interrupted,
-        )
-    resp = call.message
-    text = reply_text(resp)
-    # The stop reason first (D-1, remediation WP-01.6): a plan the model did
-    # not finish is not used, whatever parses, and is cached by nothing.
-    unfinished = unfinished_reply_error(
-        resp, text, noun="review plan", interrupted=call.interrupted,
-    )
-    if unfinished is not None:
-        return PlanResult(
-            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
-            error=unfinished, interrupted_attempts=interrupted,
-        )
+    attempt = 0
+    while True:
+        try:
+            resp = stream_message(client, kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            if _is_transient_error(exc) and attempt < max_retries:
+                sleep(_retry_backoff_seconds(attempt))
+                attempt += 1
+                continue
+            return PlanResult(model_used=model, error=_clean_error(exc))
+
+    text = _message_text(resp)
+    in_tok, out_tok = _message_usage(resp)
     obj = parse_planner_text(text)
     if obj is None:
         return PlanResult(
             input_tokens=in_tok, output_tokens=out_tok, model_used=model,
             error="planner reply carried no parseable plans block",
-            interrupted_attempts=interrupted,
         )
     plans, dropped = sanitize_plans(obj)
     profiles = profiles_from_plans(plans)
@@ -550,13 +530,12 @@ def author_review_plan(
             input_tokens=in_tok, output_tokens=out_tok, model_used=model,
             dropped_items=dropped,
             error="planner reply contained no usable plan items",
-            interrupted_attempts=interrupted,
         )
     result = PlanResult(
         profiles=profiles,
         markdown=render_plan_markdown(profiles, model=model, identity=identity),
         input_tokens=in_tok, output_tokens=out_tok, model_used=model,
-        dropped_items=dropped, interrupted_attempts=interrupted,
+        dropped_items=dropped,
     )
     if cache is not None and cache_key is not None:
         # Store the SANITIZED plans — what a warm run must rebuild verbatim so

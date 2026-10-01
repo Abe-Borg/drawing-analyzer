@@ -24,16 +24,16 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
-from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
-from .core.reply_text import reply_text
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
+    _is_transient_error,
+    _message_text,
+    _message_usage,
+    _retry_backoff_seconds,
     stream_message,
-    stream_reply,
-    unfinished_reply_error,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -47,16 +47,11 @@ DEFAULT_SYNTHESIS_MAX_TOKENS = 32_000
 DEFAULT_SYNTHESIS_EFFORT = "high"
 # Fewer than this many readable sheets and there is nothing to reconcile.
 MIN_SHEETS_FOR_SYNTHESIS = 2
-# The stage cache's host contract. 2 since remediation WP-01.6 (the owner's
-# decision): an entry now holds only a reply the model finished, and an entry
-# written under 1 (a refusal's explanation, a cut-off overview) stores no stop
-# reason to reject it by, so every entry written under 1 misses once. Never
-# ``_SCHEMA_VERSION`` (D-4).
-_SYNTHESIS_CACHE_CONTRACT = 2
+_SYNTHESIS_CACHE_CONTRACT = 1
 
 
 def default_synthesis_model() -> str:
-    """Model for the synthesis pass — Opus 5.5 by default (best coordination
+    """Model for the synthesis pass — Opus 5 by default (best coordination
     reasoning), overridable via ``DRAWING_ANALYZER_SYNTHESIS_MODEL``."""
     override = os.environ.get("DRAWING_ANALYZER_SYNTHESIS_MODEL")
     if override and override.strip():
@@ -93,7 +88,7 @@ so rather than guessing.
 - Be concise — this is an overview, not a transcription. Don't repeat every \
 schedule row; point to the sheet that carries it.
 - Output Markdown. Do NOT emit a top-level title or heading — the caller adds the \
-section header. Use short subsections / bullets.""" + "\n\n" + SOURCE_CONTENT_RULE
+section header. Use short subsections / bullets."""
 
 
 # Corpus budget (chars) for the per-sheet digests in the user turn.
@@ -138,8 +133,7 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
     the same discipline set_identity / review_planner / cross_qc already apply.
     A sheet is kept or dropped whole: half a digest would invite conflicts
-    against text the model cannot see. Budget complete escaped source blocks,
-    including their separators; the first sheet is always kept whole.
+    against text the model cannot see.
     """
     parts: list[str] = [
         "Per-sheet digests for the set follow (one block per sheet):",
@@ -151,17 +145,11 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     chars_omitted = 0
 
     def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
-        return (
-            source_content_block(
-                f"===== Sheet {index}/{total}: {sd.ref.display_label} =====",
-                tag="sheet_metadata",
-            ),
-            source_content_block(sd.text.strip(), tag="sheet_digest"),
-        )
+        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
 
     for i, sd in enumerate(ok_sheets, start=1):
         header, body = _block(i, sd)
-        cost = len(header) + len(body) + 3  # joined fields and blank line
+        cost = len(header) + len(body)
         if used + cost > _TOTAL_BUDGET and used > 0:
             # Stop at the first sheet that does not fit, and drop everything
             # after it. Skipping this one to squeeze in a later, smaller sheet
@@ -170,7 +158,7 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
             for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
                 d_header, d_body = _block(j, dropped)
                 sheets_omitted += 1
-                chars_omitted += len(d_header) + len(d_body) + 3
+                chars_omitted += len(d_header) + len(d_body)
             break
         used += cost
         parts.append(header)
@@ -205,17 +193,6 @@ class SynthesisResult:
     # user turn could not carry, and how many characters that cost.
     sheets_omitted: int = 0
     chars_omitted: int = 0
-    #: A reply came back from the API (billed), whether or not it was used.
-    #: The pipeline records a failed one as a FAILED usage attempt, as the
-    #: planner and identity already do (remediation WP-01.6). False for a
-    #: skip, a cache hit and a call that raised. An interrupted stream's
-    #: partial read is a reply (remediation WP-01.7).
-    replied: bool = False
-    #: Remediation WP-01.7: attempts whose stream was interrupted before its
-    #: final usage arrived, so the token counts are lower bounds. Nonzero
-    #: with ``replied`` False when nothing came back at all; the pipeline
-    #: records either as a FAILED usage attempt.
-    interrupted_attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -297,41 +274,33 @@ def synthesize_drawing_set(
     if effective_effort:
         kwargs["output_config"] = {"effort": effective_effort}
 
-    # Transient retries, an interrupted stream's included; once they are
-    # spent its partial read is the reply (remediation WP-01.7).
-    call = stream_reply(client, kwargs, max_retries=max_retries, sleep=sleep,
-                        send=stream_message)
-    in_tok, out_tok = call.usage.input_tokens, call.usage.output_tokens
-    if call.message is None:
-        # Nothing came back. An interrupted attempt still reported its input
-        # (``interrupted_attempts``); the pipeline records it as FAILED.
-        return SynthesisResult(
-            text="", model_used=model, error=_clean_error(call.error),
-            input_tokens=in_tok, output_tokens=out_tok,
-            sheets_omitted=prompt.sheets_omitted,
-            chars_omitted=prompt.chars_omitted,
-            interrupted_attempts=call.usage.interrupted_attempts,
-        )
-    resp = call.message
-    text = reply_text(resp)
-    # The stop reason first (D-1, remediation WP-01.6): a reply the model did
-    # not finish is not kept (a refusal's explanation is not the overview, and a
-    # cut-off one is not a whole one), not harvested and not cached.
-    error = unfinished_reply_error(
-        resp, text, noun="synthesis", interrupted=call.interrupted,
-    )
-    if error is None and not text:
-        error = "empty synthesis result"
+    attempt = 0
+    while True:
+        try:
+            resp = stream_message(client, kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001 - report, fall back to per-sheet
+            if _is_transient_error(exc) and attempt < max_retries:
+                sleep(_retry_backoff_seconds(attempt))
+                attempt += 1
+                continue
+            return SynthesisResult(
+                text="", model_used=model, error=_clean_error(exc),
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
+            )
+
+    text = _message_text(resp)
+    in_tok, out_tok = _message_usage(resp)
+    error = None if text else "empty synthesis result"
     result = SynthesisResult(
-        text=text if error is None else "",
+        text=text,
         input_tokens=in_tok,
         output_tokens=out_tok,
         model_used=model,
         error=error,
         sheets_omitted=prompt.sheets_omitted,
         chars_omitted=prompt.chars_omitted,
-        replied=True,
-        interrupted_attempts=call.usage.interrupted_attempts,
     )
     if result.ok:
         put_stage_cache_entry(

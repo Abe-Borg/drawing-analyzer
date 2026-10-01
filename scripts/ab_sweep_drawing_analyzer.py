@@ -60,7 +60,7 @@ Usage
     python scripts/ab_sweep_drawing_analyzer.py \\
         --pdf setA/M-101.pdf --pdf setA/E-201.pdf \\
         --baseline "" \\
-        --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5-5 \\
+        --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 \\
         --out ab_out
 
     # the render-target sweep

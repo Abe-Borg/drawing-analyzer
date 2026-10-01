@@ -36,8 +36,6 @@ from tests.fixtures.fake_anthropic import (
     FakeMessage,
     FakeTextBlock,
     FakeUsage,
-    checked_batch_create,
-    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -84,8 +82,7 @@ class _FakeBatches:
     def __init__(self, client):
         self._c = client
 
-    @checked_batch_create
-    def create(self, *, requests):
+    def create(self, *, requests, betas=None):
         if self._c.create_raises is not None:
             raise self._c.create_raises
         self._c.create_calls.append({"requests": list(requests)})
@@ -140,23 +137,27 @@ class _FakeClient:
         self.messages_create_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        # Files API + Message Batches are GA (production submits on the plain
-        # namespace); the real-time fallback streams through
-        # ``digest.stream_message``, on the beta namespace for the Opus 5
-        # refusal fallback (see ``apply_refusal_fallback``). Each namespace is
-        # its own SDK-checked entry point (remediation WP-02.2).
+        # Files API + Message Batches are GA (production calls the stable
+        # namespace); ``.beta.messages.stream`` is kept as a mirror because
+        # ``digest.stream_message`` routes the Opus 5 refusal-fallback params
+        # (see ``apply_refusal_fallback``) through the beta client namespace.
         stream = lambda **kw: FinalMessageStream(self._messages_create(**kw))  # noqa: E731
-        self.messages, self.beta = sdk_namespaces(
-            create=self._messages_create, stream=stream, batches=batches, files=self.files,
+        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches, stream=stream))
+        self.messages = _Obj(
+            batches=batches,
+            create=self._messages_create,
+            stream=stream,
         )
 
     def _messages_create(self, **kwargs):
+        kwargs.pop("betas", None)
+        kwargs.pop("fallbacks", None)
         self.messages_create_calls.append(kwargs)
         return (self.inline_responder or _crit_message)(kwargs)
 
 
 class _FlakyUploadFiles(_FakeFiles):
-    """Every upload raises."""
+    """Every upload raises — forces the per-sheet real-time fallback."""
 
     def upload(self, *, file):
         raise RuntimeError("upload exploded")
@@ -393,7 +394,10 @@ def test_submit_create_failure_is_nonfatal_deletes_files_and_degrades_batched():
         assert res.findings == [] and res.error and "submit failed" in res.error
 
 
-def test_submit_create_failure_preserves_cache_hit_and_upload_errors():
+def test_submit_create_failure_preserves_cache_hit_and_rescued_results():
+    # I-3: a create failure degrades ONLY the would-be-batched sheet; the free
+    # cache-hit findings and the already-PAID real-time fallback findings on the
+    # other slots survive.
     cache = DigestCache(None, persist=False)
     _run(_FakeClient(_succeed), [_make_sheet(1)], cache=cache, runs=2)  # warm sheet 1
 
@@ -414,8 +418,7 @@ def test_submit_create_failure_preserves_cache_hit_and_upload_errors():
     by_name = {ref.source_name: res for ref, res in
                collect_critique_batch(batch, client=client, cache=cache, sleep=NOSLEEP)}
     assert by_name["M-101.pdf"].cached and by_name["M-101.pdf"].findings      # free hit kept
-    assert "upload failed" in by_name["M-102.pdf"].error
-    assert client.messages_create_calls == []
+    assert by_name["M-102.pdf"].rescued and by_name["M-102.pdf"].findings     # paid fallback kept
     assert by_name["M-103.pdf"].findings == []                                # only C degraded
     assert "submit failed" in by_name["M-103.pdf"].error
     assert client.files.deleted                                               # C's uploads freed
@@ -500,28 +503,28 @@ def test_non_terminal_cancel_fails_retains_files():
 
 
 # --------------------------------------------------------------------------- #
-# Upload failures (per-sheet, non-fatal; no full-rate fallback)
+# Upload-failure fallback (per-sheet, non-fatal)
 # --------------------------------------------------------------------------- #
 
 
-def test_upload_failure_reports_unread_critique_without_real_time_calls():
+def test_upload_failure_falls_back_to_real_time_and_marks_rescued():
     client = _FakeClient(_succeed)
     client.files = _FlakyUploadFiles()
     client.beta.files = client.files
     batch = submit_critique_batch(
         iter([_make_sheet(1)]), client=client, model=OPUS, runs=2, total=1,
     )
+    # No batch item was created (the sheet was served inline instead).
     assert batch.batch_id is None and client.create_calls == []
-    assert client.messages_create_calls == []
+    # Two real-time messages.create calls (the self-consistency reads).
+    assert len(client.messages_create_calls) == 2
     results = collect_critique_batch(batch, client=client, sleep=NOSLEEP)
     _ref, res = results[0]
-    assert res.requested_runs == 2 and res.completed_runs == 0
-    assert "upload failed" in res.error and not res.rescued and res.findings == []
-    assert res.input_tokens == res.output_tokens == 0
+    assert res.rescued and res.completed_runs == 2 and len(res.findings) == 1
 
 
 def test_upload_failure_on_one_sheet_still_batches_the_other():
-    # Successful batch reads survive another sheet's upload failure.
+    # A mixed run: sheet 0 uploads fine (batched), sheet 1's upload fails (inline).
     class _OneBadUpload(_FakeFiles):
         def upload(self, *, file):
             _name, data, _ctype = file
@@ -535,18 +538,20 @@ def test_upload_failure_on_one_sheet_still_batches_the_other():
     batch, results = _run(client, [_make_sheet(1), _make_sheet(2)], runs=2)
     # Only sheet 0's two reads were batched.
     assert [r["custom_id"] for r in client.submitted] == ["sheet__0__r1", "sheet__0__r2"]
-    assert client.messages_create_calls == []
+    # Sheet 1 was served inline (2 real-time reads) and is marked rescued.
+    assert len(client.messages_create_calls) == 2
     by_name = {ref.source_name: res for ref, res in results}
-    assert by_name["M-101.pdf"].completed_runs == 2 and by_name["M-101.pdf"].findings
-    assert by_name["M-102.pdf"].completed_runs == 0
-    assert "upload failed" in by_name["M-102.pdf"].error
-    assert not any(res.rescued for res in by_name.values())
-    # Page order is preserved, including the failed sheet.
+    assert not by_name["M-101.pdf"].rescued
+    assert by_name["M-102.pdf"].rescued
+    # Both sheets still produce findings; page order is preserved.
     assert [ref.source_name for ref, _ in results] == ["M-101.pdf", "M-102.pdf"]
 
 
 def test_dead_files_route_trips_breaker_and_stops_uploading():
-    # Stop doomed uploads without spending on real-time critique reads.
+    # A whole-run Files-API outage (consecutive 404s) must trip the circuit
+    # breaker: after MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES sheets, the rest skip
+    # the doomed upload and go straight to the real-time fallback — not one dead
+    # upload round-trip per sheet.
     from drawing_analyzer.batch_digest import MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES as K
 
     client = _FakeClient(_succeed)
@@ -557,16 +562,15 @@ def test_dead_files_route_trips_breaker_and_stops_uploading():
         iter([_make_sheet(i) for i in range(n_sheets)]),
         client=client, model=OPUS, runs=2, total=n_sheets,
     )
+    # Nothing was batched; every sheet was critiqued real-time.
     assert batch.batch_id is None and client.create_calls == []
     # Only the first K sheets attempted an upload; the breaker stopped the rest.
     assert client.files.attempts == K
+    # Every sheet still got a rescued real-time critique (2 reads each).
     results = collect_critique_batch(batch, client=client, sleep=NOSLEEP)
     assert len(results) == n_sheets
-    assert all(not res.rescued and res.completed_runs == 0 for _ref, res in results)
-    assert all(res.requested_runs == 2 and res.error for _ref, res in results)
-    assert all("upload failed" in res.error for _ref, res in results[:K])
-    assert all("3 consecutive HTTP 404" in res.error for _ref, res in results[K:])
-    assert client.messages_create_calls == []
+    assert all(res.rescued and res.completed_runs == 2 for _ref, res in results)
+    assert len(client.messages_create_calls) == 2 * n_sheets
 
 
 # --------------------------------------------------------------------------- #

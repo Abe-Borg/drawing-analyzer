@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-09-29. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-09-08. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,20 +20,16 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-09-29"
+PRICING_EFFECTIVE_DATE = "2026-09-08"
 
 # Batch API bills at half of standard, per Anthropic's published pricing. The
 # caching multipliers below stack with it (Anthropic pricing, "These multipliers
 # stack with other pricing modifiers, including the Batch API discount").
 BATCH_DISCOUNT = 0.5
 # Prompt-caching multipliers on the base *input* rate. A cache READ is 0.1x on
-# every model this app can select except Opus 5.5, whose reads bill at 0.05x
-# ($0.20 on a $4 input rate); that one is a per-model override on the price
-# row (``ModelPrice.cache_read_multiplier``), and :data:`CACHE_READ_MULTIPLIER`
-# stays the standard rate every other row inherits. A cache WRITE depends on
-# the requested TTL — 1.25x for the default 5-minute entry, 2x for a
-# ``ttl: "1h"`` entry, on every model including Opus 5.5 — so the two are
-# separate constants and the write rate is chosen per record by
+# every model this app can select. A cache WRITE depends on the requested TTL —
+# 1.25x for the default 5-minute entry, 2x for a ``ttl: "1h"`` entry — so the
+# two are separate constants and the write rate is chosen per record by
 # :func:`cache_write_multiplier`.
 #
 # This distinction is not academic here: ``api_config._cache_control_block``
@@ -76,28 +72,10 @@ class ModelPrice:
     input_per_mtok: float
     output_per_mtok: float
     label: str  # human-friendly name for dialogs
-    # A cache read as a multiple of ``input_per_mtok``. Not a constant across
-    # models: Opus 5.5 reads at 0.05x, while every other model here reads at
-    # the standard 0.1x. A read priced at the standard rate on Opus 5.5 would
-    # double every cached token in the ledger.
-    cache_read_multiplier: float = CACHE_READ_MULTIPLIER
-
-    @property
-    def cache_read_per_mtok(self) -> float:
-        """USD per million cache-read tokens."""
-        return float(
-            Decimal(str(self.input_per_mtok)) * Decimal(str(self.cache_read_multiplier))
-        )
 
 
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
-# fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
-#
-# Opus 5.5 is $4/$20 with cache reads at $0.20 (0.05x); Sonnet 5.5 is $2/$10,
-# the same as Sonnet 5, with the standard 0.1x read. Both writes follow the
-# standard 1.25x / 2x multipliers ($5 / $8 on Opus 5.5, $2.50 / $4 on Sonnet
-# 5.5), and batch halves every rate. Opus 5 and Opus 4.8 stay at $5/$25: they
-# are Opus 5.5's refusal-fallback targets, which bill at their own rates.
+# startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
 #
 # Sonnet 5 is $2/$10. That figure launched as introductory pricing advertised
 # through 2026-08-31, and this table previously carried the $3/$15 list rate on
@@ -108,14 +86,11 @@ class ModelPrice:
 # time-dependence out of assembly — so the table simply carries the standing
 # price and ``PRICING_EFFECTIVE_DATE`` says when it was last checked.
 #
-# Weight note: the Sonnet row prices four pipeline stages by default (set
-# identity, verification, prose harvest, citation) plus the report chat's own
-# readout — Sonnet 5.5's now, at the same $2/$10 — so it moves the estimate
-# more than it used to, and the 50% over-statement the old hedge caused was
+# Weight note: Sonnet 5 now prices three pipeline stages (set identity, prose
+# harvest, citation) plus the report chat's own readout, so this row moves the
+# estimate more than it used to — the 50% over-statement the hedge caused was
 # correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
-    "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
-    "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5"),
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
@@ -124,10 +99,6 @@ MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-sonnet-4-6": ModelPrice(3.00, 15.00, "Sonnet 4.6"),
     "claude-haiku-4-5": ModelPrice(1.00, 5.00, "Haiku 4.5"),
 }
-
-
-# A dated snapshot suffix is YYYYMMDD.
-_DATE_SUFFIX_DIGITS = 8
 
 
 def price_for(model: str) -> ModelPrice | None:
@@ -146,20 +117,10 @@ def price_for(model: str) -> ModelPrice | None:
     # or a dated "...-4-5-20251001", but NOT a different model whose id merely
     # starts with a known one (e.g. a future "claude-opus-4-80" must stay
     # unknown → None, not silently priced as 4.8). Longest match wins.
-    #
-    # The delimiter alone is not enough: "claude-opus-5-5" is "claude-opus-5"
-    # plus "-5", and before Opus 5.5 had its own row that read as an Opus 5
-    # variant, priced at $5/$25 against a real $4/$20. A short all-digit
-    # segment after the delimiter is a version number, so the id names a
-    # different model; a date suffix is eight digits.
     best_key = ""
     for key in MODEL_PRICING:
-        if not model.startswith(key + "-") or len(key) <= len(best_key):
-            continue
-        head = model[len(key) + 1:].split("-", 1)[0]
-        if head.isdigit() and len(head) < _DATE_SUFFIX_DIGITS:
-            continue
-        best_key = key
+        if model.startswith(key + "-") and len(key) > len(best_key):
+            best_key = key
     return MODEL_PRICING[best_key] if best_key else None
 
 
@@ -219,8 +180,6 @@ def usage_record_cost(
     (1.25x). Defaulting to the 5-minute rate keeps every existing caller correct
     — the digest and critique breakpoints emit a plain ``{"type": "ephemeral"}``
     — while letting the ``api_config`` 1-hour path price itself honestly.
-    ``cache_read_tokens`` are priced at the model's own read multiplier
-    (``ModelPrice.cache_read_multiplier``: 0.05x on Opus 5.5, 0.1x elsewhere).
     """
     price = price_for(model)
     tool_uses = billable_tool_uses or {}
@@ -235,9 +194,7 @@ def usage_record_cost(
     token_cost = (
         (Decimal(int(input_tokens)) / million) * inp
         + (Decimal(int(output_tokens)) / million) * out
-        + (Decimal(int(cache_read_tokens)) / million)
-        * inp
-        * Decimal(str(price.cache_read_multiplier))
+        + (Decimal(int(cache_read_tokens)) / million) * inp * Decimal(str(CACHE_READ_MULTIPLIER))
         + (Decimal(int(cache_write_tokens)) / million)
         * inp
         * Decimal(str(cache_write_multiplier(cache_write_ttl)))

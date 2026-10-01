@@ -59,7 +59,6 @@ from .core.api_config import (
     system_prompt_with_cache,
     tools_with_cache,
 )
-from .core.reply_text import reply_text
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -68,13 +67,12 @@ from .digest import (
     _error_status,
     _image_block,
     _is_transient_error,
+    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
-    StreamUsage,
     stream_message,
 )
-from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .models import Finding, Verification, source_page_key
 from .verify import (
     _FATAL_STATUSES,
@@ -94,10 +92,7 @@ _log = get_logger()
 # MEANING changed, so a stored verdict reached under turn-counting is not
 # reproducible under the same key. This manual bump is the only mechanism that
 # covers this stage, and it discards investigation verdicts only.
-# v4 (prompt optimization PO-03): shared source instructions and escaped
-# finding/index/tool text change the model-visible contract. Keep this stage's
-# existing manual version as the sole invalidation mechanism.
-INVESTIGATE_PROMPT_VERSION = "investigate-v4"
+INVESTIGATE_PROMPT_VERSION = "investigate-v3"
 
 _DEFAULT_MAX_ROUNDS = 6
 # Per-run investigation budget, scaled to the size of the set rather than a
@@ -206,17 +201,17 @@ exhausted). Prefer the single most decisive request over broad exploration.
 When you can decide — or when told the budget is exhausted — respond with \
 ONLY a JSON object and nothing else:
 {"verdict": "CONFIRMED" | "CONTRADICTED" | "NOT_VISIBLE", "note": "<= 25 words \
-on what you actually saw"}""" + "\n\n" + SOURCE_CONTENT_RULE
+on what you actually saw"}"""
 
 
 # Whether this process may still send the advisory task budget. The beta is
-# documented for Opus 5 and Opus 5.5, but an org without it enabled would get a
-# 400 on every turn — which, on a stage designed to be additive and non-fatal
-# (I-3), would silently disable investigations altogether rather than degrade.
-# So the first such rejection turns the feature off for the process and the run
-# continues on the plain streaming transport, with the host-side round cap still
-# enforcing a bound. Only a budget-specific rejection flips it; transient errors
-# re-raise to the caller's existing retry.
+# documented for Opus 5, but an org without it enabled would get a 400 on every
+# turn — which, on a stage designed to be additive and non-fatal (I-3), would
+# silently disable investigations altogether rather than degrade. So the first
+# such rejection turns the feature off for the process and the run continues on
+# the plain streaming transport, with the host-side round cap still enforcing a
+# bound. Only a budget-specific rejection flips it; transient errors re-raise to
+# the caller's existing retry.
 _task_budget_available = True
 
 _TASK_BUDGET_REJECTION_MARKERS = ("task_budget", "task-budgets", "output_config")
@@ -320,7 +315,7 @@ def _investigation_message_turn(client: Any, kwargs: dict, *, task_budget: int) 
         config["task_budget"] = {"type": "tokens", "total": int(task_budget)}
         budgeted = {**kwargs, "output_config": config, "betas": [TASK_BUDGET_BETA]}
         try:
-            # Also opts into (and self-heals) the refusal fallback —
+            # Also opts into (and self-heals) the Opus 5 refusal fallback —
             # see call_with_refusal_fallback — orthogonally to the task-budget
             # rejection handled below.
             return call_with_refusal_fallback(
@@ -809,9 +804,6 @@ class _InvestigationOutcome:
     fatal: bool = False
     note: str = ""
     tool_trace: list = field(default_factory=list)
-    # Remediation WP-01.7: turns whose stream was interrupted before its final
-    # usage arrived; the token counts are then lower bounds.
-    interrupted_attempts: int = 0
 
 
 def _build_initial_content(
@@ -834,28 +826,17 @@ def _build_initial_content(
     if legs:
         header += "\nThe finding also involves sheet(s): " + ", ".join(legs)
     content: list = [
-        {"type": "text", "text": source_content_block(header, tag="finding_context")},
+        {"type": "text", "text": header},
         {"type": "text", "text": "The region the first reviewer saw follows:"},
         _image_block(crop_png),
     ]
     if sheet_index:
-        content.append({"type": "text", "text": source_content_block(sheet_index, tag="sheet_metadata")})
+        content.append({"type": "text", "text": sheet_index})
     content.append({"type": "text", "text": (
         f"You may make up to {budget} evidence request(s). Use the tools to "
         "gather what you need, then respond with ONLY the JSON verdict object."
     )})
     return content
-
-
-def _tool_source_content(content: list | str) -> list | str:
-    """Frame only model-visible tool text; keep raw results, images and traces."""
-    if isinstance(content, str):
-        return source_content_block(content, tag="tool_evidence")
-    return [
-        {**block, "text": source_content_block(block["text"], tag="tool_evidence")}
-        if isinstance(block, dict) and block.get("type") == "text" else block
-        for block in content
-    ]
 
 
 _BUDGET_EXHAUSTED_TEXT = (
@@ -1009,17 +990,6 @@ def _investigate_one(
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
-                # An interrupted turn is retried like any transient failure,
-                # and its reported usage is the finding's; its partial read is
-                # never used, so no tool from it runs (remediation WP-01.7,
-                # the owner's rule; the turn's replay is WP-13.4's).
-                lost = StreamUsage()
-                lost.add_interrupted(exc)
-                out.input_tokens += lost.input_tokens
-                out.output_tokens += lost.output_tokens
-                out.cache_read_tokens += lost.cache_read_tokens
-                out.cache_write_tokens += lost.cache_write_tokens
-                out.interrupted_attempts += lost.interrupted_attempts
                 if _is_transient_error(exc) and attempt < max_retries:
                     sleep(_retry_backoff_seconds(attempt))
                     attempt += 1
@@ -1086,7 +1056,7 @@ def _investigate_one(
                 result_block: dict = {
                     "type": "tool_result",
                     "tool_use_id": str(getattr(block, "id", "") or ""),
-                    "content": _tool_source_content(content_out),
+                    "content": content_out,
                 }
                 if is_error:
                     result_block["is_error"] = True
@@ -1109,7 +1079,7 @@ def _investigate_one(
             # A genuine NOT_VISIBLE conclusion and a garbled reply both map to
             # UNCERTAIN through parse_verdict — distinguish them on the raw
             # verdict token so garble is "not_concluded", never a conclusion.
-            text = reply_text(resp)
+            text = _message_text(resp)
             obj = _tolerant_json_object(text)
             raw = (
                 str(obj.get("verdict", "")).strip().upper()
@@ -1332,8 +1302,6 @@ class InvestigationRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cached: bool = False
-    # Remediation WP-01.7 (:attr:`_InvestigationOutcome.interrupted_attempts`).
-    interrupted_attempts: int = 0
 
 
 @dataclass
@@ -1499,7 +1467,6 @@ def investigate_findings(
             output_tokens=outcome.output_tokens,
             cache_read_tokens=outcome.cache_read_tokens,
             cache_write_tokens=outcome.cache_write_tokens,
-            interrupted_attempts=outcome.interrupted_attempts,
         )
         result.per_finding.append(record)
         if outcome.outcome == "concluded":

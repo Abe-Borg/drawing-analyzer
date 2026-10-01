@@ -614,14 +614,10 @@ def test_the_run_band_widens_to_carry_the_cache_scenario():
     assert fast.low_cost is not None and fast.high_cost is not None
     assert fast.low_cost < fast.high_cost
 
-    # Resolved the way the estimator resolves it: the critique runs on its own
-    # model (the review default), not on the digest's ``model=`` argument.
-    from drawing_analyzer.critique import critique_model
-
-    prefix = estimate_image_tokens_for_set(1, model=critique_model()) + 800
+    prefix = estimate_image_tokens_for_set(1, model=OPUS) + 800
     _, pessimistic = _critique_prefix_costs(
         prefix_tokens=prefix, output_tokens=1_500, sheet_count=10, runs=2,
-        model=critique_model(), batch=False,
+        model=OPUS, batch=False,
     )
     row = next(c for c in fast.components if c.stage.startswith("Critique"))
     # The displayed row shows the pessimistic end, as verification's does.
