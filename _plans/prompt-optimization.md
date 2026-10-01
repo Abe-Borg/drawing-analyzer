@@ -10,7 +10,7 @@ before the preceding PR merges and the owner asks to continue.
 
 | Chunk | Scope | Status / gate |
 |---|---|---|
-| PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | Prepared for review; PR pending |
+| PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) open; awaiting owner review and merge |
 | PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | After PO-01 merges |
 | PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | After preceding chunks merge; first reconcile with remediation PR #191 and any newer cross-QC/investigation work |
 | PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
