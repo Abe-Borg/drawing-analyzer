@@ -11,7 +11,7 @@ before the preceding PR merges and the owner asks to continue.
 | Chunk | Scope | Status / gate |
 |---|---|---|
 | PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) merged |
-| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | Validated; opening one PR, then pause for owner review and merge |
+| PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) open; paused for owner review and merge |
 | PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | After PO-02 merges and the owner asks to continue; reconcile with merged remediation PR #191 and any newer cross-QC/investigation work |
 | PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
 | PO-05 | Measure prefix token counts, current model cache minimums and reuse; enable eligible caching through the existing policy helper | Requires approved drawings and an intended live measurement budget before billable work |
@@ -111,6 +111,8 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 
 ## PO-02 handoff
 
+- [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) is open. Work
+  is paused for the owner's review and merge; PO-03 has not started.
 - Base: `aa0bfe1` (main with PO-01 PR #192 and cross-QC remediation PR #191
   merged). Open-PR check found only dependency PR #190; no overlapping work.
 - Seventeen new regressions: **15 failed, 2 passed** before implementation.
