@@ -312,7 +312,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - a run with no client reads FAILED (it read COMPLETE beside its error).
 
   `_CROSS_QC_CACHE_CONTRACT` 9 → 10 (one migration-register row). Tests:
-  `tests/test_cross_qc_terminal_outcomes.py` (109); the recorded limit in
+  `tests/test_cross_qc_terminal_outcomes.py` (117, 8 of them from the Codex
+  review: a finished retry with no findings object never loses a cut-off
+  read's items; a cut-off call that retained nothing reads FAILED; the salvage
+  count is taken after the findings cap); the recorded limit in
   `tests/test_response_shapes.py` flipped
   (`test_a_refused_cross_qc_reply_names_its_refusal`); the SDK cap table's
   `cross_qc` row streams and gains its retry row, with two new contract tests;

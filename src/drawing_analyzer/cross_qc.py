@@ -663,6 +663,14 @@ class CrossQCSalvage:
     claims: int = 0
     items_cut: int = 0
 
+    @property
+    def kept(self) -> int:
+        """Findings and facts retained: what makes a cut-off call count as having
+        obtained something (Codex review, PR #197). Claims feed the arithmetic
+        auditor and are no judgment of a conflict, as on a finished reply with
+        no findings object."""
+        return self.findings + self.facts
+
     def merge(self, other: "CrossQCSalvage") -> None:
         for f in fields(self):
             setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
@@ -1711,12 +1719,24 @@ def _send(client: Any, kwargs: dict[str, Any], *, noun: str, max_retries: int,
 
 def _keep_reply(first: _Reply, retry: _Reply) -> _Reply:
     """The digest's rule for two reads of one request (N16): the retry wins when
-    it ranks at least as high; else the first is kept and names the retry."""
-    if not retry.raised and _read_rank(retry) >= _read_rank(first):
+    it ranks at least as high; else the first is kept and names the retry.
+
+    Ranked by what cross-QC can read first (Codex review, PR #197): a reply
+    that yields a findings object (:func:`_reply_object`) outranks one that
+    does not, and the digest's rank (:func:`~drawing_analyzer.digest._read_rank`)
+    decides between two alike. A finished retry with no findings object
+    (prose, malformed JSON) used to outrank a cut-off first read and lose the
+    items it had finished.
+    """
+    def _rank(reply: _Reply) -> tuple[bool, int]:
+        return _reply_object(reply)[0] is not None, _read_rank(reply)
+
+    if not retry.raised and _rank(retry) >= _rank(first):
         kept, other = retry, first
     else:
         kept, other = first, retry
-        _name_discarded_retry(kept, (" failed: " if retry.raised else ": ") + (retry.error or ""))
+        why = retry.error or _NO_FINDINGS_OBJECT      # a finished reply, unreadable
+        _name_discarded_retry(kept, (" failed: " if retry.raised else ": ") + why)
     kept.input_tokens += other.input_tokens
     kept.output_tokens += other.output_tokens
     kept.interrupted_attempts += other.interrupted_attempts
@@ -1921,9 +1941,10 @@ def _one_cross_qc_call(
     if counts is not None:
         counts.merge(local)
     claims = _resolve_claim_handles(_reply_claims(reply, obj, salvaged), ebh, by_label)
-    if salvaged:
+    findings = _cap_findings(findings, budget)
+    if salvaged:                       # counted after the cap (Codex review)
         _note_salvage(log, findings=len(findings), facts=0, claims=len(claims), cut=cut)
-    return _cap_findings(findings, budget), claims, in_tok, out_tok, reply.error
+    return findings, claims, in_tok, out_tok, reply.error
 
 
 def _map_call(
@@ -2571,10 +2592,11 @@ def cross_sheet_qc(
             budget_degraded=budget.degraded,
             discards=discards,
             invalid=invalid,
-            # Nothing obtained: the call failed and kept nothing (D-2's
-            # all-failed rule, the owner's; a cut-off reply that kept its
-            # complete items is PARTIAL).
-            failed=err is not None and not log.salvage.calls,
+            # Nothing obtained: the call failed and retained no finding (D-2's
+            # all-failed rule, the owner's; a cut-off reply that retained a
+            # complete, grounded finding is PARTIAL; Codex review: retained,
+            # not merely read).
+            failed=err is not None and not log.salvage.kept,
             salvage=log.salvage,
             interrupted_attempts=log.interrupted_attempts,
         )
@@ -2640,9 +2662,10 @@ def cross_sheet_qc(
             # additive salvage (§2.4/I-3): the arithmetic auditor can use them
             # while the shard itself stays failed (stage PARTIAL).
             all_claims.extend(c)
-            if local_log.salvage.calls:
+            if local_log.salvage.kept:
                 # Remediation WP-06.3: a shard cut off part way keeps the
                 # findings and facts it completed; the shard stays failed.
+                # Counted only when it retained one (Codex review).
                 shards_salvaged += 1
                 all_findings.extend(f)
                 all_facts.extend(facts)
@@ -2719,7 +2742,8 @@ def cross_sheet_qc(
         budget_degraded=budget.degraded,
         discards=discards,
         invalid=invalid,
-        # Nothing obtained: no shard finished or kept a cut-off reply's items.
+        # Nothing obtained: no shard finished or retained a cut-off reply's
+        # findings or facts.
         failed=shards_completed + shards_salvaged == 0,
         salvage=log.salvage,
         interrupted_attempts=log.interrupted_attempts,

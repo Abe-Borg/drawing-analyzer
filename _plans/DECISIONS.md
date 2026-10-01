@@ -691,9 +691,12 @@ the WP-01.7 interruption rules, and restates none of them.
   (`raised_cap_may_finish`), once, at `min(2 × 16,000, MAX_TOKENS_RETRY_CEILING)`
   clamped by `output_cap_for_model` (32,000), on every path. The two reads
   fold by the digest's N16 rule through its own pieces (`_read_rank`,
-  `_name_discarded_retry`, read off `cross_qc._Reply`): the later read wins
-  when it ranks at least as high; else the first is kept and names it. Both
-  attempts' usage is summed. Not taken: not on reconcile; no retry.
+  `_name_discarded_retry`, read off `cross_qc._Reply`), after the one test
+  cross-QC adds: a reply that yields a findings object outranks one that does
+  not (Codex review, PR #197: a finished retry with no object used to
+  outrank a cut-off first read and lose its items). Between two alike the
+  later read wins when it ranks at least as high; else the first is kept and
+  names it. Both attempts' usage is summed. Not taken: not on reconcile; no retry.
 - **Salvage (round 1):** only `TRUNCATED` and `UNFINISHED` replies with text
   keep anything: their closed object, else the complete items of their
   `findings` / `facts` / `claims` arrays (one linear `raw_decode` pass), each
@@ -1071,8 +1074,11 @@ reply with no findings object, a continuation or unknown stop), when every
 shard failed and kept nothing, or when no client could be made (it read
 COMPLETE beside its error, WP-16.2's finding); else COMPLETE when `complete`,
 else PARTIAL (a failed or cut-off call, a reconcile shortfall, a budget-only
-shortfall). A cut-off call that kept its complete items is PARTIAL, not
-FAILED: it judged part of its input. The new counts are observational:
+shortfall). A cut-off call that retained a finding or a fact (after
+validation, grounding and the cap: `CrossQCSalvage.kept`) is PARTIAL, not
+FAILED: it judged part of its input; one that retained nothing is FAILED
+(Codex review, PR #197: the first version counted a call whose object was
+merely read). The new counts are observational:
 `CrossQCSalvage` (what a cut-off reply kept; one warning) and the three
 `CrossQCDiscardCounts` fields (`facts_over_cap`, `facts_not_object`,
 `legs_not_object`; one warning, the manifest's `cross_qc_discards`); neither

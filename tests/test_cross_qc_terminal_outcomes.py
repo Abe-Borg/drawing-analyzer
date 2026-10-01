@@ -992,3 +992,88 @@ def test_pipeline_the_omission_counters_reach_the_warnings_and_the_manifest(tmp_
             ctx.cross_qc_discards["legs_not_object"]) == (2, 1, 0)
     _log, manifest = _export(ctx, tmp_path)
     assert manifest["cross_qc_discards"]["facts_over_cap"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Review follow-up (Codex, PR #197)
+# --------------------------------------------------------------------------- #
+
+
+def _finished_without_object(kind: str):
+    def shape(body, obj):
+        body["content"] = [R.text("I compared the sheets; nothing structured follows."
+                                  if kind == "prose" else "```json\n{\"findings\": [ {oops\n```")]
+        return body
+    return shape
+
+
+@pytest.mark.parametrize("kind", ["prose", "malformed"], ids=["prose", "malformed"])
+@pytest.mark.parametrize("target", ["whole_set", "reconcile"], ids=["whole_set", "reconcile"])
+def test_codex_a_finished_retry_with_no_findings_object_never_loses_the_first_read(
+        tmp_path, monkeypatch, target, kind):
+    # The first reply is cut with one complete finding; the raised-cap retry
+    # finishes but carries no findings object. The retry used to outrank it
+    # (finished beats partial) and the finding was lost.
+    seen = {"n": 0}
+    retry = _finished_without_object(kind)
+
+    def route(params):
+        body = _body(params)
+        if _path(params) == target:
+            seen["n"] += 1
+            obj = _reply_object(params)
+            body = _cut(body, obj) if seen["n"] == 1 else retry(body, obj)
+        return body
+
+    res = _run(AnthropicAPIStub(route), cache=DigestCache(tmp_path / "c"),
+               sharded=target != "whole_set", monkeypatch=monkeypatch)
+
+    assert len(res.findings) == 1 and res.stage_status == "PARTIAL"
+    noun = "cross-qc" if target == "whole_set" else "cross-qc reconciliation"
+    assert (f"truncated {noun} (stop_reason='max_tokens'); retry: "
+            f"{X._NO_FINDINGS_OBJECT}") in res.error
+
+
+def _cut_text(text: str):
+    def shape(body, obj):
+        body["content"] = [R.text(text)]
+        body["stop_reason"] = "max_tokens"
+        return body
+    return shape
+
+
+@pytest.mark.parametrize("text", [
+    "```json\n{\"findings\": [], \"claims\": [{\"sheet_id\": \"S0",
+    "```json\n{\"findings\": [" + json.dumps(dict(_finding(1), source_quote="AHU-9 NOT PRINTED"))
+    + ", {\"sheet_handle\": \"S0",
+], ids=["empty_array_then_cut", "only_finding_ungrounded"])
+def test_codex_a_cut_reply_that_retained_nothing_is_failed(tmp_path, text):
+    res = _run(AnthropicAPIStub(_route(_cut_text(text), "whole_set", 2)),
+               cache=DigestCache(tmp_path / "c"))
+
+    assert res.findings == [] and res.salvage.calls == 1 and res.salvage.findings == 0
+    assert res.stage_status == "FAILED"
+
+
+def test_codex_cut_shards_that_retained_nothing_are_failed(tmp_path, monkeypatch):
+    text = "```json\n{\"findings\": [], \"claims\": [], \"facts\": [{\"sheet_handle\": \"S0"
+    res = _run(AnthropicAPIStub(_route(_cut_text(text), "map", 99)),
+               cache=DigestCache(tmp_path / "c"), sharded=True, monkeypatch=monkeypatch)
+
+    assert res.shards_completed == 0 and res.salvage.calls == 2 and res.facts_collected == 0
+    assert res.stage_status == "FAILED"
+
+
+def test_codex_the_salvage_count_is_taken_after_the_findings_cap(tmp_path):
+    cap = X.DEFAULT_CROSS_QC_MAX_FINDINGS
+
+    def many(body, obj):
+        obj = {"findings": [_finding(i) for i in range(cap + 6)]}
+        body["content"] = [R.text(_fenced(obj)[:-40])]               # the last one cut
+        body["stop_reason"] = "max_tokens"
+        return body
+
+    res = _run(AnthropicAPIStub(_route(many, "whole_set", 2)), cache=DigestCache(tmp_path / "c"))
+
+    assert len(res.findings) == cap and res.findings_omitted == 5
+    assert (res.salvage.findings, res.salvage.items_cut) == (cap, 1)

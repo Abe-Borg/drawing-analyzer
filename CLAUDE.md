@@ -1615,9 +1615,11 @@ raise, after the paid digest and critique. Now:
     clamped by `output_cap_for_model` (32,000; none when that leaves no
     headroom), on every path. `_keep_reply` is the digest's N16 rule through
     its own pieces (`digest._read_rank`, `_name_discarded_retry`, duck-typed on
-    `_Reply`): the retry wins when it ranks at least as high, else the first
-    read is kept and names it (`; retry: …`, `; retry failed: …`). Both
-    attempts' usage is summed.
+    `_Reply`), after one cross-QC test: a reply that yields a findings object
+    (`_reply_object`) outranks one that does not (Codex review: a finished
+    retry with no object lost a cut-off read's items). Then the retry wins
+    when it ranks at least as high, else the first read is kept and names it
+    (`; retry: …`, `; retry failed: …`). Both attempts' usage is summed.
   - **Salvage of a cut-off reply** (`_reply_object`, `_salvage_object`):
     only `TRUNCATED` (`max_tokens`, the context window) and `UNFINISHED` (no
     stop reason: an interrupted stream's partial read) with text
@@ -1634,7 +1636,9 @@ raise, after the paid digest and critique. Now:
   - **Status** (`CrossQCResult.stage_status`, the one rule the pipeline
     records, its usage record too): `failed` first (D-2's failure flag before
     counts; the all-failed rule at the call level) → FAILED when the stage
-    obtained nothing (the whole-set call failed and kept nothing — a refusal,
+    obtained nothing (the whole-set call failed and retained no finding — a
+    cut-off call counts only when it retained a finding or, on a shard, a
+    fact: `CrossQCSalvage.kept`, Codex review — a refusal,
     an empty or raised call, a finished reply with no findings object, a
     continuation or unknown stop — every shard failed and kept nothing, or no
     client could be made: it read COMPLETE beside its error, WP-16.2's
