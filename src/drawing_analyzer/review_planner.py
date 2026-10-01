@@ -39,6 +39,7 @@ from .core.api_config import (
     model_supports_effort,
 )
 from .core.reply_text import reply_text
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
@@ -121,7 +122,7 @@ sees the full sheet image and text.
 Output a SINGLE fenced code block labeled json and nothing after it, \
 containing exactly: {"plans": [{"discipline": "...", "title": "...", \
 "items": [{"text": "...", "severity": "...", "refs": ["..."]}]}]} — one plan \
-per discipline actually present, at most 25 items per plan."""
+per discipline actually present, at most 25 items per plan.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 _PLANNER_TASK_INSTRUCTION = (
@@ -150,7 +151,7 @@ def build_planner_user_text(identity: Any, sheet_digests: list[SheetDigest]) -> 
     """
     parts: list[str] = []
     if identity is not None and getattr(identity, "has_content", False):
-        parts.append(identity.context_block())
+        parts.append(source_content_block(identity.context_block(), tag="set_identity"))
     else:
         parts.append(
             "SET IDENTITY: unavailable — infer the disciplines and applicable "
@@ -164,7 +165,13 @@ def build_planner_user_text(identity: Any, sheet_digests: list[SheetDigest]) -> 
     omitted = 0
     for i, sd in enumerate(ok_sheets, start=1):
         head = (sd.text or "").strip()[:_PLAN_HEAD_SLICE]
-        block = f"===== Sheet {i}/{total}: {sd.ref.display_label} =====\n{head}"
+        block = "\n".join([
+            source_content_block(
+                f"===== Sheet {i}/{total}: {sd.ref.display_label} =====",
+                tag="sheet_metadata",
+            ),
+            source_content_block(head, tag="sheet_digest"),
+        ])
         if used + len(block) <= _PLAN_TOTAL_BUDGET:
             parts.append(block)
             used += len(block) + 1
