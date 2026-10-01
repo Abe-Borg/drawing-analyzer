@@ -261,3 +261,171 @@ def test_exports_carry_source_id_not_absolute_paths():
     payload = json.dumps({"findings": [f.to_dict()]})
     assert '"source_id": "SRC-0002"' in payload
     assert "pdf_path" not in payload
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-06.2 (N6, D-8): a leg is its page; an id two sheets carry
+# resolves to none of them (the owner's rules)
+# --------------------------------------------------------------------------- #
+
+import pytest  # noqa: E402
+
+from drawing_analyzer.auditors import run_auditors  # noqa: E402
+from drawing_analyzer.auditors.arithmetic import audit_arithmetic  # noqa: E402
+from drawing_analyzer.critique import (  # noqa: E402
+    _leg_targets,
+    critical_signature,
+    signature_conflicts,
+)
+from drawing_analyzer.models import ConflictLeg, NumericClaim, SheetGeometry  # noqa: E402
+
+_PAGE_W, _PAGE_H = 792.0, 612.0
+
+
+def _leg(source_id, *, sheet_id="M-101", name="M-101.pdf", page=0, quote="PUMP P-1"):
+    return ConflictLeg(sheet_id=sheet_id, source_name=name, source_id=source_id,
+                       page_index=page, source_quote=quote)
+
+
+def _conflict(leg):
+    f = _finding("SRC-0003", sheet_id="E-101", name="E-101.pdf", quote="PUMP P-1")
+    f.text = "Pump P-1 voltage on the panel schedule differs from the mechanical plan."
+    f.also_on = [leg]
+    return f
+
+
+def _sheet(source_id, sheet_id, *, name=None, page=0, lines=()):
+    from pathlib import Path
+
+    from drawing_analyzer.models import SheetRef
+
+    words = [(_PAGE_W - 300, _PAGE_H - 160, _PAGE_W - 240, _PAGE_H - 148, sheet_id, 0, 0, 0)]
+    text = "\n".join([sheet_id, *lines])
+    return SheetGeometry(
+        ref=SheetRef(pdf_path=Path(f"/{source_id}/{name or sheet_id + '.pdf'}"),
+                     page_index=page, source_name=name or f"{sheet_id}.pdf",
+                     page_count=1, source_id=source_id),
+        page_width_pt=_PAGE_W, page_height_pt=_PAGE_H, rows=2, cols=2,
+        words=words, sheet_text=text, full_sheet_text=text,
+    )
+
+
+def test_leg_targets_follow_the_leg_page_not_its_label():
+    a, b = _conflict(_leg("SRC-0001")), _conflict(_leg("SRC-0002"))
+    assert _leg_targets(a) != _leg_targets(b), "two PDFs that share M-101 are two targets"
+    assert "cross_sheet_legs" in signature_conflicts(
+        critical_signature(a), critical_signature(b))
+
+
+@pytest.mark.parametrize("spelling", ["M-101", "m‑101", "(M-101)", "MECH"],
+                         ids=["plain", "non-breaking hyphen", "bracketed", "another label"])
+def test_one_page_is_one_leg_target_however_its_label_reads(spelling):
+    plain = _conflict(_leg("SRC-0001", sheet_id="M-101"))
+    other = _conflict(_leg("SRC-0001", sheet_id=spelling))
+    assert _leg_targets(plain) == _leg_targets(other)
+
+
+def test_two_pages_of_one_pdf_are_two_leg_targets():
+    a = _conflict(_leg("SRC-0001", page=0))
+    b = _conflict(_leg("SRC-0001", page=1))
+    assert _leg_targets(a) != _leg_targets(b)
+
+
+def test_a_leg_with_no_source_keeps_its_label_target():
+    f = _conflict(ConflictLeg(sheet_id="m‑101.", source_quote="q"))
+    assert _leg_targets(f) == frozenset({"M-101"})
+
+
+def test_the_leg_target_names_the_page_portably():
+    (target,) = _leg_targets(_conflict(_leg("SRC-0002", page=3)))
+    assert target == "SRC-0002#p3"
+    assert critical_signature(_conflict(_leg("SRC-0002", page=3)))["leg_targets"] == [
+        "SRC-0002#p3"]
+
+
+def test_the_ledger_keeps_conflicts_that_point_at_two_same_label_pdfs_apart():
+    ledger = Ledger()
+    ledger.add([_conflict(_leg("SRC-0001")), _conflict(_leg("SRC-0002"))], "cross_qc")
+    assert sorted(leg.source_id for e in ledger.entries for leg in e.also_on) == [
+        "SRC-0001", "SRC-0002"]
+
+
+def test_the_ledger_still_folds_one_conflict_reported_twice():
+    ledger = Ledger()
+    ledger.add([_conflict(_leg("SRC-0001")),
+                _conflict(_leg("SRC-0001", sheet_id="m-101"))], "cross_qc")
+    assert len(ledger) == 1
+
+
+def _sum_claim(sheet_id="M-101", **kw):
+    return NumericClaim(sheet_id=sheet_id, quote="20 20 TOTAL 50", kind="sum",
+                        terms=["20", "20"], expected="50", **kw)
+
+
+def test_arithmetic_refuses_an_id_two_sheets_carry():
+    sheets = [_sheet("SRC-0001", "M-101"), _sheet("SRC-0002", "M-101"),
+              _sheet("SRC-0003", "E-101")]
+    res = audit_arithmetic([_sum_claim()], sheets)
+    assert res.findings == [], "never checked against the first M-101"
+    assert (res.checked, res.matched, res.mismatched, res.unusable, res.ambiguous) == (
+        0, 0, 0, 0, 1)
+
+
+def test_arithmetic_refuses_a_matching_claim_on_a_shared_id_too():
+    # Refused before it is checked: a claim that adds up is not "checked" on a
+    # sheet nobody can name either.
+    sheets = [_sheet("SRC-0001", "M-101"), _sheet("SRC-0002", "M-101")]
+    res = audit_arithmetic([NumericClaim(sheet_id="M-101", quote="20 20 TOTAL 40",
+                                         kind="sum", terms=["20", "20"], expected="40")],
+                           sheets)
+    assert (res.checked, res.matched, res.ambiguous) == (0, 0, 1)
+
+
+@pytest.mark.parametrize("claim,source", [
+    (_sum_claim("E-101"), "SRC-0003"),
+    (_sum_claim(source_id="SRC-0002", source_name="M-101.pdf"), "SRC-0002"),
+], ids=["an id one sheet carries", "a claim with its own source"])
+def test_arithmetic_still_resolves_what_names_one_sheet(claim, source):
+    sheets = [_sheet("SRC-0001", "M-101"), _sheet("SRC-0002", "M-101"),
+              _sheet("SRC-0003", "E-101")]
+    res = audit_arithmetic([claim], sheets)
+    (finding,) = res.findings
+    assert finding.source_id == source and res.ambiguous == 0
+
+
+def test_run_auditors_reports_the_refused_claims():
+    sheets = [_sheet("SRC-0001", "M-101"), _sheet("SRC-0002", "M-101")]
+    stats = run_auditors(sheets, claims=[_sum_claim()]).stats
+    assert stats["arithmetic_ambiguous_sheet"] == 1
+    assert stats["arithmetic_checked"] == 0
+
+
+def _harvest(synthesis):
+    from drawing_analyzer.prose_harvest import harvest_prose
+
+    ledger = Ledger()
+    sheets = [_sheet("SRC-0001", "M-101", lines=["PUMP P-1 480V"]),
+              _sheet("SRC-0002", "M-101", lines=["PUMP P-1 208V"]),
+              _sheet("SRC-0003", "E-101", lines=["PUMP P-1 FEEDER 208V"])]
+    res = harvest_prose(ledger, [], sheets, client=None, synthesis_text=synthesis,
+                        sleep=lambda *_: None)
+    return res, ledger
+
+
+def test_a_synthesis_conflict_naming_an_id_two_sheets_carry_goes_set_level():
+    res, ledger = _harvest(
+        "M-101 conflicts with E-101: pump P-1 is 480V on M-101 but 208V on E-101.")
+    from drawing_analyzer.annotate import _is_set_level_finding
+
+    (entry,) = ledger.entries
+    assert _is_set_level_finding(entry), "never the first M-101"
+    assert not entry.source_id
+    assert res.accounting()["set_level"] == 1
+
+
+def test_a_synthesis_leg_naming_an_id_two_sheets_carry_is_not_bound():
+    _res, ledger = _harvest(
+        "E-101 conflicts with M-101: pump P-1 is fed at 208V on E-101 but shown 480V on M-101.")
+    (entry,) = ledger.entries
+    assert entry.source_id == "SRC-0003"
+    assert entry.also_on == [], "the second named sheet is ambiguous, so no leg"

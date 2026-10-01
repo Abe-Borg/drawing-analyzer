@@ -693,10 +693,12 @@ class DrawingContext:
     run_journal: Any = None
     input_inventory: Any = None
     prose_accounting: dict = field(default_factory=dict)
-    # WP-02 §7.2: the sharded cross-QC pass's count-only discard counters, kept
-    # for the run manifest instead of dying with the CrossQCResult. Empty when
-    # cross-QC did not run, or ran on the whole-set (<=40) path, which performs
-    # no host-side grounding — empty means "not measured", never "none dropped".
+    # WP-02 §7.2: the cross-QC pass's count-only discard counters, kept for the
+    # run manifest instead of dying with the CrossQCResult. Recorded on both
+    # paths since remediation WP-06.2 (U8: the whole-set path grounds through
+    # the sharded validator). Empty when cross-QC made no call or served a
+    # result cached before the record existed: "not measured", never "none
+    # dropped".
     cross_qc_discards: dict = field(default_factory=dict)
     # Remediation WP-06.1 (B6): the cross-QC items the host refused for an
     # invalid field, per reason, recorded on BOTH paths. Empty when the stage
@@ -4632,8 +4634,8 @@ def extract_drawing_context(
     # cloud both sheets. Distinct from the prose synthesis (which stays as-is).
     # Additive and non-fatal.
     cross_findings: list[Finding] = []
-    # WP-02 §7.2. Empty means the measurement was not taken — cross-QC did not
-    # run, or ran on the whole-set (<=40) path, which does no host grounding.
+    # WP-02 §7.2. Empty means the measurement was not taken: cross-QC made no
+    # call. Both paths ground and record it since remediation WP-06.2 (U8).
     cross_qc_discards: dict = {}
     # Remediation WP-06.1. Recorded on both paths; empty = not recorded.
     cross_qc_invalid: dict = {}
@@ -4660,8 +4662,9 @@ def extract_drawing_context(
             # out of scope — they are the whole point of the instrumented run,
             # and a degraded result is never cached, so this is the only path
             # by which the measurement reaches an artifact.
-            if getattr(cross_res, "discards", None) is not None:
-                cross_qc_discards = cross_res.discards.to_dict()
+            discarded = getattr(cross_res, "discards", None)
+            if discarded is not None:
+                cross_qc_discards = discarded.to_dict()
             refused = getattr(cross_res, "invalid", None)
             if refused is not None:
                 cross_qc_invalid = refused.to_dict()
@@ -4701,6 +4704,12 @@ def extract_drawing_context(
             # show the first note and count the rest.
             if refused is not None and refused.note():
                 cross_stage.warnings.append(refused.note())
+            # Remediation WP-06.2 (N6): a reply that named a sheet id more than
+            # one sheet carries was refused, never bound to the first such
+            # sheet. Observational too (the owner's rule): a warning, never a
+            # status, and the cached result carries the counts.
+            if discarded is not None and discarded.ambiguity_note():
+                cross_stage.warnings.append(discarded.ambiguity_note())
             cross_stage.status = "COMPLETE" if cross_complete else "PARTIAL"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")

@@ -258,21 +258,36 @@ def _build(overrides, *, handles):
 
 
 def _validators():
+    """The whole-set and sharded binding inputs over one pair of sheets.
+
+    Since remediation WP-06.2 both paths parse through one validator
+    (``_finding_from_handles``); the whole-set path also passes the run's id
+    index (``by_label``), so a reply that names a sheet by its id still binds
+    when one sheet carries it. The whole-set side used to be a separate,
+    label-keyed ``_validate_cross_item`` over a first-wins id map.
+    """
     sheets, geoms = _pair_set()
     gm, ge = geoms
-    sheet_map = {X._norm_id("M-101"): gm, X._norm_id("E-101"): ge}
     entry_by_handle = {"S001": ("M-101", gm), "S002": ("E-101", ge)}
-    return sheet_map, entry_by_handle
+    by_label = {X._norm_id("M-101"): ["S001"], X._norm_id("E-101"): ["S002"]}
+    return by_label, entry_by_handle
+
+
+def _whole_set_parse(item, entry_by_handle, by_label, invalid):
+    """The whole-set path's parse of one item (its reply names sheets by id)."""
+    return X._finding_from_handles(item, entry_by_handle, X.CrossQCDiscardCounts(),
+                                   invalid=invalid, by_label=by_label)
 
 
 @pytest.mark.parametrize("overrides,reason", [(o, r) for _i, o, r in _ITEMS],
                          ids=[i for i, _o, _r in _ITEMS])
 def test_b6_each_refusal_is_counted_once_under_its_first_reason(overrides, reason):
-    sheet_map, entry_by_handle = _validators()
+    by_label, entry_by_handle = _validators()
     whole = X.CrossQCInvalidCounts()
     sharded = X.CrossQCInvalidCounts()
 
-    kept_whole = X._validate_cross_item(_build(overrides, handles=False), sheet_map, whole)
+    kept_whole = _whole_set_parse(_build(overrides, handles=False), entry_by_handle,
+                                  by_label, whole)
     kept_sharded = X._finding_from_handles(
         _build(overrides, handles=True), entry_by_handle, X.CrossQCDiscardCounts(),
         invalid=sharded)
@@ -292,9 +307,10 @@ def test_b6_each_refusal_is_counted_once_under_its_first_reason(overrides, reaso
 def test_b6_the_same_item_binds_alike_on_both_validators():
     # Whole-set / sharded equivalence is testable only at parser level (plan
     # WP-06 notes): the same item gives the same binding and the same counts.
-    # The evidence state is not compared: the whole-set path grounds nothing
-    # yet (U8), which is WP-06.2's.
-    sheet_map, entry_by_handle = _validators()
+    # Since remediation WP-06.2 the two paths share the validator and the
+    # whole-set path grounds too (U8); tests/test_cross_qc_source_binding.py
+    # also compares the evidence state and the discard counters.
+    by_label, entry_by_handle = _validators()
 
     def _bound(f):
         return (f.source_name, f.page_index, f.sheet_id, f.category, f.severity,
@@ -310,7 +326,7 @@ def test_b6_the_same_item_binds_alike_on_both_validators():
             whole_item.update(extra)
             shard_item.update(extra)
         a_counts, b_counts = X.CrossQCInvalidCounts(), X.CrossQCInvalidCounts()
-        a = X._validate_cross_item(whole_item, sheet_map, a_counts)
+        a = _whole_set_parse(whole_item, entry_by_handle, by_label, a_counts)
         b = X._finding_from_handles(shard_item, entry_by_handle, None, invalid=b_counts)
         assert (a is None) == (b is None) == bool(reason), _id
         assert a_counts.to_dict() == b_counts.to_dict(), _id
@@ -343,9 +359,13 @@ def test_b6_a_refused_item_is_counted_on_the_whole_set_path():
     assert res.invalid.findings_invalid_category == 1
     assert res.invalid.total == 2
     # Observational (the owner's decision): the stage's own completeness is
-    # unchanged, and the grounding counters keep their meaning ("not measured").
+    # unchanged. A refused item never reaches a sheet, so it is no grounding
+    # discard; since remediation WP-06.2 the whole-set path records its
+    # discards (it asserted ``discards is None``, "not measured", until then).
     assert res.complete is True and res.error is None
-    assert res.discards is None
+    assert res.discards is not None
+    assert {k: v for k, v in res.discards.to_dict().items()
+            if k != "by_sheet" and v} == {}
 
 
 def test_b6_refusals_are_counted_on_the_map_and_reconcile_calls(monkeypatch):
@@ -649,10 +669,11 @@ def test_the_cross_qc_contract_moved_for_the_new_host_binding():
     # result carries its refused-item counts. The persona edit re-keys every
     # entry through the prompt text as well; that is a second change with its
     # own mechanism, not a bump and a key term for one change (plan §2 rule 15).
-    # 7 since remediation WP-05.3 (the character-stream grounding) and 8 since
-    # remediation WP-04.4 (the quantity reader its veto reuses); the key still
-    # differs from contract 5's.
-    assert X._CROSS_QC_CACHE_CONTRACT == 8
+    # 7 since remediation WP-05.3 (the character-stream grounding), 8 since
+    # remediation WP-04.4 (the quantity reader its veto reuses) and 9 since
+    # remediation WP-06.2 (whole-set binding through handles, grounded); the
+    # key still differs from contract 5's.
+    assert X._CROSS_QC_CACHE_CONTRACT == 9
     _sheets, geoms = _pair_set()
     entries = [("M-101", "digest", "text", geoms[0])]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
@@ -752,7 +773,10 @@ def test_pipeline_a_refused_item_is_a_stage_warning_in_run_log_and_manifest(tmp_
     (warning,) = stage.warnings
     assert "invalid field" in warning and "severity 1" in warning
     assert ctx.cross_qc_invalid["findings_invalid_severity"] == 1
-    assert ctx.cross_qc_discards == {}, "the whole-set path measures no grounding"
+    # Since remediation WP-06.2 the whole-set path grounds and records it (U8):
+    # the kept item's two legs, grounded; the refused item reached no sheet.
+    assert ctx.cross_qc_discards["legs_accepted_grounded"] == 2
+    assert ctx.cross_qc_discards["findings_dropped_under_two_legs"] == 0
 
     export = write_drawing_export(ctx, tmp_path / "out", source_names=["M-101", "E-101"])
     log = (export / "run.log").read_text(encoding="utf-8")

@@ -1439,21 +1439,31 @@ def _is_absence(f: Finding) -> bool:
 
 
 def _leg_targets(f: Finding) -> frozenset:
-    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs).
+    """The set of pages a cross-sheet finding also touches (its ``also_on`` legs).
 
-    Canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id` for the
-    same reason ``cross_qc._norm_id`` is (P8 item 11), and it has to be the
-    **same** canonicalization: this set feeds
-    ``critical_signature["leg_targets"]``, which decides whether two findings may
-    merge. If the two disagree, cross-QC resolves a leg that the ledger then
-    refuses to recognise as the same leg — one sheet id meaning two different
-    things inside one run.
+    A leg's target is its **page**, ``"<source>#p<page_index>"`` (remediation
+    WP-06.2, N6; D-8, the owner's rule): the leg's ``source_id`` (its
+    ``source_name`` when none was assigned) and page. It used to be the leg's
+    sheet id, so two conflicts that point at two different PDFs carrying one
+    id (``M-101`` twice) read as one target and could merge, losing one leg;
+    the sheet id is display metadata. The string is portable and
+    JSON-safe (it rides ``critical_signature["leg_targets"]`` into the A/B
+    harness's records).
+
+    A leg with no source at all (a hand-built leg) keeps its sheet id as its
+    target, canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id`
+    for the same reason ``cross_qc._norm_id`` is (P8 item 11), and it has to be
+    the **same** canonicalization, or one id would mean two targets.
     """
-    return frozenset(
-        normalize_sheet_id(leg.sheet_id)
-        for leg in (getattr(f, "also_on", None) or [])
-        if (leg.sheet_id or "").strip()
-    )
+    targets = set()
+    for leg in (getattr(f, "also_on", None) or []):
+        source = str(getattr(leg, "source_id", "") or getattr(leg, "source_name", "")
+                     or "").strip()
+        if source:
+            targets.add(f"{source}#p{int(getattr(leg, 'page_index', 0) or 0)}")
+        elif (leg.sheet_id or "").strip():
+            targets.add(normalize_sheet_id(leg.sheet_id))
+    return frozenset(targets)
 
 
 def critical_signature(f: Finding) -> dict:

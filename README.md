@@ -1122,13 +1122,43 @@ distinct from the prose [synthesis](#how-it-works), which stays as-is, and like
 the critique it never touches `combined_text` (the conflicts live only in the
 findings artifacts).
 
+**Sheets are addressed by handle, never by their printed id.** Every sheet in
+the request is labelled with a request-local handle and its sheet id beside it
+(`===== SHEET S001 = M-101 =====`), and the model is asked to name sheets by
+handle in its answer and by their sheet id in the text a reviewer reads. The
+host binds each answer back through that handle to one page of one PDF. Before
+remediation WP-06.2 a set of 40 sheets or fewer was labelled by sheet id and
+every answer was bound back through that id, the first sheet with a given id
+winning: two PDFs that both carry `M-101` (two revisions of one drawing, or two
+files with one name in two folders) could not be told apart, an answer naming
+`M-101` was silently placed on the first of them, and a conflict *between* the
+two could not be expressed at all. Now each is reachable by its handle. An
+answer that still names a sheet by an id more than one sheet carries is
+**refused rather than guessed**, and counted: the stage shows a warning such as
+*"2 sheet reference(s) named a sheet id that more than one sheet carries and
+were not bound (2 leg(s), 0 fact(s))"*, `run_manifest.json` carries the counts
+in `cross_qc_discards`, and the stage keeps its status. An id that only one
+sheet carries still binds. Sheets are numbered in the order of their source
+files and pages, so the same set in a different order is sent, keyed and bound
+identically.
+
+**Every quote is checked, on both paths.** The conflict's quote from each sheet
+must be printed on that sheet before the conflict is trusted; the check reads
+the sheet's whole text, not the 4,000-character slice the model was shown (see
+below for how the match works). Before remediation WP-06.2 only sets above 40
+sheets were checked: on a smaller set a quote the sheet does not print, or a
+short tag such as `P-1` the sheet never shows, was taken as given. Now such a
+conflict is dropped and counted, and a quote read from a scanned sheet or a
+pasted image is kept at reduced trust and goes to the crop re-check, exactly as
+on a large set.
+
 **Whole-set above 40 sheets.** A larger set shards by discipline and uses a
 **map → reconcile** pass: each shard call returns its local conflicts *and* a set
 of compact, grounded facts (the comparable values another shard might contradict),
 then a final reconciliation call compares those facts across *all* shards — so a
 conflict whose two sheets fell in different shards is still found (a plain
 shard-and-union would miss it). The model sees only request-local **opaque
-handles** in the sharded path — never source identity — and every fact/leg quote is
+handles** — never source identity — on both paths, and every fact/leg quote is
 validated against the retained source text before it is trusted, so an ungrounded
 quote never becomes a dual-anchor finding. That check is a real match at every
 length, and the match must cover whole words: `AHU-10` is not found inside
@@ -1186,7 +1216,8 @@ gets its own dual-crop verification call.
 
 Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
 more `also_on` legs on the other sheets in the conflict, each resolved to its own
-sheet (via the set's title-block sheet-ids). The markup writer then clouds
+sheet through the handle the model was given for it (the sheet's title-block id
+is shown beside the handle and kept as the leg's label). The markup writer then clouds
 **both** sheets — each cloud's popup cross-references the other (*"Conflicts with
 F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict and
 where its counterpart lives. The model defaults to Opus 5.5
@@ -2133,6 +2164,13 @@ multiplying with the standard library, **never `eval`, never the model's answer*
 are counted, not flagged, and surfaced in the report as *"N numeric relationships
 checked ✓"* — the balance column of a real review.
 
+Each claim names the sheet its numbers are on. A cross-sheet QC claim names it
+by the sheet's handle and is bound to that page of that PDF; a claim the host
+can place only by a sheet id that more than one sheet carries is **refused, not
+checked**, and counted as `arithmetic_ambiguous_sheet` in the deterministic
+battery's stats (`run.log`), rather than checked on whichever of those sheets
+came first (remediation WP-06.2).
+
 A relationship is counted once however it was written. The critique reads each
 sheet twice, and one read may write `20` where the other writes `20.0`, or list
 the same terms in another order; the host compares the numbers, not their
@@ -2700,12 +2738,19 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   its prompt fix also re-keys every entry, through the prompt text the key
   holds), and 7 because grounding also takes the anchor's character-stream
   tier (a quote that differs from the sheet only in spacing) and never matches
-  part of a number split around a lone `.` (remediation WP-05.3), and 8
+  part of a number split around a lone `.` (remediation WP-05.3), 8
   because that tier's quantity check reuses the quantity reader, which now reads
   spelled ranges and lists and a compact `A` beside a voltage (remediation
-  WP-04.4). Each is a host-side change that no key input covers, so each one made
-  every stored cross-QC result miss once. None of them records the two evidence
-  changes above.
+  WP-04.4), and 9 because a set of 40 sheets or fewer is now addressed by handle,
+  its answers bound through the same rules as a larger set's (an id more than one
+  sheet carries refused), its quotes checked and its claims bound to their
+  sheets (remediation WP-06.2). Each is a host-side change that no key input
+  covers, so each one made every stored cross-QC result miss once. None of them
+  records the two evidence changes above. Since remediation WP-06.2 the wording
+  the request puts around the sheets (its headers, the per-sheet titles, the
+  task lines, the truncation marker) is part of the key too, as the prompts
+  are, so editing it re-runs the pass instead of serving an answer to a request
+  that was worded differently.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

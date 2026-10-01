@@ -105,7 +105,15 @@ COMPARISON_INCOMPLETE = "INCOMPLETE"
 #: against a v5 variant would call ``12'`` / ``12'-6"`` or ``4 to 6 in`` /
 #: ``6 in`` EXACT: the silent failure above. Refused, never deleted: re-run the
 #: arm.
-RECORD_CONTRACT_VERSION = 5
+#:
+#: v6 (remediation WP-06.2, N6; the owner's rule): ``critical_signature``'s
+#: ``leg_targets`` names each leg's page (``SRC-0002#p1``) instead of its sheet
+#: id, so two conflicts that point at two PDFs carrying one id no longer read
+#: as one. A v5 record holds sheet ids there, which never equal a page, so a v5
+#: baseline against a v6 variant would report every unchanged cross-sheet
+#: conflict as a candidate with different legs: a code change read as a model
+#: difference. Refused, never deleted: re-run the arm.
+RECORD_CONTRACT_VERSION = 6
 
 _WS_RE = re.compile(r"\s+")
 

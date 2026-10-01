@@ -1208,8 +1208,10 @@ raise, after the paid digest and critique. Now:
   surfaces per item after the batch is built and billed, so the transport that
   cannot degrade does not opt in);
   `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
-  `also_on` legs; an uncertain conflict is category `question` with severity
-  `low`, the one pair the validators accept, since remediation WP-06.1: the
+  `also_on` legs; both paths address sheets by host handles with the sheet id
+  beside each and ground every quote, since remediation WP-06.2, below; an
+  uncertain conflict is category `question` with severity
+  `low`, the one pair the validator accepts, since remediation WP-06.1: the
   persona once asked for severity `question` and every such item was refused
   unseen (B6); only findings identical in every field collapse before the
   ledger (`_drop_exact_repeats`, N2), below); `auditors/` (five deterministic zero-API auditors over the
@@ -1305,7 +1307,11 @@ raise, after the paid digest and critique. Now:
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5.5** at `EFFORT_LOW`,
-  degraded sheet-level entry on failure. **The match is signature-vetoed**
+  degraded sheet-level entry on failure. A synthesis conflict binds to the
+  sheets it names by id; an id more than one sheet carries binds none of them
+  (remediation WP-06.2, N6: the id map was first-wins), so a statement whose
+  primary is such an id takes the set-level path (§14.8) and a second sheet
+  named that way is no leg. **The match is signature-vetoed**
   (remediation WP-09.2, N10; the owner's rules): `_match_entry` takes the
   candidates whose `_match_score` (token overlap with the entry's text or
   quote) reaches `_MATCH_OVERLAP` (0.7, unchanged: U11), best first, ties in
@@ -1501,7 +1507,8 @@ raise, after the paid digest and critique. Now:
   **Four** sites compare a handle and all four use that one form, asserted equal
   rather than merely self-consistent: `_norm_id`, `critique._leg_targets` (it feeds
   `critical_signature["leg_targets"]`, so a disagreement has cross-QC resolving a
-  leg the ledger then refuses to recognise as the same leg), and both claim-dedup
+  leg the ledger then refuses to recognise as the same leg; since remediation
+  WP-06.2 only for a leg with no source at all, below), and both claim-dedup
   keys (`critique._dedup_claims`, `auditors.arithmetic._claim_dedup_key` — a
   Unicode dash in one of the two self-consistency transcriptions inflates the
   arithmetic tally). The sharpest was `arithmetic._resolve_geometry`, whose `by_id`
@@ -1509,16 +1516,74 @@ raise, after the paid digest and critique. Now:
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
   `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, 5
-  since WP-05.2, 7 since WP-05.3 and 8 since WP-04.4, above, and 6 since
-  WP-06.1, below).
-  Cross-QC also carries **count-only discard counters** on the sharded path
-  (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
-  why — unresolved handle, quote absent, quote present but unmatched, split by
+  since WP-05.2, 7 since WP-05.3 and 8 since WP-04.4, above, 6 since
+  WP-06.1 and 9 since WP-06.2, below).
+  **Both paths bind through host handles** (remediation WP-06.2; N6, U8, D-8;
+  the owner's rules). The whole-set path (40 sheets or fewer) labelled each
+  sheet by its human id and bound every reply through a map keyed by that id in
+  which the first detection won, and grounded nothing: two PDFs carrying
+  `M-101` could not be told apart, a reply naming `M-101` silently bound the
+  first, a conflict between the two could not be expressed, and a quote the
+  sheet does not print was trusted. Now:
+  - **One set of handles** (`_assign_handles`, `_SheetHandles`): `S001` … in
+    source order (`_canonical_order`: by `(source_id, page_index)`, natural
+    order, when every entry has a source id, else input order), so a reordered
+    input gets the same handles, request and key. Each sheet's title in the
+    whole-set and map requests reads `===== SHEET S001 = M-101 =====`
+    (`_sheet_block`, one helper): the handle is the address, the id beside it
+    is display metadata a model needs for a cross-reference ("see M-501") and
+    to name the sheet in text. The whole-set and map instructions say so in one
+    sentence (`_HANDLE_RULE`: handles in the json, sheet ids in text).
+  - **One resolver** (`_resolve_sheet_ref`) and **one validator**
+    (`_finding_from_handles`, whose whole-set twin `_validate_cross_item` is
+    gone): a handle names its own sheet, always; otherwise a sheet id (a
+    legacy reply's `sheet_id`, or a model writing the id it saw) binds only
+    when exactly one sheet carries it. An id more than one sheet carries
+    (`by_label`) is refused and counted `legs_ambiguous_label` /
+    `facts_ambiguous_label`, never bound to the first. A sheet whose own id
+    reads like a handle is reachable by its handle only (a recorded limit). The
+    finding carries each sheet's own id from the manifest, never the reply's
+    spelling. The sharded path reads a reply's `sheet_id` through the same
+    resolver, so the two paths bind, ground and count an item alike
+    (`tests/test_cross_qc_source_binding.py` compares them at parser level).
+  - **Whole-set grounding** (U8; plan WP-06 Step 6 reverses WP-03A's scope,
+    the owner's decision): whole-set items go through the sharded validator, so
+    every quote is checked against the uncapped evidence text
+    (`classify_quote_evidence`, one matcher, no short-tag exemption), an item
+    it cannot place on two grounded sheets is counted
+    `findings_dropped_under_two_legs`, and `discards` is recorded on both paths.
+    `tests/test_evidence_tail.py::test_forty_entries_take_the_whole_set_path_unchanged`
+    keeps WP-03A's assertions (one whole-set call); its rule (no capped-text
+    check there) still holds, pinned beside it.
+  - **Claims** are rebound through the same resolver on both paths
+    (`_resolve_claim_handles`): a claim used to carry only the model's id,
+    which the arithmetic auditor looked up first-wins. `_dedup_claims` keys on
+    the claim's page first, so one row printed on two same-id PDFs stays two
+    claims.
+  - **Ambiguity is observational** (D-2 note): `CrossQCDiscardCounts.ambiguity_note()`
+    becomes one cross-QC stage warning ("N sheet reference(s) named a sheet id
+    that more than one sheet carries and were not bound"), the stage keeps its
+    status and the cached result carries the counts.
+  - **The user-turn framing rides the key** (K2): every string the three
+    builders put around the sheets (`_CROSS_QC_TASK`, the set/shard headers,
+    the sheet title and body, the shard task, the reconcile manifest and fact
+    lines and task, the unknown-discipline mark, the `[TRUNCATED N chars]`
+    marker) is a named module string in `CROSS_QC_USER_FRAMING_NAMES`, and
+    `_cross_qc_cache_key` holds them verbatim beside the three system prompts
+    (`cross_qc_user_framing()`, read at call time as the builders read them). A
+    model-visible string added to a builder belongs there, or it is outside the
+    key again. Its own mechanism (the key's inputs), beside the binding change's
+    bump: `_CROSS_QC_CACHE_CONTRACT` **8 → 9**.
+  Cross-QC also carries **count-only discard counters** on both paths
+  (`CrossQCDiscardCounts`, WP-02 §7.2; the whole-set path since remediation
+  WP-06.2): how many legs/facts the host dropped and
+  why — unresolved handle, ambiguous id, quote absent, quote present but
+  unmatched, split by
   whether the target sheet had any extractable text at all. Purely
   observational: nothing there feeds `complete` or `budget_degraded`, and it
   holds counts, never quote text. `discards is None` means **not recorded**
-  (the whole-set ≤40 path performs no host-side grounding, and a result cached
-  before the field existed has none) — never "nothing was discarded". It exists
+  (no call was made, or a result cached before the field existed has none) —
+  never "nothing was discarded". It exists
   because `_finding_from_handles` / `_parse_facts` drop before `CrossQCResult`
   is built, so a run that kept 3 findings and one that kept 3 after dropping 40
   ungrounded legs were previously indistinguishable. A fact whose quote is only
@@ -1526,14 +1591,16 @@ raise, after the paid digest and critique. Now:
   WP-06.1; it was admitted as a no-text fact and sent to the reconciler).
   **Refused items are counted on both paths** (remediation WP-06.1, B6;
   `CrossQCInvalidCounts`, `CrossQCResult.invalid`): `_invalid_field` is the one
-  field check both validators apply, in a fixed order (not an object, category,
+  field check the validator applies (one validator for both paths since
+  remediation WP-06.2), in a fixed order (not an object, category,
   severity, text), and each refused item counts once, under the first check it
   fails, so the counts sum to the items lost (the owner's rules). The accepted
   set is unchanged: validation stays strict (plan §7, B6). Items are read only
   from a list (`_findings_array`): a `findings` string beside a map call's
   facts would otherwise count each character as a refused item. A separate record,
-  not a `discards` field, so `discards is None` keeps meaning "grounding not
-  measured" on the whole-set path until WP-06.2 grounds it; run-level only
+  not a `discards` field: a refused item never reaches a sheet, so it is no
+  grounding discard (remediation WP-06.2 made `discards` non-`None` on the
+  whole-set path and left this record untouched); run-level only
   (an item is refused before its sheets resolve). **Observational** (the
   owner's decision, D-2 note): the pipeline adds `note()` as a cross-QC stage
   warning after the warnings that decide the status, the stage keeps its
@@ -1578,7 +1645,11 @@ raise, after the paid digest and critique. Now:
   (Phase 20 §12): a tile is never sufficient and a rectangle is not read at all
   (remediation WP-03.7, below) — merges need semantic
   sameness with **compatible critical signatures** (`critique.critical_signature`:
-  tags, measurements, absence polarity, cross-sheet legs, compared by
+  tags, measurements, absence polarity, cross-sheet legs (each leg's page,
+  `SRC-0002#p1`, since remediation WP-06.2, N6: as sheet ids, two conflicts
+  pointing at two PDFs that carry one id read as one target and could merge;
+  the A/B `RECORD_CONTRACT_VERSION` is 6 for it; a leg with no source keeps its
+  canonical id; no merge-rule fingerprint moved, its corpus has no legs), compared by
   `critique.signature_conflicts`, the ONE copy of the rule: it names the
   conflicting axes, `signatures_compatible` is its negation, and the A/B
   harness's finding-level comparison reports those axes instead of restating the
@@ -2239,7 +2310,10 @@ example is parked at `docs/examples/fire_protection.md`.
   critique reuses the same builder, so a string covered by only one hash
   re-keys that cache while silently replaying the other. Add a model-visible
   string to the shared builder and it is covered automatically; add one
-  elsewhere and it is your job to hash it.
+  elsewhere and it is your job to hash it. Cross-QC's user-turn framing is the
+  same kind of string and rides its key the same way since remediation WP-06.2
+  (K2: `cross_qc.CROSS_QC_USER_FRAMING_NAMES`, held verbatim by
+  `_cross_qc_cache_key`).
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
   index rows, merged output); no randomness or time-dependence in assembly.
   One documented carve-out (Phase B): the citation verdict cache's TTL clock
@@ -2253,7 +2327,10 @@ example is parked at `docs/examples/fire_protection.md`.
   *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink,
   `operand_origin=TEXT_EXTRACTED`, Phase 25 §17.5) only when the sheet prints
   every one where the claim's quote anchors, decided **after** the auditor's own
-  anchoring pass (remediation WP-07.1, N3): the claim resolved to a sheet; its
+  anchoring pass (remediation WP-07.1, N3): the claim resolved to a sheet (a
+  claim with no source whose sheet id more than one sheet carries resolves to
+  none: refused before it is checked and counted `arithmetic_ambiguous_sheet`,
+  never placed on the first such sheet, remediation WP-06.2, N6); its
   quote anchored there EXACT or FUZZY by a numerically vetoed method
   (`anchor.numbers_grounded`; never TILE, never UNANCHORED); and the terms and
   the stated value together fit, **one occurrence each**, the numbers that
