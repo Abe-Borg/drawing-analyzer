@@ -12,7 +12,7 @@ before the preceding PR merges and the owner asks to continue.
 |---|---|---|
 | PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) merged |
 | PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) merged |
-| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | Implemented and validated; opening one PR for owner review |
+| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) open; paused for owner review and merge |
 | PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
 | PO-05 | Measure prefix token counts, current model cache minimums and reuse; enable eligible caching through the existing policy helper | Requires approved drawings and an intended live measurement budget before billable work |
 | PO-06 | Evaluate digest and critique effort separately against human-labeled findings; record precision/recall, important-defect retention, cost and latency | Requires approved dataset and budget; keep current defaults until an evidence-backed decision |
@@ -171,6 +171,8 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 
 ## PO-03 handoff
 
+- [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) is open.
+  Work is paused for owner review and merge; PO-04 has not started.
 - Base: `c791e44`, main after PO-02 PR #193 merged. Open-PR check found only
   dependency PR #190. Read PR #191's D-8 binding decision and K2 framing-key
   contracts before implementation; no remediation slice is marked complete.
