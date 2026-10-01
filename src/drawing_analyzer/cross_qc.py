@@ -87,6 +87,7 @@ from .core.reply_text import reply_text
 from . import tiling
 from .anchor import _fold_text, source_words
 from .diagnostics import get_logger
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     _FINDING_SEVERITIES,
@@ -261,7 +262,7 @@ Ground every conflict in the actual text: quote the exact conflicting string fro
 EACH sheet involved. Report only conflicts you can substantiate from the provided \
 text; when you are not certain two sheets truly conflict, report it with category \
 `question` and severity `low`. Judge across sheets only — a single-sheet issue is \
-out of scope."""
+out of scope.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 _CROSS_QC_TASK = (
     "Now report the cross-sheet conflicts in this set, following the FINDINGS "
@@ -354,7 +355,7 @@ sheet's handle); category (code, conflict, coordination, question); severity \
 the exact_quote of the primary fact); also_on (array of {"sheet_handle", \
 "source_quote" = the other fact's exact_quote}); refs (optional). Every finding \
 lists >= 1 also_on and both quotes must come verbatim from the facts. Emit \
-"findings": [] if you find no cross-sheet conflict; "claims": [] likewise."""
+"findings": [] if you find no cross-sheet conflict; "claims": [] likewise.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 def cross_qc_system_prompt() -> str:
@@ -1399,23 +1400,38 @@ def _identity_preamble(identity: Any) -> str:
     Prepended identically to the whole-set, shard-map, and reconcile inputs so
     every cross-QC read shares the same locale facts — the units/language
     context in particular kills metric-vs-imperial false conflicts. Advisory
-    text only; ``None`` keeps every input byte-identical to pre-Phase-A.
+    text only; ``None`` adds no preamble.
     """
     if identity is None or not getattr(identity, "has_content", False):
         return ""
-    return identity.context_block() + "\n\n"
+    return source_content_block(identity.context_block(), tag="set_identity") + "\n\n"
 
 
-def _sheet_block(handle: str, sheet_id: str, digest_text: str, text_layer: str) -> str:
+def _sheet_block(
+    handle: str, sheet_id: str, digest_text: str, text_layer: str, budget: _Budget,
+) -> str:
     """One sheet of a whole-set or shard request: its handle with its id beside it.
 
     One helper for both paths (remediation WP-06.2, the owner's rule): the
     handle is the address, the sheet id beside it is display metadata the model
     needs to read a cross-reference ("see M-501") and to name the sheet in text.
     """
+    # The cap/counters measure original source characters, as before. Slice
+    # before escaping; the existing host truncation notice stays outside data.
+    capped = _budgeted_text_layer(text_layer, budget)
+    notice = ""
+    if len(text_layer or "") > _TEXT_LAYER_BUDGET:
+        notice = capped[_TEXT_LAYER_BUDGET:]
+        capped = capped[:_TEXT_LAYER_BUDGET]
     return (
-        _SHEET_TITLE_TEMPLATE.format(handle=handle, sheet_id=sheet_id)
-        + _SHEET_BODY_TEMPLATE.format(digest=(digest_text or "").strip(), text=text_layer)
+        source_content_block(
+            _SHEET_TITLE_TEMPLATE.format(handle=handle, sheet_id=sheet_id),
+            tag="sheet_metadata",
+        ) + "\n"
+        + _SHEET_BODY_TEMPLATE.format(
+            digest=source_content_block((digest_text or "").strip(), tag="sheet_digest"),
+            text=source_content_block(capped, tag="sheet_text_layer"),
+        ) + notice
     )
 
 
@@ -1425,9 +1441,8 @@ def _build_whole_set_input(
     """The whole-set user text: each sheet's handle and id, digest, and budgeted text layer."""
     parts = [preamble + _WHOLE_SET_HEADER_TEMPLATE.format(count=len(entries))]
     for sheet_id, digest_text, text_layer, geom in entries:
-        tl = _budgeted_text_layer(text_layer, budget)
         handle = handles.handle_by_key[source_page_key(geom.ref)]
-        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
+        parts.append(_sheet_block(handle, sheet_id, digest_text, text_layer, budget))
     parts.append("\n" + _CROSS_QC_TASK)
     return "\n".join(parts)
 
@@ -1439,8 +1454,7 @@ def _build_map_input(
     parts = [preamble + _MAP_HEADER_TEMPLATE.format(count=len(shard))]
     for sheet_id, digest_text, text_layer, geom in shard:
         handle = handle_by_key[source_page_key(geom.ref)]
-        tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
+        parts.append(_sheet_block(handle, sheet_id, digest_text, text_layer, budget))
     parts.append(_MAP_TASK)
     return "\n".join(parts)
 
@@ -1451,14 +1465,20 @@ def _build_reconcile_input(
     """The reconciliation user text: the full handle manifest + every collected fact."""
     lines = [preamble + _RECONCILE_MANIFEST_HEADER]
     for handle, sheet_id, discipline in manifest:
-        lines.append(_RECONCILE_MANIFEST_LINE_TEMPLATE.format(
-            handle=handle, sheet_id=sheet_id,
-            discipline=discipline or _UNKNOWN_DISCIPLINE))
+        lines.append(source_content_block(
+            _RECONCILE_MANIFEST_LINE_TEMPLATE.format(
+                handle=handle, sheet_id=sheet_id,
+                discipline=discipline or _UNKNOWN_DISCIPLINE),
+            tag="sheet_metadata",
+        ))
     lines.append(_RECONCILE_FACTS_HEADER)
     for f in facts:
-        lines.append(_RECONCILE_FACT_LINE_TEMPLATE.format(
-            handle=f.sheet_handle, entity=f.entity_or_tag, attribute=f.attribute,
-            value=f.value, quote=f.exact_quote))
+        lines.append(source_content_block(
+            _RECONCILE_FACT_LINE_TEMPLATE.format(
+                handle=f.sheet_handle, entity=f.entity_or_tag, attribute=f.attribute,
+                value=f.value, quote=f.exact_quote),
+            tag="cross_qc_fact",
+        ))
     lines.append(_RECONCILE_TASK)
     return "\n".join(lines)
 
@@ -1908,6 +1928,14 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             # K2 (remediation WP-06.2, the owner's rule): the user-turn framing
             # rides the key verbatim, as the system prompts do.
             "user_framing": cross_qc_user_framing(),
+            # Use the same renderer at key-build time to cover source-block
+            # delimiters and XML-special-character encoding, beside K2's
+            # named host strings. The source rule rides the system prompts.
+            "source_framing": {
+                tag: source_content_block("SOURCE & < > \" '", tag=tag)
+                for tag in ("sheet_metadata", "sheet_digest", "sheet_text_layer",
+                            "set_identity", "cross_qc_fact")
+            },
         },
         inputs={"identity_preamble": preamble, "sheets": cache_inputs},
         params={

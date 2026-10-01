@@ -1199,7 +1199,8 @@ def test_the_budget_change_bumped_the_investigation_prompt_version():
     """
     from drawing_analyzer import investigate as inv
 
-    assert inv.INVESTIGATE_PROMPT_VERSION == "investigate-v3"
+    # v4 retains request-counting and also invalidates pre-PO-03 source framing.
+    assert inv.INVESTIGATE_PROMPT_VERSION == "investigate-v4"
 
 
 def test_a_parallel_turn_past_the_budget_is_refused_not_rendered():

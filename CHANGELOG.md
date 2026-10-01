@@ -31,6 +31,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Cross-sheet QC and investigation distinguish source text from instructions.**
+  All cross-QC requests frame sheet digests, text layers, labels/handles,
+  detected identity and reconciliation facts with the shared escaped source
+  blocks and rule. Source slices/counters, page binding and quote validation
+  stay unchanged; truncation notices remain outside the source blocks.
+  Investigation frames initial finding context, the sheet index and tool text
+  when sending it, preserving raw tool results, images and evidence traces.
+  Cross-QC's request hash covers the new source framing; investigation's manual
+  prompt version moves to v4. Older results in these two stages miss on the next
+  eligible run; the global cache schema and other prompts are unchanged. This
+  is prompt optimization chunk PO-03, verified with offline regressions.
+
 - **Synthesis and focus reports distinguish source content from the task.**
   Both wrap complete sheet digests and labels with the shared escaped source
   blocks and system rule. Focus also escapes its operator question, explicitly

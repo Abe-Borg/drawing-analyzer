@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -759,18 +760,20 @@ def test_every_framing_name_is_a_module_string():
 
 
 def test_the_requests_keep_their_bytes_apart_from_the_sheet_title():
-    """The framing moved into named strings without changing a byte elsewhere."""
+    """PO-03 changes source framing, preserving decoded fields and host tasks."""
     geoms = _framing_set()
     whole, shard, reconcile = _requests(geoms)
-    assert "  S004 = 100-p1 (?)\n" in reconcile
+    root = ET.fromstring(f"<request>{reconcile}</request>")
+    metadata = [el.text[1:-1] for el in root.findall("sheet_metadata")]
+    assert "  S004 = 100-p1 (?)" in metadata
     assert whole.startswith("DRAWING SET — 4 sheet(s). For each sheet you get its "
                             "structured digest and its verbatim text layer.\n")
     assert whole.endswith("\n" + X._CROSS_QC_TASK)
     assert shard.startswith("DRAWING SET SHARD — 4 sheet(s), each labeled with an opaque "
                             "HANDLE. Refer to sheets only by handle.\n")
-    assert reconcile.startswith("SHEET MANIFEST (handle = sheet-id (discipline)):\n"
-                                "  S001 = M-101 (m)\n")
-    assert '\n  S001 | P-1 | v | 480 | "PUMP P-1 480V"\n' in reconcile
+    assert reconcile.startswith("SHEET MANIFEST (handle = sheet-id (discipline)):\n")
+    assert metadata[0] == "  S001 = M-101 (m)"
+    assert root.find("cross_qc_fact").text[1:-1] == '  S001 | P-1 | v | 480 | "PUMP P-1 480V"'
 
 
 # --------------------------------------------------------------------------- #
