@@ -12,8 +12,8 @@ before the preceding PR merges and the owner asks to continue.
 |---|---|---|
 | PO-01 | Shared escaped source blocks; apply to identity and review planning; stage-specific cache invalidation and offline regressions | [PR #192](https://github.com/Abe-Borg/drawing-analyzer/pull/192) merged |
 | PO-02 | Extend source framing to synthesis and focus, preserving bounded corpora and exact retained prose | [PR #193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) merged |
-| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) open; paused for owner review and merge |
-| PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | After preceding chunks merge |
+| PO-03 | Extend framing to cross-sheet QC and investigation tool results; cover request framing and investigation's manual prompt version in cache identity | [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) merged |
+| PO-04 | Carry API cache-read/write usage through cross-QC and both verification paths into accurately priced usage records | Implemented and validated; opening one PR for owner review |
 | PO-05 | Measure prefix token counts, current model cache minimums and reuse; enable eligible caching through the existing policy helper | Requires approved drawings and an intended live measurement budget before billable work |
 | PO-06 | Evaluate digest and critique effort separately against human-labeled findings; record precision/recall, important-defect retention, cost and latency | Requires approved dataset and budget; keep current defaults until an evidence-backed decision |
 
@@ -171,8 +171,8 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 
 ## PO-03 handoff
 
-- [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) is open.
-  Work is paused for owner review and merge; PO-04 has not started.
+- [PR #194](https://github.com/Abe-Borg/drawing-analyzer/pull/194) merged as
+  `9e23361`; the owner requested the next chunk, PO-04.
 - Base: `c791e44`, main after PO-02 PR #193 merged. Open-PR check found only
   dependency PR #190. Read PR #191's D-8 binding decision and K2 framing-key
   contracts before implementation; no remediation slice is marked complete.
@@ -212,6 +212,60 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 - `compileall`, correctness-class ruff, diff checks and the secret scan
   (238 tracked files, including the new tests): clean. All pytest commands
   explicitly deselect `network`; the hermetic guard remains enabled.
-- Next: pause for owner review and merge of PO-03. Start PO-04 (accurate API
-  cache-token usage/pricing in cross-QC and both verification paths) only when
-  asked. Live caching/effort experiments remain gated on drawings and budget.
+- PO-04 proceeds from `9e23361`, retaining PO-03's source framing and host
+  contracts. Live caching/effort experiments remain gated on drawings and budget.
+
+## PO-04 contract
+
+- Carry API `cache_read_input_tokens` / `cache_creation_input_tokens` separately
+  from ordinary input/output through whole-set cross-QC, shard maps, one-call
+  and all-pairs reconciliation, and both single/cross-sheet verifier paths.
+  Reuse `digest.StreamUsage` and its dict-tolerant `_message_cache_usage` reader.
+  Optional/null counters keep that reader's existing behavior; the broader D-7
+  decisions about unknown usage, iterations and serving models remain open.
+- Each cross-QC map/pair worker owns its accumulator, folded in deterministic
+  input order on the collector. Verifier call results carry default-zero cache
+  counters; collectors sum them and `VerifyResult.combined` retains them too.
+  Account for every returned reply, including malformed/empty/truncated outcomes;
+  requests that raise without a reply report no usage under the existing policy.
+- Pass the counters to `_record_usage`, using each stage's resolved model and
+  the existing pricing table. Do not fold cached-prefix tokens into uncached
+  input or invent a second pricer. Cache-only usage under an unpriced model must
+  reach `RunUsage.is_billable_but_unpriced`, so the run's cost stays unknown.
+- Local verdict-cache hits remain zero-billed, including mixed warm/live
+  verification. These new producer fields describe the current run only and
+  are not persisted in verdict caches. Requests, prompts, model/effort settings,
+  grounding, evidence/verdict interpretation, cache admission, payloads and keys
+  stay unchanged; no cache invalidation or global schema bump is warranted.
+- Cross-QC and both verifiers currently send plain system prompts, without a
+  cache breakpoint. This chunk preserves any API-reported usage; it does not
+  establish eligibility, add breakpoints or demonstrate savings. Pricing keeps
+  the existing default write rate; any future one-hour breakpoint must thread
+  its requested TTL to the ledger through the existing mechanism. Live cache
+  measurements/enabling belong to PO-05, after owner approval of drawings/budget.
+
+## PO-04 handoff
+
+- Base: `9e23361`, main after PO-03 PR #194 merged. Open-PR check found only
+  dependency PR #190. This owner-selected queue continues independently of
+  remediation slices; no WP-14 slice or D-7 decision is marked complete.
+- New offline checks: **37 failed, 2 passed** against baseline production code;
+  **39 passed** afterward. The two passing controls already establish that local
+  result-cache replays are free. Coverage includes dict/SDK-shaped replies,
+  optional/null counters, malformed/empty/truncated replies, map/reconcile pair
+  and single-call aggregation under one/three workers, both verifier collectors,
+  combined tallies, mixed warm/live runs, zero-billed replay, ledger/serialized
+  totals, model-specific pricing and cache-only unpriceable spend.
+- Focused checks (new usage, existing pricing, cross-QC/verifiers, source binding,
+  PO-03 boundaries and stage caches): **292 passed**. No existing tests changed.
+- Full baseline in an independent checkout of `9e23361`: **5,956 passed,
+  105 skipped, 10 deselected**. Full final: **5,995 passed, 105 skipped,
+  10 deselected**. JUnit comparison: 39 added tests pass, no removed tests and
+  zero changed existing outcomes. Browser skips match baseline.
+- Validation uses Python 3.12.14 and supported Anthropic SDK 1.7.0. `compileall`,
+  correctness-class ruff, diff checks and the secret scan (239 tracked files,
+  including new tests): clean. All pytest commands explicitly deselect `network`
+  and keep the hermetic guard enabled. Full suites allow the local sockets its
+  guard tests need; Chromium is unavailable, so browser skips remain skips.
+- Next: pause for owner review and merge of PO-04. PO-05 needs representative
+  drawings and a stated live measurement budget before any billable calls.
