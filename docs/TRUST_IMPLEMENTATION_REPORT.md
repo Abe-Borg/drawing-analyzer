@@ -188,5 +188,19 @@ fail tests instead of opening an unattended error dialog. The affected suite
 passed **130 tests**, including the existing focus/Escape and browser checks;
 the wheel/source build and correctness checks also passed.
 
+### Windows encoding follow-up
+
+Windows CI found five failures in the new trust checks: locale-default source
+reads rejected UTF-8 punctuation, and the HTML comparison decoded it as garbled
+text. Every source/artifact read and browser-page write in these tests now names
+UTF-8 explicitly. The documentation generator already used explicit UTF-8.
+
+A regression test substitutes Windows' CP1252 default for implicit Path text
+opens and runs the actual five failing checks. It reproduced the failure before
+the fix and passes afterward. All **131 affected local checks** passed, including
+native and browser cases; static correctness and whitespace checks passed. The
+GitHub Actions matrix supplies the actual Windows runtime check. Application
+behavior and trust copy did not change in this fix.
+
 No live model calls, paid evaluations, release or installer execution were run.
 No answer or approval remains pending for this task.

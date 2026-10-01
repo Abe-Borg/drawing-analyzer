@@ -26,7 +26,7 @@ def copy_text():
 
 def test_runtime_inventory_is_complete():
     # IDs come from Phase 1's ledger, not from the implementation being tested.
-    ledger = LEDGER.read_text()
+    ledger = LEDGER.read_text(encoding="utf-8")
     ids = re.findall(r"^\| ([UA]\d{2}) \|", ledger, re.M)
     cards = trust.runtime_cards()
     assert len(ids) == len(set(ids))
@@ -48,7 +48,7 @@ def test_runtime_inventory_is_complete():
         assert set(source_ids) <= refs
     # Source symbols in the inventory must exist, not merely look plausible.
     for path, symbols in re.findall(r"`([^` :]+\.py): ([^`]+)`", ledger.split("<!-- BEGIN GENERATED")[0]):
-        source = (SRC / path).read_text()
+        source = (SRC / path).read_text(encoding="utf-8")
         for symbol in symbols.split(", "):
             symbol = symbol.split(" (")[0].split(" /")[0]
             if symbol.isidentifier():
@@ -56,14 +56,14 @@ def test_runtime_inventory_is_complete():
 
 
 def test_shipped_button_callbacks_have_inventory_sources():
-    tree = ast.parse((SRC / "gui.py").read_text())
+    tree = ast.parse((SRC / "gui.py").read_text(encoding="utf-8"))
     callbacks = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.keyword) and node.arg == "command" and isinstance(node.value, ast.Attribute):
             name = node.value.attr
             if name not in {"toggle", "_close_focus_popout", "_close_update_dialog"}:
                 callbacks.add(name)
-    ledger = LEDGER.read_text()
+    ledger = LEDGER.read_text(encoding="utf-8")
     assert callbacks
     assert all(callback in ledger for callback in callbacks)
 
@@ -91,7 +91,7 @@ def test_trust_facts(monkeypatch):
     assert verify.verify_cross_findings.__kwdefaults__["dpi"] == p["verify_dpi"]
 
     trust.sections()  # resolves FACT_SOURCES
-    ledger = LEDGER.read_text()
+    ledger = LEDGER.read_text(encoding="utf-8")
     for source in trust.FACT_SOURCES:
         module, name = source.rsplit(".", 1)
         assert hasattr(importlib.import_module("drawing_analyzer." + module), name)
@@ -140,7 +140,7 @@ def test_trust_switches_and_unused_token_count(monkeypatch):
     for path in SRC.rglob("*.py"):
         if path.name.startswith("trust_"):
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call):
                 name = getattr(node.func, "id", getattr(node.func, "attr", ""))
                 if name == "count_tokens_via_api":
@@ -151,7 +151,7 @@ def test_trust_switches_and_unused_token_count(monkeypatch):
 def test_models_hosts_settings_and_switches_in_copy_have_real_sources():
     text = copy_text()
     # Exact identifiers and configuration switches cannot be invented in prose.
-    implementation = "\n".join(p.read_text() for p in SRC.rglob("*.py") if not p.name.startswith("trust_") and p.name != "help_content.py")
+    implementation = "\n".join(p.read_text(encoding="utf-8") for p in SRC.rglob("*.py") if not p.name.startswith("trust_") and p.name != "help_content.py")
     for setting in set(re.findall(r"(?:DRAWING_ANALYZER|ANTHROPIC)_[A-Z_]+", text)):
         assert setting in implementation
     from drawing_analyzer.core import api_config
@@ -160,7 +160,7 @@ def test_models_hosts_settings_and_switches_in_copy_have_real_sources():
     # The auth header claim is fixed by production browser request code.
     assert "'x-api-key': apiKey" in html_report._CHAT_JS
     # The default GUI, unlike the library, enables synthesis and uses the queue.
-    gui = (SRC / "gui.py").read_text()
+    gui = (SRC / "gui.py").read_text(encoding="utf-8")
     assert "synthesize=True" in gui and "value=PROCESSING_MODE_ECONOMY" in gui
     from urllib.parse import urlsplit
     from drawing_analyzer.help_content import HELP_DOCUMENTS, GET_API_KEY
@@ -200,15 +200,40 @@ def test_trust_loads_no_external_assets():
     assert svg.attrib["role"] == "img"
     assert any("stroke-dasharray" in element.attrib for element in svg)
     assert all(e.tag.rsplit("}", 1)[-1] in {"svg", "rect", "line", "text"} for e in svg.iter())
-    native = (SRC / "trust_ui.py").read_text()
+    native = (SRC / "trust_ui.py").read_text(encoding="utf-8")
     assert not re.search(r"urlopen|requests|fetch\(|PhotoImage|Image\.open", native)
 
 
 def test_generated_docs_match_content_and_ledger():
-    assert (ROOT / "docs/TRUST.html").read_text() == trust.render_html()
+    assert (ROOT / "docs/TRUST.html").read_text(encoding="utf-8") == trust.render_html()
     from drawing_analyzer.trust_contract_docs import ledger_copy_map
-    ledger = LEDGER.read_text()
+    ledger = LEDGER.read_text(encoding="utf-8")
     assert ledger_copy_map() in ledger
+
+
+def test_trust_source_and_artifacts_under_windows_encoding(monkeypatch, tmp_path):
+    """Exercise the CI failures even when the host's default locale is UTF-8."""
+    original_open = Path.open
+
+    def windows_open(path, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        if "b" not in mode and encoding in {None, "locale"}:
+            encoding = "cp1252"
+        return original_open(path, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", windows_open)
+    sample = tmp_path / "utf8.txt"
+    sample.write_bytes("“Trust” → evidence".encode("utf-8"))
+    with pytest.raises(UnicodeDecodeError):
+        sample.read_text()
+    assert sample.read_text(encoding="utf-8") == "“Trust” → evidence"
+
+    # Use the actual source scans and artifact comparisons that failed on
+    # Windows, so losing an explicit encoding recreates that failure here.
+    test_runtime_inventory_is_complete()
+    test_shipped_button_callbacks_have_inventory_sources()
+    test_trust_switches_and_unused_token_count(monkeypatch)
+    test_models_hosts_settings_and_switches_in_copy_have_real_sources()
+    test_generated_docs_match_content_and_ledger()
 
 
 @pytest.mark.browser
@@ -218,7 +243,7 @@ def test_portable_trust_page_themes_reflow_and_no_requests(theme, width, tmp_pat
     from playwright.sync_api import sync_playwright
     from tests.test_report_browser_security import _launch
     path = tmp_path / "trust.html"
-    path.write_text(trust.render_html())
+    path.write_text(trust.render_html(), encoding="utf-8")
     with sync_playwright() as p:
         try:
             browser = _launch(p)
