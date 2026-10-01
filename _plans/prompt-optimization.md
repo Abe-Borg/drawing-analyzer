@@ -248,6 +248,12 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
 
 - [PR #196](https://github.com/Abe-Borg/drawing-analyzer/pull/196) is open.
   Work is paused for owner review and merge; PO-05 has not started.
+- A final open-PR check found concurrent [PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)
+  (WP-06.3 terminal honesty), opened after initial orientation. A read-only
+  `git merge-tree --write-tree HEAD FETCH_HEAD` check confirmed a content conflict
+  in `src/drawing_analyzer/cross_qc.py`. Merge one PR first, then rebase and
+  validate the other, preserving PO-03 source framing, PO-04 cache usage and
+  #197's terminal/retry accounting. No integration merge was made here.
 - Base: `9e23361`, main after PO-03 PR #194 merged. Open-PR check found only
   dependency PR #190. This owner-selected queue continues independently of
   remediation slices; no WP-14 slice or D-7 decision is marked complete.
