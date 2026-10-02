@@ -496,9 +496,10 @@ consume ledger entries and nothing else.
   is in PyMuPDF's top-left convention; `page.mediabox` comes back un-normalized
   in PDF bottom-left. `mediabox.y1 - cropbox.y0` is the CropBox's top edge in
   user space.
-- **`/CropBox` is inheritable; `/Rotate` is not.** A `new_page()` inherits a
-  `/CropBox` on `/Pages`, so `_new_generated_page` pins CropBox to MediaBox. A
-  new page does not inherit `/Rotate`.
+- **`/CropBox` and `/Rotate` are inheritable.** A `new_page()` inherits a
+  `/CropBox` on `/Pages`, so `_new_generated_page` pins CropBox to MediaBox.
+  PyMuPDF writes `/Rotate` explicitly on pages created by `new_page()`, so a
+  brand-new page does not pick up a parent `/Pages` `/Rotate` unless you set it.
 - **`get_text()` includes annotation text.** Use
   `pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage())`. The raw
   `FzStextPage` has no `extractText`, and `page.get_text(textpage=…)` rejects
