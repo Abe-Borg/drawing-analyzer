@@ -10,24 +10,32 @@ python -m pytest             # full suite — hermetic: no API key, no network
 python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
-python scripts/run_acceptance.py   # Phase 27 release gates (PASS/FAIL; hermetic — never the canary)
-python scripts/check_browser_suite.py browser-results.xml   # P9 item 42: a skip is not a pass
-python scripts/measure_evidence_coverage.py --pdf SET.pdf   # WP-02 §7.1 coverage scan (zero API calls)
+python scripts/run_acceptance.py   # release gates (PASS/FAIL; hermetic — never the canary)
+python scripts/check_browser_suite.py browser-results.xml   # a skip is not a pass
+python scripts/measure_evidence_coverage.py --pdf SET.pdf   # coverage scan (zero API calls)
 ```
 
 Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
 classes only** — E9/F63/F7/F82). The `network` pytest marker is reserved for
-tests that need real API access (the Phase 27 live canary,
-`tests/test_live_api_canary.py`); everything that runs by default uses the
-fakes in `tests/fixtures/fake_anthropic.py`. `conftest` skips `network` tests
-only when no real key is set and `pyproject.toml` sets no default exclusion, so
-**any entry point that spawns pytest must deselect the marker itself**:
-`run_acceptance.py` routes every gate through `_pytest_cmd()`, which ANDs
-`not network` into the child's `-m`, and `tests/test_run_acceptance.py` fails if
-a bare `"pytest"` argv literal reappears anywhere else in that script. The §19.1 trust-gauntlet oracle
-set + all-stage scripted client live in `tests/fixtures/gauntlet.py`; release
-docs (Windows/viewer/Excel manual scripts, benchmark record, §19.9 checklist)
+tests that need real API access (`tests/test_live_api_canary.py`); everything
+that runs by default uses the fakes in `tests/fixtures/fake_anthropic.py`.
+`conftest` skips `network` tests only when no real key is set and
+`pyproject.toml` sets no default exclusion, so **any entry point that spawns
+pytest must deselect the marker itself**: `run_acceptance.py` routes every gate
+through `_pytest_cmd()`, which ANDs `not network` into the child's `-m`, and
+`tests/test_run_acceptance.py` fails if a bare `"pytest"` argv literal
+reappears anywhere else in that script. The trust-gauntlet oracle set and
+all-stage scripted client live in `tests/fixtures/gauntlet.py`; release docs
 live in `docs/`; `requirements-release.lock` pins release builds.
+
+`pytest -m browser` writes a JUnit report and `scripts/check_browser_suite.py`
+fails the job below a floor of genuinely *executed* tests. Failures count as
+executed; skips and setup errors do not. The same floor is applied inside
+`run_acceptance.py`'s browser gate, through the same script. `release.yml`'s
+`publish` needs `gates` (full `run_acceptance.py`, Chromium, ruff/licenses/
+pip-audit) and `gates-windows` (hermetic suite on Windows) in its own `needs`
+chain, because branch protection does not apply to a tag push. `ci.yml`
+triggers on `v*` tags for visibility only.
 
 ## Architecture
 
@@ -35,964 +43,440 @@ A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
 *sheet*, rendered to an overview + 6×6 tile grid and sent — together with its
 verbatim vector text layer — in a single vision request per sheet, returning a
 structured Markdown digest plus a machine-readable findings block.
-`pipeline.extract_drawing_context()` orchestrates everything and returns a
-`DrawingContext`. The per-module map lives in `src/drawing_analyzer/__init__.py`.
+`pipeline.extract_drawing_context()` returns a `DrawingContext`. The per-module
+map lives in `src/drawing_analyzer/__init__.py`.
 
-**Run configuration & status (Phase 23A, models.py).** The GUI checkboxes and the
-public API keyword args are resolved **once** by `resolve_run_configuration()` into
-an immutable `RunConfiguration` (§15.1) — the single place `qc_markups=True` becomes
-the exhaustive stack, `reference_audit` (alone) the free zero-API auditor battery,
-and neither the standard path (findings + text retained and offline-anchored for
-free, DA-012). Every stage reads the resolved config; no call site re-derives the
-booleans. Each QC stage records a typed `StageResult` — **including the digest**,
-which carries one (`expected=True`) so a sheet the run never read reaches the
-roll-up instead of only `ctx.errors` and the journal; it is the single
-`STAGE_END` for that stage, since two would cost `stage_durations()` the
-duration. `roll_up_qc_status()` folds them (+ Phase 21 `coverage_status`) into one
-`qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` / `FAILED`, §3.3). A stage's
-own failure flag is always tested **before** any count derived from its result: an
-exception leaves that result `None`, so a crash judged by counts alone is
-indistinguishable from having had nothing to do (the bug that let a crashed
-cross-verifier report `SKIPPED_VALID`). The Phase 23 completeness gate is **OPEN** (Phase 26B
-§18.0): a clean NORMAL exhaustive run earns `COMPLETE`; the §8 phase-gates are
-permanent regressions enforced by the stage statuses themselves (a failed
-reconciliation / unchecked cited claim / missing evidence leg / mutated source
-holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
+- **Config & status** (`models.py`): `resolve_run_configuration()` resolves GUI
+  checkboxes and public API kwargs **once** into an immutable `RunConfiguration`.
+  `qc_markups=True` is the exhaustive stack; `reference_audit` alone is the free
+  zero-API auditor battery; the standard path retains findings and text and
+  offline-anchors them. Every stage reads that config. Each QC stage, including
+  the digest (`expected=True`), records one typed `StageResult` — the single
+  `STAGE_END` for that stage. `roll_up_qc_status()` folds those plus
+  `coverage_status` into `qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` /
+  `FAILED`). Test a stage's own failure flag **before** any count from its
+  result: an exception leaves the result `None`. The completeness gate is open:
+  a clean NORMAL exhaustive run earns `COMPLETE`; a failed reconciliation,
+  unchecked cited claim, missing
+  evidence leg, or mutated source holds a required stage at PARTIAL, which the
+  roll-up can never call COMPLETE.
+- **Usage** (`ctx.run_usage`): append-only `RunUsage`. Every API call appends a
+  priced `UsageRecord` (family, `transport` REAL_TIME/BATCH/CACHE, model, tokens,
+  tool uses, cache-hit, `estimated_cost`); `total_*` are derived sums. A stage
+  that placed no call and took no cache hit appends nothing. Guard a real-time
+  record on the call count alone. `core.pricing.usage_record_cost` prices one
+  record; costs carry `PRICING_EFFECTIVE_DATE`. `RunUsage.is_billable_but_unpriced`
+  is the single rule for billable usage the table cannot price: it counts cache
+  read/write tokens, and tool uses **by value** (`_record_usage` drops zero
+  counts before storing). Do not restate that rule. `cost.estimate_exhaustive_run_cost`
+  is the pre-run estimate (verification/citation as a low–high band); price every
+  stage with **its own resolved model** and the runtime's own `critique_runs()`.
+  Count critique imagery with the critique model, never reused from the digest
+  count (`estimate_image_tokens` clamps at 4784 hi-res / 1568 standard).
+- **Image-token geometry:** the GUI prices from real page shapes when profile
+  preflight has measured the current file list, and from the conservative
+  allowance otherwise. There is no separate scan. `profiles.preflight_scan`
+  returns sheet ids and `SheetCostBasis` from one walk; `estimate_*_cost(bases=…)`
+  uses them **only when they cover every sheet** — a partial list falls back
+  whole. An unreadable page inside a measured set still takes the conservative
+  allowance; `shape_aware` comes from `ImageTokenEstimate.fully_measured`, never
+  list length. Bases are gated on `source_registry.sources_fingerprint` (path +
+  size + mtime), re-checked at consumption. The GUI holds them under the same
+  generation guard as the profile suggestions. `_add_pdfs` refreshes the summary
+  before preflight clears the previous selection's bases.
+  `pipeline.estimate_image_tokens_for_set` stays the conservative allowance
+  (every image a square at the raster target, at the model cap).
+  `cost.estimate_image_tokens_for_bases` prices each page from a `SheetCostBasis`
+  (displayed w/h, vector/raster/unknown, capped text length, geometry
+  availability and error — no words, full text, image bytes, or path). Aspect
+  ratio and whether the page has words come from a scan that never rasterizes
+  (`render.iter_sheet_cost_bases`, or `models.sheet_cost_basis(geom)`).
+  `tiling.image_pixel_sizes` is the single home for tile pixel geometry and
+  mirrors `(rect * matrix).irect`, which is **position**-dependent. Count every
+  tile: blank suppression is decided from rendered pixels and must never be
+  predicted from word absence. An `unknown` page takes the conservative
+  allowance and is never assumed vector; an unmeasurable page is still quoted.
+- **Work dirs:** verify, investigate, and markup create a `drawing_qc_*` temp
+  dir when the caller supplied no `work_dir`. `pipeline._prune_stale_work_dirs`
+  reaps them on the way **in** (`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default
+  24, `0` disables, resolved at call time). Do not prune at run end: export
+  copies evidence out after `extract_drawing_context` returns. Judge age with
+  `_tree_is_recent`, not the directory mtime (crops land in
+  `evidence/<QC-###>/<leg>.png`); an empty young dir still needs the directory
+  check. Uncertainty fails safe (keep). The zero-sheet early return cleans up
+  the dir it created, in the same form as its `block_reason` twin.
+- **Journal** (`run_journal.py`): append-only, thread-safe `RunJournal`. Every
+  field is sanitized at emit (`redact_secrets` plus an absolute-path scrubber →
+  `.../basename`, one line, bounded). Events: RUN_START / INPUT_* /
+  SHEET_DIGESTED / STAGE_START / STAGE_END / LEDGER_* / MARKUP_RECEIPTS /
+  USAGE_TOTALS / RUN_END. Every export gets `run.log` (UTF-8+CRLF) and
+  `run_manifest.json` (schema v1: status/config/sources-without-paths/stages/
+  usage/coverage + sha256 of every artifact), written **last**: artifacts →
+  markup manifest → run.log → run manifest (excludes only itself).
+  `stage_instance` labels are portable (`digest:SRC-0001:p0`). `private_roots`
+  matches case-insensitively, across both separators, only at a component
+  boundary (`_private_root_re`, `(?=[\\/]|$)`). Every renderer of both artifacts
+  gets that list. `redact_for_display` is the same boundary without flattening
+  or truncation, for host status/error text only — never digest prose (I-2) or
+  model findings.
+- **Digest path:** `tiling.py` (geometry) → `render.py` (raster) → `digest.py`
+  or `batch_digest.py` (Message Batches + Files) → `digest_cache.py` (two-level
+  content-keyed cache; a hit skips rendering and restores parsed findings).
+  Findings fences are **line-anchored**, accept 3+ backticks or tildes, and a
+  closer must match its opener's character and length. Never cache a truncated
+  read: both transports treat an unfinished reply (empty or cut off) as an
+  error, retry once at `digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache
+  write if it is still cut off. Real-time usage accumulates across both
+  attempts and falls back to the truncated first read if the raised-cap call
+  cannot land. Critique does not re-rasterize: `render_spool.py` rebuilds the
+  same `RenderedSheet` from the digest's PNG bytes; the batch path adopts the
+  digest's terminal uploads. A second render is the per-page fallback
+  (`_one_page_fallback` re-renders exactly the page that failed). A failed spool
+  write leaves the key absent (I-3).
+- **Batch recovery** stays on the batch transport for the pipeline
+  (`recovery_transport=RECOVERY_BATCH`): cancel a stalled batch and resubmit
+  unresolved sheets (`_recover_via_batch_resubmit`). Never silently drop to
+  full-rate real-time; when the rounds or budget are spent, unreached sheets
+  keep a retriable batch error. Every site that abandons a batch harvests it
+  first (`_harvest_abandoned_batch`): `results()` is filled only from a
+  terminal read, so harvest between cancel and the rescue list, **successes
+  only**, and park billed empty attempts (`_park_usage_attempts`). Harvest time
+  is additional — add it back to the caller's start mark. A batch that will not
+  settle within the bound harvests nothing. The collection bound is **24h**
+  (`DEFAULT_BATCH_MAX_ELAPSED_HOURS`), overridable via
+  `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`, resolved at call time from a
+  `None` default. `DETACHED_MOVING` vs `DETACHED` is diagnostic only. The
+  full-rate rescue (`_rescue_failed_items_sync`, `RECOVERY_DIRECT`) is for
+  direct callers and tests. Stall watch is tiered (`_stall_timeout_seconds`):
+  25 min primary, 60 min on every resubmission;
+  `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` overrides both. Heartbeat every
+  5 minutes. An abandoned batch appends a non-billable `DigestUsageAttempt`
+  (`billable=False`, `terminal_status="ABANDONED_*"`, zero tokens) per sheet,
+  so usage sees every attempt while the image-token estimate still counts only
+  response-bearing ones. Each slot records `served_by`.
+- **Text extraction** (`render.py`): sheet text comes from
+  `page.get_displaylist(annots=False)` via `TextPage.extractWORDS()`
+  (`_page_text_and_view_words`, `_page_word_count`, `_page_text_and_word_count`).
+  Those words are already PAGE_VIEW_V2; `get_text("words")` is
+  rotation-invariant, so `_page_text_and_view_words` owns the conversion for
+  both routes. `_RENDER_IDENTITY_SCHEME` is **v4**. See the PyMuPDF gotcha on
+  annotation text.
+- **Page identity:** any other `/Type /Page` reached by `_page_dependency_sha256`
+  is an opaque leaf. A GOTO destination is not hashed; the reference already
+  rides the referencing annot, so retargeting still moves the key.
+- **GUI** (`gui.py`): console-less entry (`[project.gui-scripts]` on Windows;
+  the frozen build is windowed). The guarded `customtkinter` import reports
+  through a stdlib `messagebox` and raises **ImportError**, not `SystemExit`
+  (`app_entry.py --selfcheck` catches `Exception`). `WM_DELETE_WINDOW` →
+  `_on_close_request` (workers are daemons; export runs after analysis returns).
+  `report_callback_exception` → `_on_callback_exception`. Both reporters swallow
+  every failure of their own channels.
+- **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,
+  tokenizer, structured-outputs gate. The tokenizer is estimate-only; the exact
+  count is `count_tokens_via_api`, and the local path is the conservative
+  safety-factor table. `reference_audit.py` is a shim over
+  `auditors/references.py`. No built-in review profiles ship: packaged
+  `profiles/` is empty; user checklists live in `~/.drawing_analyzer/profiles/`;
+  a worked example is `docs/examples/fire_protection.md`.
 
-**Usage & cost (Phase 23B, §15.6).** Token/cost accounting is an **append-only**
-`RunUsage` ledger (`ctx.run_usage`): every API call/attempt appends a priced
-`UsageRecord` (family, `transport` REAL_TIME/BATCH/CACHE, model, tokens, tool uses,
-cache-hit, `estimated_cost`), and the run's `total_*` are *derived* sums — no stage
-can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is gone).
-The ledger describes work that **happened**, not stages that were configured: a
-stage that placed no call and took no cache hit appends nothing. Guard the
-real-time record on the call count alone — the old `if X.api_calls or not
-X.cache_hits` fired exactly in the no-work case it meant to exclude, so a
-verification that verified nothing still reported two real-time calls.
-`core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
-`PRICING_EFFECTIVE_DATE`. `RunUsage.is_billable_but_unpriced` is the single rule
-for "this consumed billable usage the table cannot price", and it counts **cache
-read/write tokens** as usage: omitting them let a record carrying 180k cache
-tokens under an unpriceable model pass as "no usage", so a run with one $5.00
-digest beside it reported **$5.00** — a complete-looking total that dropped real
-spend, the exact failure the rule exists to prevent. It also counts tool uses by
-**value, not key**: the dict is truthy whenever it has one, so `{"web_search": 0}`
-— what citation writes when every ref came warm from the verdict cache — read as
-billable usage and unknowned a run in which nothing unpriceable happened. Both
-ends are fixed (`_record_usage` drops zero counts before storing) because either
-alone lets the other bring it back. Never restate that rule; the
-A/B harness had a second copy and it drifted within one commit. `cost.estimate_exhaustive_run_cost` is the pre-run
-per-stage estimate (verification/citation quoted as a low–high band), and every
-stage is priced with **its own resolved model** and the runtime's own
-`critique_runs()` — the standard path once priced synthesis/focus at the digest's
-threaded `model` while those stages actually follow `REVIEW_MODEL_DEFAULT`, and
-the critique line was fixed at two reads regardless of
-`DRAWING_ANALYZER_CRITIQUE_RUNS`. Critique imagery is counted with the critique
-model, never reused from the digest count: `estimate_image_tokens` clamps at a
-per-model cap (4784 hi-res / 1568 standard tier), so one count for two tiers is a
-~3× error.
+**QC stack** (each stage optional and independently cached). Anchoring,
+verification, the citation check, the markup writer, the exports, and the report
+consume ledger entries and nothing else.
 
-**Geometry-aware image tokens (WP-05 §10.1/§10.3).** The GUI prices from real
-page shapes when the **profile preflight** has already measured the current file
-list, and from the conservative allowance otherwise. There is no separate scan,
-and that is a measured decision, not a preference: a fresh scan of 120 dense
-sheets takes 6,896 ms and can wait 22,457 ms behind the preflight's lock, while
-deriving the same records from geometry the preflight already built takes 0.4 ms
-(`scripts/measure_scan_time.py`; the scan tracks **word count**, ~15 ms/1k words,
-not sheet count). So `profiles.preflight_scan` returns sheet ids *and*
-`SheetCostBasis` records from one walk, the GUI holds them under the same
-generation guard the profile suggestions use, and `estimate_*_cost(bases=…)`
-uses them **only when they cover every sheet** — a partial *list* falls back
-whole, since a total mixing measured and conservative sheets is neither figure.
-Covering every sheet is not measuring every sheet: a page that could not be read
-still takes the conservative allowance inside an otherwise measured set, so
-`shape_aware` comes from `ImageTokenEstimate.fully_measured` (never list length)
-and the dialog names the count that fell back rather than claiming either
-extreme. Bases are also gated on `source_registry.sources_fingerprint` — path +
-size + mtime per file, re-checked at consumption — because the generation counter
-tracks *selection* changes and cannot see a PDF overwritten in place, which is
-ordinary when re-exporting a set to the same filenames. That gate is what makes
-the ordering safe too: `_add_pdfs` refreshes the summary before the preflight
-clears the previous selection's bases.
-`pipeline.estimate_image_tokens_for_set` remains the deliberately conservative
-allowance — every image a square at the *raster* target, at the model cap — and
-its public meaning is unchanged. `cost.estimate_image_tokens_for_bases` is the
-successor that prices each page from its real shape, given a `SheetCostBasis`
-(`models.py`: displayed w/h in points, vector/raster/unknown, capped text length,
-geometry-availability + error state — and deliberately no words, no full text, no
-image bytes, no path). Two facts per page carry the whole correction: aspect
-ratio and *does this page have words*, both from a scan that never rasterizes
-(`render.iter_sheet_cost_bases`, or `models.sheet_cost_basis(geom)` to reuse an
-existing prescan/preflight rather than becoming a second PDF owner). The
-correction is ~1.9× on a vector E-size sheet.
-`tiling.image_pixel_sizes` is the single home for that geometry (GUI, CLI and
-tests all call it) and mirrors PyMuPDF's `(rect * matrix).irect` sizing — which is
-**position**-dependent, so two identically-sized tiles can differ by a pixel and
-no dimension-rounding rule reproduces it. Every tile is counted: blank
-suppression is decided from rendered pixels and must never be *predicted* from
-word absence, since a vector sheet's words sit in the title block while the body
-is lines. An `unknown` page falls back to the conservative allowance and is never
-assumed vector — vector is the cheaper target, so guessing it quotes low on
-exactly the pages least understood — and an unmeasurable page is still quoted,
-never silently dropped.
-
-**Work-dir hygiene (P9 item 46).** The verify, investigate and markup stages each
-create a `drawing_qc_*` temp directory when the caller supplied no `work_dir`, and
-nothing removed them — they hold the high-DPI evidence crops, so a repeatedly
-reviewed set leaks the largest artifact the tool produces into `%TEMP%`.
-`pipeline._prune_stale_work_dirs(keep=…)` reaps them on the way **in**
-(`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default 24, `0` disables, resolved at
-call time). Pruning at run *end* is not an option: `extract_drawing_context`
-returns before the caller exports and the export *copies* evidence out (DA-033),
-so it would destroy the crops before anything saved them. Age is judged by
-`_tree_is_recent`, not the directory's own mtime: a directory's mtime moves only
-when an entry is added directly in it, and crops land in
-`evidence/<QC-###>/<leg>.png` — measured, a work dir whose crop was written **0
-seconds ago** but whose own mtime was 40 hours old was pruned out from under a
-live run, and a run can outlive the prune age (the batch bound alone is 24h). Both
-checks are needed: an empty young dir has nothing inside to date. Every
-uncertainty fails **safe** (keep, never delete) — an unreadable entry, an
-unscannable directory, an exhausted scan budget — because keeping a stale
-directory costs disk and deleting a live one costs a paid run's evidence. The
-zero-sheet early return cleans up the dir it created, in the byte-identical form
-its `block_reason` twin uses.
-
-**Run journal & manifests (Phase 26A, §18.1–18.4).** Every run owns a
-`RunJournal` (`ctx.run_journal`, `run_journal.py`): an append-only, thread-safe
-event trace whose every field is **sanitized at emit time** (shared Phase 17
-`redact_secrets` + an absolute-path scrubber → `.../basename`; one line;
-bounded). The pipeline emits RUN_START/INPUT_*/SHEET_DIGESTED/STAGE_START/
-STAGE_END/LEDGER_*/MARKUP_RECEIPTS/USAGE_TOTALS/RUN_END; `ctx.input_inventory`
-and `ctx.prose_accounting` are retained for the manifests. Every export gets
-`run.log` (rendered §18.2 log, UTF-8+CRLF) and `run_manifest.json`
-(schema v1: status/config/sources-without-paths/stages/usage/coverage + sha256
-of every artifact), written **last** in the §18.4 non-circular order (artifacts
-→ markup manifest → run.log → run manifest, which excludes only itself). Usage
-`stage_instance` labels are portable (`digest:SRC-0001:p0`, never a path).
-`private_roots` is matched **case-insensitively, across both separators, and only
-to a component boundary** (`_private_root_re`, cached per root): Windows paths are case-insensitive with two
-legal separators, so a literal `str.replace` matched only the registered spelling
-and one lowercase drive letter left `Abe Borg\My Drawings` in the file — the
-regex path scrubber cannot bound a path containing spaces. The boundary
-(`(?=[\\/]|$)`) is what stops a root matching a *sibling* whose name merely
-starts with it: `…\Job` matched `…\Job2\Client Secret\…` and the partial
-rewrite was worse than none, since eating the drive letter left the backstop
-nothing to anchor on. And **every** renderer
-of both artifacts is handed that list, not just the errors section (it was only
-the errors section, so one string was scrubbed two sections below where it printed
-in full); `test_run_journal.py` asserts that structurally over the module's AST,
-because an assertion about today's call sites cannot see tomorrow's.
-`redact_for_display` is the same boundary minus flattening and truncation, for
-artifacts that render a block rather than a line: the exported Markdown
-(`00_index.md`, per-sheet files) and `report.html` printed host error strings
-verbatim — measured, an `AuthenticationError` repr put both the user's directory
-names and an `x-api-key` value into all three while run.log beside them was
-clean. Host status/error text only: digest prose (I-2) and model findings are
-never routed through it, because `TOKEN: 12` on a sheet is drawing content.
-
-**Text extraction excludes annotations (P7 item 28).** `page.get_text()` folds
-annotation text in, so a re-reviewed set fed its own prior QC callouts back as
-`sheet_text`, contaminated `full_sheet_text` (which host grounding treats as
-source evidence), and inflated the word count that decides `is_raster`.
-`render._page_text_and_view_words` / `_page_word_count` /
-`_page_text_and_word_count` read `page.get_displaylist(annots=False)` instead. The
-raw `FzStextPage` it yields has no `extractText` and is rejected by
-`page.get_text(textpage=…)` **even wrapped**, so words come from
-`TextPage.extractWORDS()`. The trap: that display list is built for `page.rect`,
-so its words are **already** canonical PAGE_VIEW_V2 while `page.get_text("words")`
-is rotation-*invariant* — applying `_words_to_view` on top double-rotates every
-anchor on a rotated sheet. `_page_text_and_view_words` owns that conversion for
-both routes so the asymmetry cannot reach a caller; measured bit-exact against the
-canonical long way round at every rotation × CropBox, and ~1.6× faster because one
-display list serves both extractions. `_RENDER_IDENTITY_SCHEME` is **v4** for this
-(the annotation bytes do not move, so a cached page would otherwise be served
-contaminated text without re-extracting); no key *term* was added, since that
-would be a second mechanism for one change.
-
-**Page identity is page-local even across links (N23).** Any other `/Type /Page`
-object reached transitively by `_page_dependency_sha256` is an **opaque leaf**: a
-GOTO link annot references its destination page, whose `/Parent` is not stripped
-the way the hashed page's own is, so the walk reached `/Kids` and every sibling and
-one cross-sheet hyperlink made every sheet re-key whenever any sheet changed.
-Nothing about the destination is hashed and nothing needs to be — the reference
-already rides the referencing annot object, so retargeting still moves the key.
-
-**Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
-`digest.py` (prompt + tolerant findings-block parser — fences are **line-anchored**,
-accept 3+ backticks or tildes, and a closer must match its opener's character and
-length, because an un-anchored scan let an inline ``` span open a phantom block
-that swallowed the real findings JSON into the sacred prose), or `batch_digest.py`
-(Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
-content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free — but never a **truncated** read: both transports treat a
-reply the model did not finish as an error whether it came back *empty or merely
-cut off*, retry once at a raised cap from the shared
-`digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache write if it is still cut
-off, since a stored truncation is indistinguishable from a complete one on every
-later run. Real-time accumulates usage across both attempts — each was billed —
-and falls back to the truncated first read if the raised-cap call cannot land, so
-the retry can only improve on that read, never lose it). The critique does **not** re-rasterize what the digest
-already rendered: `render_spool.py` spools the digest's already-compressed PNG
-bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
-(nothing resized, recompressed or filtered), and the batch path adopts the
-digest's terminal uploads instead. A second render is the per-page **fallback**
-— an unspooled page (a digest cache hit rendered nothing), a grid mismatch, an
-unavailable manifest, a failed spool read/write — and `_one_page_fallback`
-re-renders exactly the page that failed without misassigning another. Run-local
-and advisory: a failed spool write just leaves the key absent (I-3). Batch recovery of a stuck/backend-sick batch stays on the
-batch transport for the pipeline (`recovery_transport=RECOVERY_BATCH`): a
-stalled batch is canceled and its unresolved sheets resubmitted as fresh
-batches (bounded rounds + collection budget, `_recover_via_batch_resubmit`), so
-a run **never silently drops to full-rate real-time calls**; when the rounds/
-budget are spent, unreached sheets keep a clean retriable batch error.
-Every site that abandons a batch first **harvests** it
-(`_harvest_abandoned_batch`, DA-035): `results` is filled only from a terminal
-`results()` read, so on a non-terminal batch every slot reads `None` —
-including sheets it completed **and billed** — and the rescue list was
-therefore all of them. Cancellation is asynchronous, so a canceled batch still
-reaches `ended` and its finished items stay readable; the harvest reads them
-back between the cancel and the rescue list at all three sites (primary,
-resubmission, follow-up — the last re-billing at full real-time rate). It
-resolves **successes only**: an item that came back empty still needs the
-rescue, but its billed attempt is parked on the slot
-(`_park_usage_attempts`) so §15.6 keeps it. Its time is **additional**, added
-back to each caller's start mark rather than deducted — it competes with the
-rescue for the same seconds exactly on the `detached` path, and charging it
-there turned a 3/3 recovery into 0/3, trading re-billing for lost sheets. A
-batch that will not settle within the bound harvests nothing and the caller
-resubmits everything, as before. The collection bound is
-**24h** (`DEFAULT_BATCH_MAX_ELAPSED_HOURS`, the Batches API's own SLA),
-overridable per call via `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`
-(`_batch_max_elapsed_seconds`, resolved at call time from a `None` default, not
-frozen at import) — safe to raise only because of the harvest. Hitting it
-returns `DETACHED_MOVING` when items were still completing and `DETACHED` when
-none had; the split is **diagnostic** (log line, per-sheet error,
-`ABANDONED_*` terminal status), never a different disposition: leaving a
-healthy-but-slow batch running would strand every sheet it was already billed
-for, since `results()` is served only after a batch ends. The
-legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
-`RECOVERY_DIRECT` default kept only for direct callers/tests. The stall watch is
-**tiered** (`_stall_timeout_seconds`): 25 min on the primary batch ("is it
-moving at all?" — a healthy 39-sheet batch lands in ~10 min), 60 min on every
-resubmission after it ("deep queue or sick backend?"); a flat hour on the first
-watch once cost a real run two frozen hours for ~25 min of work.
-`DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` overrides **both** tiers with one
-value. A queued batch is never silent: `_poll_until_terminal` emits a 5-minute
-heartbeat (elapsed, items done, time left on the watch) to the log and `on_log`,
-and the progress line carries elapsed minutes. Every abandoned batch appends a
-**non-billable** `DigestUsageAttempt` (`billable=False`,
-`terminal_status="ABANDONED_*"`, zero tokens) per sheet via
-`_mark_batch_abandoned`, parked on the `_Slot` until the real digest absorbs it
-— so §15.6 sees every attempt while the image-token estimate still counts only
-response-bearing ones. Each slot records `served_by`, so the collect log names
-both the submitted batch and the one that actually served the digests.
-
-**CI gates (P9 item 42).** `pytest -m browser` writes a JUnit report and
-`scripts/check_browser_suite.py` fails the job below a floor of genuinely
-*executed* tests. Every test in that suite skips itself when Chromium will not
-launch and pytest exits **0** on an all-skipped run: measured on one commit, one
-environment variable apart, `98 passed` and `98 skipped, 2180 deselected`, both
-exit 0 — a green required check over a suite that proved nothing about CSP,
-`file://` handling or event execution. Failures count as executed (the body ran);
-skips and setup errors do not. The same floor is applied inside
-`run_acceptance.py`'s own browser gate, through the same script — the release
-gate and the CI job must not disagree about what "passed" means.
-`release.yml`'s `publish` needs two tag-gated jobs in its own `needs` chain —
-`gates` (the full `run_acceptance.py`, Chromium installed, plus ruff/licenses/
-pip-audit) and `gates-windows` (the hermetic suite on Windows) — because branch
-protection does not apply to a tag push, a tag can name any commit, and a second
-workflow run triggered by that tag is **not** a dependency of this one. `ci.yml`
-triggers on `v*` tags for visibility only.
-
-**GUI lifecycle (P9 items 47/N32).** `gui.py` is a console-less entry point
-(`[project.gui-scripts]` on Windows, and the frozen build is windowed), so
-anything written to stdout/stderr is invisible: the `customtkinter` import is
-guarded and reports through a stdlib `messagebox` naming the fix, raising
-**ImportError** and not `SystemExit` (`app_entry.py`'s `--selfcheck` catches
-`Exception`, and `SystemExit` would sail past it and report success). The main
-window wires `WM_DELETE_WINDOW` → `_on_close_request` (the workers are daemons and
-the export runs *after* the analysis returns, so closing mid-run discarded a paid
-run with no prompt, while all three secondary windows already confirmed) and
-`report_callback_exception` → `_on_callback_exception` (Tk's default handler
-prints to the stderr that does not exist). Both reporters swallow every failure of
-their own channels: a broken dialog must not trap the user in the window, and the
-reporter of last resort must never raise from inside Tk's handler.
-
-**QC stack** (each stage optional and independently cached):
-
-- *Planning (Phase A §20, universal reviewer):* `set_identity.py` — one text-only
-  call over a budgeted corpus (every digest head + early text layers + verbatim
-  windows around each code-edition mention) → a bounded `SetIdentity`
-  (disciplines, sheet→discipline map, jurisdiction, language, units, adopted
-  codes with evidence quotes; the regex edition harvest unions in as
-  `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
-  consumers take `SetIdentity | None` and never gate a finding on it — which,
-  with the regex backstop, is why this stage runs on **Sonnet 5**.
-  Both sanitizers coerce every list-shaped field through
-  `set_identity._as_list` (P8 item 9): they are documented as never raising and
-  the stages treat an exception as stage FAILED, yet a dict raised `TypeError:
-  unhashable type: 'slice'` and a **string** passed silently and was consumed per
-  character — `"refs": "NFPA 13 2016 §8.17"` reached the citation check as
-  `('N','F','P')`, three live web searches for single letters. The
-  international code-designation regex is **case-sensitive** (item 12): under
-  `IGNORECASE` ordinary lowercase notes matched, so `is 1000 mm clearance` became
-  Indian Standard 1000; `Eurocode` keeps its own case-insensitive group.
-  `review_planner.py` — one text-only call authoring the per-discipline review
-  checklist (bounded host-side: ≤60 items via `DRAWING_ANALYZER_MAX_PLAN_ITEMS`,
-  the overage taken from the **longest** plan each round — trimming the last
-  plan's tail deleted `mechanical` and `plumbing` outright while `architectural`
-  kept everything, since plans sort by slug (N5) —
-  overlong items dropped-never-truncated; every code-based item must name
-  code+section+edition inline and never invent a section — the refs flow into
-  `Finding.refs`, which the citation check verifies). Plans become caller-built
-  `Profile` objects injected AFTER user profiles (snapshot `source="model"`),
-  so `profiles_cache_fragment` gives cache correctness for free; both stages
-  cache in `DigestCache` namespaces (`stage=identity` / `stage=review_plan`) so
-  warm re-runs keep the critique `profiles_key` byte-stable. Both ride the
+- **Planning:** `set_identity.py` — one text-only call → advisory `SetIdentity`
+  (consumers take `SetIdentity | None` and never gate a finding on it). The
+  regex edition harvest unions in as `origin="regex"`. Runs on Sonnet 5. Coerce
+  every list-shaped field through `set_identity._as_list` (a string must not be
+  consumed per character). The international code-designation regex is
+  **case-sensitive**; `Eurocode` keeps its own case-insensitive group.
+  `review_planner.py` — one text-only call for the per-discipline checklist,
+  bounded at ≤60 items (`DRAWING_ANALYZER_MAX_PLAN_ITEMS`), overage taken from
+  the **longest** plan each round; overlong items are dropped, never truncated.
+  Every code-based item names code + section + edition inline and never invents
+  a section. Plans become `Profile` objects injected **after** user profiles
+  (`source="model"`), so `profiles_cache_fragment` stays correct. Both stages
+  cache in `DigestCache` (`stage=identity` / `stage=review_plan`) and ride the
   critique stack (`run_identity` also on with citation alone); the standard run
-  stays zero-extra-cost (DA-012/DA-013). Artifacts: `set_identity.json`,
-  `review_plan.md`, a manifest `set_identity` key, and an additive combined-text
-  section (I-2). Identity also feeds `check_citations(identity=)` (merged
-  editions + jurisdiction line) and `cross_sheet_qc(identity=)` (preamble).
-- *Finders:* the digest's findings block; `critique.py` (a second full-coverage
-  vision read, run twice — self-consistency merge sets `reproduced`; on the
-  real-time path the two byte-identical reads prompt-cache their shared image
-  prefix when `runs>=2`, so the second bills it at ~0.1× — cache write/read tokens
-  ride the ledger; the parallel batch path stays uncached, and `use_batch` resolves
-  from `DRAWING_ANALYZER_USE_BATCH` when the caller leaves it `None`.
-  **Structured outputs, opt-in (F-01):** the critique is the ONLY high-volume
-  call whose reply is JSON and nothing else, so it is the only stage
-  `output_config.format` fits — the digest writes prose *then* a findings block
-  and no schema describes that (F-02 would need a `record_findings` tool; not
-  done, and its cost is a `_SCHEMA_VERSION` bump on the highest-traffic call).
-  `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1` + the registry capability +
-  the per-stage latch all gate it — the three are one shared
-  `core.structured_outputs.StructuredOutputsGate` (`critique.STRUCTURED_OUTPUTS`),
-  reused verbatim by `prose_harvest` and `verify` under their own env vars and
-  their own latch **instances**, because a vision rejection on the critique says
-  nothing about a text-only call and must not switch it off; `attach_format` /
-  `detach_format` are the one request rule, and the gate's rejection vocabulary
-  overlaps `investigate.py`'s two latches on purpose-neutral words, which is safe
-  only while no request carries both features. Off by default because
-  vision × schema is **undocumented upstream**: citations and prefill are the
-  only stated incompatibilities and images are not mentioned either way, so it
-  is settled by one live call (`test_live_critique_under_output_config_format`),
-  not by a hermetic assertion. `_CRITIQUE_STRUCTURED_INSTRUCTION` is **derived**
-  from `_CRITIQUE_FINDINGS_INSTRUCTION` by substitution with an import-time
-  assert, never a second copy — one author for the enum, the verbatim rule, the
-  40-finding cap and the claims contract. The schema omits that cap on purpose
-  (`maxItems` is rejected by the compiler, as are `minimum`/`maximum`/
-  `minLength` and `minItems`>1), so it stays prose and stays host-enforced.
-  `format` is **merged** into `output_config`, never assigned over it — a fresh
-  dict there silently drops `effort` on every structured request. The whole
-  feature is cache-neutral: `CRITIQUE_PROMPT_VERSION` is untouched and
-  `structured_key` folds in ONLY when set (the `profiles_key` precedent), so a
-  fenced run keys byte-identically to every pre-F-01 entry and no paid read is
-  discarded. It rides **both** cache levels, and that is not optional:
-  `critique_cache_key_level1` is probed *before rendering* and answers first, so
-  separating only the level-2 (PNG-bytes) key closes nothing — a warm run
-  enabling structured outputs would hit a stored fenced entry at level 1 and
-  return it without ever issuing a structured request, and the feature would
-  read as enabled while changing nothing. Both **store** keys are rebuilt after
-  the reads rather than reused from the probe, because the latch can flip in
-  between and a degraded run must store under the fenced key or it parks a
-  fenced-produced merge exactly where the next working structured run looks
-  (`_ingest_miss` keeps the render *identity*, not the finished key, for that
-  reason). `tests/test_structured_outputs.py` asserts the level-1 threading over
-  the pipeline's AST, since a test naming today's call sites cannot see the next
-  one added. The batch transport pins
-  `structured=False` — a batch item's shape is fixed at submit and a rejection
-  surfaces per item after the batch is built and billed, so the transport that
-  cannot degrade does not opt in);
-  `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
-  `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
-  text layers, **all** grounded on the shared `auditors/sheet_ids.py` grammar
-  foundation — Phase 25 §17.2/17.3: `id_signature`/`learn_grammar` learn the set's
-  hyphenated/compact/dotted numbering convention, `classify_reference` +
-  `is_non_sheet_reference` adjudicate a reference against it with a negative corpus
-  so a code/tag/voltage/RFI/**drawing annotation**/dimension never becomes a sheet
-  finding. `_ANNOTATION_PREFIXES` (REV/DET/DWG/TYP/SIM/NTS) is kept separate from
-  the transmittal set because it is a different kind of thing; paper sizes are
-  deliberately absent, since `A1`–`A4` are ISO sizes *and* real architectural ids
-  and the corpus never consults the set. `references.detect_sheet_id_word` also vetoes
-  before its bottom-right position score: position alone let a code citation in the
-  general notes become the sheet's own id, and `build_inventory` learns the set's
-  grammar from exactly those ids, so one general note redefined the convention
-  every downstream auditor adjudicates against. That veto is
-  **`never_a_sheets_own_id`, a strict subset of the reference corpus** — the
-  reference corpus answers "does this token point at a sheet in the set?", safely
-  No for things a sheet can still be *named*, so `_TRANSMITTAL_PREFIXES` is
-  excluded: `SK-1` is a sketch issued as a sheet, and so are `PR-04` / `ADD-2`.
-  Using the full corpus removed such a sheet's real title-block id from the
-  running, and one un-vetoed `A-101` in a note then won at any position, so the
-  sheet vanished from the inventory under its real name. Only that structural
-  veto, never the learned grammar — that would be circular — so a same-shape
-  distractor (`M-999`) can still win; closing that needs a two-pass harvest and is
-  **not** done. `detect_sheet_id_word` is
-  memoized on the sheet **object** (14 live call sites, none cached before); a
-  ref-keyed process-wide dict would serve one stage's answer to another stage's
-  rebuilt geometry, and `None` is a real answer so the memo needs a sentinel.
-  `_merge_adjacent_id_words` caps its scan on **length, not fragment count** — the
-  pathological input is a per-glyph text layer where a real `M-101` is five
-  fragments, so a fragment cap would stop reconstructing the very ids it exists to
-  find; the length cap takes it from n²·¹ (10 s at 2,000 words, ~5 min at 10,000)
-  to linear with byte-identical output. `naming.py` refuses to report drift when
-  there is no frequency winner unless both spellings share an `_arrangement`
-  (same-kind runs, separators breaking them): without evidence of a convention the
-  fallback was *lexicographically first wins*, which reported canonical `FP-101` as
-  drift from mangled `F-P101` and `VAV-21` as a misspelling of `VAV-2-1`. An
-  established winner still outranks structural doubt. `sheet_index.py`'s harvest
-  remains unbounded and is deliberately **not** patched with a second copy of the
-  corpus check — both diff directions already run every entry through
-  `classify_reference` — because the real fix is region bounding, which moves the
-  `_MIN_INDEX_ENTRIES` gate and re-baselines both directions together);
-  `prose_harvest.py` — whose boilerplate filter is anchored at **both** ends
-  (P8 item 6: anchored only at the start, it discarded every real finding that
-  *opened* with No/None/Nothing/N/A, which is how an absence finding naturally
-  opens), with the length floor at 8 and a `filtered` count so a drop cannot
-  vanish — `expected` is built from what survived the filter, so `missing` read 0
-  and `complete` was True over a real loss. That count is **observational** (the
-  §7.2 discard-counter contract): filler is not a lost finding, so it feeds
-  neither. `prose_harvest.py` (mirrors prose Coordination/Conflict items,
-  synthesis conflicts, and opted-in focus items into findings — match first,
-  one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
-  degraded sheet-level entry on failure; opt-in structured outputs
-  (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`): `HARVEST_STRUCTURED_SYSTEM_PROMPT`
-  is ONE substitution on the fenced prompt with an import-time assert,
-  `HARVEST_FINDING_SCHEMA` mirrors the prompt's field list one-for-one as a
-  closed object — `additionalProperties: false` means a field the prompt names
-  must be in the schema or the grammar forbids what the prose asks for — with
-  the enums taken from `digest._MODEL_FINDING_CATEGORIES` / `_FINDING_SEVERITIES`,
-  `HARVEST_STRUCTURED_PROMPT_VERSION` folds into the item key ONLY when the
-  request carried the schema, the store key is re-resolved after the call so a
-  read that degraded mid-call lands under the fenced key, and a bare-JSON parse
-  is attempted only under the structured contract with a fenced reply still
-  winning).
-  Cross-QC's host-side grounding reads **`models.sheet_evidence_text(geom)`**,
-  not `sheet_text` (WP-03A §2.1 trigger 1): `sheet_text` is the *capped* string
-  the model was shown, while `full_sheet_text` is the uncapped reading-order
-  text retained for host checks and **never sent**. A quote transcribed from
-  pixels past `SHEET_TEXT_MAX_CHARS` is real source text, and grounding it
-  against the cap silently dropped the leg — and with it the whole finding,
-  which needs two grounded sheets. The helper is deliberately not
-  `full_sheet_text or sheet_text`: a present-but-empty full text means "no
-  textual evidence" and must not fall back, while `None` (older caller,
-  hand-built fixture) means "unavailable" and does. A non-string is treated as
-  unavailable rather than stringified into trusted evidence. Prompt bytes are
-  unchanged — `cross_sheet_qc` entries and `_budgeted_text_layer` still carry
-  the capped text — and `_cross_qc_cache_key` adds an `evidence_sha256` **only
-  for a truncated sheet**, so every untruncated key stays byte-identical and no
-  stored result was discarded (hence no `_CROSS_QC_CACHE_CONTRACT` bump).
-  Grounding is **three-state** (WP-03B §8.3, `classify_quote_evidence`), not a
-  boolean: `TEXT_GROUNDED` / `NOT_MATCHED_IN_TEXT` / `TEXT_EVIDENCE_UNAVAILABLE`.
-  Collapsing the last two was the §2.1 trigger-2 bug — a scanned sheet, or the
-  pasted raster region of a *hybrid* one (which has words, so `is_raster` is
-  False and cannot identify it), can never satisfy a text check, and treating
-  that silence as refutation dropped every leg **and every fact**, excluding the
-  sheet from cross-shard reconciliation entirely. The question is asked of the
-  **reported tile**, not the sheet (`_tile_has_words`): `render.py` fills
-  `full_sheet_text` from `page.get_text()`, so one selectable title block — which
-  every real hybrid sheet has — makes the sheet-level answer "yes" and sends
-  every quote off the pasted detail back to `NOT_MATCHED_IN_TEXT`, i.e. the
-  hybrid recovery never fires on a real page. So the tile is resolved **before**
-  classification at both call sites, and an *unknown* tile answers "there was
-  text" — absence of a location is not evidence of pixels, and the other default
-  would launder every unlocatable bad quote into admission. Those are now admitted at
-  reduced trust carrying `Finding.evidence_state` / `ConflictLeg.evidence_state`;
-  a quote unmatched on text the sheet *does* have stays a discard, the
-  hallucination signal. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`, never
-  implicitly grounded (trigger 3, closed).
-  Reduced trust must **reach verification**, so the location travels in three
-  parts: the shard-map prompt requests `tile_label` per fact and leg
-  (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
-  rejoins a reconciled leg to its originating fact by `(handle, normalized
-  quote)` — the reconcile contract carries no tile, and the model never supplies
-  the location, it is *derived* from evidence already committed to. That key is
-  **not unique** (one sheet, two "150 gpm" facts, two tiles), and a collision
-  loses rather than picks: keeping the first would hand the second occurrence a
-  rectangle that still anchors and still passes the region test, laundering a
-  guess into a location the reviewer is sent to. Disagreement drops the key
-  order-independently; only unanimity resolves. And
-  `anchor._anchor_one` falls back to that tile **only** for
-  `TEXT_EVIDENCE_UNAVAILABLE`, so TILE anchoring makes
-  `verify._has_anchored_legs` and `investigate._candidates` reachable. Every
-  other path keeps `quote_not_found`. Reduced trust is visible in the markup and
-  the report (a note on the quote cell, not a new status chip — `_STATUS_RANK`
-  drives the browser sort and evidence trust is an orthogonal axis), and the
-  *reason* is chosen per finding by `models.reduced_trust_reason`, because
-  `TEXT_EVIDENCE_UNAVAILABLE` covers two situations a reviewer must not be told
-  are one: no text to search (`[NO TEXT TO CHECK]`) and no quote to search *for*
-  (`[NO QUOTE TO CHECK]`). Saying "no searchable text on this sheet" to someone
-  looking at selectable text discredits every true caveat beside it. A trust
-  label belongs to **its own quote**: `evidence_state` rides the atomic grounding
-  bundle through a ledger merge, and `annotate._units_for_finding` gives each
-  per-leg mark that leg's state rather than the parent's — a conflict can be
-  text-grounded on one sheet and read off a raster detail on the other.
-  Sheet **handles canonicalize before matching** (P8 item 11): `_norm_id` runs
-  `auditors.sheet_ids.normalize_sheet_id` — the declared canonical form that
-  `detect_sheet_id` itself returns — not a bare `.strip().upper()`,
-  because a handle written with a non-breaking hyphen, en dash, U+2010 hyphen or
-  fullwidth digits missed its plain-ASCII twin — the leg was dropped, and a
-  cross-sheet finding needs two grounded sheets, so the finding went with it.
-  **Four** sites compare a handle and all four use that one form, asserted equal
-  rather than merely self-consistent: `_norm_id`, `critique._leg_targets` (it feeds
-  `critical_signature["leg_targets"]`, so a disagreement has cross-QC resolving a
-  leg the ledger then refuses to recognise as the same leg), and both claim-dedup
-  keys (`critique._dedup_claims`, `auditors.arithmetic._claim_dedup_key` — a
-  Unicode dash in one of the two self-consistency transcriptions inflates the
-  arithmetic tally). The sharpest was `arithmetic._resolve_geometry`, whose `by_id`
-  map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
-  matched **nothing**, and the claim resolved to no sheet at all. That
-  canonicalization is host-side binding no key input covers, so it carries
-  `_CROSS_QC_CACHE_CONTRACT` **2 → 3**.
-  Cross-QC also carries **count-only discard counters** on the sharded path
-  (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
-  why — unresolved handle, quote absent, quote present but unmatched, split by
-  whether the target sheet had any extractable text at all. Purely
-  observational: nothing there feeds `complete` or `budget_degraded`, and it
-  holds counts, never quote text. `discards is None` means **not recorded**
-  (the whole-set ≤40 path performs no host-side grounding, and a result cached
-  before the field existed has none) — never "nothing was discarded". It exists
-  because `_finding_from_handles` / `_parse_facts` drop before `CrossQCResult`
-  is built, so a run that kept 3 findings and one that kept 3 after dropping 40
-  ungrounded legs were previously indistinguishable.
-- ***`ledger.py` is the exclusive findings container*** (Part III §16): every
-  channel ingests into it with source tags. Dedup is conservative and lossless
-  (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
-  sameness with **compatible critical signatures** (`critique.signatures_compatible`
-  over `critique.critical_signature`: tags, measurements, absence polarity,
-  cross-sheet legs — public because the A/B harness's finding-level comparison
-  applies the same rule across two runs, and a restated copy is the drift this
-  codebase has already paid for once — and a measurement in that signature is its
-  **value**, not its spelling: `1/2"` is `0.5in`, not the denominator `2in` it used
-  to collapse to, which made *Provide 1/2" drain* and *Provide 2" drain* one
-  finding. `12'-6"` keeps both halves and neither goes negative, which needs TWO
-  lookbehinds — a single `[A-Za-z0-9.\-]` class blocks the `101` in `M-101`
-  (right) *and* the `6` in `12'-6"` (wrong, and unsafe: `12'-6"` and `12'-8"` then
-  both sign as `{12ft}`). Plurals fold; `psig` deliberately does not fold into
-  `psi`); merging keeps
-  **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
-  verdict** are one atomic bundle from a single representative, and the loser's
-  quote → `supporting_quotes`. `_grounding_quality` ranks **host-computed
-  provenance first**, above quote length: a `DETERMINISTIC` verdict is a
-  statement about one computation over one quote, so it must not be decided
-  separately from the text it describes. It was, and the auditor holds the
-  *shorter* quote (it quotes only the term it computed over), so the model's
-  "the sum is 560" won the bundle and inherited the host's label — skipping
-  `verify._TERMINAL_STATUSES` and inking as "an exact text check, not an AI
-  judgment". Both quality tuples are computed **before** the severity union,
-  which used to raise the survivor's severity to the max and erase the very
-  difference it feeds (one order saw ranks (3, 2), the reverse (3, 3), and the
-  tiebreak fell to raw text, where `"…560…"` sorts above `"…540…"`). There is
-  deliberately **no** independent verdict adoption and **no** backfill of a
-  loser's verdict onto an empty winner. An unanchored winner never erases a rect
-  that places its own quote. The merge also unions `sources`, keeps most-severe
-  severity, and — when the merged provenance spans two families — raises
-  `reproduced` **and** `confidence` together (`critique.merge_finding_groups`'s
-  rule; the ledger implemented only half of it, so entries read
-  `reproduced=True` beside `confidence=SINGLETON`). Explicit lifecycle:
-  `seal()` (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B) →
-  `number()` (SEALED→NUMBERED assigns positional `QC-###` **after** anchoring).
-  Pass B's complete-link history comes from `Ledger.member_history`, never a
-  fresh `{id(e): [e]}` map — the live survivor may no longer carry the signature
-  of what it absorbed, and rebuilding from it let Pass B undo a fold Pass A had
-  refused, destroying a conflicting measurement that lived in `text` rather than
-  the quote. Those snapshots are taken **when a merge is about to mutate an
-  entry**, not eagerly at ingest: anchors are resolved after ingest, so an eager
-  copy is a permanently *unanchored* twin of a live entry and `_is_duplicate`'s
-  geometry branch could never fire against it. A post-seal add marks the run
-  incomplete (no `QC-XTRA` masquerade) — including a post-seal **duplicate**,
-  which used to reach neither the counter nor the log because the merge branch
-  returned first, and which is counted and **dropped** rather than merged: it
-  would otherwise rewrite text, quote, id, severity and anchor underneath an
-  already-exported `QC-###`.
-  Anchoring, verification, the citation check, the markup writer, the exports,
-  and the report consume ledger entries and nothing else.
-- *Edition audit (Phase B):* `citation_check.reconcile_cited_editions` — a
-  zero-API, **strictly pre-seal** check turning an adopted-vs-cited edition
-  divergence into a first-class ledger finding (gated `run_citation or
-  run_auditors`; stage `edition_audit`). Basis = identity `adopted_codes`
-  (model entries need a quote; regex-union entries are ignored here) ∪ a
-  citation-shape-filtered regex harvest (`_basis_edition_claims` — a mention
-  followed by a section marker is a citation, never an adoption). Two-tier
-  trust mirroring §17.5: both operands re-found in sheet text → medium +
-  `DETERMINISTIC`; else low + advisory-labeled, crop-verified downstream. The
-  finding anchors to the stale-edition text's own matched span (never the
-  citing finding's quote — an identical quote would collide in Pass B).
-**Text normalization (P8 N7/N8).** `anchor._normalize` rewrites **vulgar
-fractions before NFKC** (`_VULGAR_FRACTION_TABLE`): NFKC expands `½` to `1⁄2`
-with no separating space, so `2½"` became `21⁄2"` and could never match a sheet
-reading `2-1/2"` — a 2.5 inch drain quoted as a 21 inch one. `_CHAR_FOLD` also
-covers the fraction slash, division slash and multiplication sign. Every
-invisible code point in `anchor.py` and `auditors/sheet_ids.py` is written as a
-`\uXXXX` **escape**, never a literal: as literals they are invisible in every
-editor and diff, and a test fails if one reappears.
-
-- *Disposition:* `anchor.py` (quote → PDF rect, tiered
-  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Both fuzzy
-  tiers carry the **numeric veto** (P7 item 30): token overlap is blind to a
-  swapped digit, so on `PROVIDE 6 INCH DRAIN AT COLUMN LINE 4` every one-number
-  substitution scored 6/7 = 0.857, cleared the 0.85 floor, and clouded a wrong
-  pipe size onto the sheet's real text. `_numbers_aligned` requires each
-  digit-bearing token to sit at **its own position** in the matched span, within
-  `_fuzzy_window_slack` — derived from the overlap floor, never a constant, so the
-  two cannot disagree — and consumes each span position once, so `4 4-INCH DRAINS`
-  cannot satisfy both mentions from a single `4`. Presence anywhere in the span is
-  not evidence: multiset agreement alone is defeated by the window *sliding* to
-  borrow a digit from the next line. The sub-phrase tier instead uses
-  `_numbers_agree`, because its span is the slice verbatim and its failure mode is
-  *dropping* a measurement, not mismatching one. The 0.85 threshold is a standing
-  prohibition and is asserted unchanged) →
-  `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
-  thinking at medium effort inside an 8k envelope — thinking shares the
-  `max_tokens` budget with the answer, and the old 1k cap fit neither, so
-  verdicts came back empty and degraded to UNCERTAIN. Every live call that
-  returns no verdict is now **counted** on `VerifyResult` — `malformed` /
-  `truncated` / `failed`, a breakdown of `uncertain`, classified by
-  `_degrade_kind` from the same validity flag and stop reason the parser
-  already produced and the call site used to discard — and
-  `degradation_note()` becomes one stage *warning* (observational: no status
-  moves), because a run could not otherwise say whether its UNCERTAIN share came
-  from the drawings or the parser. Opt-in `output_config.format`
-  (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`, `VERIFY_VERDICT_SCHEMA`, enum =
-  `sorted(_VERDICT_MAP)`) leaves the prompt untouched — it already asks for a
-  bare object — so the structured and plain requests differ only by the schema,
-  which rides `_request_shape_params` into both cache keys for free. The
-  decision is made **once, at submit time**, and threaded to the worker
-  (`_verify_one(structured=)`, `_PreparedCrossVerification.kwargs`) — never
-  re-derived on the pool, or the request and the cache identity resolve
-  separately and a plain verdict lands under a structured key. The latch is
-  the one thing that can change in between (another worker's rejection), so
-  the worker honours the keyed decision unless the latch is already off, then
-  sends plain without paying for a guaranteed 400, and `_CallResult.structured`
-  reports the contract actually sent; both keys are built at submit time and
-  the verdict is stored under that contract's key (`cache_keys[res.structured]`,
-  `plain_cache_key` on the cross path, whose requests are all prepared before
-  any is sent). A verdict **replaces** the
-  status, never the arithmetic provenance behind it: all 18 `Verification(...)`
-  constructions assign wholesale and populate neither `computation_method` nor
-  `operand_origin`, so `_provenance_restorer` snapshots them at each public
-  entry point and restores them at every exit — success, skip, error, abort and
-  warm-cache alike. Restoring at the boundary rather than at the ten assignment
-  sites is deliberate: patching those leaves the next branch someone adds to
-  reintroduce it silently. Losing them *inverted* the reviewer's caveat, since
-  `annotate._trust_note` reads `operand_origin` first — "re-check the math
-  against the sheet" became "AI-verified against the drawing" — and the exposure
-  is precisely targeted, because `auditors/arithmetic` emits UNCERTAIN for
-  `MODEL_TRANSCRIBED` operands while only DETERMINISTIC is terminal here.
-  `investigate.py` carries both fields forward at its own three sites) →
-  `investigate.py` (Phase C: a host-driven client-tool loop escalating each
-  anchored UNCERTAIN verdict — the model requests evidence via `crop_region`
-  / zero-API `find_text` / `view_sheet`, all three declared `strict: true`
-  (F-03) so a malformed request is rejected upstream instead of spending an
-  evidence slot — `tool_round += len(granted)` charges a granted block even when
-  it returns `is_error`. Strict constrains the schema *language* too, and all
-  three schemas used keywords it rejects (`minItems`/`maxItems` on `rect`,
-  `minimum`/`maximum` on `dpi` and `page_number`, `minLength` on `query`), so
-  every one moved into the parameter `description` and stays enforced in
-  `_ToolExecutor`. **Strict cannot promise `rect` holds four numbers** — array
-  length is exactly what it cannot express — so a 3-number rect is schema-valid,
-  reaches the host, and `len(raw) != 4` is still load-bearing; same for the DPI
-  clamp and the 2-char query floor. `relax_strict_tools` (not a rebuild) powers
-  the `_strict_tools_available` latch, because rebuilding drops the
-  `cache_control` breakpoint `tools_with_cache` put on the last entry and
-  silently un-caches the tool block. That latch nests OUTSIDE the task-budget
-  one and keeps a disjoint marker vocabulary — one shared list had either latch
-  disabling the other's feature. Every image is saved-before-send into
-  the finding's evidence dir with an `investigation.json` trace; strictly
-  sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
-  default 6, spent per **evidence request** and enforced *before* execution —
-  one turn may carry several `tool_use` blocks and each is a real crop
-  rendered, saved and sent; charging the turn let a 6-request budget buy 18+,
-  and merely counting them after the fact still paid for the crops. Blocks past
-  the remaining budget are refused unexecuted, answered in the same user turn
-  as an `is_error` result, and cost nothing so they do not advance the counter) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
-  — 10 + one per 4 sheets, ceiling 40, an explicit env value pinning it) with the
-  assistant turn committed before its tools are answered, every tool_use id
-  answered in ONE user turn, and a forced no-tools text close at the cap so a
-  run never dangles; a capped/garbled outcome stays UNCERTAIN — never
-  REJECTED — and is a designed stage COMPLETE; it only ever UPDATES
-  `finding.verification` in place (legal post-seal); concluded verdicts cache
-  in `stage=investigation` keyed on finding identity + a whole-set content
-  fingerprint + model/prompt/round-budget/task-budget, complete-only admission,
-  and a warm hit
-  deterministically REPLAYS the tool trace with sha-compare so evidence bytes
-  are recreated and warm output stays byte-identical, no TTL) →
-  `citation_check.py` (**Sonnet 5**: server-side `web_search` + `web_fetch` per
-  unique code ref — web fetch is unavailable on Opus 5, so an Opus citation
-  check can only read search snippets rather than the section text; both tools
-  carry the shared source-quality blocklist, and the resolved tool set rides
-  the verdict cache key because what the model was allowed to do is part of
-  what its answer means. Its tool schemas carry a cache breakpoint, so after the
-  first request most of the input is billed as a cache **read** while
-  `input_tokens` reports only the remainder: the prompt-cache split rides
-  `_CheckOutcome` → `CitationCheckResult` → the ledger, summed across
-  `pause_turn` resumes and carried on the error and still-paused exits too, since
-  those attempts were billed. `digest._message_cache_usage` is the shared,
-  dict-tolerant reader — attribute-only `extract_cache_usage` silently zeroes a
-  dict-shaped usage, which undercounts rather than failing) →
-  `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
-  REJECTED/gated, which get reconciled index rows; rect-less entries become
-  margin callouts **packed into visually-clear bands** — validated against words,
-  a rendered occupancy mask, and siblings so they never obscure the drawing
-  (Phase 25 §17.6); one that will not fit overflows to an appended *AI Review
-  Notes* page with a GOTO link back, rerouted to a `REVIEW_NOTES` placement; the
-  writer stamps every mark, reopens the saved PDF, and reconciles
-  each **placement** against what it finds. A **GOTO destination is default user
-  space** (PDF §12.3.2.2), a third space beyond the two §19 names, so
-  `_dest_user_point` converts and `_dest_point` / `_outline_dest_point` invert
-  whichever transform the entry point applies — `insert_link` maps `to` through
-  `~page.transformation_matrix`, `set_toc` flips y about `cropbox.height` then
-  applies `rotation_matrix`, and they are **not** interchangeable. `_derotate_point`
-  is annotation space and is wrong for a destination (P7 item 27: 12 of 24 cases
-  wrong via `insert_link`, 22 via `set_toc`). Every generated page comes from
-  `_new_generated_page`, which pins `CropBox` to `MediaBox` because `/CropBox` is
-  **inheritable** and a set carrying one on `/Pages` rendered a 612×792 index page
-  as 512×712. The index is built **last**, after the notes page, so a row links to
-  the page its mark actually landed on rather than guessing its source sheet; every
-  page written before it shifts by the same `n_index`. `_placement_kind` returns
-  `NO_QUOTE` for a quote-less finding — `[QUOTE NOT FOUND]` is the hallucination
-  signal and must not be spent on a graphics-only finding that never had a quote.
-  `_clear_bands` gates the **padded** band (a 58 pt gap once returned a 50 pt band
-  the packer could never use) and is **column-aware**: a full-width word-free
-  y-range is nearly unobtainable beside a title block, so per-column bands are
-  computed from only the words intersecting that column — which preserves the
-  word-free guarantee `_pack_callouts` relies on to skip its word scan.
-  `_page_occupancy` samples at **1:1** with a **min-filter over point-sized cells**,
-  because at a coarse scale a 0.5 pt pipe line antialiases *lighter* than the ink
-  threshold and a pixel-fraction verdict is non-monotonic in scale; `_fit_text` /
-  `_base14_safe` fit page text by measured width and fold glyphs Base-14 cannot
-  draw, which it otherwise renders as a middle dot — returning a `MarkupRunResult` with
-  per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
-  `coverage_status`. Every finding annotation (cloud, tag, callout, leader,
-  overflow/set-level note) is also placed on a per-**severity** PDF
-  optional-content layer (`QC markups - High/Medium/Low severity`, all shipped on)
-  so a reviewer can toggle a whole severity tier; layered strictly by `severity`
-  (question rides its own tier), created only for tiers with ink in fixed
-  high→medium→low order (I-7), additive/non-fatal (I-3), and the `/OC` reference
-  is independent of the DA-007 placement stamp so reconciliation is untouched) →
-  `export.py` (`markup_manifest.json`) / `html_report.py`. The opt-in
-  `save_tile_artifacts` option (GUI "Save tile images + per-tile notes",
-  `DRAWING_ANALYZER_SAVE_TILES`) stages every rendered tile PNG at render time
-  (`tile_artifacts.py`) and exports a `tiles/` folder with mirrored per-tile
-  notes; it bypasses the level-1 render skip so tiles exist on warm runs, while
-  the level-2 (PNG-keyed) cache still serves the digests with zero API calls.
-
-**Export filesystem contract (`export.py`, P9).** Every write inside the atomic
-publish goes through `long_path(folder)`, derived **once** in
-`write_drawing_export`: each writer builds its targets by joining onto that
-folder, so a joined path inherits the `\\?\` prefix and the ~18 write sites need
-no individual treatment. `_long_path_text` is the pure string transform (UNC
-becomes `\\?\UNC\…`, never a bare prefix; idempotent; device paths untouched) and
-`long_path` is the os-gated wrapper — an **identity function** off Windows, which
-is why the Linux suite exercises byte-identical behaviour and the Windows CI leg
-exercises the prefixed form end to end. `_unique_dir` probes and `mkdir` creates
-through it as well, and that ordering is load-bearing twice: a parent deep enough
-that the export folder *itself* passes MAX_PATH would otherwise fail before the
-first prefixed write, and past MAX_PATH an unprefixed `exists()` answers *False*
-for a directory that is really there — so the name reads as free and the publish
-rename moves the new export over the old one. The prefixed form is internal: the path
-returned to the caller (and shown in the GUI, and passed to `os.startfile`) is
-always plain. Name dedupe is `casefold()`-keyed at all four allocators
-(`models.name_is_taken` / `record_name`) because `M-101` and `m-101` are one file
-on Windows and macOS; the original case is still written. The publish rename's
-retry loop **waits** between attempts (`_publish_backoff`, 0.1s/0.4s) — sized for
-a filesystem lock, not an API rate limit, so deliberately not
-`digest._retry_backoff_seconds` (2s/4s/8s), and it never sleeps after the last
-attempt.
-
-**HTML report (`html_report.py`).** `_finding_display_status` folds anchor +
-verification into one chip, and keeps `UNCERTAIN` ("a verifier looked and could
-not settle") distinct from `UNVERIFIED` / *Not checked* ("no verification stage
-ran") — the state of every finding on a standard run; collapsing them once
-labelled all 287 findings of a clean 39-sheet run "Uncertain". `_STATUS_RANK`
-must stay **integer-valued** (the browser sorts it through `parseInt`).
-Findings quoting the same verbatim text carry a `data-repeat-key`
-(`_repeat_key`: sha256 of the case/whitespace-normalized quote, so it is stable
-per I-7 and never puts quote text in an attribute) and collapse behind the first
-row in the browser — **display only**: the ledger, exports, markups and the badge
-total keep every finding (§18.6), and the grouping recomputes after every
-sort/filter so a follower never outlives its lead. Journal timestamps render
-through `_local_stamp` in the same clock as the report header (the raw UTC value
-beside a local header read as a report predating its own run). The chat widget hands the report to the model inside a
-`<document><source>…</source><document_content>…</document_content></document>`
-wrapper (Anthropic's long-context guidance for one large reference document);
-the wrapper is byte-stable for the life of the page, so the 1h cache breakpoint
-on that block still holds. The chat widget's **turn loop** owns four rules a DOM emulator cannot check
-(P6): every commit into `history` is generation-guarded (`gen !== turnGen`)
-**inside `step`**, not only on the outer catch/then — New chat and Load
-*reassign* `history`, so an in-flight turn otherwise writes its assistant turn
-into the next conversation, which the API rejects, `dropUnansweredTail` cannot
-heal (it trims only a **trailing** unanswered exchange) and `saveTranscript`
-persists. Stop is a **turn** latch (`stopRequested`), not the per-request
-`AbortController` that `streamOnce` rebuilds on every call, and it is checked
-both before the tools run and after they finish. A `tool_use` block nothing
-will answer is stripped before commit (`stripDanglingToolUse`) — dropped, never
-answered with a synthetic result, because the call never ran. And a turn's note
-is DOM-only unless that turn owns the last `displays` entry, since the catch's
-pops run first. `activeStream` is released **by identity**, so a stream
-settling after its thread was replaced cannot clear the new turn's handle.
-The request shape is resolved host-side from the capability registry —
-`thinking`, `webSearch` and `webFetch` all ride `CFG` and the browser omits
-what the model will not take, because `DRAWING_ANALYZER_CHAT_MODEL` is
-overridable and an unsupported `thinking` or web-search *variant* is a 400 that
-kills every question. In the chat
-widget a **reader-supplied key outranks the embedded one** — the key row renders
-in both modes, since hiding it billed every shared report's questions to its
-author and left a rotated-key report dead.
-
-`core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
-store, pricing, tokenizer, the structured-outputs gate). The tokenizer is
-estimate-only: `tiktoken` was removed — its only two callers had no callers,
-and it fetched its encoding from a third-party host on first use, which a
-locked-down workstation blocks — so the exact count is `count_tokens_via_api`
-and the local path is the conservative safety-factor table. `reference_audit.py` is a back-compat shim over
-`auditors/references.py`. **No built-in review profiles ship** (Phase A): the
-packaged `profiles/` dir is empty by design — the model authors the plan per
-set; user checklists live in `~/.drawing_analyzer/profiles/` and a worked
-example is parked at `docs/examples/fire_protection.md`.
+  stays zero-extra-cost. Artifacts: `set_identity.json`, `review_plan.md`, a
+  manifest `set_identity` key, and an additive combined-text section (I-2).
+  Identity feeds
+  `check_citations(identity=)` and `cross_sheet_qc(identity=)`.
+- **Finders:** the digest findings block; `critique.py` (a second full-coverage
+  vision read, twice; self-consistency sets `reproduced`). On the real-time path
+  the two reads prompt-cache their shared image prefix when `runs>=2`; the batch
+  path stays uncached. `use_batch` resolves from `DRAWING_ANALYZER_USE_BATCH`
+  when the caller leaves it `None`. Structured outputs are opt-in and **critique
+  only** among high-volume calls (`DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1`
+  + registry capability + that stage's `StructuredOutputsGate`). `prose_harvest`
+  and `verify` reuse the gate type under their own env vars and their own latch
+  instances. `attach_format` / `detach_format` is the one request rule; the
+  critique latch's rejection vocabulary overlaps investigation's only while no
+  request carries both features. Off by default: vision × schema is undocumented
+  upstream and is settled by `test_live_critique_under_output_config_format`.
+  `_CRITIQUE_STRUCTURED_INSTRUCTION` is derived from
+  `_CRITIQUE_FINDINGS_INSTRUCTION` by substitution, with an import-time assert.
+  The schema omits the 40-finding cap (`maxItems`, `minimum`/`maximum`,
+  `minLength`, and `minItems`>1 are rejected); the cap stays host-enforced.
+  Merge `format` into `output_config`. Cache-neutral: `CRITIQUE_PROMPT_VERSION`
+  is untouched and `structured_key` folds in only when set; it rides **both**
+  cache levels. Rebuild both store keys after the reads (the latch can flip;
+  `_ingest_miss` keeps the render identity). The batch transport pins
+  `structured=False`. `cross_qc.py` is the text-only cross-sheet conflict hunt
+  (dual anchors via `also_on`). `auditors/` holds five deterministic zero-API
+  auditors on `auditors/sheet_ids.py` (`id_signature` / `learn_grammar`,
+  `classify_reference`, `is_non_sheet_reference`). `_ANNOTATION_PREFIXES`
+  (REV/DET/DWG/TYP/SIM/NTS) stays separate from the transmittal set; paper sizes
+  are absent from the corpus. `references.detect_sheet_id_word` vetoes with
+  `never_a_sheets_own_id` — a strict subset of the reference corpus, so
+  `_TRANSMITTAL_PREFIXES` is excluded — before the position score, and never
+  with the learned grammar (a same-shape distractor can still win; a two-pass
+  harvest is not done). Memoize it on the sheet object (`None` needs a
+  sentinel). `_merge_adjacent_id_words` caps on **length**, not fragment count.
+  `naming.py` reports drift with no frequency winner only when both spellings
+  share an `_arrangement`; an established winner still outranks structural
+  doubt. `sheet_index.py`'s harvest stays unbounded; both diff directions
+  already run `classify_reference`. `prose_harvest.py` mirrors prose
+  Coordination/Conflict items, synthesis conflicts, and opted-in focus items
+  (match first; one structuring call for stragglers on Sonnet 5 at
+  `EFFORT_LOW`). Its boilerplate filter is anchored at **both** ends, length
+  floor 8; the `filtered` count is observational and feeds neither `missing` nor
+  `complete`. Opt-in `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`:
+  `HARVEST_STRUCTURED_SYSTEM_PROMPT` is one substitution on the fenced prompt;
+  `HARVEST_FINDING_SCHEMA` mirrors that field list one-for-one
+  (`additionalProperties: false`; enums from `digest._MODEL_FINDING_CATEGORIES`
+  / `_FINDING_SEVERITIES`). `HARVEST_STRUCTURED_PROMPT_VERSION` folds into the
+  item key only when the request carried the schema; re-resolve the store key
+  after the call. A bare-JSON parse is attempted only under the structured
+  contract, and a fenced reply still wins.
+- **Cross-QC grounding** reads `models.sheet_evidence_text(geom)`, not the capped
+  `sheet_text`. A present-but-empty full text means no textual evidence and does
+  not fall back; `None` means unavailable; a non-string is unavailable. Prompt
+  bytes stay capped. `_cross_qc_cache_key` adds `evidence_sha256` **only for a
+  truncated sheet**. Grounding is three-state (`classify_quote_evidence`):
+  `TEXT_GROUNDED` / `NOT_MATCHED_IN_TEXT` / `TEXT_EVIDENCE_UNAVAILABLE`. Ask the
+  **reported tile** (`_tile_has_words`) before classification; an unknown tile
+  answers that there was text. A quote unmatched where the sheet has text is a
+  discard. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`. Reduced trust carries
+  `evidence_state` and must reach verification: `anchor._anchor_one` falls back
+  to the tile **only** for that state. `fact_tile_lookup` rejoins a leg by
+  `(handle, normalized quote)`; the key is not unique, and a collision drops
+  rather than picks — only unanimity resolves. The reduced-trust reason is
+  per finding (`models.reduced_trust_reason`): `[NO TEXT TO CHECK]` vs
+  `[NO QUOTE TO CHECK]`. It is a note on the quote, not a status chip.
+  `evidence_state` rides the atomic grounding bundle; each per-leg mark gets
+  that leg's state. Sheet handles canonicalize with
+  `auditors.sheet_ids.normalize_sheet_id` at all four compare sites (`_norm_id`,
+  `critique._leg_targets`, `critique._dedup_claims`,
+  `auditors.arithmetic._claim_dedup_key`). That host-side binding carries
+  `_CROSS_QC_CACHE_CONTRACT` **3**. Sharded-path `CrossQCDiscardCounts` are
+  count-only and observational (`discards is None` means not recorded; the
+  whole-set ≤40 path does no host-side grounding).
+- **Ledger** (`ledger.py`): the exclusive findings container. See the ledger
+  rules under Binding invariants.
+- **Edition audit:** `citation_check.reconcile_cited_editions` is zero-API and
+  **strictly pre-seal** (gated `run_citation or run_auditors`; stage
+  `edition_audit`). Basis = identity `adopted_codes` (model entries need a
+  quote; regex-union entries are ignored) ∪ a citation-shaped regex harvest (a
+  mention followed by a section marker is a citation, never an adoption). Both
+  operands re-found in sheet text → medium + `DETERMINISTIC`; otherwise low,
+  advisory-labeled, and crop-verified. Anchor to the stale-edition span, never
+  the citing finding's quote.
+- **Text normalization:** `anchor._normalize` rewrites vulgar fractions
+  **before** NFKC (`_VULGAR_FRACTION_TABLE`). `_CHAR_FOLD` also covers the
+  fraction slash, division slash, and multiplication sign. Invisible code points
+  in `anchor.py` and `auditors/sheet_ids.py` are `\uXXXX` escapes, never
+  literals.
+- **Disposition:** `anchor.py` maps a quote to a PDF rect: EXACT / FUZZY / TILE
+  / UNANCHORED (UNANCHORED is the hallucination signal). Both fuzzy tiers carry
+  the numeric veto: each digit-bearing token must sit at its own position in
+  the matched span, within `_fuzzy_window_slack` (derived from the overlap
+  floor), and each span position is consumed once. The sub-phrase tier uses
+  `_numbers_agree`. The 0.85 threshold stays as asserted. `verify.py` is the
+  high-DPI crop re-check (VERIFIED / REJECTED / UNCERTAIN) at medium effort
+  inside an 8k envelope. Count every live call that returns no verdict
+  (`malformed` / `truncated` / `failed` via `_degrade_kind`); `degradation_note()`
+  is one observational stage warning. Opt-in
+  `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`: decide once at submit time and
+  thread `structured=` to the worker; if the latch is already off, send plain.
+  Store under the contract actually sent. A verdict replaces status and never
+  the arithmetic provenance (`_provenance_restorer` snapshots at each public
+  entry and restores at every exit). `investigate.py` carries
+  `computation_method` and `operand_origin` forward. It escalates each anchored
+  UNCERTAIN verdict through `crop_region` / `find_text` / `view_sheet`, all
+  `strict: true`. Charge `tool_round += len(granted)` even when a block returns
+  `is_error`. Strict cannot express array length: `len(raw) != 4`, the DPI
+  clamp, and the 2-char query floor stay enforced in `_ToolExecutor`.
+  `relax_strict_tools` (not a rebuild) powers the latch, which nests outside the
+  task-budget latch and uses a disjoint marker vocabulary. Save every image
+  before send, with an `investigation.json` trace. Sequential (I-5). Per finding, `…_INVESTIGATION_MAX_ROUNDS`
+  (default 6) is spent per **evidence request** and enforced before execution;
+  blocks past the remaining budget are refused unexecuted in the same user turn
+  and do not advance the counter. Per run, `…_MAX_FINDINGS` is severity-first,
+  10 + one per 4 sheets, ceiling 40, unless an explicit env value pins it.
+  Commit the assistant turn before answering tools; answer every tool_use id in
+  one user turn; force a no-tools close at the cap. A capped or garbled outcome
+  stays UNCERTAIN — never REJECTED — and is a designed stage COMPLETE; it only
+  updates `finding.verification` in place. Concluded verdicts cache in
+  `stage=investigation` (finding identity + whole-set fingerprint +
+  model/prompt/round-budget/task-budget), complete-only; a warm hit replays the
+  tool trace with sha-compare and has no TTL. `citation_check.py` runs on
+  Sonnet 5 (`web_search` + `web_fetch` per unique code ref; web fetch is
+  unavailable on Opus 5). Both tools carry the shared source-quality blocklist.
+  The resolved tool set rides the verdict cache key.
+  The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
+  ledger, including `pause_turn` resumes and error or still-paused exits.
+  `digest._message_cache_usage` is the shared dict-tolerant reader.
+  `annotate.py` inks every entry except REJECTED/gated (those get index rows).
+  Rect-less entries become margin callouts packed into visually clear bands
+  (validated against words, a rendered occupancy mask, and siblings);
+  overflow goes to an appended *AI Review Notes* page (`REVIEW_NOTES`) with a
+  GOTO back. Stamp every mark, reopen the saved PDF, and reconcile each
+  placement. Build the index **last**, after the notes page. `_placement_kind`
+  returns `NO_QUOTE` for a quote-less finding. `_clear_bands` gates the
+  **padded** band and is column-aware. `_fit_text` / `_base14_safe` fit by
+  measured width and fold glyphs Base-14 cannot draw. Return a
+  `MarkupRunResult` (`WRITTEN` / `INDEXED` / `FAILED`) whose receipts derive
+  `coverage_status`. Place finding annotations on per-severity optional-content
+  layers (`QC markups - High/Medium/Low severity`), only for tiers with ink, in
+  high→medium→low order; the `/OC` reference is independent of the placement
+  stamp. GOTO destinations, CropBox, and occupancy sampling are in the PyMuPDF
+  gotchas. `export.py` writes `markup_manifest.json`; `html_report.py` renders
+  the report. Opt-in `save_tile_artifacts` (`DRAWING_ANALYZER_SAVE_TILES`,
+  `tile_artifacts.py`) bypasses the level-1 render skip so tiles exist on warm
+  runs; the level-2 cache still serves the digests.
+- **Export** (`export.py`): every write inside the atomic publish goes through
+  `long_path(folder)`, derived **once** in `write_drawing_export`.
+  `_long_path_text` turns UNC into `\\?\UNC\…` (never a bare prefix; idempotent;
+  device paths untouched). `long_path` is an identity off Windows. `_unique_dir`
+  probes and `mkdir` creates through it; past MAX_PATH an unprefixed `exists()`
+  answers false for a directory that is there. The prefixed form is internal;
+  the path returned to the caller is plain. Name dedupe is `casefold()`-keyed
+  at all four allocators (`models.name_is_taken` / `record_name`); the original
+  case is still written. The publish rename waits between attempts
+  (`_publish_backoff`, 0.1s/0.4s) and never sleeps after the last attempt.
+- **HTML report** (`html_report.py`): `_finding_display_status` keeps `UNCERTAIN`
+  distinct from `UNVERIFIED` / *Not checked*. `_STATUS_RANK` stays
+  integer-valued. Repeated quotes collapse in the browser only
+  (`data-repeat-key` is a sha256 of the normalized quote, never the quote text);
+  grouping recomputes after every sort or filter. Journal timestamps render
+  through `_local_stamp`. The chat widget wraps the report in a byte-stable
+  `<document>…</document>` block so the 1h cache breakpoint holds. Its turn loop
+  generation-guards every `history`
+  commit inside `step`; Stop is a turn latch (`stopRequested`) checked before
+  and after tools; `stripDanglingToolUse` drops an unanswered `tool_use`; a
+  turn's note is DOM-only unless that turn owns the last `displays` entry;
+  `activeStream` is released by identity. Request shape (`thinking`,
+  `webSearch`, `webFetch`) comes from the capability registry. A reader-supplied
+  key outranks the embedded one, and the key row renders in both modes.
 
 ## Binding invariants (cited by number in code comments)
 
 - **I-1 — full coverage:** every sheet is read whole (overview + all tiles);
   optimizations may never drop content-bearing tiles.
 - **I-2 — the prose digest is sacred:** nothing may alter `combined_text`. The
-  findings block is stripped byte-exactly; prose QC items are *mirrored* into
-  the ledger, never moved or edited.
+  findings block is stripped byte-exactly; prose QC items are mirrored into the
+  ledger, never moved or edited.
 - **I-3 — QC is additive and non-fatal:** every QC stage catches its own
   exceptions, appends to `ctx.errors`, and lets the standard deliverable ship.
 - **I-4 — hermetic tests:** use `tests/fixtures/fake_anthropic.py`
-  (`FakeMessage`/`FakeTextBlock`/`FakeUsage`) and the routing-client patterns
-  in existing tests. No test may hit the network or need a key.
+  (`FakeMessage` / `FakeTextBlock` / `FakeUsage`) and the routing-client
+  patterns in existing tests. No test may hit the network or need a key.
 - **I-5 — PyMuPDF isolation:** only `render.py` and `annotate.py` may import
   PyMuPDF. The README's AGPL licensing story depends on this; `anchor.py` and
-  `tiling.py` work on extracted word rectangles precisely to preserve it.
+  `tiling.py` work on extracted word rectangles to preserve it.
 - **I-6 — cache correctness:** prompt versions are content hashes
-  (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`), so prompt edits
-  auto-invalidate; `digest_cache._SCHEMA_VERSION` is manual — bump it whenever
-  what is stored or sent changes. A hash only covers what it is given: the
-  user-turn framing (sheet introduction, omitted-tile disclosure, overview and
-  per-tile labels) once sat outside both, so editing it changed the request
-  while every key stayed identical. Those strings now live in
-  `digest.SHARED_USER_FRAMING_STRINGS`, which **both** hashes splat — the
-  critique reuses the same builder, so a string covered by only one hash
-  re-keys that cache while silently replaying the other. Add a model-visible
-  string to the shared builder and it is covered automatically; add one
-  elsewhere and it is your job to hash it.
+  (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`); bump
+  `digest_cache._SCHEMA_VERSION` manually whenever what is stored or sent
+  changes. A hash covers only what it is given. Model-visible user-turn framing
+  lives in `digest.SHARED_USER_FRAMING_STRINGS`, which **both** hashes splat.
+  A string added elsewhere must be hashed by the author.
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
   index rows, merged output); no randomness or time-dependence in assembly.
-  One documented carve-out (Phase B): the citation verdict cache's TTL clock
-  (`DRAWING_ANALYZER_CITATION_TTL_DAYS`, injectable `now=`) governs cache
-  admission/refresh only — whether an API call is made — never numbering,
-  ordering, or merged output; a warm run's assembled output is byte-identical
-  to the run that populated the cache.
+  The citation verdict cache TTL (`DRAWING_ANALYZER_CITATION_TTL_DAYS`,
+  injectable `now=`) governs cache admission only, never numbering, ordering, or
+  merged output.
 - **The model never calculates:** models transcribe `NumericClaim`s;
   `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
-  the model's own arithmetic. The host *operation* is always deterministic, but the
-  *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink) only when
-  the claim's quote independently carries every one (`operand_origin=TEXT_EXTRACTED`,
-  Phase 25 §17.5); a mismatch from `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and
-  is crop-verified before it inks as ground truth. A term that is not **one** value
-  is refused rather than truncated to its leading run (`12,5`, `12'-6"`, `1.2.3`),
-  and a `%` is refused outright: a percent is a ratio, and because the bare `30` in
-  `1500 SF + 30% = 1950 SF` appears literally in the quote it *cleared* the
-  TEXT_EXTRACTED gate and inked "the product of 1500, 30 is 45000" as host-computed.
-  `_head_denies` / `_tail_denies` are applied at the **quote-scan** site, not inside
-  `parse_number`, because only the scanner can see what bound a number — that is
-  what keeps the two from disagreeing. A binder must be **tight** — no whitespace
-  on either side: `20 20 20 TOTAL 540` is four numbers and `0.5, 1.5, TOTAL 2.0`
-  is an operand list, while `12,5` and `10,20` stay rejected. A loose binder cost
-  no wrong answers but downgraded such a list to MODEL_TRANSCRIBED and paid for a
-  crop check to re-learn what the quote already said. `_fmt` expands an integral with `format(v, "f")`, never
-  `quantize`, which raises above the decimal context's 28 digits from ordinary
-  string terms — inside the `Finding(...)` expression, *after* `mismatched` was
-  incremented. Each claim now has its own `try` with a tally rollback: the
-  orchestrator's single batch-wide `try` meant one bad claim lost every arithmetic
-  finding **and** all four `arithmetic_*` stat keys, after which the summary line
-  read `arith=0/0` — indistinguishable from a set with no claims.
-- **Tiles use the `tile_label` contract (Phase 25 §17.1):** the model returns the
-  exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
-  canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted
-  only as explicit zero-based, bounds-checked — never guessed to be 1-based.
-- **Thinking is always explicit; never omitted (§C).** On Opus 5 and Sonnet 5 an
-  *omitted* `thinking` key runs adaptive thinking — it does not disable it — and
-  thinking draws from the same `max_tokens` envelope as the answer. Three stages
-  once relied on omission meaning "off" and starved their own output. Every
-  request builder therefore states `thinking` and `effort` explicitly, resolved
-  through the `core.api_config` phase registry (which also applies the
-  model-ceiling clamp). Digest and critique now read that registry too
-  (`DEFAULT_DIGEST_EFFORT = default_effort_for_phase(PHASE_REVIEW)`, inherited by
-  `DEFAULT_CRITIQUE_EFFORT`): they cannot use `apply_effort_config` because both
-  expose `effort` as a caller override, so they clamp per request via
-  `clamp_effort_for_model` instead. Before this, `PHASE_REVIEW` was registered at
-  `EFFORT_XHIGH` while both stages sent a hardcoded `"high"` and **nothing read
-  the entry** — two sources of truth that never had to agree, with the live one
-  invisible to anyone tuning the registry. It was moved to `EFFORT_HIGH`, the
-  level the stages actually send, rather than wiring them up at `xhigh`: raising
-  it is a cost increase on the highest-volume calls in the pipeline AND a
-  cache-wide invalidation (`effort` is a component of `digest_cache_key` /
-  `critique_cache_key`), so it is a separately-priced decision and one worth an
-  eval — `high` is also what the API applies when the field is omitted.
-  `PHASE_CROSS_CHECK` keeps its `xhigh` and stays orphaned. A phase that wants
-  shallow work registers `EFFORT_LOW`;
-  it does **not** send `{"type": "disabled"}`, which risks leaking reasoning tags
-  into a response the host parses as JSON.
-- **Above ~21k `max_tokens`, streaming is mandatory, not preferred.** The SDK
-  refuses a non-streaming `create` whose cap implies >10 minutes of output with a
-  client-side `ValueError`, before any HTTP request. `digest.stream_message` is
-  the single place that knows this; digest / critique / review-plan / synthesis /
-  focus all go through it. Batch items never stream and are unaffected. A cap
-  raise without the matching streaming conversion is a hard failure, including
-  via the batch→real-time fallbacks in `batch_digest`/`batch_critique`.
-- **Every real-time call whose model declares it opts into the server-side
-  refusal fallback.** Which models is
-  `ModelCapabilities.supports_refusal_fallback`, a registry capability beside
-  each model's other request-shape decisions — never a test against one model
-  id. The gate read `model != MODEL_OPUS_5`, so any other id (a newer Opus, a
-  changed default) silently lost the protection with nothing raised and nothing
-  logged. Opus 5 is today's only declarer; Opus 4.8 is the fallback *target*,
-  not a source.
-  Opus 5's elevated safety classifiers can decline a request outright
-  (`stop_reason="refusal"`, HTTP 200); `core.api_config.call_with_refusal_fallback`
-  attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) for
-  every Opus-5-routed real-time call — `digest.stream_message` (digest, critique,
-  the batch direct-call rescue), `verify.py`'s crop re-check calls, and the
-  investigation loop — and re-routes through `client.beta.messages`. (These are
-  not "escalation" calls: `verify.py` resolves one model,
-  `VERIFICATION_MODEL_DEFAULT`, and never escalates. The wrapper is applied
-  because a verification call *can* be Opus-routed via
-  `DRAWING_ANALYZER_VERIFICATION_MODEL`, not because a second tier exists.
-  `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`, WP-07 §12.13.) The
-  parameter is rejected on the Batches API, so this never touches the bulk
-  batch-submitted review traffic. Opus 4.8, the documented cyber-refusal
-  fallback target, is registered in `_MODEL_CAPABILITIES` with identical
-  effort/thinking/output-cap/hi-res-vision support and identical $5/$25
-  pricing to Opus 5, so a fallback changes nothing about request shape or
-  billing. Self-healing, mirroring investigation's own `_task_budget_available`
-  latch: a 400 naming the fallback beta/parameter turns the feature off for the
-  rest of the process (`_refusal_fallback_available`) rather than permanently
-  breaking every subsequent Opus 5 call on a platform that doesn't support it.
-- **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
-  fields cleanly so cached payloads from older runs still load.
-- **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every
-  ledger entry (and every cross-sheet leg) becomes a planned `MarkupPlacement`;
-  the writer stamps each drawn mark with a private PDF key, reopens the saved PDF,
-  and reconciles → one `MarkupReceipt` (`WRITTEN`/`INDEXED`/`FAILED`) per
-  placement. The tally and `coverage_status` are derived from those receipts,
-  **never** from intention (`ink_disposition` remains only a planning helper). A
-  placement counts only when its stamped, mandatory component is found again in
-  the artifact; missing/failed/duplicate/unexpected → `INCOMPLETE`. Stamps embed a
-  per-run id, so prior-run/pre-existing annotations are ignored (DA-029). An
-  INCOMPLETE reviewed PDF is renamed `…_reviewed_INCOMPLETE.pdf`; the plan +
-  receipts are exported to `markup_manifest.json` (no key, no absolute path).
+  the model's arithmetic. Operands are trusted (`DETERMINISTIC`, and
+  deterministic-only ink) only when the quote independently carries every one
+  (`operand_origin=TEXT_EXTRACTED`); a `MODEL_TRANSCRIBED` mismatch stays
+  `UNCERTAIN` until crop-verified. Refuse a term that is not one value (`12,5`,
+  `12'-6"`, `1.2.3`) and refuse `%` outright. Apply `_head_denies` /
+  `_tail_denies` at the quote-scan site. A binder is tight: no whitespace on
+  either side. `_fmt` uses `format(v, "f")`, never `quantize`. Each claim has
+  its own `try` with a tally rollback.
+- **Ledger is the only findings container:** every channel ingests into
+  `ledger.py` with source tags. A tile/rect overlap is never sufficient to
+  merge; merges need semantic sameness and compatible critical signatures
+  (`critique.signatures_compatible` / `critique.critical_signature` — public, one
+  copy). A measurement in that signature is its **value** (`1/2"` is `0.5in`;
+  `12'-6"` keeps both halves and neither goes negative; plurals fold; `psig`
+  does not fold into `psi`). Text, quote, tile, rect, evidence-state, and
+  verdict are one atomic bundle from a single representative; the loser's quote
+  goes to `supporting_quotes`. `_grounding_quality` ranks host-computed
+  provenance first, and both quality tuples are computed **before** the severity
+  union. There is no independent verdict adoption and no backfill of a loser's
+  verdict. An unanchored winner never erases a rect that places its own quote.
+  Union `sources`, keep the most-severe severity, and when provenance spans two
+  families raise `reproduced` and `confidence` together. Lifecycle: `seal()`
+  (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B, history from
+  `Ledger.member_history`, snapshotted when a merge is about to mutate) →
+  `number()` (positional `QC-###` after anchoring). A post-seal add marks the
+  run incomplete (no `QC-XTRA` id); a post-seal duplicate is counted and
+  dropped, not merged.
+  `Finding.to_dict` / `from_dict` must default new fields so older cached
+  payloads still load.
+- **Ledger coverage is artifact-backed:** on markup runs every ledger entry and
+  cross-sheet leg becomes a planned `MarkupPlacement`. The writer stamps each
+  drawn mark, reopens the saved PDF, and reconciles to one `MarkupReceipt`
+  (`WRITTEN` / `INDEXED` / `FAILED`) per placement. `coverage_status` comes from
+  those receipts, never from `ink_disposition`. A placement counts only when its
+  stamped mandatory component is found again; missing, failed, duplicate, or
+  unexpected → `INCOMPLETE`. Stamps embed a per-run id, so prior-run annotations
+  are ignored. An INCOMPLETE reviewed PDF is renamed `…_reviewed_INCOMPLETE.pdf`.
+  `markup_manifest.json` carries the plan and receipts with no key and no
+  absolute path.
+- **Tiles use the `tile_label` contract:** the model returns the exact visible
+  label (`"r1c1"`); `tiling.parse_tile_label` converts it to the canonical
+  **zero-based** `[row, col]`. A legacy `tile` array is accepted only as
+  explicit zero-based, bounds-checked.
+- **Thinking and effort are always explicit.** On Opus 5 and Sonnet 5 an omitted
+  `thinking` key runs adaptive thinking, and thinking shares the `max_tokens`
+  envelope with the answer. Every request builder states `thinking` and
+  `effort`, resolved through the `core.api_config` phase registry (including
+  the model-ceiling clamp). Digest and critique clamp per request via
+  `clamp_effort_for_model` (`DEFAULT_DIGEST_EFFORT` /
+  `DEFAULT_CRITIQUE_EFFORT` = `default_effort_for_phase(PHASE_REVIEW)`, which is
+  `EFFORT_HIGH`). `PHASE_CROSS_CHECK` stays at `xhigh` and is unused. `effort` is
+  part of `digest_cache_key` / `critique_cache_key`. A phase that wants shallow
+  work registers `EFFORT_LOW` and does not send `{"type": "disabled"}`.
+- **Above ~21k `max_tokens`, streaming is mandatory.** The SDK refuses a
+  non-streaming `create` whose cap implies >10 minutes of output, client-side,
+  before any HTTP request. `digest.stream_message` is the single place that
+  knows this; digest, critique, review-plan, synthesis, and focus go through it.
+  Batch items never stream. A cap raise without the matching streaming
+  conversion is a hard failure, including the batch→real-time fallbacks.
+- **Refusal fallback is a registry capability.**
+  `ModelCapabilities.supports_refusal_fallback` decides which models opt in —
+  never a comparison against one model id. Opus 5 is today's only declarer
+  (`stop_reason="refusal"`, HTTP 200); Opus 4.8 is the fallback target, with
+  the same effort, thinking, output cap, hi-res vision, and $5/$25 pricing.
+  `core.api_config.call_with_refusal_fallback` attaches `fallbacks: "default"`
+  (beta `server-side-fallback-2026-07-01`) on Opus-5-routed real-time calls
+  (`digest.stream_message`, `verify.py`, the investigation loop) and re-routes
+  through `client.beta.messages`. The parameter is rejected on the Batches API.
+  `verify.py` resolves one model (`VERIFICATION_MODEL_DEFAULT`) and never
+  escalates; `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`. A 400
+  naming the fallback beta turns the feature off for the process
+  (`_refusal_fallback_available`).
 
 ## PyMuPDF gotchas (hard-won; they crash or render blank)
 
 - A plain FreeText annot rejects `border_color` (raises unless rich text) —
-  severity is carried by colored *text* instead.
-- For FreeText, `/Contents` IS the displayed text: `set_info(content=...)`
-  overwrites what's drawn, so display prefixes (`[UNVERIFIED]`, `[SHEET]`)
-  must be composed into the content string, not set afterwards.
+  severity is carried by colored text instead.
+- For FreeText, `/Contents` is the displayed text: `set_info(content=...)`
+  overwrites what is drawn, so display prefixes (`[UNVERIFIED]`, `[SHEET]`)
+  must be composed into the content string.
 - Annot objects unbind when the `annots()` generator advances or the page tree
   changes (`insert_page`): snapshot properties during iteration, re-fetch pages
   by index after inserting, and never call `.get_text()` on an annot.
@@ -1002,38 +486,33 @@ example is parked at `docs/examples/fire_protection.md`.
   text.
 - PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
   the API calls.
-- **A GOTO destination is a THIRD space (P7 item 27).** `/XYZ` is default user
+- **A GOTO destination is a third coordinate space.** `/XYZ` is default user
   space; `add_*_annot()` and `insert_text()` take the un-rotated CropBox-relative
-  space. Worse, the two writers disagree with each other: `Page.insert_link` maps
-  `to` through `~page.transformation_matrix`, while `Document.set_toc` does
-  `y = cropbox.height - y` then `* page.rotation_matrix`. Never share one helper
-  between them. Ground truth is an annotation's raw `/Rect`, which the spec puts in
-  the same space as `/XYZ`.
-- **`page.cropbox` is top-left; `page.mediabox` is the RAW box.** `page.cropbox`
-  is reported in PyMuPDF's top-left convention (a `set_cropbox([50,30,562,700])`
-  stores `/CropBox [50 92 562 762]`), while `page.mediabox` comes back
-  un-normalized in PDF bottom-left. `mediabox.y1 - cropbox.y0` is the CropBox's top
-  edge in user space. This asymmetry has produced several confidently wrong probes.
-- **`/CropBox` is inheritable; `/Rotate` is written explicitly.** A `new_page()` in
-  a document whose `/Pages` node carries a `/CropBox` **inherits** it — a 612×792
-  page came back with a 512×712 visible rect — so pin it. A new page does not
-  inherit `/Rotate`, verified rather than assumed.
+  space. `Page.insert_link` maps `to` through `~page.transformation_matrix`;
+  `Document.set_toc` does `y = cropbox.height - y` then `* page.rotation_matrix`.
+  Never share one helper between them. `_derotate_point` is annotation space and
+  is wrong for a destination. Ground truth is an annotation's raw `/Rect`.
+- **`page.cropbox` is top-left; `page.mediabox` is the raw box.** `page.cropbox`
+  is in PyMuPDF's top-left convention; `page.mediabox` comes back un-normalized
+  in PDF bottom-left. `mediabox.y1 - cropbox.y0` is the CropBox's top edge in
+  user space.
+- **`/CropBox` is inheritable; `/Rotate` is not.** A `new_page()` inherits a
+  `/CropBox` on `/Pages`, so `_new_generated_page` pins CropBox to MediaBox. A
+  new page does not inherit `/Rotate`.
 - **`get_text()` includes annotation text.** Use
-  `pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage())`; the raw
-  `FzStextPage` has no `extractText` and `page.get_text(textpage=…)` rejects even
-  the wrapper, so words come from `TextPage.extractWORDS()`. Those words are in
-  **rotated view** space, unlike `get_text("words")`, which is rotation-invariant.
+  `pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage())`. The raw
+  `FzStextPage` has no `extractText`, and `page.get_text(textpage=…)` rejects
+  even the wrapper, so words come from `TextPage.extractWORDS()`. Those words
+  are in rotated view space; `get_text("words")` is rotation-invariant.
 - **A thin line can be invisible in a downscaled pixmap.** At 0.12 a 0.5 pt line
-  antialiases to ~223, above a 210 "dark" threshold, and whether it registers at
-  all depends on pixel-grid alignment — so a pixel-fraction occupancy test is
-  non-monotonic in scale. Sample at 1:1 and min-filter.
-- **Rotation/CropBox use two coordinate spaces (Phase 19).** `get_text("words")`
-  and `add_*_annot()` work in an *un-rotated, CropBox-relative* space; but
-  `get_pixmap(clip=...)` clips in the *rotated page-view* space (`page.rect` dims).
-  They diverge on a rotated/cropped page. The codebase's canonical space is
-  `PAGE_VIEW_V2` (post-CropBox, post-rotation — what the model sees): `render.py`
-  moves words into it via `page.rotation_matrix`, `annotate.py` moves rects back
-  via `page.derotation_matrix` before drawing (and draws FreeText with
-  `rotate=page.rotation` for upright text). Identity on an un-rotated page. Never
-  feed a raw `get_text` rect to `get_pixmap(clip=...)`, or a raw view-space rect to
-  `add_*_annot()`.
+  antialiases above a 210 dark threshold, and the result depends on pixel-grid
+  alignment, so a pixel-fraction occupancy test is non-monotonic in scale.
+  `_page_occupancy` samples at 1:1 and min-filters over point-sized cells.
+- **Rotation and CropBox use two coordinate spaces.** `get_text("words")` and
+  `add_*_annot()` work in an un-rotated, CropBox-relative space;
+  `get_pixmap(clip=...)` clips in the rotated page-view space (`page.rect`).
+  The canonical space is `PAGE_VIEW_V2` (post-CropBox, post-rotation):
+  `render.py` moves words in via `page.rotation_matrix`; `annotate.py` moves
+  rects back via `page.derotation_matrix` before drawing and draws FreeText with
+  `rotate=page.rotation`. Never feed a raw `get_text` rect to
+  `get_pixmap(clip=...)`, or a raw view-space rect to `add_*_annot()`.
