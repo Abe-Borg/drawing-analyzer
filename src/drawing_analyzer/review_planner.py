@@ -440,7 +440,9 @@ def _review_scope_hash(identity: Any) -> str | None:
     Sheet inventory and detection provenance are not review requirements. Keep
     disciplines, project/set type, locale, and code editions/amendments; discard
     sheet classifications, evidence, confidence, notes, and code source labels.
-    Without a usable identity we cannot establish compatible revisions.
+    Compatible revisions require detected disciplines plus a project type,
+    jurisdiction, or named adopted code. Generic locale/set-type fields alone
+    cannot establish which specialist checklist applies.
     """
     if identity is None or not hasattr(identity, "to_dict"):
         return None
@@ -461,9 +463,12 @@ def _review_scope_hash(identity: Any) -> str | None:
     })
     scope["adopted_codes"] = sorted({
         tuple(normalize(c.get(k)) for k in ("code", "edition", "amendment_note"))
-        for c in data.get("adopted_codes", []) if isinstance(c, dict)
+        for c in data.get("adopted_codes", [])
+        if isinstance(c, dict) and normalize(c.get("code"))
     })
-    if not any(scope.values()):
+    if not scope["disciplines"] or not any(
+        scope[name] for name in ("project_type", "jurisdiction", "adopted_codes")
+    ):
         return None
     return hashlib.sha256(json.dumps(scope, sort_keys=True).encode("utf-8")).hexdigest()
 

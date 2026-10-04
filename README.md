@@ -738,6 +738,9 @@ warm re-runs rebuild it byte-identically (keeping the critique cache hot).
 Routine revisions retain that checklist when at least one readable sheet is
 unchanged and the detected review scope still matches: disciplines, project and
 set type, jurisdiction, language, units, and adopted code editions/amendments.
+Revision compatibility requires detected disciplines plus a project type,
+jurisdiction, or named adopted code. Locale-only or other partial identities
+require a new plan when the corpus changes; exact-corpus cache hits remain valid.
 Renaming a PDF, adding/removing a page, revising a sheet, or recovering a failed
 digest therefore preserves paid critique results for unchanged sheets. Evidence,
 confidence, sheet classifications, and code source labels do not reset the plan.

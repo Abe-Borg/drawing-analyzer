@@ -422,6 +422,64 @@ def test_no_overlap_and_unknown_scope_do_not_share_plans():
     assert len(client.calls) == 1
 
 
+@pytest.mark.parametrize("identity", [
+    pytest.param(SetIdentity(language="en"), id="language-only"),
+    pytest.param(SetIdentity(units="imperial"), id="units-only"),
+    pytest.param(SetIdentity(country="United States"), id="country-only"),
+    pytest.param(SetIdentity(region="California"), id="region-only"),
+    pytest.param(SetIdentity(set_type="permit"), id="set-type-only"),
+    pytest.param(SetIdentity(language="en", units="imperial", country="United States"),
+                 id="generic-locale"),
+    pytest.param(SetIdentity(disciplines=("fire protection",)), id="disciplines-only"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), language="en", units="imperial"),
+                 id="disciplines-and-locale"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), set_type="permit"),
+                 id="disciplines-and-set-type"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), country="United States"),
+                 id="disciplines-and-country"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), adopted_codes=(AdoptedCode(""),)),
+                 id="disciplines-and-empty-code"),
+    pytest.param(SetIdentity(project_type="office"), id="project-without-disciplines"),
+    pytest.param(SetIdentity(jurisdiction="California, United States"),
+                 id="jurisdiction-without-disciplines"),
+    pytest.param(SetIdentity(adopted_codes=(AdoptedCode("NFPA 13", "2016"),)),
+                 id="codes-without-disciplines"),
+])
+def test_partial_identity_does_not_retain_a_plan_across_shared_boilerplate(identity):
+    cache = DigestCache(None, persist=False)
+    shared = _sheet(0, "General notes shared between drawing sets")
+    original = [shared, _sheet(1, "Fire protection dry-system layout")]
+    first = author_review_plan(identity, original, client=_FakeClient(_reply()), cache=cache)
+    # The exact-corpus cache remains valid even when revision compatibility
+    # cannot be established from the partial identity.
+    warm_client = _FakeClient(_reply())
+    warm = author_review_plan(identity, original, client=warm_client, cache=cache)
+    assert warm.cached and warm_client.calls == []
+    electrical_plan = {"plans": [{"discipline": "electrical", "items": [
+        {"text": "Flag a circuit with an unlabelled breaker."}]}]}
+    client = _FakeClient(_reply(electrical_plan))
+    revision = [shared, _sheet(1, "Electrical panelboard layout")]
+    result = author_review_plan(identity, revision, client=client, cache=cache)
+    assert result.ok and not result.cached and not result.reused
+    assert len(client.calls) == 1
+    assert profiles_cache_fragment(result.profiles) != profiles_cache_fragment(first.profiles)
+
+
+@pytest.mark.parametrize("context", [
+    {"project_type": "office"},
+    {"jurisdiction": "California, United States"},
+    {"adopted_codes": (AdoptedCode("NFPA 13", "2016"),)},
+])
+def test_substantive_identity_still_retains_a_revision_plan(context):
+    identity = SetIdentity(disciplines=("fire protection",), **context)
+    cache = DigestCache(None, persist=False)
+    first = author_review_plan(identity, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    result = author_review_plan(identity, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert result.reused and result.cached and client.calls == []
+    assert profiles_cache_fragment(result.profiles) == profiles_cache_fragment(first.profiles)
+
+
 def test_conflicting_snapshots_require_a_new_plan():
     cache = DigestCache(None, persist=False)
     a, b = _sheet(0, "First project"), _sheet(1, "Second project")
