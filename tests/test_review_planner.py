@@ -7,12 +7,14 @@ stability, and the degradation matrix. No PyMuPDF, no network.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.digest_cache import DigestCache
-from drawing_analyzer.models import SetIdentity, SheetRef
+import pytest
+
+from drawing_analyzer.models import AdoptedCode, SetIdentity, SheetRef
 from drawing_analyzer.profiles import build_checklist_prompt, profiles_cache_fragment
 from drawing_analyzer.review_planner import (
     PLANNER_PROMPT_VERSION,
@@ -320,6 +322,224 @@ def test_author_review_plan_cache_misses_on_different_identity():
     client2 = _FakeClient(_reply())
     res = author_review_plan(other_identity, [_sheet(0)], client=client2, cache=cache)
     assert not res.cached and len(client2.calls) == 1   # identity re-keys the plan
+
+
+@pytest.mark.parametrize("change", ["rename", "add", "remove", "revise", "recover"])
+def test_revision_retains_the_checklist(change):
+    cache = DigestCache(None, persist=False)
+    sheets = [_sheet(i, f"Sheet FP-10{i} - Fire Protection - Plan\nunique notes {i}")
+              for i in range(3)]
+    if change == "recover":
+        sheets[2] = replace(sheets[2], text="", error="temporary digest failure")
+    first = author_review_plan(_IDENTITY, sheets, client=_FakeClient(_reply()), cache=cache)
+    revised = list(sheets)
+    if change == "rename":
+        revised = [replace(sd, ref=replace(sd.ref, source_name="reissued.pdf",
+                                          pdf_path=Path("/tmp/reissued.pdf"))) for sd in sheets]
+    elif change == "add":
+        revised.append(_sheet(3, "Sheet FP-103 - Fire Protection - New Plan"))
+    elif change == "remove":
+        revised.pop(1)
+    elif change == "revise":
+        revised[1] = _sheet(1, "Sheet FP-101 - Fire Protection - Revised layout")
+    else:
+        revised[2] = _sheet(2, "Sheet FP-102 - Fire Protection - Recovered Plan")
+    # Re-authoring would return different checklist text and evict all critiques.
+    changed_plan = {"plans": [{"discipline": "fire protection", "items": [
+        {"text": "Flag missing sprinkler coverage in occupied spaces."}]}]}
+    client = _FakeClient(_reply(changed_plan))
+    second = author_review_plan(_IDENTITY, revised, client=client, cache=cache)
+    assert second.ok and second.cached and second.reused
+    assert client.calls == []
+    assert second.input_tokens == second.output_tokens == 0
+    assert profiles_cache_fragment(second.profiles) == profiles_cache_fragment(first.profiles)
+
+
+def test_revision_ignores_identity_provenance_and_normalizes_scope():
+    cache = DigestCache(None, persist=False)
+    code = AdoptedCode("NFPA 13", "2016", quote="per NFPA 13 2016", source_sheet="old.pdf")
+    identity = replace(_IDENTITY, adopted_codes=(code,))
+    first = author_review_plan(identity, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    revised_identity = replace(
+        identity, disciplines=(" Fire Protection ",), units="IMPERIAL",
+        sheet_disciplines=(("FP-101", "fire protection"), ("FP-102", "fire protection")),
+        confidence="medium", evidence=("new evidence",), notes="Different detection prose",
+        adopted_codes=(replace(code, code="nfpa 13", quote="new quote",
+                               source_sheet="new.pdf", origin="regex"), code),
+    )
+    client = _FakeClient(_reply())
+    second = author_review_plan(revised_identity, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert second.reused and client.calls == []
+    assert profiles_cache_fragment(first.profiles) == profiles_cache_fragment(second.profiles)
+
+
+@pytest.mark.parametrize("scope_change", [
+    {"disciplines": ("electrical",)}, {"project_type": "hospital"},
+    {"set_type": "construction"}, {"jurisdiction": "Berlin, Germany"},
+    {"country": "Germany"}, {"region": "Berlin"}, {"language": "de"},
+    {"units": "metric"}, {"adopted_codes": (AdoptedCode("NFPA 13", "2019"),)},
+    {"adopted_codes": (AdoptedCode("NFPA 13", "2016", amendment_note="local amendment"),)},
+])
+def test_revision_replans_when_review_requirements_change(scope_change):
+    cache = DigestCache(None, persist=False)
+    identity = replace(_IDENTITY, adopted_codes=(AdoptedCode("NFPA 13", "2016"),))
+    author_review_plan(identity, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    result = author_review_plan(replace(identity, **scope_change), [_sheet(0), _sheet(1)],
+                                client=client, cache=cache)
+    assert result.ok and not result.cached and len(client.calls) == 1
+
+
+@pytest.mark.parametrize("setting", ["model", "max_tokens", "effort", "thinking", "cap", "prompt"])
+def test_revision_replans_when_planner_settings_change(setting, monkeypatch):
+    cache = DigestCache(None, persist=False)
+    author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    kwargs = {}
+    if setting == "cap":
+        monkeypatch.setenv("DRAWING_ANALYZER_MAX_PLAN_ITEMS", "40")
+    elif setting == "prompt":
+        monkeypatch.setattr("drawing_analyzer.review_planner.PLANNER_PROMPT_VERSION", "new-prompt")
+    else:
+        kwargs = {"model": "other-model", "max_tokens": 8000, "effort": "low",
+                  "use_thinking": False}
+        kwargs = {("use_thinking" if setting == "thinking" else setting):
+                  kwargs["use_thinking" if setting == "thinking" else setting]}
+    client = _FakeClient(_reply())
+    result = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache, **kwargs)
+    assert result.ok and not result.cached and len(client.calls) == 1
+
+
+def test_no_overlap_and_unknown_scope_do_not_share_plans():
+    cache = DigestCache(None, persist=False)
+    author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    assert not author_review_plan(_IDENTITY, [_sheet(1, "Unrelated set")],
+                                  client=client, cache=cache).cached
+    assert len(client.calls) == 1
+    author_review_plan(None, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    assert not author_review_plan(None, [_sheet(0), _sheet(1)], client=client, cache=cache).cached
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("identity", [
+    pytest.param(SetIdentity(language="en"), id="language-only"),
+    pytest.param(SetIdentity(units="imperial"), id="units-only"),
+    pytest.param(SetIdentity(country="United States"), id="country-only"),
+    pytest.param(SetIdentity(region="California"), id="region-only"),
+    pytest.param(SetIdentity(set_type="permit"), id="set-type-only"),
+    pytest.param(SetIdentity(language="en", units="imperial", country="United States"),
+                 id="generic-locale"),
+    pytest.param(SetIdentity(disciplines=("fire protection",)), id="disciplines-only"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), language="en", units="imperial"),
+                 id="disciplines-and-locale"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), set_type="permit"),
+                 id="disciplines-and-set-type"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), country="United States"),
+                 id="disciplines-and-country"),
+    pytest.param(SetIdentity(disciplines=("fire protection",), adopted_codes=(AdoptedCode(""),)),
+                 id="disciplines-and-empty-code"),
+    pytest.param(SetIdentity(project_type="office"), id="project-without-disciplines"),
+    pytest.param(SetIdentity(jurisdiction="California, United States"),
+                 id="jurisdiction-without-disciplines"),
+    pytest.param(SetIdentity(adopted_codes=(AdoptedCode("NFPA 13", "2016"),)),
+                 id="codes-without-disciplines"),
+])
+def test_partial_identity_does_not_retain_a_plan_across_shared_boilerplate(identity):
+    cache = DigestCache(None, persist=False)
+    shared = _sheet(0, "General notes shared between drawing sets")
+    original = [shared, _sheet(1, "Fire protection dry-system layout")]
+    first = author_review_plan(identity, original, client=_FakeClient(_reply()), cache=cache)
+    # The exact-corpus cache remains valid even when revision compatibility
+    # cannot be established from the partial identity.
+    warm_client = _FakeClient(_reply())
+    warm = author_review_plan(identity, original, client=warm_client, cache=cache)
+    assert warm.cached and warm_client.calls == []
+    electrical_plan = {"plans": [{"discipline": "electrical", "items": [
+        {"text": "Flag a circuit with an unlabelled breaker."}]}]}
+    client = _FakeClient(_reply(electrical_plan))
+    revision = [shared, _sheet(1, "Electrical panelboard layout")]
+    result = author_review_plan(identity, revision, client=client, cache=cache)
+    assert result.ok and not result.cached and not result.reused
+    assert len(client.calls) == 1
+    assert profiles_cache_fragment(result.profiles) != profiles_cache_fragment(first.profiles)
+
+
+@pytest.mark.parametrize("context", [
+    {"project_type": "office"},
+    {"jurisdiction": "California, United States"},
+    {"adopted_codes": (AdoptedCode("NFPA 13", "2016"),)},
+])
+def test_substantive_identity_still_retains_a_revision_plan(context):
+    identity = SetIdentity(disciplines=("fire protection",), **context)
+    cache = DigestCache(None, persist=False)
+    first = author_review_plan(identity, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    result = author_review_plan(identity, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert result.reused and result.cached and client.calls == []
+    assert profiles_cache_fragment(result.profiles) == profiles_cache_fragment(first.profiles)
+
+
+def test_conflicting_snapshots_require_a_new_plan():
+    cache = DigestCache(None, persist=False)
+    a, b = _sheet(0, "First project"), _sheet(1, "Second project")
+    for sd in (a, b):
+        author_review_plan(_IDENTITY, [sd], client=_FakeClient(_reply()), cache=cache)
+    client = _FakeClient(_reply())
+    result = author_review_plan(_IDENTITY, [a, b], client=client, cache=cache)
+    assert result.ok and not result.cached and len(client.calls) == 1
+
+
+def test_revision_bindings_survive_restart_and_extend_to_new_sheets(tmp_path):
+    path = tmp_path / "plans.sqlite"
+    cache = DigestCache(path)
+    first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    cache.close()
+    cache = DigestCache(path)
+    client = _FakeClient(_reply())
+    added = _sheet(1, "New sheet FP-102")
+    second = author_review_plan(_IDENTITY, [_sheet(0), added], client=client, cache=cache)
+    assert second.reused and client.calls == []
+    # Remove the original anchor: the new sheet now retains the same snapshot.
+    third = author_review_plan(_IDENTITY, [added], client=client, cache=cache)
+    assert third.reused and client.calls == []
+    assert profiles_cache_fragment(third.profiles) == profiles_cache_fragment(first.profiles)
+    cache.close()
+
+
+def test_empty_cached_plan_is_reauthored():
+    cache = DigestCache(None, persist=False)
+    author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    for entry in cache._entries.values():
+        if "plans" in entry:
+            entry["plans"] = []
+    client = _FakeClient(_reply())
+    result = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert result.ok and not result.cached and len(client.calls) == 1
+
+
+def test_legacy_exact_entry_seeds_revision_bindings_without_authoring():
+    cache = DigestCache(None, persist=False)
+    first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    cache._entries = {key: entry for key, entry in cache._entries.items()
+                      if not key.startswith("stage:review_plan_binding:")}
+    client = _FakeClient(_reply())
+    warm = author_review_plan(_IDENTITY, [_sheet(0)], client=client, cache=cache)
+    revision = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert warm.cached and not warm.reused and revision.reused and client.calls == []
+    assert profiles_cache_fragment(revision.profiles) == profiles_cache_fragment(first.profiles)
+
+
+def test_dropped_item_accounting_survives_exact_and_revision_hits():
+    cache = DigestCache(None, persist=False)
+    payload = {"plans": [{"discipline": "civil", "items": [
+        {"text": "Flag a swale with no invert elevation."}, {"text": "x" * 400}]}]}
+    first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply(payload)), cache=cache)
+    client = _FakeClient(_reply())
+    warm = author_review_plan(_IDENTITY, [_sheet(0)], client=client, cache=cache)
+    revision = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache)
+    assert first.dropped_items == warm.dropped_items == revision.dropped_items == 1
+    assert revision.reused and client.calls == []
 
 
 def test_prompt_version_is_a_content_hash():

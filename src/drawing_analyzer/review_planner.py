@@ -19,8 +19,9 @@ never truncated — a truncated check is a corrupted check.
 
 The plan is advisory and additive: authoring failure degrades this stage only
 (I-3) and the critique proceeds with the user's profiles (or none). Plans are
-cached content-addressed on the exact corpus + identity, which keeps the
-critique ``profiles_key`` stable across warm re-runs (the Phase 19B economics).
+cached content-addressed on the exact corpus + identity. Unchanged sheets also
+bind that snapshot to the substantive review scope, so routine revisions retain
+the checklist and the critique ``profiles_key`` (the Phase 19B economics).
 PDF-engine-free (I-5); deterministic assembly (I-7: plans sort by discipline).
 """
 from __future__ import annotations
@@ -53,6 +54,7 @@ from .digest import (
 from .models import ProfileSnapshot
 from .set_identity import _as_list
 from .profiles import Profile
+from .stage_cache import get_stage_cache_entry, put_stage_cache_entry, stage_cache_key
 
 DEFAULT_PLAN_MAX_TOKENS = 32_000
 DEFAULT_PLAN_EFFORT = "high"          # judgment work — what WOULD a specialist check?
@@ -413,6 +415,7 @@ class PlanResult:
     error: str | None = None
     dropped_items: int = 0
     cached: bool = False
+    reused: bool = False              # snapshot retained from a prior revision
 
     @property
     def ok(self) -> bool:
@@ -431,6 +434,123 @@ def _identity_hash(identity: Any) -> str:
     ).hexdigest()
 
 
+def _review_scope_hash(identity: Any) -> str | None:
+    """Canonical facts that require a new checklist when they change.
+
+    Sheet inventory and detection provenance are not review requirements. Keep
+    disciplines, project/set type, locale, and code editions/amendments; discard
+    sheet classifications, evidence, confidence, notes, and code source labels.
+    Compatible revisions require detected disciplines plus a project type,
+    jurisdiction, or named adopted code. Generic locale/set-type fields alone
+    cannot establish which specialist checklist applies.
+    """
+    if identity is None or not hasattr(identity, "to_dict"):
+        return None
+    data = identity.to_dict()
+
+    def normalize(value: Any) -> str:
+        return _one_line(value).casefold()
+
+    scope = {
+        name: normalize(data.get(name))
+        for name in (
+            "project_type", "set_type", "jurisdiction", "country", "region",
+            "language", "units",
+        )
+    }
+    scope["disciplines"] = sorted({
+        normalize(d) for d in data.get("disciplines", []) if normalize(d)
+    })
+    scope["adopted_codes"] = sorted({
+        tuple(normalize(c.get(k)) for k in ("code", "edition", "amendment_note"))
+        for c in data.get("adopted_codes", [])
+        if isinstance(c, dict) and normalize(c.get("code"))
+    })
+    if not scope["disciplines"] or not any(
+        scope[name] for name in ("project_type", "jurisdiction", "adopted_codes")
+    ):
+        return None
+    return hashlib.sha256(json.dumps(scope, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _plan_binding_keys(
+    identity: Any,
+    sheet_digests: list[SheetDigest],
+    sheet_keys: dict[tuple[str, int], str] | None,
+    *,
+    model: str,
+    max_tokens: int,
+    effort: str | None,
+    use_thinking: bool,
+) -> list[str]:
+    """Snapshot pointers keyed by unchanged content + scope + planner settings.
+
+    The pipeline supplies content-addressed prescan keys without page locators.
+    Direct callers can establish continuity through identical digest prose.
+    Paths/filenames/page counts never identify a binding. This is a separate
+    namespace: the exact-request cache and the critique key contract stay intact.
+    """
+    scope_hash = _review_scope_hash(identity)
+    if scope_hash is None:
+        return []
+    fingerprints = set()
+    for sd in sheet_digests:
+        if not sd.ok:
+            continue
+        if sheet_keys is not None:
+            key = sheet_keys.get((str(sd.ref.pdf_path), sd.ref.page_index))
+            if key:
+                fingerprints.add("sheet:" + key)
+        else:
+            fingerprints.add("digest:" + hashlib.sha256(sd.text.encode("utf-8")).hexdigest())
+    return [
+        stage_cache_key(
+            "review_plan_binding", model=model, prompt=PLANNER_PROMPT_VERSION,
+            inputs={"scope": scope_hash, "sheet": fingerprint},
+            params={
+                "contract": 1, "max_tokens": max_tokens, "effort": effort,
+                "use_thinking": use_thinking, "max_items": max_plan_items(),
+            },
+        )
+        for fingerprint in sorted(fingerprints)
+    ]
+
+
+def _cached_plan_result(
+    entry: Any, *, model: str, identity: Any, reused: bool = False,
+) -> PlanResult | None:
+    if not isinstance(entry, dict) or not isinstance(entry.get("plans"), list):
+        return None
+    plans, dropped = sanitize_plans({"plans": entry["plans"]})
+    profiles = profiles_from_plans(plans)
+    if not profiles:
+        return None
+    try:
+        original_dropped = max(0, int(entry.get("dropped_items", 0)))
+    except (TypeError, ValueError):
+        return None
+    model_used = str(entry.get("model", model))
+    markdown = render_plan_markdown(
+        profiles, model=model_used, identity=None if reused else identity,
+    )
+    if reused:
+        markdown += (
+            "\n_Checklist retained from a prior revision with the same review scope._\n"
+        )
+    return PlanResult(
+        profiles=profiles, markdown=markdown, model_used=model_used,
+        dropped_items=dropped + original_dropped,
+        cached=True, reused=reused,
+    )
+
+
+def _bind_plan(cache: Any, keys: list[str], plan_key: str) -> None:
+    for key in keys:
+        put_stage_cache_entry(
+            cache, key, stage="review_plan_binding", payload={"plan_key": plan_key},
+        )
+
+
 def author_review_plan(
     identity: Any,
     sheet_digests: list[SheetDigest],
@@ -443,6 +563,7 @@ def author_review_plan(
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
     cache: Any = None,
+    sheet_keys: dict[tuple[str, int], str] | None = None,
 ) -> PlanResult:
     """Author the set's review plan in one text-only call (never raises — I-3).
 
@@ -450,7 +571,9 @@ def author_review_plan(
     ``cache``, the sanitized plans are stored content-addressed on the exact
     corpus + identity + params, so a warm re-run rebuilds identical Profile
     objects — keeping the critique's ``profiles_key`` (and therefore its cached
-    reads) stable.
+    reads) stable. An unchanged sheet may also retain a prior revision's plan
+    when the substantive identity and planner settings match. Conflicting prior
+    snapshots, an unknown identity, or no overlapping sheets require authoring.
     """
     model = model or default_review_plan_model()
     if not any(sd.ok for sd in sheet_digests):
@@ -459,6 +582,7 @@ def author_review_plan(
     user_text, _omitted = build_planner_user_text(identity, sheet_digests)
 
     cache_key = None
+    binding_keys: list[str] = []
     if cache is not None:
         from .digest_cache import review_plan_cache_key
 
@@ -472,20 +596,31 @@ def author_review_plan(
             use_thinking=use_thinking,
             max_items=max_plan_items(),
         )
-        entry = cache.get(cache_key)
-        if entry is not None and isinstance(entry.get("plans"), list):
-            plans, dropped = sanitize_plans({"plans": entry["plans"]})
-            profiles = profiles_from_plans(plans)
-            return PlanResult(
-                profiles=profiles,
-                markdown=render_plan_markdown(
-                    profiles, model=str(entry.get("model", model)), identity=identity
-                ),
-                model_used=str(entry.get("model", model)),
-                dropped_items=dropped,
-                cached=True,
-                error=None if profiles else "cached plan entry was empty",
+        binding_keys = _plan_binding_keys(
+            identity, sheet_digests, sheet_keys, model=model, max_tokens=max_tokens,
+            effort=effort, use_thinking=use_thinking,
+        )
+        cached_result = _cached_plan_result(cache.get(cache_key), model=model, identity=identity)
+        if cached_result is not None:
+            # Also seeds bindings from legacy exact-corpus entries without
+            # invalidating existing critique caches or buying a fresh plan.
+            _bind_plan(cache, binding_keys, cache_key)
+            return cached_result
+        prior_keys = set()
+        for key in binding_keys:
+            binding = get_stage_cache_entry(cache, key, stage="review_plan_binding")
+            if binding is not None and isinstance(binding.get("plan_key"), str):
+                prior_keys.add(binding["plan_key"])
+        if len(prior_keys) == 1:
+            prior_key = next(iter(prior_keys))
+            cached_result = _cached_plan_result(
+                cache.get(prior_key), model=model, identity=identity, reused=True,
             )
+            if cached_result is not None:
+                # New/reissued sheets join the same snapshot. Do not store it
+                # under this run's exact-corpus key: it was authored previously.
+                _bind_plan(cache, binding_keys, prior_key)
+                return cached_result
 
     if client is None:
         from .client import get_client as _get_client
@@ -554,5 +689,7 @@ def author_review_plan(
             ],
             "model": model,
             "prompt_version": PLANNER_PROMPT_VERSION,
+            "dropped_items": dropped,
         })
+        _bind_plan(cache, binding_keys, cache_key)
     return result

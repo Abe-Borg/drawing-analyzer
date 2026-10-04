@@ -735,9 +735,25 @@ machinery below (after any user checklists), snapshotted with
 `source="model"`, exported as `review_plan.md`, and cached content-addressed so
 warm re-runs rebuild it byte-identically (keeping the critique cache hot).
 
+Routine revisions retain that checklist when at least one readable sheet is
+unchanged and the detected review scope still matches: disciplines, project and
+set type, jurisdiction, language, units, and adopted code editions/amendments.
+Revision compatibility requires detected disciplines plus a project type,
+jurisdiction, or named adopted code. Locale-only or other partial identities
+require a new plan when the corpus changes; exact-corpus cache hits remain valid.
+Renaming a PDF, adding/removing a page, revising a sheet, or recovering a failed
+digest therefore preserves paid critique results for unchanged sheets. Evidence,
+confidence, sheet classifications, and code source labels do not reset the plan.
+The bindings persist across restarts and follow sheet content rather than its
+filename or page number. Changed review requirements or planner settings require
+a new plan; sets with no shared sheets, unknown identities, and conflicting prior plans also
+require authoring. Retained plans are identified in `review_plan.md` and the run
+journal. The critique cache continues to hash the exact injected checklist,
+including any edited user profiles.
+
 Both stages ride the critique stack automatically (`qc_markups=True`, or an
 expert `critique=True` / `citation_check=True`) and add two real-time text
-calls, disclosed in the pre-run cost estimate; standard digest-only runs make
+calls on a cold run, disclosed in the pre-run cost estimate; standard digest-only runs make
 neither call. Expert overrides: `identity=False` / `review_plan=False`
 (recorded debug overrides inside exhaustive QC). The identity also feeds the
 citation check (merged adopted-codes line + a jurisdiction/locale line) and

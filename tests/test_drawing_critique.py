@@ -830,7 +830,8 @@ class _PipelineClient(BetaClientMixin):
     """Routes digest / critique / verify. Critique run 1 = [D, C2], run 2 = [D],
     so D is reproduced (and also raised by the digest) while C2 is a singleton."""
 
-    def __init__(self, *, critique_raises=False):
+    def __init__(self, *, critique_raises=False, plan_item=None, identity_overrides=None,
+                 digest_raises_at=None):
         self.digest_calls = 0
         self.critique_calls = 0
         self.verify_calls = 0
@@ -858,6 +859,8 @@ class _PipelineClient(BetaClientMixin):
                                        usage=FakeUsage(input_tokens=100, output_tokens=20))
                 if system.startswith(DIGEST_SYSTEM_PROMPT):
                     outer.digest_calls += 1
+                    if outer.digest_calls == digest_raises_at:
+                        raise _StatusError(400)
                     prose = "Sheet F-D-01-1 - Fire Protection - Plan\nVAV-3 serves the room."
                     return FakeMessage(
                         content=[FakeTextBlock(text=prose + "\n\n" + _block([_D]))],
@@ -870,6 +873,7 @@ class _PipelineClient(BetaClientMixin):
                         "language": "en", "units": "imperial",
                         "adopted_codes": [], "confidence": "medium",
                     }
+                    payload.update(identity_overrides or {})
                     return FakeMessage(
                         content=[FakeTextBlock(text="```json\n" + json.dumps(payload) + "\n```")],
                         usage=FakeUsage(input_tokens=30, output_tokens=10))
@@ -877,7 +881,7 @@ class _PipelineClient(BetaClientMixin):
                     outer.plan_calls += 1
                     plan = {"plans": [{
                         "discipline": "fire protection", "title": "FP QC",
-                        "items": [{"text": "Flag a relief valve note set below "
+                        "items": [{"text": plan_item or "Flag a relief valve note set below "
                                            "175 psi on a wet system.",
                                    "severity": "medium",
                                    "refs": ["NFPA 13 2016 §8.1.2"]}],
@@ -988,6 +992,101 @@ def test_pipeline_warm_rerun_skips_rasterization(tmp_path, monkeypatch):
     # The cached critique findings are still served, rebound to the current source.
     assert len(ctx2.findings) == len(ctx1.findings) >= 1
     assert all(f.source_id for f in ctx2.findings)
+
+
+@pytest.mark.parametrize("change", ["rename", "add", "remove", "revise", "recover", "scope"])
+@pytest.mark.parametrize("cache_level", [1, 2])
+@pytest.mark.parametrize("batch", [False, True])
+def test_incremental_critique_reuse_and_scope_invalidation(tmp_path, monkeypatch, change, cache_level, batch):
+    """A set edit buys two reads for the changed/new sheet, zero for siblings.
+
+    Exercise the actual planner and both critique cache levels on Fast and
+    Economy transports. A fresh plan reply deliberately changes its wording.
+    """
+    pytest.importorskip("pymupdf")
+    import pymupdf
+    from drawing_analyzer import pipeline
+    from drawing_analyzer.profiles import profiles_cache_fragment
+    from tests.test_drawing_batch_critique import _FakeClient, _succeed
+
+    path = tmp_path / "set.pdf"
+    doc = pymupdf.open()
+    for i in range(3):
+        doc.new_page(width=792, height=612).insert_text((80, 120), f"SHEET FP-10{i} VAV-{i}")
+    doc.save(str(path))
+    doc.close()
+    # Persistence matters: these bindings must work across application restarts.
+    cache_path = tmp_path / "cache.sqlite"
+    cache = DigestCache(cache_path)
+
+    def run(client, run_cache):
+        api_client = (_FakeClient(_succeed, inline_responder=lambda kw: client.messages.create(**kw))
+                      if batch else client)
+        context = extract_drawing_context(
+            [path], client=api_client, rows=2, cols=2, critique=True,
+            verify_findings=False, synthesize=False, cache=run_cache,
+            use_batch=False, critique_use_batch=batch, max_workers=1,
+        )
+        reads = (sum(len(call["requests"]) for call in api_client.create_calls)
+                 if batch else client.critique_calls)
+        return context, reads
+
+    first, reads = run(_PipelineClient(digest_raises_at=3 if change == "recover" else None), cache)
+    assert reads == 6
+    cache.close()
+    if change == "rename":
+        renamed = tmp_path / "renamed.pdf"
+        path.rename(renamed)
+        path = renamed
+    elif change != "recover":
+        doc = pymupdf.open(str(path))
+        if change == "add":
+            doc.new_page(width=792, height=612).insert_text((80, 120), "SHEET FP-103 NEW PLAN")
+        elif change == "remove":
+            doc.delete_page(1)
+        else:
+            doc[1].insert_text((80, 170), "REVISED LAYOUT", fontsize=12)
+        doc.saveIncr()
+        doc.close()
+
+    if cache_level == 2:
+        real_partition = pipeline._critique_level1_partition
+
+        def miss_level1(*args, **kwargs):
+            hits, misses, identities, portable = real_partition(*args, **kwargs)
+            return {}, misses | set(hits), identities, portable
+
+        monkeypatch.setattr(pipeline, "_critique_level1_partition", miss_level1)
+
+    # Re-identification changes evidence, confidence, and sheet classifications
+    # as it commonly does after a revision; none changes the review requirements.
+    identity_overrides = {"confidence": "high", "evidence": ["updated cover"],
+                          "sheet_disciplines": [{"sheet_id": "FP-103",
+                                                 "discipline": "fire protection"}]}
+    if change == "scope":
+        identity_overrides["units"] = "metric"
+    client = _PipelineClient(
+        plan_item="Flag missing sprinkler coverage in occupied spaces.",
+        identity_overrides=identity_overrides,
+    )
+    cache = DigestCache(cache_path)
+    second, reads = run(client, cache)
+    cache.close()
+    expected_new = 3 if change == "scope" else 1 if change in ("add", "revise") else 0
+    assert reads == 2 * expected_new
+    assert client.digest_calls == (1 if change in ("add", "revise", "recover", "scope") else 0)
+    assert client.plan_calls == (1 if change == "scope" else 0)
+    same_checklist = (profiles_cache_fragment(second.review_plan_profiles)
+                      == profiles_cache_fragment(first.review_plan_profiles))
+    assert same_checklist == (change != "scope")
+    records = [r for r in second.run_usage.records if r.stage_family == "critique"]
+    assert sum(not r.cache_hit for r in records) == expected_new
+    assert all(r.estimated_cost == 0 for r in records if r.cache_hit)
+    plan_record = next(r for r in second.run_usage.records if r.stage_family == "review_plan")
+    assert plan_record.cache_hit == (change != "scope")
+    if plan_record.cache_hit:
+        assert plan_record.estimated_cost == 0
+    assert next(s for s in second.stage_results if s.stage == "critique").status == "COMPLETE"
 
 
 def _install_fp_user_profile(tmp_path, monkeypatch) -> None:
