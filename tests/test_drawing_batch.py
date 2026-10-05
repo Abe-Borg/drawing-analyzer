@@ -1797,6 +1797,14 @@ def test_zero_progress_batch_stalls_before_the_elapsed_bound(monkeypatch):
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
     client = _FakeClient(_succeed)
     _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+    polls_at_cancel = []
+    original_cancel = client.messages.batches.cancel
+
+    def cancel(batch_id):
+        polls_at_cancel.append(len(client.retrieve_calls))
+        return original_cancel(batch_id)
+
+    monkeypatch.setattr(client.messages.batches, "cancel", cancel)
 
     batch = submit_drawing_batch(
         iter([_make_sheet(0)]), client=client, model=OPUS, total=1
@@ -1812,11 +1820,11 @@ def test_zero_progress_batch_stalls_before_the_elapsed_bound(monkeypatch):
     assert client.cancel_calls == ["batch_abc"]
     # Gave up at the FIRST-watch stall window (25 min of frozen counts), NOT
     # the elapsed bound: 4 polls × 600s = 30 min, a fraction of the
-    # ~98k-second budget. One further retrieve is the DA-035 harvest looking
-    # once for items the batch had already finished (it had none, so every
-    # sheet still goes to the rescue) — the split matters, because a stall
-    # watch that needed 5 polls to fire would be a different bug.
-    assert len(client.retrieve_calls) == 4 + 1
+    # ~98k-second budget. Count at cancellation so later harvest polls do not
+    # obscure when the stall watch fired. The harvest now waits for a full
+    # generation envelope, but this never-ending batch still goes to rescue.
+    assert polls_at_cancel == [4]
+    assert len(client.retrieve_calls) > polls_at_cancel[0]
     assert clock["t"] < 10_000
     assert any(level == "warning" and "no progress" in msg for level, msg in logs)
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
@@ -2599,6 +2607,164 @@ def _resubmitted_ids(client) -> list[list[str]]:
     return [[r["custom_id"] for r in c["requests"]] for c in client.create_calls]
 
 
+class _SlowCancelWithInFlightItems(_StallThenSettleWithCompletedItems):
+    """Cancellation waits for an in-flight generation to finish."""
+
+    def __init__(self, *args, settle_seconds=12 * 60, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.settle_seconds = settle_seconds
+        self.cancel_started = None
+        self.results_read_at = None
+
+    def cancel(self, batch_id):
+        self.cancel_started = self._clock["t"]
+        return super().cancel(batch_id)
+
+    def retrieve(self, batch_id):
+        if batch_id == self._primary:
+            if self.cancel_started is None:
+                batch = super().retrieve(batch_id)
+                # No completed items yet: these are still generating at cancel.
+                batch.request_counts.succeeded = 0
+                batch.request_counts.processing = len(self._primary_reqs)
+                return batch
+            if self._clock["t"] - self.cancel_started < self.settle_seconds:
+                self._c.retrieve_calls.append(batch_id)
+                return _Obj(
+                    processing_status="canceling",
+                    request_counts=_Obj(
+                        succeeded=0, errored=0, canceled=0, expired=0,
+                        processing=len(self._primary_reqs),
+                    ),
+                )
+        return super().retrieve(batch_id)
+
+    def results(self, batch_id):
+        if batch_id == self._primary:
+            assert self._clock["t"] - self.cancel_started >= self.settle_seconds
+            self.results_read_at = self._clock["t"]
+        yield from super().results(batch_id)
+
+
+@pytest.mark.parametrize(
+    "transport", [batch_digest.RECOVERY_BATCH, batch_digest.RECOVERY_DIRECT],
+)
+def test_stall_cancel_waits_twelve_minutes_for_inflight_digests(monkeypatch, transport):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    client = _FakeClient(_succeed)
+    backend = _SlowCancelWithInFlightItems(
+        client, clock, tick=600.0, done_ids={"sheet__0", "sheet__1"},
+    )
+    _install_batches(client, backend)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(i) for i in range(3)]), client=client, model=OPUS,
+        total=3, max_tokens=64_000, effort="high",
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=sleep, retry_failed_items=True,
+        recovery_transport=transport, max_elapsed_seconds=3000,
+    )
+
+    assert backend.results_read_at is not None
+    assert backend.results_read_at - backend.cancel_started == 12 * 60
+    assert all(d.ok for d in digests)
+    assert [s.served_by for s in batch.slots[:2]] == ["batch_1", "batch_1"]
+    assert all(len(d.usage_attempts) == 1 for d in digests[:2])
+    if transport == batch_digest.RECOVERY_BATCH:
+        assert _resubmitted_ids(client)[1:] == [["sheet__2"]]
+        assert not client.rescue_calls
+    else:
+        assert len(client.create_calls) == 1
+        assert len(client.rescue_calls) == 1
+
+
+def test_resubmission_harvest_uses_its_raised_token_cap(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    # The slots still carry the original cap; this round's requests doubled it.
+    slots = [
+        batch_digest._Slot(
+            index=i, ref=_make_sheet(i).ref, image_estimate=0,
+            custom_id=f"sheet__{i}", rows=2, cols=2,
+            params={"model": OPUS, "max_tokens": 64_000, "messages": []},
+        )
+        for i in range(2)
+    ]
+    client = _FakeClient(_succeed)
+    backend = _SlowCancelWithInFlightItems(
+        client, clock, tick=600.0, done_ids={"sheet__0"},
+        settle_seconds=120 * 60,  # exceeds the 64k generation bound
+    )
+    _install_batches(client, backend)
+    results = [None, None]
+    recovered, files_safe = batch_digest._recover_via_batch_resubmit(
+        [(s, {**s.params, "max_tokens": 128_000}) for s in slots], results,
+        batch_total=2, client=client, cache=DigestCache(None, persist=False),
+        progress=None, on_log=None, sleep=sleep,
+        max_elapsed_seconds=5000, stall_timeout_seconds=60,
+    )
+
+    assert files_safe and recovered == 2
+    assert backend.results_read_at - backend.cancel_started == 120 * 60
+    assert _resubmitted_ids(client)[1:] == [["sheet__1"]]
+    assert slots[0].served_by == "batch_1"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (" 20 ", 1200.0), ("1.5", 90.0), ("0.01", 60.0),
+        ("0", 6700.0), ("-3", 6700.0), ("overnight", 6700.0),
+        ("inf", 6700.0), ("nan", 6700.0), ("1e309", 6700.0), ("", 6700.0),
+    ],
+)
+def test_harvest_timeout_override_is_finite(monkeypatch, raw, expected):
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN", raw)
+    assert batch_digest._harvest_budget_seconds(60) == expected
+
+
+def test_harvest_bound_uses_largest_request_and_ignores_small_collection_budget(monkeypatch):
+    monkeypatch.delenv("DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN", raising=False)
+    params = [{"max_tokens": 16_000}, {"max_tokens": 128_000}]
+    assert batch_digest._harvest_budget_seconds(60, request_params=params) == 13_100
+    assert batch_digest._harvest_budget_seconds(0, request_params=params) == 0
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN", "15")
+    assert batch_digest._harvest_budget_seconds(60, request_params=params) == 900
+
+
+def test_harvest_poll_stops_at_hard_ceiling_while_items_are_processing(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed, status="canceling")
+
+    def retrieve(batch_id):
+        client.retrieve_calls.append(batch_id)
+        return _Obj(
+            processing_status="canceling", request_counts=_Obj(processing=1),
+        )
+
+    monkeypatch.setattr(client.messages.batches, "retrieve", retrieve)
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    status = batch_digest._poll_for_harvest(
+        client, "batch_1", sleep=sleep, budget_seconds=12.5,
+    )
+    assert status is None
+    assert clock["t"] == 12.5
+    assert len(client.retrieve_calls) == 4
+
+
 def test_stalled_batch_harvests_completed_sheets_before_resubmitting(monkeypatch):
     # THE money defect. A 40-sheet run detached with 11 sheets already produced
     # and billed, resubmitted all 40, and returned 0/40 after paying for 12
@@ -2911,6 +3077,59 @@ def test_stalled_followup_batch_harvests_before_the_fullrate_rescue(monkeypatch)
     # may reach the full-rate direct rescue.
     assert len(client.rescue_calls) == 1
     assert batch.slots[0].served_by == "batch_2"
+
+
+def test_followup_harvest_waits_for_its_raised_token_cap(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    class _SlowFollowupCancel(_PrimaryOkThenFollowUpStalls):
+        def cancel(self, batch_id):
+            self.cancel_started = clock["t"]
+            return super().cancel(batch_id)
+
+        def retrieve(self, batch_id):
+            if batch_id in self._canceled and clock["t"] - self.cancel_started < 120 * 60:
+                return _Obj(
+                    processing_status="canceling", request_counts=_Obj(processing=2),
+                )
+            return super().retrieve(batch_id)
+
+        def results(self, batch_id):
+            if batch_id == self._follow_up:
+                assert clock["t"] - self.cancel_started == 120 * 60
+            yield from super().results(batch_id)
+
+    empty_at_cap = _Obj(
+        custom_id="sheet__0",
+        result=_Obj(type="succeeded", message=FakeMessage(
+            content=[FakeTextBlock(text="")], stop_reason="max_tokens",
+        )),
+    )
+    client = _FakeClient(_flaky_then_ok({
+        "sheet__0": empty_at_cap,
+        "sheet__1": batch_errored_result("sheet__1", error_message="Internal Server Error"),
+    }))
+    _install_batches(client, _SlowFollowupCancel(
+        client, clock, tick=600.0, follow_up_done={"sheet__0"},
+    ))
+    batch = submit_drawing_batch(
+        iter([_make_sheet(i) for i in range(3)]), client=client, model=OPUS,
+        total=3, max_tokens=64_000,
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=sleep, retry_failed_items=True,
+        max_elapsed_seconds=5000,
+    )
+
+    assert all(d.ok for d in digests)
+    assert client.create_calls[1]["requests"][0]["params"]["max_tokens"] == 128_000
+    assert batch.slots[0].params["max_tokens"] == 64_000
+    assert batch.slots[0].served_by == "batch_2"
+    assert len(client.rescue_calls) == 1
 
 
 # --------------------------------------------------------------------------- #

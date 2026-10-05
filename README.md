@@ -1672,6 +1672,7 @@ runs.
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
+| `DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN` | request-derived (~112 min at 64k) | Maximum minutes to wait for an abandoned batch to settle before harvesting its completed items. Default: largest submitted `max_tokens` / 10 tokens per second + 5 minutes of cancellation grace, including raised retry caps. A positive finite override is floored at one minute; invalid values use the default. Harvest time is additional to the collection budget. Shorter overrides can cause duplicate billing if in-flight generation outlasts the wait. |
 | `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
 | `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
@@ -1758,14 +1759,26 @@ full-rate real-time calls, so a stuck run keeps the ~50% batch discount.
 **A sheet the batch already finished is never resubmitted.** Before anything is
 sent again, the run reads the abandoned batch's completed items back and fills
 those sheets from them — cancellation on the Batches API is asynchronous, so a
-canceled batch still transitions to `ended` and the items it finished stay
-readable. Without that step a stalled batch was paid for twice: results are
+canceled batch reaches `ended` only after its in-flight requests finish, and
+those requests are still billed. Their finished items stay readable. Without
+that step a stalled batch was paid for twice: results are
 filled only from a terminal read, so on a batch that never terminated *every*
 sheet looked unresolved, including the ones already produced and billed. A real
 40-sheet run detached with 11 sheets in hand, resubmitted all 40, and returned
-nothing after paying for 12 digests. The harvest is bounded and never spends the
-recovery's budget: if the batch will not settle, the run resubmits everything
-exactly as it used to, which costs money but never loses sheets.
+nothing after paying for 12 digests. The harvest allows one full generation at
+a conservative **10 tokens per second**, using the largest actual submitted
+`max_tokens` (including raised retry caps), plus **five minutes** for cancellation
+to settle: about **112 minutes at 64k**, or **218 minutes at 128k**. It is not
+shortened by a small collection budget. Set
+`DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN` to override this finite ceiling.
+Harvest time is added back to the caller's start mark, so it never spends the
+recovery's budget. If the batch will not settle within that ceiling, the run
+resubmits unresolved sheets as before; an in-flight generation that outlasts the
+ceiling can still be billed twice.
+
+The critique batch shares the main poller, but has **no stall watch, harvest or
+automatic resubmission**. It waits for the full collection bound and reports
+uncollected critique reads if it must detach; it does not enter this recovery loop.
 
 The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
 what makes the app's "can run overnight" wording true rather than aspirational.
