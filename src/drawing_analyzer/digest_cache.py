@@ -128,6 +128,27 @@ def persistence_enabled() -> bool:
     return _env_truthy(os.environ.get("DRAWING_ANALYZER_CACHE_PERSIST"), default=True)
 
 
+def _hash_tile_layout(h: Any, sheet: Any) -> None:
+    """Separate nonlegacy grids even when suppression leaves identical PNGs.
+
+    The grid, tile labels/positions and omitted cells are model-visible. PNGs
+    alone cannot key them: a blank page can have the same overview and no tiles
+    under two different grids. Keep legacy 6x6 keys byte-identical for ANSI E
+    and ARCH E1; other grids carry their full label layout beside the bytes.
+    """
+    rows, cols = getattr(sheet, "rows", 6), getattr(sheet, "cols", 6)
+    if (rows, cols) == (6, 6):
+        return
+    layout = {
+        "rows": rows, "cols": cols,
+        "tiles": [[t.row, t.col, t.label] for t in sheet.tiles],
+        "omitted": list(getattr(sheet, "omitted_tiles", []) or []),
+    }
+    h.update(b"tile_layout=")
+    h.update(json.dumps(layout, separators=(",", ":")).encode("utf-8"))
+    h.update(b"\x00")
+
+
 def digest_cache_key(
     sheet: Any,
     *,
@@ -143,8 +164,8 @@ def digest_cache_key(
     """Content-address one sheet's digest request.
 
     The rendered images are a model input, so hashing them captures the page
-    content *and* every tiling parameter at once (different rows / cols / overlap
-    → different crops → different bytes → different key). Folding in the model,
+    content. Non-6x6 grids also hash the visible tile layout, because different
+    grids can have identical PNGs after blank suppression. Folding in the model,
     prompt fingerprint, and output-shaping params means a model swap or a prompt
     edit re-digests rather than serving a stale cached read.
 
@@ -189,6 +210,7 @@ def digest_cache_key(
         h.update(b"sheet_text=")
         h.update(sheet_text.encode("utf-8"))
         h.update(b"\x00")
+    _hash_tile_layout(h, sheet)
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
         h.update(tile.png_bytes)
@@ -334,8 +356,8 @@ def critique_cache_key(
     """Content-address one sheet's *critique* (Phase 11) — a separate model read
     from the digest, over the same images.
 
-    Mirrors :func:`digest_cache_key` (the rendered images key the page content
-    and every tiling parameter at once, and a non-empty ``sheet_text`` is folded
+    Mirrors :func:`digest_cache_key` (images and nonlegacy layouts key the page
+    content, and a non-empty ``sheet_text`` is folded
     in so a corrected text layer re-critiques even when the pixels are unchanged),
     but adds a ``stage=critique`` namespace tag, the critique prompt fingerprint,
     and the self-consistency ``runs`` count — a one-run critique and a two-run
@@ -389,6 +411,7 @@ def critique_cache_key(
         h.update(b"structured=")
         h.update(structured_key.encode("utf-8"))
         h.update(b"\x00")
+    _hash_tile_layout(h, sheet)
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
         h.update(tile.png_bytes)

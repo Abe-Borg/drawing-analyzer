@@ -624,8 +624,8 @@ def sheet_render_identity(
     content_sha256: str,
     page_index: int,
     page_count: int,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     dependency_cache: "dict[int, tuple[bytes, tuple[int, ...]]] | None" = None,
 ) -> str:
@@ -648,6 +648,10 @@ def sheet_render_identity(
     without ever rendering it.
     """
     is_raster = _page_word_count(page) == 0
+    rows, cols = tiling.choose_grid(
+        float(page.rect.width), float(page.rect.height), rows=rows, cols=cols,
+        overlap_frac=overlap_frac, is_raster=is_raster,
+    )
     total_images = tiling.total_images_for_grid(rows, cols)
     target_px = tiling.target_long_edge_px(total_images, is_raster=is_raster)
     near_blank, near_blank_bytes = _near_blank_config()
@@ -798,8 +802,8 @@ def render_sheet(
     page: "pymupdf.Page",
     ref: SheetRef,
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
 ) -> RenderedSheet:
     """Render one already-open page into an overview + ``rows*cols`` tiles.
@@ -826,6 +830,10 @@ def render_sheet(
     # second _words_to_view here would rotate the words twice.
     raw_text, words = _page_text_and_view_words(page, geometry)
     is_raster = len(words) == 0
+    rows, cols = tiling.choose_grid(
+        w_pt, h_pt, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        is_raster=is_raster,
+    )
     sheet_text = _cap_sheet_text(raw_text)
     if len(sheet_text) != len(raw_text):
         _log.info(
@@ -901,8 +909,8 @@ def render_sheet(
 def iter_rendered_sheets(
     pdf_paths: list[Path],
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
@@ -972,8 +980,8 @@ def _sheet_geometry_no_render(
     page: "pymupdf.Page",
     ref: SheetRef,
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
 ) -> SheetGeometry:
     """Build a :class:`SheetGeometry` from cheap page access — no rasterization.
@@ -987,6 +995,10 @@ def _sheet_geometry_no_render(
     # Already canonical PAGE_VIEW_V2 — the helper owns that conversion, so a
     # second _words_to_view here would rotate the words twice.
     raw_text, words = _page_text_and_view_words(page, geometry)
+    rows, cols = tiling.choose_grid(
+        geometry.view_width_pt, geometry.view_height_pt, rows=rows, cols=cols,
+        overlap_frac=overlap_frac, is_raster=len(words) == 0,
+    )
     return SheetGeometry(
         ref=ref,
         page_width_pt=geometry.view_width_pt,
@@ -1083,8 +1095,8 @@ def iter_sheet_cost_bases(
 def iter_sheet_prescan(
     pdf_paths: list[Path],
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> "Iterator[tuple[SheetRef, str, SheetGeometry]]":

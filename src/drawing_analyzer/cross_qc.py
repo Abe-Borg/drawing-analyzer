@@ -511,8 +511,8 @@ def _tile_has_words(geom: Any, tile: "list[int] | None") -> bool:
         rects = tiling.tile_rects(
             float(getattr(geom, "page_width_pt", 0.0) or 0.0),
             float(getattr(geom, "page_height_pt", 0.0) or 0.0),
-            rows=int(getattr(geom, "rows", 0) or tiling.DEFAULT_GRID_ROWS),
-            cols=int(getattr(geom, "cols", 0) or tiling.DEFAULT_GRID_COLS),
+            rows=int(getattr(geom, "rows", 0) or 0),
+            cols=int(getattr(geom, "cols", 0) or 0),
             overlap_frac=float(
                 getattr(geom, "overlap_frac", tiling.DEFAULT_OVERLAP_FRAC)
             ),

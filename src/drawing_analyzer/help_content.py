@@ -428,7 +428,7 @@ _HOW_IT_WORKS = HelpDocument(
         _section(
             "The pipeline",
             _para(
-                "PDFs → list sheets → render (overview + 6×6 tiles) and extract "
+                "PDFs → list sheets → render (overview + per-page tiles) and extract "
                 "the vector text layer → per-sheet vision digest → optional "
                 "cross-sheet synthesis → optional focus report → combined Markdown "
                 "→ optional QC (auditors + anchor → verify → markup)."
@@ -458,14 +458,15 @@ _HOW_IT_WORKS = HelpDocument(
         _section(
             "Render & digest",
             _para(
-                "Each sheet is rendered to an overview image plus a 6×6 grid of "
+                "Each sheet is rendered to an overview image plus a size-based grid of "
                 "high-resolution tiles and sent, together with its text layer, to Claude "
                 "Opus 5.5 in a single request. The model returns a structured Markdown "
                 "digest plus a machine-readable findings block."
             ),
             _bullet(
-                "Ordinary vector sheets render tiles at 1560 px; a scanned or pasted-raster "
-                "sheet (empty text layer) renders at 1992 px, because there the pixels are "
+                "With more than 20 images, vector sheets render tiles at 1560 px and a "
+                "scanned or pasted-raster sheet (empty text layer) at 1992 px. With 20 or "
+                "fewer images, both target 2576 px. Raster pixels are "
                 "the only information channel."
             ),
         ),
@@ -900,7 +901,7 @@ RUNTIME_TRANSPARENCY = HelpDocument(
             "Exactly what leaves your computer",
             _para("On a paid stage, the request body contains:"),
             _bullet(
-                "Rendered images of the sheet — one overview plus a 6×6 grid of tiles. "
+                "Rendered images of the sheet — one overview plus a size-based grid of tiles. "
                 "These are pictures of your drawing, so treat them as you would treat "
                 "emailing the PDF."
             ),

@@ -128,7 +128,7 @@ def _specs_cost_contribution(
 class ImageTokenEstimate:
     """A geometry-aware image-token estimate, with the assumptions it rests on.
 
-    ``tokens`` is the planning number. ``conservative_tokens`` is what the legacy
+    ``tokens`` is the planning number. ``conservative_tokens`` is what the size-free
     allowance (:func:`pipeline.estimate_image_tokens_for_set`) would have quoted
     for the same pages, kept beside it so a caller can show both and a test can
     assert the direction of the correction rather than a magic constant.
@@ -158,19 +158,17 @@ class ImageTokenEstimate:
 def estimate_image_tokens_for_bases(
     bases: "Sequence[Any]",
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     model: str = REVIEW_MODEL_DEFAULT,
 ) -> ImageTokenEstimate:
     """Image tokens for one vision read of these pages, from their real shapes.
 
-    WP-05 §10.1. The shipped allowance
-    (:func:`pipeline.estimate_image_tokens_for_set`) assumes every image is a
-    square at the *raster* target and lands at the model's token cap — a true
-    upper bound, and about 1.9x the actual cost of a vector E-size sheet (§2.6).
-    Two facts per page close most of that gap, and both come from a scan that
-    never rasterizes: the aspect ratio, and whether the page has words.
+    The size-free allowance (:func:`pipeline.estimate_image_tokens_for_set`)
+    bounds the full adaptive image budget. Measured pages use their displayed
+    physical size and word presence to choose the same grid as the renderer,
+    then price its exact image geometry. Explicit rows/cols retain fixed grids.
 
     The per-page walk mirrors the renderer exactly rather than approximating it:
     :func:`tiling.image_pixel_sizes` resolves the target through the same
@@ -234,7 +232,7 @@ def estimate_image_tokens_for_bases(
 
 
 def _image_tokens_for(
-    sheet_count: int, bases, *, rows: int, cols: int, model: str,
+    sheet_count: int, bases, *, rows: int | None, cols: int | None, model: str,
 ) -> tuple[int, bool, int]:
     """``(image_tokens, shape_aware, unmeasured_pages)`` — real shapes where we have them.
 
@@ -290,8 +288,8 @@ def estimate_drawing_set_cost(
     *,
     file_count: int = 0,
     model: str = REVIEW_MODEL_DEFAULT,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     synthesize: bool = True,
     batch: bool = False,
     focus: bool = False,
@@ -767,8 +765,8 @@ def estimate_exhaustive_run_cost(
     *,
     file_count: int = 0,
     model: str = REVIEW_MODEL_DEFAULT,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     batch: bool = True,
     critique_batch: bool | None = None,
     focus: bool = False,
