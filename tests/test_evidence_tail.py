@@ -492,18 +492,15 @@ def test_a_truncated_sheet_keys_distinctly():
     assert _key(a) != _key(b)
 
 
-def test_no_cross_qc_contract_bump_was_needed():
-    """WP-03A must not invalidate stored results; WP-03B is where that happens.
+def test_cross_qc_contract_bumps_have_recorded_reasons():
+    """Conditional evidence hashing itself needs no contract bump.
 
-    A tripwire on the counter's value, so any bump has to come through here and
-    say why. It reads 3 rather than 2 because **P8 item 11** bumped it — a
-    separate change with its own reason (``_norm_id`` now folds sheet handles
-    through ``fold_text``, which is host-side binding no key input covers, so a
-    warm entry would keep serving the smaller finding set). Neither WP-03A nor
-    WP-03B contributed to it; that is what this test still asserts, by requiring
-    the value to be exactly what the recorded reasons account for.
+    Version 3 accounted for P8 item 11's host-side sheet-handle normalization.
+    Version 4 isolates the new text-truncation cache-admission policy from
+    legacy readers during mixed-version use or rollback. Neither WP-03A nor
+    WP-03B contributes to the counter; every bump has its own recorded reason.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    assert X._CROSS_QC_CACHE_CONTRACT == 4
 
 
 # --------------------------------------------------------------------------- #

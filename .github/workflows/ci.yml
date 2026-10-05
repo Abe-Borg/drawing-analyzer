@@ -2,7 +2,8 @@
 #
 # Jobs:
 #   * test            — hermetic suite on the Windows + Linux / Py 3.11 + 3.12
-#                       matrix (no API key, no network). Includes the Phase 27
+#                       matrix using the pinned runtime + release constraints
+#                       (no API key, no network). Includes the Phase 27
 #                       §19.1/§19.2 trust gauntlet.
 #   * browser-security — the mandatory headless-Chromium report exploit suite,
 #                       Linux only (a DOM emulator cannot prove CSP / file:// /
@@ -83,14 +84,15 @@ jobs:
           - { os: ubuntu-latest, python: "3.12" }
           - { os: windows-latest, python: "3.11" }
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - name: Install (engine + dev)
+      - name: Install (pinned runtime + engine + dev)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install -c requirements-release.lock -r requirements.txt -e ".[dev]"
+          python -m pip check
       - name: Byte-compile sources
         run: python -m compileall -q src
       - name: PyMuPDF import isolation (I-5)
@@ -104,8 +106,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install (engine + dev + browser test)
@@ -131,8 +133,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Repo secret scan
@@ -172,8 +174,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Build wheel + sdist (locked build tools)

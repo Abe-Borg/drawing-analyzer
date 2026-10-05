@@ -405,17 +405,17 @@ def test_submit_create_failure_deletes_every_uploaded_file():
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
-def test_collect_results_error_releases_files_before_propagating():
+def test_collect_results_error_releases_files_and_degrades():
     # DA-034: an unexpected error collecting a *terminal* batch (results() raising)
-    # must release the uploaded files before the exception propagates — the batch
-    # is ended, so its files are safe to delete.
+    # releases uploaded files and returns retriable per-sheet errors (I-3).
     client = _FakeClient(_succeed)  # status defaults to "ended" (terminal)
     batch = submit_drawing_batch(
         iter([_make_sheet(1), _make_sheet(2)]), client=client, model=OPUS, total=2,
     )
     client.results_raises = RuntimeError("results exploded")
-    with pytest.raises(RuntimeError, match="results exploded"):
-        collect_drawing_batch(batch, client=client, sleep=NOSLEEP)
+    results = collect_drawing_batch(batch, client=client, sleep=NOSLEEP)
+    assert len(results) == 2
+    assert all("retry next run" in result.error for result in results)
     assert sorted(client.files.deleted) == sorted(batch.all_file_ids)
     assert client.files.deleted  # there were files to release
 

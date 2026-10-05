@@ -163,11 +163,13 @@ def test_conflict_is_stamped_with_dual_anchors():
     assert res.input_tokens == 800 and res.output_tokens == 60
 
 
-def test_cross_qc_warm_cache_skips_api_and_billed_tokens():
+@pytest.mark.parametrize("extra_text_chars", [0, 9000, 16000])
+def test_cross_qc_warm_cache_skips_api_and_billed_tokens(extra_text_chars):
     from drawing_analyzer.digest_cache import DigestCache
 
     sheets = [_digest("a.pdf"), _digest("b.pdf")]
     geoms = [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")]
+    geoms[0].sheet_text += "X" * extra_text_chars
     cache = DigestCache(None, persist=False)
     client = _CrossClient([[_CONFLICT]])
 
@@ -181,6 +183,9 @@ def test_cross_qc_warm_cache_skips_api_and_billed_tokens():
     assert cold.complete and cold.cached is False
     assert warm.complete and warm.cached is True
     assert warm.input_tokens == 0 and warm.output_tokens == 0
+    omitted = max(0, len(geoms[0].sheet_text) - 4000)
+    assert cold.text_chars_omitted == warm.text_chars_omitted == omitted
+    assert not cold.budget_degraded and not warm.budget_degraded
     assert [f.to_dict() for f in warm.findings] == [f.to_dict() for f in cold.findings]
     assert client.calls == 1
 
@@ -505,19 +510,166 @@ def test_large_set_shards_by_discipline():
     assert res.shards_planned == 2 and res.shards_completed == 2
 
 
-def test_text_budget_is_loss_aware_not_silent():
-    # DA-028: an over-long text layer is capped, but the omission is COUNTED and
-    # surfaced (budget_degraded / text_chars_omitted) — never a silent slice.
+def test_text_budget_is_disclosed_without_making_the_result_incomplete():
+    # The designed input bound is counted, but no returned findings were lost.
     big = "X" * 9000
     res = cross_sheet_qc(
         [_digest("a.pdf"), _digest("b.pdf")],
         [_geom_txt("a.pdf", "F-D-01-1", big), _geom("b.pdf", "F-A-01-1")],
         client=_CrossClient([[]]), max_retries=0, sleep=_NOOP,
     )
-    assert res.budget_degraded is True
+    assert res.budget_degraded is False
     assert res.text_chars_omitted > 0
     assert res.text_chars_included + res.text_chars_omitted == res.text_chars_total
-    assert res.complete is False           # a degraded budget holds the pass at PARTIAL
+    assert res.complete is True
+    assert res.findings_omitted == 0
+
+
+def test_text_layer_still_uses_the_4000_character_input_bound():
+    budget = X._Budget()
+    text = "A" * 4000 + "TAIL"
+
+    assert X._budgeted_text_layer(text, budget) == "A" * 4000 + "\n[TRUNCATED 4 chars]"
+    assert (budget.total, budget.included, budget.omitted) == (4004, 4000, 4)
+    assert not budget.degraded
+
+
+def test_sharded_text_truncation_is_cached_after_reconciliation():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets, geoms = _mk_two_shard_set()
+    geoms[0].sheet_text += "X" * 9000
+    conflict = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "cross-shard conflict", "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    client = _MapReconcileClient(conflict)
+    cache = DigestCache(None, persist=False)
+
+    cold = cross_sheet_qc(sheets, geoms, client=client, cache=cache, max_retries=0, sleep=_NOOP)
+    assert (client.map_calls, client.reconcile_calls) == (2, 1)
+    warm = cross_sheet_qc(sheets, geoms, client=client, cache=cache, max_retries=0, sleep=_NOOP)
+
+    assert cold.complete and warm.complete and warm.cached
+    assert cold.reconciliation_completed and warm.reconciliation_completed
+    assert cold.text_chars_omitted == warm.text_chars_omitted == len(geoms[0].sheet_text) - 4000
+    assert warm.text_chars_included + warm.text_chars_omitted == warm.text_chars_total
+    assert not cold.budget_degraded and not warm.budget_degraded
+    assert warm.input_tokens == warm.output_tokens == 0
+    assert [f.to_dict() for f in warm.findings] == [f.to_dict() for f in cold.findings]
+    assert len(warm.findings) == 1
+    assert (client.map_calls, client.reconcile_calls) == (2, 1)
+
+
+def test_omitted_findings_stay_incomplete_and_are_not_cached():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets = [_digest("a.pdf"), _digest("b.pdf")]
+    geoms = [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")]
+    findings = [dict(_CONFLICT, text=f"Conflict {i}")
+                for i in range(X.DEFAULT_CROSS_QC_MAX_FINDINGS + 1)]
+    client = _CrossClient([findings])
+    cache = DigestCache(None, persist=False)
+
+    for _ in range(2):
+        result = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                                max_retries=0, sleep=_NOOP)
+        assert result.findings_omitted == 1
+        assert result.budget_degraded and not result.complete and not result.cached
+    assert client.calls == 2
+
+
+def test_cache_refuses_omitted_findings_even_if_completeness_flags_are_clean():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    result = X.CrossQCResult(complete=True, budget_degraded=False, findings_omitted=1)
+    X._put_cross_qc_cache(cache, "cross-qc-test", result)
+    assert cache.get("cross-qc-test") is None
+    assert X._cross_qc_from_cache({
+        "findings": [], "claims": [], "complete": True,
+        "budget_degraded": False, "findings_omitted": 1,
+    }) is None
+
+
+@pytest.mark.parametrize("omission_phase", ["map", "reconcile"])
+def test_sharded_omitted_findings_are_not_cached(omission_phase):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets, geoms = _mk_two_shard_set()
+    geoms[0].sheet_text += "X" * 9000
+    conflict = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "cross-shard conflict", "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    client = _MapReconcileClient(conflict)
+    create = client.messages.create
+
+    def overflowing_response(**kw):
+        response = create(**kw)
+        reconcile = kw["system"].startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60])
+        body = kw["messages"][0]["content"][0]["text"]
+        if ((omission_phase == "reconcile" and reconcile)
+                or (omission_phase == "map" and not reconcile and "SHEET S001" in body)):
+            obj = X._tolerant_json_object(response.content[0].text)
+            finding = conflict if reconcile else dict(
+                conflict, source_quote="sheet text layer",
+                also_on=[{"sheet_handle": "S002", "source_quote": "sheet text layer"}],
+            )
+            obj["findings"] = [dict(finding, text=f"Conflict {i}")
+                               for i in range(X.DEFAULT_CROSS_QC_MAX_FINDINGS + 1)]
+            response.content[0].text = "```json\n" + json.dumps(obj) + "\n```"
+        return response
+
+    client.messages.create = overflowing_response
+    cache = DigestCache(None, persist=False)
+    for _ in range(2):
+        result = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                                max_retries=0, sleep=_NOOP, max_workers=1)
+        assert result.shards_completed == result.shards_planned == 2
+        assert result.reconciliation_completed and result.error is None
+        assert result.text_chars_omitted > 0 and result.findings_omitted == 1
+        assert result.budget_degraded and not result.complete and not result.cached
+    assert (client.map_calls, client.reconcile_calls) == (4, 2)
+
+
+@pytest.mark.parametrize("failure_phase", ["map", "reconcile"])
+def test_sharded_failures_stay_incomplete_with_text_truncation(failure_phase):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets, geoms = _mk_two_shard_set()
+    geoms[0].sheet_text += "X" * 9000
+    client = _MapReconcileClient({
+        "sheet_handle": "S001", "source_quote": "COLO 5 SERVES AREA A",
+        "text": "conflict",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    })
+    create = client.messages.create
+    failures = []
+
+    def failing_response(**kw):
+        reconcile = kw["system"].startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60])
+        body = kw["messages"][0]["content"][0]["text"]
+        if ((failure_phase == "reconcile" and reconcile)
+                or (failure_phase == "map" and not reconcile and "SHEET S001" in body)):
+            failures.append(failure_phase)
+            raise RuntimeError(f"{failure_phase} failed")
+        return create(**kw)
+
+    client.messages.create = failing_response
+    cache = DigestCache(None, persist=False)
+    for _ in range(2):
+        result = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                                max_retries=0, sleep=_NOOP, max_workers=1)
+        assert result.text_chars_omitted > 0 and not result.budget_degraded
+        assert result.error and not result.complete and not result.cached
+        if failure_phase == "map":
+            assert result.shards_completed == 1 and result.shards_planned == 2
+        else:
+            assert result.shards_completed == 2 and not result.reconciliation_completed
+    assert failures == [failure_phase, failure_phase]
 
 
 def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
@@ -836,6 +988,37 @@ def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch)
     assert current != legacy, "the contract must ride the key"
 
 
+@pytest.mark.parametrize("extra_text_chars", [0, 9000])
+def test_cross_qc_cache_isolates_legacy_text_truncation_policy(monkeypatch, extra_text_chars):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets = [_digest("a.pdf"), _digest("b.pdf")]
+    geoms = [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")]
+    geoms[0].sheet_text += "X" * extra_text_chars
+    cache = DigestCache(None, persist=False)
+    client = _CrossClient([[_CONFLICT]])
+    cold = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                          max_retries=0, sleep=_NOOP)
+    assert cold.complete and not cold.cached and client.calls == 1
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 3)
+        legacy.setattr(X._Budget, "degraded", property(
+            lambda budget: budget.omitted > 0 or budget.findings_omitted > 0,
+        ))
+        result = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                                max_retries=0, sleep=_NOOP)
+        assert not result.cached and client.calls == 2
+        assert result.complete is (extra_text_chars == 0)
+        assert result.budget_degraded is (extra_text_chars > 0)
+
+    warm = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                          max_retries=0, sleep=_NOOP)
+    assert warm.complete and warm.cached and client.calls == 2
+    assert warm.text_chars_omitted == cold.text_chars_omitted
+    assert warm.input_tokens == warm.output_tokens == 0
+
+
 # --------------------------------------------------------------------------- #
 # Sheet handles fold before matching (P8 item 11)
 # --------------------------------------------------------------------------- #
@@ -953,7 +1136,7 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # legs validate, and so the stored result, for byte-identical request inputs.
     # A warm entry written under the old normalization would keep serving the
     # smaller finding set forever.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    assert X._CROSS_QC_CACHE_CONTRACT >= 3
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
