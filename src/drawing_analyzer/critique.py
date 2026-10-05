@@ -1366,10 +1366,11 @@ def result_from_outcomes(
 ) -> CritiqueResult:
     """Fold every read's :class:`CritiqueRunOutcome` into one merged :class:`CritiqueResult`.
 
-    ``all_outcomes`` is **every** requested read's outcome — successes and failures
-    alike — so billed tokens are summed across all of them (a response that billed
-    tokens but failed to parse still counts, §14.4) while only the successful reads
-    are merged. Shared by the real-time :func:`critique_sheet_self_consistent` and
+    ``all_outcomes`` is **every** attempted read's outcome, including replacements —
+    successes and failures alike — so billed tokens are summed across all of them
+    (a response that billed tokens but failed to parse still counts, §14.4) while
+    only the successful reads are merged. Shared by the real-time
+    :func:`critique_sheet_self_consistent` and
     the Message-Batches collector (Phase 23C) so a batched sheet is merged, billed,
     and marked partial byte-for-byte the same way. Caching is left to the caller
     (it owns the cache key); a result is complete only when every requested read
@@ -1407,14 +1408,10 @@ def result_from_outcomes(
             len(ok), requested_runs, len(merged), label,
         )
 
-    # A productive result that shipped findings keeps ``error=None`` — the run still
-    # ships them (I-3); its partial-ness is carried honestly by each finding's
-    # ``confidence == NOT_ASSESSED_PARTIAL``. But a partial run that produced NO
-    # merged findings has no finding to carry that signal, so an empty result from
-    # fewer-than-requested valid reads would be indistinguishable from a genuinely
-    # clean sheet (both reads valid + empty). That is exactly the masquerade §14.4 /
-    # §4.4 forbid, so it is surfaced as a stage degradation.
-    partial_empty = not merged and len(ok) < requested_runs
+    # Findings still ship (I-3), but every shortfall must degrade the stage so the
+    # roll-up cannot call an incomplete critique COMPLETE. Finding confidence alone
+    # does not carry stage status, and an empty survivor has no finding to flag.
+    partial = len(ok) < requested_runs
     return CritiqueResult(
         findings=merged,
         claims=claims,
@@ -1426,9 +1423,9 @@ def result_from_outcomes(
         requested_runs=requested_runs,
         completed_runs=len(ok),
         error=(
-            "; ".join(errors)
-            or f"critique partial: only {len(ok)}/{requested_runs} read(s) valid, no findings"
-        ) if partial_empty else None,
+            f"critique partial: only {len(ok)}/{requested_runs} read(s) valid"
+            + ("; " + "; ".join(errors) if errors else "")
+        ) if partial else None,
     )
 
 
@@ -1450,8 +1447,9 @@ def critique_sheet_self_consistent(
 
     ``cache`` (a :class:`~drawing_analyzer.digest_cache.DigestCache`, or ``None``)
     is consulted first; on a hit the merged findings are served with no model
-    call. Each run's failure is tolerated — the merge runs over whatever runs
-    succeeded; only if *every* run fails is an error returned (empty findings).
+    call. If fewer reads succeed than requested, make at most one replacement
+    read before merging. Each failure is tolerated — findings from valid reads
+    still ship, but a remaining shortfall returns an error to degrade the stage.
 
     ``profiles`` (Phase 12) are review-profile checklists injected into the
     critique prompt; they fold into the cache key (so selecting or editing one
@@ -1499,8 +1497,9 @@ def critique_sheet_self_consistent(
     # merged findings are unchanged. A single-read critique gets no breakpoint (it
     # would just pay the cache-write premium for nothing).
     cache_prefix = runs >= 2
-    all_outcomes: list[CritiqueRunOutcome] = [
-        _critique_read(
+
+    def _read(i: int) -> CritiqueRunOutcome:
+        return _critique_read(
             rendered,
             run_id=f"critique_{i + 1}",
             client=client,
@@ -1513,8 +1512,19 @@ def critique_sheet_self_consistent(
             checklist=run_checklists[i],
             cache_prefix=cache_prefix,
         )
-        for i in range(runs)
-    ]
+
+    all_outcomes = [_read(i) for i in range(runs)]
+    failed_run = next((i for i, oc in enumerate(all_outcomes) if not oc.ok), None)
+    if failed_run is not None:
+        # One replacement per sheet, while the shared image prefix is still warm.
+        # Reuse the failed slot's provenance/checklist; retain its original outcome
+        # so billed tokens (including parse failures) remain in the usage totals.
+        _log.info(
+            "critique: replacing failed read %d/%d (%s)",
+            failed_run + 1, runs, rendered.ref.display_label,
+        )
+        all_outcomes.append(_read(failed_run))
+
     result = result_from_outcomes(
         all_outcomes, requested_runs=runs, label=rendered.ref.display_label
     )

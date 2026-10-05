@@ -410,7 +410,8 @@ class ScriptedQCClient(BetaClientMixin):
     ``sabotage`` selects a §19.1 failure-injection mode:
 
     - ``"synthesis"``     — synthesis returns an empty max-tokens response;
-    - ``"critique_read2"``— every sheet's second critique read is malformed;
+    - ``"critique_read2"``— every sheet's second critique read and replacement
+      are malformed;
     - ``"cross_qc"``      — the cross-sheet call returns unparseable text;
     - ``"citation_empty"``— citation returns an empty assessments list (DA-017);
     - ``"identity"``      — the set-identity call returns unparseable text (the
@@ -536,7 +537,7 @@ class ScriptedQCClient(BetaClientMixin):
         key = script.token if script else "<raster>"
         n = self.critique_calls.get(key, 0) + 1
         self.critique_calls[key] = n
-        if self._sabotage == "critique_read2" and n % 2 == 0:
+        if self._sabotage == "critique_read2" and n >= 2:
             return _msg("malformed critique output — no findings object", 200, 20)
         findings, claims = ((), ())
         if script is not None:

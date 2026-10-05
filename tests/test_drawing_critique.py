@@ -474,20 +474,22 @@ def test_transient_error_is_retried_then_succeeds():
 
 def test_all_runs_failing_degrades_to_empty_with_error():
     rendered = _rendered()
-    client = _CritiqueClient([_StatusError(400), _StatusError(400)])   # permanent
+    client = _CritiqueClient([_StatusError(400)] * 3)   # both reads + replacement fail
     res = critique_sheet_self_consistent(rendered, client=client, runs=2,
                                          max_retries=0, sleep=_NOOP)
     assert res.findings == [] and res.runs == 0 and res.error
+    assert client.attempts == 3
 
 
 def test_one_failed_run_still_merges_the_other():
     rendered = _rendered()
     ok = {"sheet_id": "F", "category": "code", "severity": "low",
           "text": "still found this", "tile": [0, 0]}
-    client = _CritiqueClient([_StatusError(400), [ok]])   # run1 fails, run2 ok
+    client = _CritiqueClient([_StatusError(400), [ok], _StatusError(400)])
     res = critique_sheet_self_consistent(rendered, client=client, runs=2,
                                          max_retries=0, sleep=_NOOP)
-    assert res.runs == 1 and len(res.findings) == 1 and res.error is None
+    assert res.runs == 1 and len(res.findings) == 1 and res.error is not None
+    assert client.attempts == 3
 
 
 # --- Review fixes: distinct absences, empty bodies, partial-run caching ------ #
@@ -553,11 +555,12 @@ def test_partial_run_is_returned_but_not_cached():
     cache = DigestCache(None, persist=False)
     ok = {"sheet_id": "F", "category": "code", "severity": "low",
           "text": "found this", "tile": [0, 0]}
-    client = _CritiqueClient([_StatusError(400), [ok]])
+    client = _CritiqueClient([_StatusError(400), [ok], _StatusError(400)])
     res = critique_sheet_self_consistent(
         _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
     )
     assert res.runs == 1 and len(res.findings) == 1
+    assert res.error is not None and client.attempts == 3
     assert cache.stats()["size"] == 0
 
 
@@ -567,22 +570,25 @@ def test_partial_run_is_returned_but_not_cached():
 
 
 class _RawCritiqueClient(BetaClientMixin):
-    """Scripted critique client returning RAW response bodies (str) or Exceptions,
-    so a test can drive a malformed / truncated / prose-only reply the well-formed
-    ``_CritiqueClient`` never produces."""
+    """Scripted critique client returning raw bodies, messages, or exceptions,
+    so tests can drive malformed replies and their billed usage."""
 
     def __init__(self, script):
         self._script = list(script)
         self.attempts = 0
+        self.captured = []
         outer = self
 
         class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 idx = outer.attempts
                 outer.attempts += 1
+                outer.captured.append(kw)
                 item = outer._script[idx] if idx < len(outer._script) else ""
                 if isinstance(item, Exception):
                     raise item
+                if isinstance(item, FakeMessage):
+                    return item
                 return FakeMessage(
                     content=[FakeTextBlock(text=item)],
                     usage=FakeUsage(input_tokens=100, output_tokens=20),
@@ -648,24 +654,88 @@ def test_explicit_empty_schema_is_a_clean_success():
     assert findings == [] and err is None
 
 
-def test_malformed_read_is_not_cached_or_corroborated():
-    # §14.4: two reads, the second malformed → only one VALID read, so nothing is
-    # cached as complete and the surviving finding is NOT_ASSESSED_PARTIAL (never
-    # silently reproduced=True because a malformed read "agreed").
+@pytest.mark.parametrize("failed_run", [0, 1])
+@pytest.mark.parametrize("body", [
+    "",
+    "I reviewed the sheet and it looks fine to me.",
+    '```json\n{"findings": [ {"category":',
+    '```json\n{"findings": broken json here }\n```',
+])
+def test_bad_read_replacement_completes_and_caches(body, failed_run):
+    from drawing_analyzer.models import CONFIDENCE_REPRODUCED
+
+    good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
+                    "text": "riser is undersized", "tile": [0, 0]}])
+    bodies = [good, good, good]
+    bodies[failed_run] = body
+    client = _RawCritiqueClient([
+        FakeMessage(
+            content=[FakeTextBlock(text=text)],
+            usage=FakeUsage(input_tokens=100, output_tokens=20,
+                            cache_creation_input_tokens=900 if i == 0 else 0,
+                            cache_read_input_tokens=700 if i > 0 else 0),
+        )
+        for i, text in enumerate(bodies)
+    ])
+    cache = DigestCache(None, persist=False)
+    rendered = _rendered()
+    res = critique_sheet_self_consistent(
+        rendered, client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP,
+    )
+    assert client.attempts == 3
+    assert res.error is None and res.completed_runs == res.requested_runs == 2
+    assert len(res.findings) == 1 and res.findings[0].reproduced
+    assert res.findings[0].confidence == CONFIDENCE_REPRODUCED
+    assert set(res.findings[0].sources) == {"critique_1", "critique_2"}
+    # The failed response still billed tokens, and the replacement reuses the
+    # identical image prefix/checklist rather than breaking the warm prompt cache.
+    assert (res.input_tokens, res.output_tokens) == (300, 60)
+    assert (res.cache_write_tokens, res.cache_read_tokens) == (900, 1400)
+    assert client.captured[0] == client.captured[1] == client.captured[2]
+    assert client.captured[2]["messages"][0]["content"][-1]["cache_control"] == {
+        "type": "ephemeral",
+    }
+    cached = critique_sheet_self_consistent(
+        rendered, client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP,
+    )
+    assert cached.cached and cached.error is None and client.attempts == 3
+
+
+def test_malformed_read_and_replacement_are_not_cached_or_corroborated():
+    # §14.4: the second read and replacement are malformed → only one VALID read,
+    # so nothing is cached as complete; the survivor is NOT_ASSESSED_PARTIAL
+    # (never silently reproduced=True because a malformed read "agreed").
     from drawing_analyzer.models import CONFIDENCE_NOT_ASSESSED_PARTIAL
 
     cache = DigestCache(None, persist=False)
     good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
                     "text": "riser is undersized", "tile": [0, 0]}])
-    client = _RawCritiqueClient([good, '```json\n{"findings": trunc'])
+    bad = '```json\n{"findings": trunc'
+    client = _RawCritiqueClient([good, bad, bad, good])
     res = critique_sheet_self_consistent(
         _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
     )
     assert res.completed_runs == 1 and res.requested_runs == 2
+    assert client.attempts == 3  # the fourth scripted response is never requested
+    assert res.error is not None and "1/2 read(s) valid" in res.error
+    assert (res.input_tokens, res.output_tokens) == (300, 60)
     assert len(res.findings) == 1
     assert res.findings[0].reproduced is False
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
     assert cache.stats()["size"] == 0            # a malformed read is never frozen clean
+
+
+def test_multiple_bad_reads_get_only_one_replacement():
+    good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
+                    "text": "riser is undersized", "tile": [0, 0]}])
+    client = _RawCritiqueClient(["prose only", "prose only", good, good])
+    cache = DigestCache(None, persist=False)
+    res = critique_sheet_self_consistent(
+        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP,
+    )
+    assert client.attempts == 3 and res.completed_runs == 1
+    assert res.error is not None and len(res.findings) == 1
+    assert cache.stats()["size"] == 0
 
 
 def test_two_valid_reads_stamp_real_per_read_provenance():

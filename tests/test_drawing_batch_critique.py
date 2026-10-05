@@ -340,6 +340,7 @@ def test_partial_read_failure_merges_survivor_and_marks_partial():
     _batch, results = _run(client, [_make_sheet(1)], cache=cache, runs=2)
     _ref, res = results[0]
     assert res.completed_runs == 1 and res.requested_runs == 2
+    assert res.error is not None and "1/2 read(s) valid" in res.error
     assert len(res.findings) == 1
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
     # A partial result is never frozen under the full-runs key (DA-008): a second
@@ -347,6 +348,30 @@ def test_partial_read_failure_merges_survivor_and_marks_partial():
     c2 = _FakeClient(_succeed)
     _run(c2, [_make_sheet(1)], cache=cache, runs=2)
     assert c2.files.uploaded_ids and c2.create_calls
+
+
+@pytest.mark.parametrize("body", [
+    "I reviewed the sheet and it looks fine to me.",
+    '```json\n{"findings": trunc',
+    '```json\n{"findings": broken json here }\n```',
+])
+def test_collect_bad_schema_degrades_even_with_surviving_findings(body):
+    def responder(req):
+        result = _succeed(req)
+        if req["custom_id"].endswith("__r1"):
+            result.result.message.content = [FakeTextBlock(text=body)]
+        return result
+
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(responder)
+    _batch, results = _run(client, [_make_sheet(1)], cache=cache)
+    _ref, res = results[0]
+    assert res.completed_runs == 1 and res.requested_runs == 2
+    assert res.error is not None and "1/2 read(s) valid" in res.error
+    assert len(res.findings) == 1
+    assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
+    assert (res.input_tokens, res.output_tokens) == (200, 40)
+    assert cache.stats()["size"] == 0 and client.messages_create_calls == []
 
 
 def test_complete_result_is_cached_and_second_run_is_a_hit():
