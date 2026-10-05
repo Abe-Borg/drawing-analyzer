@@ -58,20 +58,21 @@ request in hand was valid. When per-item recovery is enabled
 collection budget (:func:`_rescue_reserve_seconds`), gives up on a batch whose
 request counts haven't moved for the stall window (:func:`_stall_timeout_seconds`
 — shorter on the primary batch than on the resubmissions that follow it)
-("stalled"), best-effort cancels the abandoned batch (its results will never
-be read, so left running it only burns quota and pins the uploaded files), and
-recovers every unresolved sheet through the same ``recovery_transport`` — the
+("stalled"), best-effort cancels the abandoned batch, harvests its completed
+items once the in-flight requests finish, and recovers every unresolved sheet
+through the same ``recovery_transport`` — the
 pipeline's ``RECOVERY_BATCH`` resubmits them as fresh batches (never real-time),
 so a stuck Batches backend is retried as a batch instead of degrading the run
 to full-price direct calls or losing it.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.tokenizer import estimate_image_tokens_total
@@ -215,14 +216,22 @@ DEFAULT_RESCUE_RESERVE_SECONDS = 30 * 60
 #
 # The price is that a collect which harvests may run past its nominal bound by
 # up to this much per abandoned batch (so at most one primary plus
-# :func:`_max_batch_resubmit_rounds` resubmissions). Five minutes is far past
-# the seconds an accepted cancel takes to settle, and the 25% cap keeps a small
-# caller-supplied bound from being overshot by a multiple of itself.
-DEFAULT_HARVEST_BUDGET_SECONDS = 5 * 60
+# :func:`_max_batch_resubmit_rounds` resubmissions). Cancel does NOT interrupt
+# in-flight requests: they finish generating and are billed before the batch
+# reaches ``ended``. Adaptive thinking can spend the full output envelope, so
+# allow one full generation at a conservative 10 tokens/s, plus cancel grace.
+# Use the largest ACTUAL submitted cap, including raised-cap retries, rather
+# than a slice of the collection budget. ``DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN``
+# overrides this finite bound; see :func:`_harvest_budget_seconds`.
+DEFAULT_HARVEST_TOKENS_PER_SECOND = 10.0
+DEFAULT_HARVEST_CANCEL_GRACE_SECONDS = 5 * 60
+DEFAULT_HARVEST_BUDGET_SECONDS = (
+    DEFAULT_DIGEST_MAX_TOKENS / DEFAULT_HARVEST_TOKENS_PER_SECOND
+    + DEFAULT_HARVEST_CANCEL_GRACE_SECONDS
+)
 
-# Cadence and error tolerance for that harvest poll. Short and shallow on
-# purpose: the question is only "has the async cancel landed?", which a batch
-# that is going to settle answers within seconds.
+# Cadence and error tolerance for that harvest poll. Check promptly once the
+# last in-flight generation finishes, without restarting the main stall watch.
 _HARVEST_POLL_INTERVAL_SECONDS = 5.0
 _HARVEST_MAX_POLL_ERRORS = 3
 
@@ -704,10 +713,10 @@ def _cancel_batch(
 ) -> bool:
     """Best-effort cancel of a batch this run has given up collecting.
 
-    Canceling is the correct disposition for a stuck batch: its results will
-    never be read (the run is about to digest the sheets directly), so left
-    running it can only keep burning processing quota — and as long as it MAY
-    still be running, the uploaded files it references cannot be released.
+    Cancellation stops queued work, but in-flight requests still finish and
+    are billed. Recovery callers harvest those results before resubmitting
+    unresolved sheets. As long as the batch MAY still be running, the uploaded
+    files it references cannot be released.
     Returns ``True`` when the API accepted the cancellation (the caller may
     then delete the uploaded files once the rescue is done); ``False`` leaves
     the remote batch presumed running, so the files stay retained for it.
@@ -717,25 +726,49 @@ def _cancel_batch(
     except Exception as exc:  # noqa: BLE001 - cancel is advisory; the rescue proceeds either way
         _log.warning("batch %s cancel failed: %s", batch_id, summarize_exc(exc))
         return False
-    _log.info("batch %s canceled (this run will not collect it)", batch_id)
+    _log.info("batch %s cancellation accepted", batch_id)
     if on_log is not None:
         on_log(f"Canceled remote batch {batch_id}")
     return True
 
 
-def _harvest_budget_seconds(max_elapsed_seconds: float) -> float:
-    """How long a harvest may spend, derived from the caller's FULL bound.
+def _harvest_budget_seconds(
+    max_elapsed_seconds: float, *, request_params: Iterable[dict | None] = (),
+) -> float:
+    """Bound cancellation harvest by the longest submitted generation.
 
-    ``min(``:data:`DEFAULT_HARVEST_BUDGET_SECONDS```, 25%)``, clamped at zero.
-    Deliberately NOT a slice of what is *left*: the harvest's cost is added back
-    to the caller's start mark, so it does not consume the remaining budget, and
-    scaling it to a nearly-exhausted one would shrink the harvest to nothing on
-    exactly the ``detached`` path where it recovers the most. A non-positive
-    bound (the tests force an immediate detach that way) yields zero and skips
-    the harvest entirely — the caller then resubmits everything, which is
-    today's behavior: it loses money but never loses sheets.
+    Allow the largest actual ``max_tokens`` at 10 tokens/s, plus five minutes
+    for cancellation to settle. Requests generate concurrently, so this is a
+    maximum, not a sum. Missing caps use the digest default. A positive caller
+    collection bound never shortens this wait: harvest time is added back to
+    the caller's start mark. Preserve an explicit non-positive bound's immediate
+    detach behavior by skipping harvest.
+
+    ``DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN`` overrides the bound per call,
+    floored at one minute. Malformed, non-positive or non-finite values use the
+    request-derived default, keeping the wait bounded even for ``inf``/``nan``.
+    A shorter override can reintroduce duplicate billing if generation outlasts
+    it; it is an explicit wall-clock tradeoff.
     """
-    return max(0.0, min(DEFAULT_HARVEST_BUDGET_SECONDS, max_elapsed_seconds * 0.25))
+    if max_elapsed_seconds <= 0:
+        return 0.0
+    raw = os.environ.get("DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN")
+    if raw and raw.strip():
+        try:
+            seconds = float(raw.strip()) * 60.0
+        except ValueError:
+            seconds = 0.0
+        if math.isfinite(seconds) and seconds > 0:
+            return max(60.0, seconds)
+    max_tokens = max(
+        (int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
+         for params in request_params if params is not None),
+        default=DEFAULT_DIGEST_MAX_TOKENS,
+    )
+    return (
+        max_tokens / DEFAULT_HARVEST_TOKENS_PER_SECOND
+        + DEFAULT_HARVEST_CANCEL_GRACE_SECONDS
+    )
 
 
 def _park_usage_attempts(slot: "_Slot", digest: SheetDigest) -> None:
@@ -771,7 +804,8 @@ def _poll_for_harvest(
     processing; remote batch left running (files retained)" warning that would
     describe something else entirely in the diagnostics trace someone reads
     when this goes wrong. The question here is narrow: has the asynchronous
-    cancel landed yet? A batch that is going to settle answers in seconds.
+    cancel landed yet? In-flight requests must finish generating first, which
+    can take longer than the primary stall watch for a large output envelope.
 
     Returns the terminal ``processing_status``, or ``None`` when it did not
     settle within ``budget_seconds`` or the retrieves kept failing. Always makes
@@ -796,9 +830,10 @@ def _poll_for_harvest(
             status = str(_get(batch, "processing_status", "") or "")
             if status in ("ended", "failed", "expired", "canceled"):
                 return status
-        if time.monotonic() - started >= budget_seconds:
+        remaining = budget_seconds - (time.monotonic() - started)
+        if remaining <= 0:
             return None
-        sleep(_HARVEST_POLL_INTERVAL_SECONDS)
+        sleep(min(_HARVEST_POLL_INTERVAL_SECONDS, remaining))
 
 
 @dataclass(frozen=True)
@@ -1253,7 +1288,9 @@ def _recover_via_batch_resubmit(
                 batch_id=retry_id,
                 client=client, cache=cache,
                 on_log=on_log, sleep=sleep,
-                budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+                budget_seconds=_harvest_budget_seconds(
+                    max_elapsed_seconds, request_params=(params for _, params in pending),
+                ),
             )
             started += harvest.elapsed  # additional time, not deducted
             if harvest.read_failed:
@@ -1542,7 +1579,9 @@ def _resubmit_failed_items(
                 batch_id=retry_id,
                 client=client, cache=cache,
                 on_log=on_log, sleep=sleep,
-                budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+                budget_seconds=_harvest_budget_seconds(
+                    max_elapsed_seconds, request_params=(params for _, params in retry),
+                ),
             )
             started += harvest.elapsed  # additional time, not deducted
             if harvest.read_failed:
@@ -2472,7 +2511,9 @@ def collect_drawing_batch(
                     batch_id=batch.batch_id,
                     client=client, cache=cache,
                     on_log=on_log, sleep=sleep,
-                    budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+                    budget_seconds=_harvest_budget_seconds(
+                        max_elapsed_seconds, request_params=(s.params for s in submitted),
+                    ),
                 )
                 # The harvest's time is additional, not deducted: move the mark
                 # every later ``remaining`` is measured from, so the rescue gets
