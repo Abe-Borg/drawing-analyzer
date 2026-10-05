@@ -24,7 +24,7 @@ from drawing_analyzer.cost import (
     format_exhaustive_cost_prompt,
 )
 
-OPUS = "claude-opus-5"
+OPUS = "claude-opus-5-5"
 
 
 # --------------------------------------------------------------------------- #
@@ -48,7 +48,8 @@ def test_price_for_exact_and_unknown():
 def test_price_for_resolves_suffixed_variant():
     # Dated / fast variants (delimited by "-") resolve to the base model's price.
     assert price_for("claude-haiku-4-5-20251001") == MODEL_PRICING["claude-haiku-4-5"]
-    assert price_for("claude-opus-5-fast") == MODEL_PRICING[OPUS]
+    assert price_for("claude-opus-5-5-fast") == MODEL_PRICING[OPUS]
+    assert price_for("claude-opus-5-fast") == MODEL_PRICING["claude-opus-5"]
     assert price_for("claude-opus-4-8-fast") == MODEL_PRICING["claude-opus-4-8"]
 
 
@@ -62,24 +63,28 @@ def test_price_for_requires_delimiter_not_bare_prefix():
 
 
 def test_friendly_model_name():
-    assert friendly_model_name(OPUS) == "Opus 5"
+    assert friendly_model_name(OPUS) == "Opus 5.5"
+    assert friendly_model_name("claude-opus-5") == "Opus 5"
+    assert friendly_model_name("claude-sonnet-5-5") == "Sonnet 5.5"
     assert friendly_model_name("claude-sonnet-5") == "Sonnet 5"
     assert friendly_model_name("claude-sonnet-4-6") == "Sonnet 4.6"
     assert friendly_model_name("mystery") == "mystery"  # falls back to the id
 
 
 def test_estimate_request_cost_opus():
-    # 1M in + 1M out = $5 + $25 = $30.
-    assert estimate_request_cost(1_000_000, 1_000_000, model=OPUS) == pytest.approx(30.0)
-    # 200k in / 50k out = 0.2*5 + 0.05*25 = 1.0 + 1.25 = 2.25.
-    assert estimate_request_cost(200_000, 50_000, model=OPUS) == pytest.approx(2.25)
+    # Opus 5.5: 1M in + 1M out = $4 + $20 = $24.
+    assert estimate_request_cost(1_000_000, 1_000_000, model=OPUS) == pytest.approx(24.0)
+    # 200k in / 50k out = 0.2*4 + 0.05*20 = 0.8 + 1.0 = 1.8.
+    assert estimate_request_cost(200_000, 50_000, model=OPUS) == pytest.approx(1.8)
+    # Opus 5 keeps its own $5 / $25 rate.
+    assert estimate_request_cost(1_000_000, 1_000_000, model="claude-opus-5") == pytest.approx(30.0)
 
 
 def test_estimate_request_cost_batch_is_half():
     full = estimate_request_cost(1_000_000, 1_000_000, model=OPUS)
     batch = estimate_request_cost(1_000_000, 1_000_000, model=OPUS, batch=True)
     assert batch == pytest.approx(full * BATCH_DISCOUNT)
-    assert batch == pytest.approx(15.0)
+    assert batch == pytest.approx(12.0)
 
 
 def test_estimate_request_cost_unknown_model_is_none():
@@ -422,7 +427,7 @@ def test_spec_chars_real_time_path_uses_cache_write_once_read_many():
     spec_tokens = 40_000 // 4
     price = MODEL_PRICING[OPUS]
     write = (spec_tokens / 1_000_000) * price.input_per_mtok * 1.25
-    read = (spec_tokens / 1_000_000) * price.input_per_mtok * 0.10
+    read = (spec_tokens / 1_000_000) * price.input_per_mtok * price.cache_read_multiplier
     expected = write + read * 9  # 1 write + 9 reads across 10 sheets
     assert delta == pytest.approx(expected)
 
@@ -572,22 +577,23 @@ def test_no_dialog_claims_the_qc_stages_always_bill():
 def test_the_copy_fix_moved_no_price():
     """§9.3 case 8, second half. Wording only — every total is unchanged.
 
-    Values captured from the estimator before the copy edit. If one of these
+    Values captured from the estimator before the copy edit (re-captured at
+    the Opus 5.5 rates when the default generation moved). If one of these
     moves, someone "corrected" arithmetic the plan established is already
     correct (§2.4), and the batch/real-time relationship below is the property
     that would silently invert.
     """
     assert estimate_drawing_set_cost(
         10, file_count=1, model=OPUS, batch=True, spec_chars=40_000
-    ).total_cost == pytest.approx(5.10, abs=0.005)
+    ).total_cost == pytest.approx(4.08, abs=0.005)
     assert estimate_drawing_set_cost(
         10, file_count=1, model=OPUS, batch=False, spec_chars=40_000
-    ).total_cost == pytest.approx(9.65, abs=0.005)
+    ).total_cost == pytest.approx(7.70, abs=0.005)
 
     ex = estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, batch=True,
                                       critique_batch=True, spec_chars=40_000)
-    assert ex.low_cost == pytest.approx(14.88, abs=0.005)
-    assert ex.high_cost == pytest.approx(16.26, abs=0.005)
+    assert ex.low_cost == pytest.approx(11.93, abs=0.005)
+    assert ex.high_cost == pytest.approx(13.20, abs=0.005)
 
 
 def test_a_dialog_without_specifications_says_nothing_about_them():

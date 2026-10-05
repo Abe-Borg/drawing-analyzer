@@ -42,7 +42,7 @@ from typing import Any, Iterable
 
 from .core.api_config import (
     HARVEST_OUTPUT_CAP,
-    MODEL_SONNET_5,
+    MODEL_SONNET_5_5,
     PHASE_HARVEST,
     apply_effort_config,
     apply_thinking_config,
@@ -170,7 +170,7 @@ def harvest_model() -> str:
     judgment: the item has already been found, and the host re-binds it to its
     sheet afterwards. Sonnet 5 covers it at a fraction of the flagship's cost.
     """
-    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_5
+    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_5_5
 
 
 # --------------------------------------------------------------------------- #

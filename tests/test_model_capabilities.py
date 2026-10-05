@@ -16,6 +16,8 @@ from drawing_analyzer.core.pricing import MODEL_PRICING
 from drawing_analyzer.core.tokenizer import _LOCAL_SAFETY_FACTORS
 
 OPUS_5 = "claude-opus-5"
+OPUS_5_5 = "claude-opus-5-5"
+SONNET_5_5 = "claude-sonnet-5-5"
 SONNET_5 = "claude-sonnet-5"
 OPUS_48 = "claude-opus-4-8"
 SONNET_46 = "claude-sonnet-4-6"
@@ -28,12 +30,12 @@ HAIKU = "claude-haiku-4-5"
 
 
 def test_pipeline_defaults_are_the_current_generation():
-    assert api.REVIEW_MODEL_DEFAULT == OPUS_5
-    assert api.VERIFICATION_ESCALATION_MODEL == OPUS_5
-    assert api.CROSS_CHECK_MODEL_DEFAULT == SONNET_5
-    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5
-    # Chat is deliberately NOT Opus 5 — see the web-fetch tests below.
-    assert api.CHAT_MODEL_DEFAULT == SONNET_5
+    assert api.REVIEW_MODEL_DEFAULT == OPUS_5_5
+    assert api.VERIFICATION_ESCALATION_MODEL == OPUS_5_5
+    assert api.CROSS_CHECK_MODEL_DEFAULT == SONNET_5_5
+    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5_5
+    # Chat is deliberately NOT Opus — see the web-fetch tests below.
+    assert api.CHAT_MODEL_DEFAULT == SONNET_5_5
 
 
 def test_stages_that_deliberately_run_on_sonnet():
@@ -46,13 +48,28 @@ def test_stages_that_deliberately_run_on_sonnet():
 
     # Citation is a CAPABILITY choice, not a cost one: web_fetch does not exist
     # on Opus 5, so an Opus citation check can only read search snippets.
-    assert citation_model() == SONNET_5
-    assert api.model_capabilities(SONNET_5).supports_web_fetch is True
+    assert citation_model() == SONNET_5_5
+    assert api.model_capabilities(SONNET_5_5).supports_web_fetch is True
+    assert api.model_capabilities(OPUS_5_5).supports_web_fetch is False
     assert api.model_capabilities(OPUS_5).supports_web_fetch is False
     # Advisory-only, with a deterministic regex backstop.
-    assert default_identity_model() == SONNET_5
+    assert default_identity_model() == SONNET_5_5
     # Pure structuring of one prose item.
-    assert harvest_model() == SONNET_5
+    assert harvest_model() == SONNET_5_5
+
+
+def test_5_5_generation_matches_the_previous_generation_request_shape():
+    # Opus 5.5 / Sonnet 5.5 are drop-in successors: same ceilings, effort
+    # roster, vision tier, structured outputs; Opus 5.5 keeps the refusal
+    # fallback opt-in that Opus 5 declared.
+    for new, old in ((OPUS_5_5, OPUS_5), (SONNET_5_5, SONNET_5)):
+        assert api.model_capabilities(new) == api.model_capabilities(old)
+    assert api.model_capabilities(OPUS_5_5).supports_refusal_fallback is True
+    assert OPUS_5_5 in api.OPUS_MODELS and SONNET_5_5 not in api.OPUS_MODELS
+    # Effort is always explicit (Opus 5.5's API default is medium, not high).
+    for model in (OPUS_5_5, SONNET_5_5):
+        assert api.effort_config_for(model=model, phase=api.PHASE_REVIEW) == {"effort": "high"}
+        assert api.thinking_config_for(model=model, phase=api.PHASE_REVIEW) == {"type": "adaptive"}
 
 
 def test_previous_generation_stays_registered_as_a_valid_override():

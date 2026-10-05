@@ -6,6 +6,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Default models move to the 5.5 generation.** Review/digest/critique and the
+  investigation escalation tier now default to Claude Opus 5.5
+  (`claude-opus-5-5`); verification, set identity, prose harvest, citation check
+  and the report chat default to Claude Sonnet 5.5 (`claude-sonnet-5-5`). Same
+  families, same 1M context / 128k output / tokenizer / effort roster / hi-res
+  vision. Opus 5.5 is priced $4 / $20 per MTok with 0.05x cache reads (Sonnet
+  5.5 unchanged at $2 / $10); `ModelPrice` gains a per-model
+  `cache_read_multiplier` so the estimate prices Opus 5.5 cache reads at the
+  true rate. Opus 5.5 keeps the server-side refusal-fallback opt-in. Opus 5 and
+  Sonnet 5 stay registered as valid `DRAWING_ANALYZER_*_MODEL` overrides. No
+  request shape changes: the app never sent `thinking: disabled`, sampling
+  parameters or a forced `tool_choice`, and states `effort` explicitly (Opus
+  5.5's API default is `medium`). Model id is part of every cache key, so
+  digest/critique caches repopulate once on first run.
+
 ## [1.7.0] - 2026-09-21
 
 ### Added
