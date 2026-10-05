@@ -40,7 +40,7 @@ triggers on `v*` tags for visibility only.
 ## Architecture
 
 A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
-*sheet*, rendered to an overview + 6×6 tile grid and sent — together with its
+*sheet*, rendered to an overview + a per-page tile grid and sent — together with its
 verbatim vector text layer — in a single vision request per sheet, returning a
 structured Markdown digest plus a machine-readable findings block.
 `pipeline.extract_drawing_context()` returns a `DrawingContext`. The per-module
@@ -84,8 +84,9 @@ map lives in `src/drawing_analyzer/__init__.py`.
   size + mtime), re-checked at consumption. The GUI holds them under the same
   generation guard as the profile suggestions. `_add_pdfs` refreshes the summary
   before preflight clears the previous selection's bases.
-  `pipeline.estimate_image_tokens_for_set` stays the conservative allowance
-  (every image a square at the raster target, at the model cap).
+  `pipeline.estimate_image_tokens_for_set` remains a true upper bound: without
+  sizes it covers the adaptive 100-image budget (478,400 tokens/page on Opus 5).
+  Explicit 6×6 / fixed-grid mode keeps the legacy 177,008 allowance.
   `cost.estimate_image_tokens_for_bases` prices each page from a `SheetCostBasis`
   (displayed w/h, vector/raster/unknown, capped text length, geometry
   availability and error — no words, full text, image bytes, or path). Aspect
@@ -96,6 +97,35 @@ map lives in `src/drawing_analyzer/__init__.py`.
   tile: blank suppression is decided from rendered pixels and must never be
   predicted from word absence. An `unknown` page takes the conservative
   allowance and is never assumed vector; an unmeasurable page is still quoted.
+- **Physical-size grids:** `tiling.choose_grid` is the single resolver for
+  rendering, no-render geometry, render identity and image cost geometry.
+  Default `rows=None, cols=None` means adaptive; pinning either dimension wins
+  (the unpinned dimension stays six). `DRAWING_ANALYZER_FIXED_GRID=1`, read per
+  call, restores fixed 6×6. Search rectangular grids within 100 images, price
+  each with `image_pixel_sizes` + Opus 5's tokenizer, and minimize image tokens
+  subject to every overlapping tile meeting ANSI E's 44×34 inch 6×6 minimum
+  DPI (183.39 vector / 234.17 raster at 8% overlap). Compare like with like and
+  resolve the <=20-image 2576 px target versus >20-image 1560/1992 targets
+  before testing DPI. A page with no feasible grid fails explicitly. Cost
+  estimation substitutes the conservative allowance and discloses the fallback;
+  digest and critique prescans report that page's failure and continue, keeping
+  both stages partial while processing the other pages. Keep I-1.
+  ANSI E (34×44) and ARCH E1 (30×42), either orientation, retain 6×6 and their
+  cache keys; no prompt/schema/render-identity version bump is needed because
+  actual rows/cols/target already key the render. Level 2 hashes PNG bytes plus
+  tile layout on non-6×6 grids, so blank suppression cannot collide grids;
+  6×6 retains the legacy key format.
+  Consumers must use `RenderedSheet` / `SheetGeometry.rows, cols`, including
+  label parsing, TILE anchors, cross-QC legs, verify/investigate crops, artifacts,
+  and critique spool/upload matching. Never compare adaptive pages to global
+  `None` grid arguments. Cost bases choose the same grid before pricing it with
+  the stage's model; a cheaper model changes pricing, not the selected geometry.
+  Measured Opus 5 image tokens per read, before blank suppression: vector
+  Letter 93,013 → 7,399 (20×1, −92.0%, 183.53 DPI); vector Tabloid 77,905 →
+  14,352 (2×1, −81.6%, 234.18 DPI); raster Letter 151,619 → 9,568 (1×1,
+  −93.7%, 234.18 DPI). The 20×1 strip result follows the image-count target
+  discontinuity; square grids are not necessarily the token minimum. Digest
+  and both critique reads benefit. E / E1 counts and images stay unchanged.
 - **Work dirs:** verify, investigate, and markup create a `drawing_qc_*` temp
   dir when the caller supplied no `work_dir`. `pipeline._prune_stale_work_dirs`
   reaps them on the way **in** (`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default

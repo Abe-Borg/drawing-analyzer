@@ -584,13 +584,13 @@ def test_the_copy_fix_moved_no_price():
     that would silently invert.
     """
     assert estimate_drawing_set_cost(
-        10, file_count=1, model=OPUS, batch=True, spec_chars=40_000
+        10, file_count=1, model=OPUS, rows=6, cols=6, batch=True, spec_chars=40_000
     ).total_cost == pytest.approx(4.08, abs=0.005)
     assert estimate_drawing_set_cost(
-        10, file_count=1, model=OPUS, batch=False, spec_chars=40_000
+        10, file_count=1, model=OPUS, rows=6, cols=6, batch=False, spec_chars=40_000
     ).total_cost == pytest.approx(7.70, abs=0.005)
 
-    ex = estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, batch=True,
+    ex = estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, rows=6, cols=6, batch=True,
                                       critique_batch=True, spec_chars=40_000)
     assert ex.low_cost == pytest.approx(11.93, abs=0.005)
     assert ex.high_cost == pytest.approx(13.20, abs=0.005)

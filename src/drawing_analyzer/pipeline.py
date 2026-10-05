@@ -50,6 +50,7 @@ from .models import (
     RunConfiguration,
     RunUsage,
     SheetGeometry,
+    SheetRef,
     StageResult,
     UsageRecord,
     resolve_run_configuration,
@@ -752,8 +753,8 @@ def _combine(
 def _rendered_stream(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     geometry_sink: list | None,
     only: "set[tuple[str, int]] | None" = None,
@@ -846,8 +847,8 @@ class _GeometryOmissionSink:
 def _digest_sheets_concurrent(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     client: Any,
     model: str,
@@ -942,8 +943,8 @@ def _digest_sheets_concurrent(
 def _digest_sheets_via_batch(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     client: Any,
     model: str,
@@ -1060,8 +1061,8 @@ def _refkey(ref: Any) -> tuple[str, int]:
 def _level1_partition(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     cache: Any,
     model: str,
@@ -1071,6 +1072,7 @@ def _level1_partition(
     focus: str | None,
     specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -1084,7 +1086,10 @@ def _level1_partition(
       the render stream's ``only`` so exactly those sheets rasterize;
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
-    - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
+    - ``geometries`` — every successfully scanned sheet's geometry, for QC.
+
+    Failed pages are reported via ``on_page_error`` and excluded from both
+    cache hits and render misses, so the rest of the set still processes.
     """
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     miss_only: set[tuple[str, int]] = set()
@@ -1093,7 +1098,8 @@ def _level1_partition(
     focus_frag = focus_cache_fragment(focus)
     specs_frag = specs_cache_fragment(specs_text)
     for ref, identity, geometry in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, on_page_error=on_page_error,
     ):
         geometries.append(geometry)
         key = digest_cache_key_level1(
@@ -1231,14 +1237,15 @@ class _QCResult:
 def _critique_level1_partition(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     cache: Any,
     model: str,
     runs: int,
     profiles_key: str | None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "tuple[dict, set, dict]":
     """Pre-render level-1 cache scan for the critique stage (Phase 19B, §11.5).
 
@@ -1278,7 +1285,8 @@ def _critique_level1_partition(
     # does) needs no assumption about the caller's path-list ordering.
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     for ref, identity, _geom in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, on_page_error=on_page_error,
     ):
         key = critique_cache_key_level1(
             identity,
@@ -1312,8 +1320,8 @@ def _critique_level1_partition(
 def _run_critique_stage(
     paths: list[Path],
     *,
-    rows: int,
-    cols: int,
+    rows: int | None,
+    cols: int | None,
     overlap_frac: float,
     client: Any,
     cache: Any,
@@ -1328,6 +1336,7 @@ def _run_critique_stage(
     on_status: StatusCallback | None = None,
     render_spool: Any = None,
     reusable_uploads: "list[Any] | None" = None,
+    sheet_geometries: "list[SheetGeometry] | None" = None,
     recovery_state: Any = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
@@ -1376,12 +1385,20 @@ def _run_critique_stage(
     level1_identities: dict[tuple[str, int], str] = {}
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
+    prescan_degraded: list[str] = []
+
+    def _on_prescan_error(ref: SheetRef, exc: Exception) -> None:
+        prescan_degraded.append(
+            f"{ref.display_label}: page could not be prescanned ({type(exc).__name__})"
+        )
+
     if (cache is not None or use_batch or
             (recovery_state is not None and (recovery_state.recovered or recovery_state.blocked))):
         cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
+            on_page_error=_on_prescan_error,
         )
         if cached_by_ref:
             _log.info(
@@ -1417,7 +1434,7 @@ def _run_critique_stage(
     workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
-    degraded: list[str] = recovery_degraded
+    degraded: list[str] = prescan_degraded + recovery_degraded
     # Sheets the input merge could not produce at all — spool load and the
     # one-page re-render fallback both returned None. These used to be dropped
     # silently by ``_ordered_inputs``, so the stage reported COMPLETE having
@@ -1519,6 +1536,26 @@ def _run_critique_stage(
 
     miss_total = total if only is None else len(only)
 
+    grids_by_ref = {
+        _refkey(g.ref): (g.rows, g.cols) for g in sheet_geometries or []
+    }
+
+    def _grid_matches(item: Any, key: tuple[str, int]) -> bool:
+        if rows is not None or cols is not None or tiling.fixed_grid_enabled():
+            expected = tiling.choose_grid(72, 72, rows=rows, cols=cols)
+        else:
+            expected = grids_by_ref.get(key)
+            if expected is None and hasattr(item, "page_width_pt") and hasattr(item, "page_height_pt"):
+                expected = tiling.choose_grid(
+                    item.page_width_pt, item.page_height_pt,
+                    overlap_frac=overlap_frac, is_raster=item.is_raster,
+                )
+            if expected is None:
+                # Uploaded manifests have no dimensions. Without page geometry,
+                # a direct stage caller must render rather than guess its grid.
+                return False
+        return (getattr(item, "rows", -1), getattr(item, "cols", -1)) == expected
+
     def _rendered_for_critique():
         """Yield critique inputs in page order, reusing exact digest work.
 
@@ -1606,8 +1643,7 @@ def _run_critique_stage(
                 if (
                     key in target
                     and key not in reusable_by_ref
-                    and int(getattr(reusable, "rows", -1)) == rows
-                    and int(getattr(reusable, "cols", -1)) == cols
+                    and _grid_matches(reusable, key)
                     and bool(getattr(reusable, "available", False))
                 ):
                     reusable_by_ref[key] = reusable
@@ -1633,7 +1669,8 @@ def _run_critique_stage(
                 except Exception as exc:  # noqa: BLE001 - one-page fallback below
                     _log.warning("render reuse load failed for %s: %s", key, exc)
                     return None
-                if rendered is not None and _refkey(rendered.ref) == key:
+                if (rendered is not None and _refkey(rendered.ref) == key
+                        and _grid_matches(rendered, key)):
                     return rendered
                 return None
 
@@ -2608,8 +2645,8 @@ def _tally_line(
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     model: str = REVIEW_MODEL_DEFAULT,
     client: Any = None,
@@ -2647,6 +2684,10 @@ def extract_drawing_context(
     confirm_large_set: bool = False,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
+
+    With rows/cols omitted, each page chooses its grid from displayed physical
+    size, preserving the vector/raster ANSI E 6x6 DPI floor. Explicit dimensions
+    pin the grid; DRAWING_ANALYZER_FIXED_GRID=1 restores the fixed default.
 
     ``progress`` (if given) is invoked as ``progress(done, total, label)`` as
     each sheet finishes and once at completion, so a GUI can show "k/n".
@@ -2875,7 +2916,9 @@ def extract_drawing_context(
         model=model,
         transport=_transport_plan_name(use_batch, critique_use_batch),
         cache=bool(cache is not None),
-        grid=f"{rows}x{cols}",
+        grid=(f"{rows or tiling.DEFAULT_GRID_ROWS}x{cols or tiling.DEFAULT_GRID_COLS}"
+              if rows is not None or cols is not None else
+              "fixed 6x6" if tiling.fixed_grid_enabled() else "per-page"),
         mode=(
             "exhaustive_qc" if config.exhaustive_qc
             else "deterministic_audit_only" if config.deterministic_audit_only
@@ -3072,6 +3115,7 @@ def extract_drawing_context(
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
             effort=effort, focus=focus or None, specs_text=specs_text or None,
             snapshot_by_path=snapshot_by_path,
+            on_page_error=_on_page_error,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -3732,6 +3776,7 @@ def extract_drawing_context(
                 use_batch=critique_use_batch, on_log=on_log, on_status=on_status,
                 render_spool=render_spool,
                 reusable_uploads=reusable_uploads,
+                sheet_geometries=sheet_geometries,
                 recovery_state=recovery_state,
             )
             numeric_claims.extend(c_claims)
@@ -4156,24 +4201,29 @@ def extract_drawing_context(
 def estimate_image_tokens_for_set(
     sheet_count: int,
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     model: str = REVIEW_MODEL_DEFAULT,
 ) -> int:
     """Rough upper-bound image-token estimate for a set, for a GUI budget preview.
 
-    Assumes every image (overview + tiles) lands at the per-model cap, which is
-    the worst case for a dense sheet at the target render resolution. Uses the
-    **raster** long-edge target as that per-image size: a sheet's rasterness is
-    unknown before rendering, and a raster sheet renders larger (the raster
-    target) than a vector one (the reduced default), so quoting the raster target
-    keeps this a true upper bound that never under-quotes. Vector sheets — the
-    common case — then render smaller and cost less than quoted, which is the
-    safe direction for a pre-run budget confirmation.
+    Without page sizes, adaptive mode bounds the entire 100-image request
+    budget at the model cap, including pages larger than ANSI E. Pinned grids
+    and fixed-grid mode bound every image by a square at the raster target plus
+    integer-clip rounding margin. Measured sets should use cost bases instead.
     """
+    if rows is None and cols is None and not tiling.fixed_grid_enabled():
+        # Without page sizes, bound every grid in the adaptive request budget.
+        # A huge page may need more than 36 tiles to satisfy the DPI floor.
+        return sheet_count * tiling.MAX_IMAGES_PER_SHEET * estimate_image_tokens(
+            tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES,
+            tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES, model=model,
+        )
+    rows, cols = tiling.choose_grid(72, 72, rows=rows, cols=cols)
     images_per_sheet = tiling.total_images_for_grid(rows, cols)
     long_edge = tiling.target_long_edge_px(images_per_sheet, is_raster=True)
     # A square image at the long-edge target is the largest area (hence most
     # tokens) the renderer can emit, so it bounds the per-image cost from above.
-    per_image = estimate_image_tokens(long_edge, long_edge, model=model)
+    # Integer clip containment can add a pixel on either edge.
+    per_image = estimate_image_tokens(long_edge + 2, long_edge + 2, model=model)
     return sheet_count * images_per_sheet * per_image

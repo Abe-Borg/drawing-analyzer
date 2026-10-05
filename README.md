@@ -2,7 +2,7 @@
 
 Extract structured information from a set of construction-drawing PDFs using Claude
 vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
-overview image plus a 6×6 grid of high-resolution tiles — **and its vector text
+overview image plus a grid chosen for that page's physical size — **and its vector text
 layer is extracted and sent verbatim alongside the images** — to Claude Opus 5
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
@@ -340,7 +340,7 @@ receipts) rather than being pinned onto an arbitrary drawing.
 ## How it works
 
 ```
-PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text layer
+PDFs → list sheets → render (overview + per-page tiles) + extract vector text layer
      → per-sheet vision digest (images + verbatim text layer)
      → optional cross-sheet synthesis → optional focus report → combined Markdown
      → optional QC: deterministic auditors + anchor → verify → cloud (reviewed PDFs, CSV)
@@ -352,20 +352,48 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   for exact strings (tags, schedule values, note numbers, sheet references). Vector
   text can't misread a digit the way OCR of a low-resolution embedded raster can,
   so grounding the read in it is the antidote to that class of error.
-- **Render resolution.** Ordinary (vector) sheets now render each tile at a
-  **1560 px** long edge (down from 1992 px) — the text layer carries the exact
-  strings, so the tiles trade ~40% of their PNG bytes and image tokens for a
-  smaller, cheaper request while staying crisp for note text. **Raster fallback:**
-  a sheet with an *empty* text layer (scanned or pasted-raster) instead renders at
-  **1992 px**, because there the pixels are the only information channel; such
-  sheets are flagged in the run and (later) badged in the report.
+- **Per-page tile grids.** With `rows` and `cols` omitted, `tiling.choose_grid`
+  minimizes Opus 5 image tokens using the page's displayed physical dimensions
+  (CropBox, after rotation), overlapping tile geometry and image-count target.
+  Every tile meets the minimum DPI of today's 44×34 inch ANSI E sheet at 6×6:
+  **183.39 DPI for vector, 234.17 DPI for raster**, at the default 8% overlap.
+  The overview and all content-bearing tiles still cover the whole sheet (I-1).
+  ANSI E (34×44 inches) and ARCH E1 (30×42 inches), in either orientation,
+  keep 6×6, byte-identical imagery, and existing digest/critique cache keys.
+  Explicit `rows`/`cols` win; specifying just one keeps six for the other.
+  `DRAWING_ANALYZER_FIXED_GRID=1` restores the historical fixed 6×6 default.
+  Above 20 images, vector tiles target **1560 px** and raster tiles **1992 px**,
+  safely below the **2000 px hard cap**. At 20 or fewer, both target **2576 px**.
+  Rectangular grids are allowed: the target change makes 20×1 narrow strips
+  the token minimum for portrait vector Letter; raster Letter chooses 1×1.
+  Larger sheets can need more than six rows/columns. Pages that cannot meet
+  the DPI floor within 100 images are reported as failed, never read below it.
+  Cost confirmation prices those pages at the conservative allowance; digest
+  and critique prescans record their failures and continue with the other pages.
+
+  Measured with `tiling.image_pixel_sizes` and `core.tokenizer` on Opus 5,
+  counting every tile before blank suppression, per vision read:
+
+  | Page (portrait) | Grid | Fixed 6×6 tokens | Chosen tokens | Savings | Minimum tile DPI |
+  | --- | --- | ---: | ---: | ---: | ---: |
+  | Vector Letter, 8.5×11 in | 20×1 | 93,013 | 7,399 | 92.0% | 183.53 |
+  | Vector Tabloid, 11×17 in | 2×1 | 77,905 | 14,352 | 81.6% | 234.18 |
+  | Raster Letter, 8.5×11 in | 1×1 | 151,619 | 9,568 | 93.7% | 234.18 |
+  | Vector ANSI E, 34×44 in | 6×6 | 93,013 | 93,013 | 0% | 183.39 |
+  | Vector ARCH E1, 30×42 in | 6×6 | 85,987 | 85,987 | 0% | 192.12 |
+
+  The same savings apply to the digest and both critique reads. Tile labels,
+  findings bounds, anchors, crops, cross-QC legs, upload/spool reuse and tile
+  artifacts all use each sheet's own grid.
 - **Cost preview from each page's real shape.** The old image figure assumed
   every image was a square at the *raster* target hitting the model's per-image
-  token cap — a true upper bound, and about **1.9x** what a vector E-size sheet
-  actually costs (177,008 tokens quoted against 93,013). Two facts per page close
-  most of that gap: the page's aspect ratio, and whether it has any selectable
-  words. That single boolean is the dominant lever, because it decides the render
-  target. The dialog now says which basis produced its number — *"Based on each
+  token cap. `cost.estimate_image_tokens_for_bases` now prices the chosen grid,
+  including every tile, from the page's size and whether it has selectable words.
+  Without measurements, `pipeline.estimate_image_tokens_for_set` bounds the full
+  adaptive image budget: **478,400 tokens/page** on Opus 5, including oversized
+  pages requiring more than 36 tiles. Explicit 6×6 or the fixed-grid switch
+  retains the historical **177,008 tokens/page** allowance. The dialog says
+  which basis produced its number — *"Based on each
   page's measured size and text layer"* or *"Conservative planning estimate"* —
   so the figure is never ambiguous about what it rests on.
   **Nothing extra is opened to get this.** The profile preflight already walks
@@ -446,7 +474,7 @@ non-goal:
   an unchanged exhaustive re-run skips both its API calls *and* rasterization —
   previously the critique had to re-render every sheet just to discover its result
   was already cached.
-- **Parallel Files-API uploads.** A sheet's ~37 images upload on a small pool
+- **Parallel Files-API uploads.** An E-size sheet's 37 images upload on a small pool
   (default 6, `DRAWING_ANALYZER_UPLOAD_WORKERS`) instead of one at a time — the
   dominant batch-path latency after rendering. Parallelism changes only
   *scheduling*: each image keeps the same retry taxonomy (transient `503`s
@@ -693,7 +721,7 @@ three-way enum plus `note`, on the single-crop and cross-sheet calls alike; it
 is vision-involved, so it carries the critique's caveat and its own canary. All
 three stages share one gate (`core/structured_outputs.py`: env opt-in → model
 capability → self-healing latch), but each owns its **own** latch — a rejection
-on the critique's 37-image request says nothing about a text-only call and must
+on the critique's multi-image request says nothing about a text-only call and must
 not switch it off — and each keys structured and plain results apart, so
 nothing already paid for is discarded. Each has a live canary
 (`-k harvest_under_output_config_format`, `-k verify_under_output_config_format`);
@@ -1637,6 +1665,7 @@ runs.
 | `DRAWING_ANALYZER_ANNOTATE_WORKERS` | `2` | Independent source-PDF markup processes (`1` disables process fan-out; hard cap 4). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |
 | `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
+| `DRAWING_ANALYZER_FIXED_GRID` | off | Set `1` to restore fixed 6×6 tiling. Otherwise choose each page's grid from displayed size, minimizing image tokens while preserving the matching vector/raster ANSI E DPI floor. Explicit `rows`/`cols` still win. |
 | `DRAWING_ANALYZER_TILE_TARGET_PX` | `1560` | **Measurement knob.** Vector-sheet tile long edge, in pixels. Image tokens scale with the *square* of this, and the tiles ride the digest plus both critique reads, so it is the single highest-leverage number in the bill: `1400` ≈ −19% image tokens per sheet, `1240` ≈ −37%, `1100` ≈ −50%. Whether a lower value still reads the drawing is a quality question — sweep it against a real set before changing anything, and note that a changed target re-renders (it invalidates the digest/critique caches by design). Raster sheets are unaffected: with no text layer the pixels are the only channel. Clamped to `[400, 1992]` so no value can breach the API's hard 2000 px many-image cap. |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |

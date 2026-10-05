@@ -11,6 +11,7 @@ count (cheap to obtain via ``render.list_sheets``).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -128,7 +129,7 @@ def _specs_cost_contribution(
 class ImageTokenEstimate:
     """A geometry-aware image-token estimate, with the assumptions it rests on.
 
-    ``tokens`` is the planning number. ``conservative_tokens`` is what the legacy
+    ``tokens`` is the planning number. ``conservative_tokens`` is what the size-free
     allowance (:func:`pipeline.estimate_image_tokens_for_set`) would have quoted
     for the same pages, kept beside it so a caller can show both and a test can
     assert the direction of the correction rather than a magic constant.
@@ -139,8 +140,8 @@ class ImageTokenEstimate:
     #: Pages counted by how their render target was decided.
     vector_pages: int = 0
     raster_pages: int = 0
-    #: Pages that could not be classified, or could not be measured, and were
-    #: therefore priced at the conservative allowance. Never dropped, never
+    #: Pages that could not be classified, measured, or assigned a feasible grid
+    #: and were therefore priced at the conservative allowance. Never dropped, never
     #: quietly treated as vector.
     unknown_pages: int = 0
     unmeasured_pages: int = 0
@@ -158,19 +159,17 @@ class ImageTokenEstimate:
 def estimate_image_tokens_for_bases(
     bases: "Sequence[Any]",
     *,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     model: str = REVIEW_MODEL_DEFAULT,
 ) -> ImageTokenEstimate:
     """Image tokens for one vision read of these pages, from their real shapes.
 
-    WP-05 §10.1. The shipped allowance
-    (:func:`pipeline.estimate_image_tokens_for_set`) assumes every image is a
-    square at the *raster* target and lands at the model's token cap — a true
-    upper bound, and about 1.9x the actual cost of a vector E-size sheet (§2.6).
-    Two facts per page close most of that gap, and both come from a scan that
-    never rasterizes: the aspect ratio, and whether the page has words.
+    The size-free allowance (:func:`pipeline.estimate_image_tokens_for_set`)
+    bounds the full adaptive image budget. Measured pages use their displayed
+    physical size and word presence to choose the same grid as the renderer,
+    then price its exact image geometry. Explicit rows/cols retain fixed grids.
 
     The per-page walk mirrors the renderer exactly rather than approximating it:
     :func:`tiling.image_pixel_sizes` resolves the target through the same
@@ -187,8 +186,9 @@ def estimate_image_tokens_for_bases(
     must be estimated with their own resolved models, never counted once and
     reused (§2.4).
 
-    A page classified ``unknown``, or one that could not be measured, falls back
-    to the conservative per-sheet allowance and is counted separately. It is
+    A page classified ``unknown``, one that could not be measured, or one with
+    no feasible adaptive grid falls back to the conservative per-sheet allowance
+    and is counted separately. It is
     never assumed vector: vector is the *cheaper* target, so guessing it would
     quote low on precisely the pages least understood.
     """
@@ -204,7 +204,8 @@ def estimate_image_tokens_for_bases(
         width = float(getattr(basis, "width_pt", 0.0) or 0.0)
         height = float(getattr(basis, "height_pt", 0.0) or 0.0)
         measurable = (
-            bool(getattr(basis, "geometry_ok", False)) and width > 0 and height > 0
+            bool(getattr(basis, "geometry_ok", False))
+            and all(math.isfinite(v) and v > 0 for v in (width, height))
         )
         if not measurable:
             unmeasured += 1
@@ -214,14 +215,21 @@ def estimate_image_tokens_for_bases(
             unknown += 1
             total += conservative_per_sheet
             continue
+        try:
+            sizes = tiling.image_pixel_sizes(
+                width, height, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                is_raster=classification == CLASSIFICATION_RASTER,
+            )
+        except tiling.InfeasibleGridError:
+            # Retain this page in the budget, without claiming a measured grid.
+            # Rendering will report its failure; the confirmation must still open.
+            unknown += 1
+            total += conservative_per_sheet
+            continue
         if classification == CLASSIFICATION_RASTER:
             raster += 1
         else:
             vector += 1
-        sizes = tiling.image_pixel_sizes(
-            width, height, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            is_raster=classification == CLASSIFICATION_RASTER,
-        )
         total += estimate_image_tokens_total(sizes, model=model)
     return ImageTokenEstimate(
         tokens=total,
@@ -234,7 +242,7 @@ def estimate_image_tokens_for_bases(
 
 
 def _image_tokens_for(
-    sheet_count: int, bases, *, rows: int, cols: int, model: str,
+    sheet_count: int, bases, *, rows: int | None, cols: int | None, model: str,
 ) -> tuple[int, bool, int]:
     """``(image_tokens, shape_aware, unmeasured_pages)`` — real shapes where we have them.
 
@@ -290,8 +298,8 @@ def estimate_drawing_set_cost(
     *,
     file_count: int = 0,
     model: str = REVIEW_MODEL_DEFAULT,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     synthesize: bool = True,
     batch: bool = False,
     focus: bool = False,
@@ -767,8 +775,8 @@ def estimate_exhaustive_run_cost(
     *,
     file_count: int = 0,
     model: str = REVIEW_MODEL_DEFAULT,
-    rows: int = tiling.DEFAULT_GRID_ROWS,
-    cols: int = tiling.DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     batch: bool = True,
     critique_batch: bool | None = None,
     focus: bool = False,

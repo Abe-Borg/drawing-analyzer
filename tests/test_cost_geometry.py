@@ -83,8 +83,8 @@ def test_image_tokens_are_scale_invariant_in_both_regimes(grid, label):
 
 
 def test_scale_invariance_survives_a_raster_classification():
-    assert (tokens(E, classification=CLASSIFICATION_RASTER)
-            == tokens(LETTER, classification=CLASSIFICATION_RASTER))
+    assert (tokens(E, classification=CLASSIFICATION_RASTER, rows=6, cols=6)
+            == tokens(LETTER, classification=CLASSIFICATION_RASTER, rows=6, cols=6))
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +97,7 @@ def test_aspect_ratio_drives_cost_in_the_shipping_many_image_regime():
 
     The plan measures the 34x44-vs-square spread at 20.27% of the larger.
     """
-    tall, square = tokens(E), tokens(SQUARE)
+    tall, square = tokens(E, rows=6, cols=6), tokens(SQUARE, rows=6, cols=6)
     assert tall < square
     spread = (square - tall) / square
     assert 0.19 < spread < 0.22, spread
@@ -187,7 +187,7 @@ def test_predicted_token_count_matches_a_real_render_within_a_tight_bound(shape)
         estimate_image_tokens(w, h, model=OPUS)
         for w, h in _rendered_sizes(pymupdf, w_in, h_in, rows=6, cols=6)
     )
-    predicted = tokens(shape)
+    predicted = tokens(shape, rows=6, cols=6)
     assert abs(predicted - actual) / actual < 0.0001, (predicted, actual)
 
 
@@ -270,6 +270,34 @@ def test_a_page_claiming_vector_with_no_area_still_falls_back():
     assert est.tokens == estimate_image_tokens_for_set(1, model=OPUS)
 
 
+@pytest.mark.parametrize("classification", [CLASSIFICATION_VECTOR, CLASSIFICATION_RASTER])
+@pytest.mark.parametrize("model", [OPUS, HAIKU])
+def test_an_infeasible_grid_is_conservatively_priced_without_losing_other_pages(classification, model):
+    est = estimate_image_tokens_for_bases(
+        [basis(LETTER), basis((80, 80), classification), basis(B)], model=model,
+    )
+    assert est.tokens == tokens(LETTER, model=model) + tokens(B, model=model) + (
+        estimate_image_tokens_for_set(1, model=model)
+    )
+    assert (est.vector_pages, est.raster_pages, est.unknown_pages) == (2, 0, 1)
+    assert est.pages == 3 and not est.fully_measured
+    assert est.unmeasured_pages == 0  # Known dimensions; no feasible grid.
+    assert est.tokens <= est.conservative_tokens
+
+
+@pytest.mark.parametrize("size", [float("inf"), float("nan")])
+def test_nonfinite_page_dimensions_use_the_unmeasured_allowance(size):
+    est = estimate_image_tokens_for_bases([basis((size, 80))], model=OPUS)
+    assert est.tokens == estimate_image_tokens_for_set(1, model=OPUS)
+    assert est.unmeasured_pages == est.unknown_pages == est.pages == 1
+    assert not est.fully_measured
+
+
+def test_cost_fallback_does_not_mask_invalid_caller_grid_dimensions():
+    with pytest.raises(ValueError, match="grid dimensions must be positive"):
+        estimate_image_tokens_for_bases([basis(LETTER)], rows=0, cols=2, model=OPUS)
+
+
 def test_mixed_classifications_are_counted_separately():
     est = estimate_image_tokens_for_bases(
         [basis(E), basis(D, CLASSIFICATION_RASTER), basis(B, CLASSIFICATION_UNKNOWN)],
@@ -290,21 +318,21 @@ def test_an_empty_set_is_zero_not_an_error():
 # --------------------------------------------------------------------------- #
 
 
-def test_the_conservative_allowance_is_unchanged():
+def test_the_explicit_fixed_grid_allowance_is_unchanged():
     """§10.1: do not silently redefine the legacy allowance's public meaning."""
-    assert estimate_image_tokens_for_set(1, model=OPUS) == 177_008
+    assert estimate_image_tokens_for_set(1, rows=6, cols=6, model=OPUS) == 177_008
 
 
 def test_a_vector_e_size_sheet_costs_about_half_the_conservative_allowance():
     """§2.6 decomposes the overstatement as ~1.9x. Asserted as a ratio."""
-    ratio = estimate_image_tokens_for_set(1, model=OPUS) / tokens(E)
+    ratio = estimate_image_tokens_for_set(1, rows=6, cols=6, model=OPUS) / tokens(E)
     assert 1.85 < ratio < 1.95, ratio
 
 
 def test_the_plan_reference_value_is_reproduced_within_the_rounding_delta():
     """92,871 (round-the-dimension) vs 93,013 (the renderer's irect). 0.15%."""
     assert tokens(E) == pytest.approx(92_871, rel=0.003)
-    assert tokens(SQUARE) == pytest.approx(116_481, rel=0.003)
+    assert tokens(SQUARE, rows=6, cols=6) == pytest.approx(116_481, rel=0.003)
     # ...and the renderer's own value exactly, which is what actually bills.
     assert tokens(E) == 93_013
 
@@ -312,7 +340,7 @@ def test_the_plan_reference_value_is_reproduced_within_the_rounding_delta():
 def test_the_mixed_set_total_matches_the_plans_independent_derivation():
     """§2.5's 20 E + 8 D + 6 B + 2 letter set: the plan derives 3,150,948."""
     bases = ([basis(E)] * 20 + [basis(D)] * 8 + [basis(B)] * 6 + [basis(LETTER)] * 2)
-    est = estimate_image_tokens_for_bases(bases, model=OPUS)
+    est = estimate_image_tokens_for_bases(bases, rows=6, cols=6, model=OPUS)
     assert est.tokens == pytest.approx(3_150_948, rel=0.003)
     assert est.vector_pages == 36 and est.fully_measured
     # The shipped allowance quotes this set at roughly twice that.

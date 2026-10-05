@@ -385,6 +385,17 @@ def test_a_fully_measured_set_still_claims_it():
     assert "measured size and text layer." in format_drawing_cost_prompt(est)
 
 
+@pytest.mark.parametrize("estimate,format_prompt", [
+    (estimate_drawing_set_cost, format_drawing_cost_prompt),
+    (estimate_exhaustive_run_cost, format_exhaustive_cost_prompt),
+])
+def test_cost_confirmation_opens_and_discloses_an_infeasible_page(estimate, format_prompt):
+    mixed = bases(2) + bases(1, shape=(80, 80))
+    est = estimate(3, model=OPUS, bases=mixed)
+    assert not est.shape_aware and est.unmeasured_pages == 1
+    assert "except 1 page(s) that could not be read" in format_prompt(est)
+
+
 # --------------------------------------------------------------------------- #
 # Review round: bases must describe the files as they are on disk NOW
 # --------------------------------------------------------------------------- #

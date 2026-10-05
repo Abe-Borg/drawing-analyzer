@@ -74,6 +74,31 @@ def test_spool_hits_and_fresh_miss_are_consumed_in_page_order(monkeypatch) -> No
     assert render_calls == [{pipeline._refkey(b.ref)}]
 
 
+def test_spool_grid_mismatch_rerenders_only_that_page(monkeypatch) -> None:
+    fresh = _sheet("A", 0)
+    stale = _sheet("A", 0)
+    stale.rows = 2
+    key = pipeline._refkey(fresh.ref)
+
+    class _Spool:
+        def __contains__(self, candidate):
+            return candidate == key
+
+        def pop(self, candidate):
+            assert candidate == key
+            return stale
+
+    render_calls = []
+
+    def _render(_paths, **kwargs):
+        render_calls.append(set(kwargs["only"]))
+        if key in kwargs["only"]:
+            yield fresh
+
+    assert _run_realtime(monkeypatch, [fresh], _Spool(), _render) == ["A.pdf"]
+    assert render_calls == [{key}]
+
+
 def test_spool_load_failure_uses_exact_one_page_fallback(monkeypatch) -> None:
     a, b, c = (_sheet("A", 0), _sheet("B", 1), _sheet("C", 2))
     stored = {
