@@ -1355,10 +1355,20 @@ code verdict is never grounded on a forum post or another assistant's output.
 Fetch can only retrieve URLs a prior search surfaced in the same request, so the
 model cannot reach a page it invented.
 
+References are normalized for case, whitespace, cosmetic punctuation and
+`§`/`Section`/`Sec.` before grouping; each finding keeps its original spelling
+for display. The pass admits at most **50 normalized refs per run**, ordered by
+the highest severity of their eligible citing findings (then QC id/finding id).
+`DRAWING_ANALYZER_CITATION_MAX_REFS` overrides the cap; `0` checks none. Claims
+whose citing findings are all `REJECTED` and refs beyond the cap receive
+`UNCHECKED` assessments with explicit reasons, included in exports and stage
+warnings. Skips happen before cache lookup or client creation and keep the stage
+`PARTIAL`, consistent with the unchecked-claim gate.
+
 The check is **claim-complete**: a verdict attaches to a finding only if that
-finding's claim was in the request that produced it. Every distinct claim for a
-reference is checked (chunked into claim-complete requests when there are many —
-so no claim is silently dropped), the model returns a **per-claim** verdict, and
+finding's claim was in the request that produced it. Every eligible distinct claim
+for an admitted reference is checked (chunked into claim-complete requests when
+there are many), the model returns a **per-claim** verdict, and
 each `CitationAssessment` is bound to exactly the findings whose claim it covered.
 A finding that cites several references keeps one assessment **per reference**
 (`finding.citations`), and `finding.citation` is a derived summary
@@ -1373,12 +1383,18 @@ stale citation *is* the finding; in the HTML report a mismatch renders with a
 distinct warning style plus the structured provenance (which edition the verdict
 was **checked against**, the current published edition, and the model-selected
 https **evidence link**), and findings.csv carries four provenance columns.
-Real-time only (a handful of interactive calls; ~$0.03–0.08 per unique ref —
-billed by the server-reported search count), additive, and non-fatal: any
-failure leaves the affected claim `UNCHECKED` and holds the stage at `PARTIAL`.
+Each fetch is capped at **4,000 tokens**: enough for a clause and nearby
+definitions/exceptions, without admitting 40,000 tokens of a whole code book.
+The prompt asks for clause-level pages. Pause resumes cache the conversation
+through the newest assistant turn, retaining the preceding one-hour breakpoint
+to reuse long prefixes beyond the API's 20-block lookup window. The sliding pair
+stays within the four-breakpoint limit; usage prices writes at the 1h rate.
+Real-time only, billed by reported tokens and server search counts, additive,
+and non-fatal: any failure leaves the affected claim `UNCHECKED` and holds the
+stage at `PARTIAL`.
 
 **Warm runs are cheap (Phase B):** complete verdicts cache content-addressed on
-the exact ref + claims + editions/jurisdiction context, expiring after
+the normalized ref + claims + editions/jurisdiction context, expiring after
 `DRAWING_ANALYZER_CITATION_TTL_DAYS` (default 30; `0` disables the cache). A
 partial or failed check is never cached, so a cache hit can never hide an
 unchecked claim. The pre-run cost estimate quotes the cold-run figure — warm
@@ -1635,6 +1651,7 @@ runs.
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
+| `DRAWING_ANALYZER_CITATION_MAX_REFS` | `50` | Per-run normalized reference cap, severity-first after skipping rejected-only claims. Cache hits share the cap. `0` checks none; invalid/negative values use the default. Every skipped claim is explicitly unchecked. |
 | `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
@@ -1642,7 +1659,7 @@ runs.
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
-| `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Lower than the search budget by design: each fetch pulls up to 40k tokens of page text into the request. Rides the verdict-cache key. |
+| `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Each fetch pulls at most 4k tokens of clause text and nearby context into the request. Rides the verdict-cache key. |
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |

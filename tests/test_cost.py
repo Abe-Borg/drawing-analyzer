@@ -316,6 +316,44 @@ def test_exhaustive_estimate_prices_actual_verification_model():
     assert "Sonnet 5" in verify.note
 
 
+def test_citation_estimate_uses_runtime_ref_cap_and_clause_fetch_limit(monkeypatch):
+    from drawing_analyzer.citation_check import citation_tools
+    from drawing_analyzer.core.pricing import WEB_SEARCH_COST_PER_USE
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "3")
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "1")
+    est = estimate_exhaustive_run_cost(100)
+    row = next(c for c in est.components if c.stage == "Citation checks")
+    fetch = next(t for t in citation_tools(est.stage_models.citation) if t["name"] == "web_fetch")
+    assert fetch["max_content_tokens"] == 4_000
+    assert row.input_tokens == 3 * (2_000 + 4_000)
+    assert row.output_tokens == 3 * 1_400
+    expected = estimate_request_cost(row.input_tokens, row.output_tokens,
+                                    model=est.stage_models.citation, batch=False)
+    assert row.cost == pytest.approx(expected + 3 * float(WEB_SEARCH_COST_PER_USE))
+    assert "3 eligible normalized ref(s), per-run cap 3" in row.note
+    assert "1 searches/ref" in row.note
+    assert "4,000 tokens" in row.note
+    assert "claim chunks/resumes can cost more" in row.note
+
+
+def test_zero_citation_cap_quotes_no_citation_spend(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "0")
+    est = estimate_exhaustive_run_cost(100)
+    row = next(c for c in est.components if c.stage == "Citation checks")
+    assert row.cost == row.input_tokens == row.output_tokens == 0
+    assert "per-run cap 0" in row.note
+
+
+def test_search_only_citation_model_quotes_no_fetch_input(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MODEL", OPUS)
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "2")
+    est = estimate_exhaustive_run_cost(100)
+    row = next(c for c in est.components if c.stage == "Citation checks")
+    assert row.input_tokens == 2 * 2_000
+    assert "fetch" not in row.note
+
+
 def test_exhaustive_estimate_prices_actual_critique_model(monkeypatch):
     """Critique is the largest component; it must be priced at its own model.
 
