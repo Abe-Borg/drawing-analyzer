@@ -660,7 +660,7 @@ def _csp_meta(*, script_sources: list[str], chat_enabled: bool) -> str:
 # --------------------------------------------------------------------------- #
 # Findings — the QC record, surfaced as a pinned, sortable, filterable table.
 # Each finding collapses its anchor + verification outcomes into ONE "display
-# status" chip (the five states an operator triages on); the digest prose is
+# status" chip (the states an operator triages on); the digest prose is
 # untouched (I-2) — these come from ctx.findings / ctx.reference_findings.
 # --------------------------------------------------------------------------- #
 
@@ -670,6 +670,7 @@ _FINDING_STATUS_CHIP: dict[str, tuple[str, str]] = {
     "VERIFIED": ("Verified", "verified"),
     "DETERMINISTIC": ("Deterministic", "deterministic"),
     "UNCERTAIN": ("Uncertain", "uncertain"),
+    "FAILED": ("Verifier could not run", "failed"),
     "UNVERIFIED": ("Not checked", "unverified"),
     "UNANCHORED": ("Unanchored", "unanchored"),
     "REJECTED": ("Rejected", "rejected"),
@@ -681,13 +682,13 @@ _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 # Integers only — the browser reads this back through ``parseInt``, which would
 # floor a fractional rank into a neighbour's slot.
 _STATUS_RANK = {
-    "VERIFIED": 6, "DETERMINISTIC": 5, "UNCERTAIN": 4, "UNVERIFIED": 3,
+    "VERIFIED": 7, "DETERMINISTIC": 6, "UNCERTAIN": 5, "FAILED": 4, "UNVERIFIED": 3,
     "UNANCHORED": 2, "REJECTED": 1,
 }
-# The two states that mean "no verifier has confirmed this", for the callers
+# The states that mean "no verifier has confirmed this", for the callers
 # that treat them alike (starter prompts, chat guidance). They are still
 # distinct chips — see :func:`_finding_display_status`.
-_UNCONFIRMED_STATUSES = ("UNANCHORED", "UNCERTAIN", "UNVERIFIED")
+_UNCONFIRMED_STATUSES = ("UNANCHORED", "UNCERTAIN", "FAILED", "UNVERIFIED")
 
 
 def _finding_display_status(f: Any) -> str:
@@ -700,7 +701,8 @@ def _finding_display_status(f: Any) -> str:
     The remaining anchored findings split by whether verification actually ran.
     ``SKIPPED`` — the state on every finding of a standard run, where the
     verification stage is ``NOT_REQUESTED`` — reads as ``UNVERIFIED`` ("Not
-    checked"); an anchored finding a verifier *did* examine without reaching a
+    checked"); ``FAILED`` reads as "Verifier could not run". An anchored
+    finding a verifier *did* examine without reaching a
     verdict reads as ``UNCERTAIN``. Collapsing the two (as this did) labelled
     all 287 findings of a standard 39-sheet run "Uncertain", which reads as a
     verifier's inconclusive judgement rather than the truth: nothing had looked
@@ -714,6 +716,8 @@ def _finding_display_status(f: Any) -> str:
         return "DETERMINISTIC"
     if v == "VERIFIED":
         return "VERIFIED"
+    if v == "FAILED":
+        return "FAILED"
     if a == "UNANCHORED":
         return "UNANCHORED"
     if v == "SKIPPED":
@@ -900,6 +904,13 @@ def _finding_row_html(
             "</div>"
         )
     text_cell = _render_inline(text)
+    if status == "FAILED":
+        failure_note = getattr(getattr(f, "verification", None), "note", "") or ""
+        if failure_note:
+            text_cell += (
+                '<div class="finding-verification-note muted">'
+                f"{html.escape(failure_note)}</div>"
+            )
     action = (getattr(f, "recommended_action", "") or "").strip()
     if action:
         text_cell += (
@@ -2137,6 +2148,7 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 .fchip-verified{background:#e7f6ee; color:var(--ok)}
 .fchip-deterministic{background:#e7eefb; color:#2f5fd0}
 .fchip-uncertain{background:#fbf3df; color:var(--coord)}
+.fchip-failed{background:#fbf3df; color:var(--coord); border:1px solid #e5c980}
 .fchip-unverified{background:#f1f3f6; color:var(--muted); border:1px solid #dde1e7}
 .fchip-unanchored{background:#fff; color:var(--conflict); border:1px solid var(--conflict)}
 .fchip-rejected{background:#eef0f3; color:var(--muted); text-decoration:line-through}
@@ -3812,9 +3824,9 @@ _CHAT_JS = r"""
        }, required: ['target']}},
       {name: 'query_findings',
        description: 'Search the structured QC findings ledger — the machine-checked findings ' +
-         'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/' +
+         'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/FAILED/' +
          'UNVERIFIED/UNANCHORED/REJECTED — UNVERIFIED means no verification stage ran for it, ' +
-         'UNCERTAIN means one ran and could not settle it) and source quote. A cross-sheet ' +
+         'UNCERTAIN means one ran and could not settle it; FAILED means the verifier could not run) and source quote. A cross-sheet ' +
          'finding also carries "also_on" ' +
          '(the other sheet ids it spans); a code finding may carry "refs" (the cited section ' +
          'numbers) and "citation" (the web-search check status/verdict). The prose report does ' +

@@ -2031,7 +2031,8 @@ def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_pat
     assert stage.errors == []
     assert stage.warnings == [
         "verification: 1 of 1 live verdict calls returned no judgment "
-        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN"
+        "(malformed=1, truncated=0, failed=0); "
+        "malformed/truncated replies were left UNCERTAIN, failed calls were marked FAILED"
     ]
     assert ctx.findings[0].verification.status == "UNCERTAIN"
     # The warning reaches the exported manifest through the stage record.
@@ -2049,3 +2050,33 @@ def test_pipeline_a_clean_verification_carries_no_parse_loss_warning(tmp_path):
     stage = {s.stage: s for s in ctx.stage_results}["verification"]
     assert stage.warnings == []
     assert ctx.findings[0].verification.status == "UNCERTAIN"
+
+
+def test_pipeline_failed_verifier_call_never_starts_investigation(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])
+    create = client.messages.create
+
+    class _BadRequest(Exception):
+        status_code = 400
+
+    class _Messages(StreamingMessagesMixin):
+        def create(self, **kwargs):
+            if _system_text(kwargs.get("system", "")) == VERIFY_SYSTEM_PROMPT:
+                client.verify_calls += 1
+                raise _BadRequest("invalid model override")
+            return create(**kwargs)
+
+    client.messages = _Messages()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True,
+        qc_work_dir=tmp_path / "qc",
+    )
+    stages = {s.stage: s for s in ctx.stage_results}
+    assert client.verify_calls == 1 and client.investigate_calls == 0
+    assert ctx.findings[0].verification.status == "FAILED"
+    assert stages["verification"].status == "PARTIAL"
+    assert stages["verification"].items_out == 0
+    assert any("failed=1" in warning for warning in stages["verification"].warnings)
+    assert stages["investigation"].status == "SKIPPED_VALID"
+    assert ctx.qc_status == "PARTIAL"

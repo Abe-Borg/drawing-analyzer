@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Verifier call failures now carry `FAILED`, with a "Verifier could not run"
+  label in the report and a distinct status in JSON/CSV exports and PDF notes.
+  They no longer start paid investigations. Three matching non-transient 4xx
+  errors stop uncached calls for the rest of that verification pass; remaining
+  findings are `SKIPPED`. Both single-crop and cross-sheet verification retain
+  retries for transient errors and stop immediately on authentication failures.
+
 ### Changed
 
 - **Default models move to the 5.5 generation.** Review/digest/critique and the
