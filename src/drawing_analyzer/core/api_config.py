@@ -5,12 +5,12 @@ beta headers, web-search tool configuration, and request-shape policy
 (prompt caching, adaptive thinking, effort).
 
 Model identifiers may be overridden via env vars:
-    DRAWING_ANALYZER_MODEL                — review (default Opus 5).
+    DRAWING_ANALYZER_MODEL                — review (default Opus 5.5).
     DRAWING_ANALYZER_VERIFICATION_MODEL          — verification initial pass
-                                               (default Sonnet 5).
+                                               (default Sonnet 5.5).
     DRAWING_ANALYZER_VERIFY_MODEL                — legacy verification alias;
                                                takes precedence when set.
-    DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 5).
+    DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 5.5).
     DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
                                               (default: the escalation model).
     DRAWING_ANALYZER_IDENTITY_MODEL       — the set-identity harvest
@@ -23,7 +23,7 @@ Model identifiers may be overridden via env vars:
                                               Sonnet 5; needs web fetch, which
                                               Opus 5 lacks).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
-                                              (default Sonnet 5; needs web
+                                              (default Sonnet 5.5; needs web
                                               fetch, which Opus 5 lacks).
     DRAWING_ANALYZER_REFUSAL_FALLBACK     — the Opus 5 server-side refusal
                                               fallback (default on; any falsy
@@ -43,12 +43,14 @@ _log = logging.getLogger(__name__)
 # Model identifiers (centralized)
 # ---------------------------------------------------------------------------
 
-MODEL_OPUS_5 = "claude-opus-5"
-MODEL_SONNET_5 = "claude-sonnet-5"
-# Previous generation. No longer a default anywhere, but still active models
+MODEL_OPUS_5_5 = "claude-opus-5-5"
+MODEL_SONNET_5_5 = "claude-sonnet-5-5"
+# Previous generations. No longer a default anywhere, but still active models
 # and still fully registered below, so pinning one via a
 # ``DRAWING_ANALYZER_*_MODEL`` env var keeps full capabilities instead of
 # falling through to the conservative unknown-model defaults.
+MODEL_OPUS_5 = "claude-opus-5"
+MODEL_SONNET_5 = "claude-sonnet-5"
 MODEL_OPUS_48 = "claude-opus-4-8"
 MODEL_SONNET_46 = "claude-sonnet-4-6"
 MODEL_HAIKU_45 = "claude-haiku-4-5"
@@ -70,15 +72,15 @@ MODEL_HAIKU_45 = "claude-haiku-4-5"
 # all — the statuses are VERIFIED / REJECTED / UNCERTAIN / DETERMINISTIC /
 # SKIPPED. A reader tuning cost from this comment would have looked for a
 # severity gate that was never there.
-REVIEW_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_MODEL", MODEL_OPUS_5)
-CROSS_CHECK_MODEL_DEFAULT = MODEL_SONNET_5
+REVIEW_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_MODEL", MODEL_OPUS_5_5)
+CROSS_CHECK_MODEL_DEFAULT = MODEL_SONNET_5_5
 VERIFICATION_MODEL_DEFAULT = os.environ.get(
-    "DRAWING_ANALYZER_VERIFICATION_MODEL", MODEL_SONNET_5
+    "DRAWING_ANALYZER_VERIFICATION_MODEL", MODEL_SONNET_5_5
 )
 
 # Model used when escalating a low-confidence/high-severity verification.
 VERIFICATION_ESCALATION_MODEL = os.environ.get(
-    "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_5
+    "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_5_5
 )
 
 # The Q&A assistant embedded in the HTML report (html_report.py) calls the API
@@ -98,7 +100,7 @@ VERIFICATION_ESCALATION_MODEL = os.environ.get(
 # the capability registry gates the emitted tool list (html_report.py), so an
 # override to a model without web fetch degrades to search-only rather than
 # 400-ing, and a test asserts this default keeps both capabilities.
-CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_5)
+CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_5_5)
 
 
 # Opus family membership. This set answers exactly one question — "is this
@@ -110,7 +112,7 @@ CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_
 # vision tier are all per-model facts that live in ``_MODEL_CAPABILITIES`` —
 # Sonnet 5, for instance, matches Opus on all three. Register a new model
 # there; only add it here if it should be treated as an escalation tier.
-OPUS_MODELS = frozenset({MODEL_OPUS_5, MODEL_OPUS_48})
+OPUS_MODELS = frozenset({MODEL_OPUS_5_5, MODEL_OPUS_5, MODEL_OPUS_48})
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +412,43 @@ class ModelCapabilities:
 # and 1M context for each. Registering a model here is what unlocks its full
 # capabilities; unregistered ids fall through to the conservative defaults.
 _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
+    MODEL_OPUS_5_5: ModelCapabilities(
+        # Opus 5.5 succeeds Opus 5 with the same 1M context, 128k output,
+        # tokenizer, effort roster, hi-res vision and structured outputs.
+        # Thinking can no longer be disabled on it, which this app never did
+        # (see :func:`thinking_config_for`); its API default effort is
+        # ``medium`` rather than ``high``, which is why every request site
+        # states its effort explicitly.
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        # Web fetch is left undeclared (as on Opus 5): no default routes a
+        # fetch-needing stage to Opus, and an undeclared flag degrades to
+        # search-only rather than risking a 400.
+        supports_web_fetch=False,
+        supports_web_search=True,
+        # Same classifier-decline behaviour as Opus 5 (``bio`` joins the
+        # categories), so the server-side fallback stays opted in.
+        supports_refusal_fallback=True,
+        supports_structured_outputs=True,
+    ),
+    MODEL_SONNET_5_5: ModelCapabilities(
+        # Sonnet 5.5 succeeds Sonnet 5: same 1M context, 128k output,
+        # tokenizer and prices. Thinking cannot be sent as ``disabled`` (a
+        # 400) and forced ``tool_choice`` is rejected; this app sends neither.
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        supports_web_fetch=True,
+        supports_web_search=True,
+        supports_structured_outputs=True,
+    ),
     MODEL_OPUS_5: ModelCapabilities(
         supports_adaptive_thinking=True,
         max_output_tokens=MAX_OUTPUT_TOKENS_128K,

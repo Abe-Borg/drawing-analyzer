@@ -20,7 +20,7 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-09-08"
+PRICING_EFFECTIVE_DATE = "2026-10-05"
 
 # Batch API bills at half of standard, per Anthropic's published pricing. The
 # caching multipliers below stack with it (Anthropic pricing, "These multipliers
@@ -72,6 +72,9 @@ class ModelPrice:
     input_per_mtok: float
     output_per_mtok: float
     label: str  # human-friendly name for dialogs
+    # Cache-read rate as a multiple of base input. Opus 5.5 reads at 0.05x
+    # ($0.20 on $4); every other model in the table reads at 0.10x.
+    cache_read_multiplier: float = CACHE_READ_MULTIPLIER
 
 
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
@@ -91,6 +94,8 @@ class ModelPrice:
 # estimate more than it used to — the 50% over-statement the hedge caused was
 # correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
+    "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
+    "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5"),
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
@@ -194,7 +199,7 @@ def usage_record_cost(
     token_cost = (
         (Decimal(int(input_tokens)) / million) * inp
         + (Decimal(int(output_tokens)) / million) * out
-        + (Decimal(int(cache_read_tokens)) / million) * inp * Decimal(str(CACHE_READ_MULTIPLIER))
+        + (Decimal(int(cache_read_tokens)) / million) * inp * Decimal(str(price.cache_read_multiplier))
         + (Decimal(int(cache_write_tokens)) / million)
         * inp
         * Decimal(str(cache_write_multiplier(cache_write_ttl)))

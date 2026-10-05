@@ -185,7 +185,7 @@ consume ledger entries and nothing else.
 
 - **Planning:** `set_identity.py` — one text-only call → advisory `SetIdentity`
   (consumers take `SetIdentity | None` and never gate a finding on it). The
-  regex edition harvest unions in as `origin="regex"`. Runs on Sonnet 5. Coerce
+  regex edition harvest unions in as `origin="regex"`. Runs on Sonnet 5.5. Coerce
   every list-shaped field through `set_identity._as_list` (a string must not be
   consumed per character). The international code-designation regex is
   **case-sensitive**; `Eurocode` keeps its own case-insensitive group.
@@ -237,7 +237,7 @@ consume ledger entries and nothing else.
   doubt. `sheet_index.py`'s harvest stays unbounded; both diff directions
   already run `classify_reference`. `prose_harvest.py` mirrors prose
   Coordination/Conflict items, synthesis conflicts, and opted-in focus items
-  (match first; one structuring call for stragglers on Sonnet 5 at
+  (match first; one structuring call for stragglers on Sonnet 5.5 at
   `EFFORT_LOW`). Its boilerplate filter is anchored at **both** ends, length
   floor 8; the `filtered` count is observational and feeds neither `missing` nor
   `complete`. Opt-in `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`:
@@ -320,7 +320,7 @@ consume ledger entries and nothing else.
   `stage=investigation` (finding identity + whole-set fingerprint +
   model/prompt/round-budget/task-budget), complete-only; a warm hit replays the
   tool trace with sha-compare and has no TTL. `citation_check.py` runs on
-  Sonnet 5 (`web_search` + `web_fetch` per unique code ref; web fetch is
+  Sonnet 5.5 (`web_search` + `web_fetch` per unique code ref; web fetch is
   unavailable on Opus 5). Both tools carry the shared source-quality blocklist.
   The resolved tool set rides the verdict cache key.
   The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
@@ -440,7 +440,7 @@ consume ledger entries and nothing else.
   label (`"r1c1"`); `tiling.parse_tile_label` converts it to the canonical
   **zero-based** `[row, col]`. A legacy `tile` array is accepted only as
   explicit zero-based, bounds-checked.
-- **Thinking and effort are always explicit.** On Opus 5 and Sonnet 5 an omitted
+- **Thinking and effort are always explicit.** On the 5-generation Opus and Sonnet (5 and 5.5) an omitted
   `thinking` key runs adaptive thinking, and thinking shares the `max_tokens`
   envelope with the answer. Every request builder states `thinking` and
   `effort`, resolved through the `core.api_config` phase registry (including
@@ -458,7 +458,7 @@ consume ledger entries and nothing else.
   conversion is a hard failure, including the batch→real-time fallbacks.
 - **Refusal fallback is a registry capability.**
   `ModelCapabilities.supports_refusal_fallback` decides which models opt in —
-  never a comparison against one model id. Opus 5 is today's only declarer
+  never a comparison against one model id. Opus 5.5 is today's only declarer
   (`stop_reason="refusal"`, HTTP 200); Opus 4.8 is the fallback target, with
   the same effort, thinking, output cap, hi-res vision, and $5/$25 pricing.
   `core.api_config.call_with_refusal_fallback` attaches `fallbacks: "default"`

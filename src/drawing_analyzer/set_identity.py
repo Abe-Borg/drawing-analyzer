@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .core.api_config import (
-    MODEL_SONNET_5,
+    MODEL_SONNET_5_5,
     call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
@@ -87,7 +87,7 @@ _CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 
 def default_identity_model() -> str:
-    """Model for the identity pass — Sonnet 5 by default, overridable via
+    """Model for the identity pass — Sonnet 5.5 by default, overridable via
     ``DRAWING_ANALYZER_IDENTITY_MODEL``.
 
     Structured extraction over a budgeted text corpus, and **advisory only**:
@@ -99,7 +99,7 @@ def default_identity_model() -> str:
     override = os.environ.get("DRAWING_ANALYZER_IDENTITY_MODEL")
     if override and override.strip():
         return override.strip()
-    return MODEL_SONNET_5
+    return MODEL_SONNET_5_5
 
 
 IDENTITY_SYSTEM_PROMPT = """\

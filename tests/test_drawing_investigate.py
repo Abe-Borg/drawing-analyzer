@@ -565,7 +565,7 @@ def test_budget_env_overrides(monkeypatch):
 
 
 def test_investigation_model_env_override(monkeypatch):
-    assert investigation_model() == "claude-opus-5"  # the escalation tier
+    assert investigation_model() == "claude-opus-5-5"  # the escalation tier
     monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", "claude-sonnet-5")
     assert investigation_model() == "claude-sonnet-5"
 

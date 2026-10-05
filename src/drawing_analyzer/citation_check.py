@@ -63,7 +63,7 @@ from typing import Any, Iterable
 
 from .core.api_config import (
     CITATION_OUTPUT_CAP,
-    MODEL_SONNET_5,
+    MODEL_SONNET_5_5,
     PHASE_CITATION,
     WEB_SEARCH_TOOL_TYPE,
     apply_effort_config,
@@ -141,7 +141,7 @@ def citation_model() -> str:
     drawing claims", that is the difference between a plausible verdict and a
     defensible one — and it costs less.
     """
-    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5
+    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5_5
 
 
 def web_search_max_uses() -> int:
