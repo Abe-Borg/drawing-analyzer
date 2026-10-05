@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from drawing_analyzer import batch_digest, batch_recovery, batch_critique, pipeline
+from drawing_analyzer import batch_digest, batch_recovery, batch_critique, digest_cache, pipeline
 from drawing_analyzer.batch_recovery import BatchReceiptError, recover_pending_batches, read_batch_results
 from drawing_analyzer.digest_cache import DigestCache
 from tests.test_drawing_batch import _FakeClient, _flaky_then_ok, _make_sheet, _succeed, OPUS, NOSLEEP
@@ -215,6 +215,43 @@ def test_critique_receipt_recovers_all_reads_into_fresh_cache(tmp_path):
     assert batch.slots[0].result.cached
     assert batch.slots[0].result.completed_runs == 2
     assert cache.pending_batches() == []
+
+
+@pytest.mark.parametrize("stage, bumped", [("digest", "critique"), ("critique", "digest")])
+def test_other_stage_schema_bump_preserves_paid_batch_recovery(stage, bumped, tmp_path, monkeypatch):
+    path = tmp_path / "digest.sqlite3"
+    cache = DigestCache(path)
+    client = _FakeClient(_succeed) if stage == "digest" else CritiqueClient(critique_succeed)
+    submit = batch_digest.submit_drawing_batch if stage == "digest" else batch_critique.submit_critique_batch
+    kwargs = {"runs": 2} if stage == "critique" else {}
+    submit([_make_sheet(0)], client=client, cache=cache, model=OPUS, **kwargs)
+    record, = cache.pending_batches()
+    assert record["stage"] == stage and record["schema_version"] == 10
+    cache.close()
+    monkeypatch.setattr(digest_cache, f"_{bumped.upper()}_SCHEMA_VERSION", 11)
+    cache = DigestCache(path)
+    try:
+        batch = submit([_make_sheet(0)], client=client, cache=cache, model=OPUS, **kwargs)
+        result = batch.slots[0].digest if stage == "digest" else batch.slots[0].result
+        assert result.cached
+        assert batch.batch_id is None and len(client.create_calls) == 1
+        assert cache.pending_batches() == []
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("stage", ["digest", "critique"])
+def test_new_batch_receipt_uses_its_namespace_version(stage, tmp_path, monkeypatch):
+    monkeypatch.setattr(digest_cache, f"_{stage.upper()}_SCHEMA_VERSION", 11)
+    cache = DigestCache(tmp_path / "digest.sqlite3")
+    client = _FakeClient(_succeed) if stage == "digest" else CritiqueClient(critique_succeed)
+    submit = batch_digest.submit_drawing_batch if stage == "digest" else batch_critique.submit_critique_batch
+    try:
+        submit([_make_sheet(0)], client=client, cache=cache, model=OPUS)
+        record, = cache.pending_batches()
+        assert record["schema_version"] == 11
+    finally:
+        cache.close()
 
 
 def test_critique_recovery_groups_identical_sheet_pixels_by_slot(tmp_path):

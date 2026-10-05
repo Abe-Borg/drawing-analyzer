@@ -16,7 +16,7 @@ import pytest
 
 from drawing_analyzer.digest_cache import (
     DigestCache,
-    _SCHEMA_VERSION,
+    _LEGACY_SCHEMA_VERSION,
     critique_cache_key_level1,
     digest_cache_key_level1,
 )
@@ -291,17 +291,18 @@ def test_prescan_rehashes_a_source_changed_since_the_snapshot(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Schema migration: a pre-v5 cache entry is discarded on load
+# Legacy JSON admission: versions before the last global v10 still miss
 # --------------------------------------------------------------------------- #
 
 
 def test_old_schema_entries_are_discarded(tmp_path):
     # A cache file written under an older schema must miss (never be served as
-    # current) — the whole point of bumping _SCHEMA_VERSION on a shape change.
+    # current). The final global version is fixed for legacy JSON admission;
+    # new namespace bumps invalidate through keys rather than this gate.
     cache_path = tmp_path / "digest_cache.json"
     key = "some-key"
     cache_path.write_text(json.dumps({
-        "_schema_version": _SCHEMA_VERSION - 1,
+        "_schema_version": _LEGACY_SCHEMA_VERSION - 1,
         "entries": {key: {"text": "stale digest", "findings": []}},
     }), encoding="utf-8")
     cache = DigestCache(cache_path, persist=True)

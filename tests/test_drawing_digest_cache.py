@@ -17,7 +17,7 @@ import drawing_analyzer.digest_cache as digest_cache_module
 from drawing_analyzer.digest import DIGEST_PROMPT_VERSION, digest_sheet
 from drawing_analyzer.digest_cache import (
     _DB_FORMAT_VERSION,
-    _SCHEMA_VERSION,
+    _LEGACY_SCHEMA_VERSION,
     DigestCache,
     critique_cache_key,
     default_cache_path,
@@ -241,7 +241,7 @@ def test_legacy_json_migrates_in_place_without_losing_current_schema_entries(tmp
     path.write_text(
         json.dumps(
             {
-                "_schema_version": _SCHEMA_VERSION,
+                "_schema_version": _LEGACY_SCHEMA_VERSION,
                 "entries": {
                     "digest-key": {"text": "legacy digest", "findings": []},
                     "critique-key": {"text": "legacy critique", "completed_runs": 2},
@@ -282,7 +282,7 @@ def test_failed_legacy_migration_is_atomic_and_serves_original_in_memory(
     path.write_text(
         json.dumps(
             {
-                "_schema_version": _SCHEMA_VERSION,
+                "_schema_version": _LEGACY_SCHEMA_VERSION,
                 "entries": {"k": {"text": "still available"}},
             }
         ),
@@ -310,7 +310,7 @@ def test_concurrent_instances_migrate_once_and_do_not_lose_writes(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "_schema_version": _SCHEMA_VERSION,
+                "_schema_version": _LEGACY_SCHEMA_VERSION,
                 "entries": {"legacy": {"text": "seed"}},
             }
         ),
@@ -401,38 +401,49 @@ def test_transient_write_failure_is_retried_by_next_successful_put(tmp_path):
         reopened.close()
 
 
-def test_storage_or_content_schema_mismatch_invalidates_all_rows(tmp_path):
-    for mismatch in ("storage", "content"):
-        path = tmp_path / f"{mismatch}.json"
-        cache = DigestCache(path, persist=True)
-        cache.put("digest", {"text": "stale"})
-        cache.put("critique", {"text": "also stale"})
-        cache.close()
+@pytest.mark.parametrize("legacy_schema", [None, "9", "10", "malformed"])
+def test_old_content_metadata_never_wipes_sqlite_rows(tmp_path, legacy_schema):
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    cache.put("digest", {"text": "paid digest"})
+    cache.put("critique", {"text": "paid critique"})
+    cache.close()
 
-        with sqlite3.connect(path) as raw:
-            if mismatch == "storage":
-                raw.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION + 1}")
-            else:
-                raw.execute(
-                    "UPDATE cache_metadata SET value = ? WHERE name = ?",
-                    (str(_SCHEMA_VERSION - 1), "cache_schema_version"),
-                )
-
-        reopened = DigestCache(path, persist=True)
-        try:
-            assert reopened.get("digest") is None
-            assert reopened.get("critique") is None
-            assert reopened.stats()["size"] == 0
-            assert (
-                reopened._connection.execute("PRAGMA user_version").fetchone()[0]
-                == _DB_FORMAT_VERSION
+    with sqlite3.connect(path) as raw:
+        if legacy_schema is not None:
+            raw.execute(
+                "INSERT INTO cache_metadata(name, value) VALUES (?, ?)",
+                ("cache_schema_version", legacy_schema),
             )
-            assert reopened._connection.execute(
-                "SELECT value FROM cache_metadata WHERE name = ?",
-                ("cache_schema_version",),
-            ).fetchone() == (str(_SCHEMA_VERSION),)
-        finally:
-            reopened.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.get("digest") == {"text": "paid digest"}
+        assert reopened.get("critique") == {"text": "paid critique"}
+        assert reopened.stats()["size"] == 2
+        assert reopened._connection.execute("PRAGMA user_version").fetchone()[0] == _DB_FORMAT_VERSION
+    finally:
+        reopened.close()
+
+
+def test_newer_storage_format_is_left_untouched(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    cache.put("digest", {"text": "paid digest"})
+    cache.close()
+    with sqlite3.connect(path) as raw:
+        raw.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION + 1}")
+    monkeypatch.setattr(digest_cache_module, "_OPEN_RETRY_DELAYS", ())
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened._connection is None
+        with sqlite3.connect(path) as raw:
+            assert raw.execute("PRAGMA user_version").fetchone()[0] == _DB_FORMAT_VERSION + 1
+            assert json.loads(raw.execute("SELECT value_json FROM cache_entries").fetchone()[0]) == {
+                "text": "paid digest",
+            }
+    finally:
+        reopened.close()
 
 
 def test_digest_and_critique_namespaces_coexist_in_persistent_store(tmp_path):
@@ -575,7 +586,7 @@ def test_a_lost_open_race_after_migration_does_not_empty_the_cache(tmp_path, mon
     path = tmp_path / "shared-cache.json"
     path.write_text(
         json.dumps(
-            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+            {"_schema_version": _LEGACY_SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
         ),
         encoding="utf-8",
     )
@@ -620,7 +631,7 @@ def test_a_genuinely_unreadable_database_still_degrades_quietly(tmp_path, monkey
     path = tmp_path / "shared-cache.json"
     path.write_text(
         json.dumps(
-            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+            {"_schema_version": _LEGACY_SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
         ),
         encoding="utf-8",
     )
@@ -650,7 +661,7 @@ def test_a_failed_migration_still_serves_the_legacy_json(tmp_path, monkeypatch):
     path = tmp_path / "shared-cache.json"
     path.write_text(
         json.dumps(
-            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+            {"_schema_version": _LEGACY_SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
         ),
         encoding="utf-8",
     )

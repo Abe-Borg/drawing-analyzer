@@ -9,7 +9,7 @@ re-opening the project) should not re-pay for the sheets that didn't change.
 Persistent caches use a transactional SQLite/WAL store.  Older releases wrote
 one JSON object and replaced the whole file on every ``put``; that made a cold
 multi-sheet run rewrite an ever-growing cache many times.  The first open of a
-legacy JSON cache migrates its current-schema entries in place, atomically, so
+legacy JSON cache migrates its v10 entries in place, atomically, so
 existing ``DRAWING_ANALYZER_CACHE_PATH`` values remain valid even when their
 filename ends in ``.json``.
 
@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+# Historical global schema changes (before namespace-specific versions):
 # Bumped to 2 when the cache entry gained a serialized ``findings`` list (Phase
 # 3); to 3 for the two-level key (Phase 9) — a digest is now also stored under a
 # cheap *pre-render* key (``digest_cache_key_level1``) so an unchanged sheet is
@@ -84,12 +85,24 @@ from typing import Any, Iterator
 # is stored as two. Cannot be re-derived in place and must miss once and be
 # re-critiqued rather than served as current. Same reasoning as the v6 and v9
 # parser rebuilds, which are the precedent this follows.
-_SCHEMA_VERSION = 10
+# Start every namespace at the former global version so all paid v10 keys stay
+# byte-identical. Bump only the stages whose stored/request contract changed
+# (I-6); digest and critique each share a version across their two key levels.
+_DIGEST_SCHEMA_VERSION = 10
+_CRITIQUE_SCHEMA_VERSION = 10
+_IDENTITY_SCHEMA_VERSION = 10
+_REVIEW_PLAN_SCHEMA_VERSION = 10
+_CITATION_SCHEMA_VERSION = 10
+_INVESTIGATION_SCHEMA_VERSION = 10
+
+# Fixed legacy JSON admission version, NOT an invalidation knob. Future stage
+# bumps must still import the other namespaces' already-paid v10 entries.
+_LEGACY_SCHEMA_VERSION = 10
 
 # Storage format and concurrency settings are intentionally separate from the
-# content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;
-# ``_DB_FORMAT_VERSION`` describes only the SQLite tables that hold them.
-_DB_FORMAT_VERSION = 1
+# content schemas above. ``_DB_FORMAT_VERSION`` describes only the SQLite
+# tables that hold them; format changes migrate rows rather than invalidate them.
+_DB_FORMAT_VERSION = 2
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _BUSY_TIMEOUT_SECONDS = 30.0
 #: Backoffs for re-opening a database whose first open lost the schema-lock
@@ -100,7 +113,26 @@ _OPEN_RETRY_DELAYS = (0.05, 0.15, 0.4)
 _INIT_LOCK_TIMEOUT_SECONDS = 30.0
 _STALE_INIT_LOCK_SECONDS = 10 * 60.0
 
+# Re-keyed rows eventually expire without evicting entries still in use. Each
+# sweep is bounded; an open cache also sweeps at most once an hour on writes.
+_CACHE_MAX_IDLE_SECONDS = 180 * 24 * 60 * 60
+_GC_BATCH_SIZE = 256
+_GC_INTERVAL_SECONDS = 60 * 60
+_ACCESS_TOUCH_INTERVAL_SECONDS = 24 * 60 * 60
+
 _FALSEY = {"0", "false", "no", "off", ""}
+
+
+def cache_schema_version(namespace: str) -> int:
+    """Current result contract for a namespace, including batch receipts."""
+    return {
+        "digest": _DIGEST_SCHEMA_VERSION,
+        "critique": _CRITIQUE_SCHEMA_VERSION,
+        "identity": _IDENTITY_SCHEMA_VERSION,
+        "review_plan": _REVIEW_PLAN_SCHEMA_VERSION,
+        "citation": _CITATION_SCHEMA_VERSION,
+        "investigation": _INVESTIGATION_SCHEMA_VERSION,
+    }[namespace]
 
 
 def _env_truthy(value: str | None, *, default: bool) -> bool:
@@ -191,7 +223,7 @@ def digest_cache_key(
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_DIGEST_SCHEMA_VERSION}",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_tokens={int(max_tokens)}",
@@ -248,7 +280,7 @@ def digest_cache_key_level1(
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_DIGEST_SCHEMA_VERSION}",
         "level=1",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -314,7 +346,7 @@ def critique_cache_key_level1(
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_CRITIQUE_SCHEMA_VERSION}",
         "stage=critique",
         "level=1",
         f"model={model or ''}",
@@ -380,15 +412,15 @@ def critique_cache_key(
     different findings instruction and a schema the model decoded against — and
     must not be served to, or from, a fenced run. Folded in on the same
     only-when-set rule as ``profiles_key``, which is what lets this land with NO
-    ``_SCHEMA_VERSION`` bump: every existing entry was written without it, every
-    fenced run still computes the pre-F-01 key byte-for-byte, and nothing already
-    paid for is discarded. Turning the feature on adds entries beside the old
+    ``_CRITIQUE_SCHEMA_VERSION`` bump: every existing entry was written without
+    it, every fenced run still computes the pre-F-01 key byte-for-byte, and
+    nothing already paid for is discarded. Turning the feature on adds entries beside the old
     ones rather than replacing them, so flipping it back and forth costs one
     re-read each way instead of invalidating both sides.
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_CRITIQUE_SCHEMA_VERSION}",
         "stage=critique",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -433,7 +465,7 @@ def identity_cache_key(
     deterministic — page-ordered, budgeted), so the same set re-identifies for
     free and any content/prompt/param change re-runs. The ``stage=identity``
     namespace tag keeps this from ever colliding with digest/critique keys, so
-    adding it needs no ``_SCHEMA_VERSION`` bump (nothing stored under existing
+    adding it needs no schema bump (nothing stored under existing
     keys changes shape). Keeping the identity — and therefore the canonical
     review facts derived from it — warm-run stable protects the review-plan
     cache. The planner independently keys on those facts, so identity provenance
@@ -441,7 +473,7 @@ def identity_cache_key(
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_IDENTITY_SCHEMA_VERSION}",
         "stage=identity",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -471,14 +503,14 @@ def review_plan_cache_key(
     plus request params and the total-items cap. The planner consumes only these
     facts; changed disciplines or adopted codes must re-plan. The new prompt
     fingerprint and ``contract=2`` isolate older corpus-based entries without a
-    global ``_SCHEMA_VERSION`` bump that would discard paid per-sheet reads.
+    schema bump for any other stage.
     A stable cached plan is what keeps the critique's
     ``profiles_key`` byte-identical across warm runs, preserving the Phase 19B
     cached-critique fast path.
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_REVIEW_PLAN_SCHEMA_VERSION}",
         "stage=review_plan",
         "contract=2",
         f"model={model or ''}",
@@ -518,9 +550,9 @@ def citation_cache_key(
     what its answer means.
 
     Same namespace-isolation rationale as :func:`identity_cache_key` — the
-    ``stage=citation`` tag means no ``_SCHEMA_VERSION`` bump. Entries carry a
-    ``checked_at`` timestamp the CALLER compares against its TTL (this module
-    stays time-blind; the I-7 carve-out is documented in
+    ``stage=citation`` tag means no schema bump for other stages. Entries carry a
+    ``checked_at`` timestamp the CALLER compares against its TTL (the key stays
+    time-blind; the I-7 carve-out is documented in
     :mod:`drawing_analyzer.citation_check`).
     """
     shape = json.dumps(
@@ -528,7 +560,7 @@ def citation_cache_key(
     )
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_CITATION_SCHEMA_VERSION}",
         "stage=citation",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -562,11 +594,11 @@ def investigation_cache_key(
     cache: citation's ground truth drifts with the live web, while every
     investigation input is folded into this key. Same namespace-isolation
     rationale as :func:`identity_cache_key` — the ``stage=investigation`` tag
-    means no ``_SCHEMA_VERSION`` bump.
+    means no schema bump for other stages.
     """
     h = hashlib.sha256()
     for part in (
-        f"schema={_SCHEMA_VERSION}",
+        f"schema={_INVESTIGATION_SCHEMA_VERSION}",
         "stage=investigation",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -590,7 +622,7 @@ def _serialize_entry(value: dict) -> str:
 def _read_legacy_json(path: Path) -> dict[str, dict]:
     """Read a pre-SQLite cache defensively.
 
-    Only entries from the current content schema are eligible for migration.
+    Only entries from the last global content schema are eligible for migration.
     This preserves the old loader's fail-closed behavior: malformed files,
     stale schemas, and non-dict row values all become cache misses.
     """
@@ -598,7 +630,7 @@ def _read_legacy_json(path: Path) -> dict[str, dict]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    if not isinstance(raw, dict) or raw.get("_schema_version") != _SCHEMA_VERSION:
+    if not isinstance(raw, dict) or raw.get("_schema_version") != _LEGACY_SCHEMA_VERSION:
         return {}
     entries = raw.get("entries")
     if not isinstance(entries, dict):
@@ -678,17 +710,18 @@ def _create_database_file(path: Path, entries: dict[str, dict]) -> None:
             """
             CREATE TABLE cache_entries (
                 cache_key TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL
+                value_json TEXT NOT NULL,
+                last_used_at REAL NOT NULL DEFAULT 0
             ) WITHOUT ROWID
             """
         )
         connection.execute(
-            "INSERT INTO cache_metadata(name, value) VALUES (?, ?)",
-            ("cache_schema_version", str(_SCHEMA_VERSION)),
+            "CREATE INDEX cache_entries_last_used ON cache_entries(last_used_at)"
         )
+        migrated_at = time.time()
         connection.executemany(
-            "INSERT INTO cache_entries(cache_key, value_json) VALUES (?, ?)",
-            ((key, _serialize_entry(value)) for key, value in entries.items()),
+            "INSERT INTO cache_entries(cache_key, value_json, last_used_at) VALUES (?, ?, ?)",
+            ((key, _serialize_entry(value), migrated_at) for key, value in entries.items()),
         )
         connection.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION}")
         connection.commit()
@@ -740,10 +773,13 @@ def _prepare_database_path(path: Path) -> None:
 
 
 def _ensure_database_schema(connection: sqlite3.Connection) -> None:
-    """Create tables and transactionally invalidate incompatible cache rows."""
+    """Migrate storage in place; content invalidation happens only in keys."""
     connection.execute("BEGIN IMMEDIATE")
     try:
-        # Submission receipts outlive content-schema invalidation. Losing a
+        db_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if db_version > _DB_FORMAT_VERSION:
+            raise sqlite3.DatabaseError("cache uses a newer database format")
+        # Submission receipts outlive content-schema changes. Losing a
         # receipt would strand work already accepted (and billed) by the API.
         connection.execute(
             "CREATE TABLE IF NOT EXISTS pending_batches ("
@@ -761,37 +797,42 @@ def _ensure_database_schema(connection: sqlite3.Connection) -> None:
             """
             CREATE TABLE IF NOT EXISTS cache_entries (
                 cache_key TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL
+                value_json TEXT NOT NULL,
+                last_used_at REAL NOT NULL DEFAULT 0
             ) WITHOUT ROWID
             """
         )
 
-        db_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        schema_row = connection.execute(
-            "SELECT value FROM cache_metadata WHERE name = ?",
-            ("cache_schema_version",),
-        ).fetchone()
-        try:
-            cache_schema = int(schema_row[0]) if schema_row is not None else None
-        except (TypeError, ValueError):
-            cache_schema = None
-
-        if db_version != _DB_FORMAT_VERSION or cache_schema != _SCHEMA_VERSION:
-            # Cache invalidation is all-or-nothing.  No reader can observe old
-            # and current-schema rows mixed together.
-            connection.execute("DELETE FROM cache_entries")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(cache_entries)")}
+        if "last_used_at" not in columns:
+            connection.execute(
+                "ALTER TABLE cache_entries ADD COLUMN last_used_at REAL NOT NULL DEFAULT 0"
+            )
+            # Give every existing row a full retention window, regardless of
+            # its payload's creation date. Migrating must re-digest nothing.
+            connection.execute("UPDATE cache_entries SET last_used_at = ?", (time.time(),))
+        # The old cache_schema_version metadata is intentionally ignored. Keys
+        # already encode each result's contract; a different stage's version
+        # must never remove a paid row. Keep legacy metadata untouched too.
         connection.execute(
-            """
-            INSERT INTO cache_metadata(name, value) VALUES (?, ?)
-            ON CONFLICT(name) DO UPDATE SET value=excluded.value
-            """,
-            ("cache_schema_version", str(_SCHEMA_VERSION)),
+            "CREATE INDEX IF NOT EXISTS cache_entries_last_used ON cache_entries(last_used_at)"
         )
         connection.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION}")
         connection.commit()
     except Exception:
         connection.rollback()
         raise
+
+
+def _collect_database_garbage(connection: sqlite3.Connection, *, now: float) -> int:
+    """Reap at most one batch of idle rows, preserving all recently used rows."""
+    cursor = connection.execute(
+        "DELETE FROM cache_entries WHERE cache_key IN ("
+        "SELECT cache_key FROM cache_entries WHERE last_used_at < ? "
+        "ORDER BY last_used_at, cache_key LIMIT ?)",
+        (now - _CACHE_MAX_IDLE_SECONDS, _GC_BATCH_SIZE),
+    )
+    return cursor.rowcount
 
 
 def _open_database(path: Path) -> sqlite3.Connection:
@@ -806,6 +847,11 @@ def _open_database(path: Path) -> sqlite3.Connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         _ensure_database_schema(connection)
+        try:
+            _collect_database_garbage(connection, now=time.time())
+        except sqlite3.Error:
+            # Maintenance must not make an otherwise usable cache miss.
+            pass
     except Exception:
         connection.close()
         raise
@@ -838,6 +884,7 @@ class DigestCache:
         self._connection: sqlite3.Connection | None = None
         self._hits = 0
         self._misses = 0
+        self._next_gc_at = time.monotonic() + _GC_INTERVAL_SECONDS
         if self._persist:
             self._load()
 
@@ -854,7 +901,7 @@ class DigestCache:
 
             try:
                 row = self._connection.execute(
-                    "SELECT value_json FROM cache_entries WHERE cache_key = ?", (key,)
+                    "SELECT value_json, last_used_at FROM cache_entries WHERE cache_key = ?", (key,)
                 ).fetchone()
             except sqlite3.Error:
                 self._misses += 1
@@ -881,6 +928,18 @@ class DigestCache:
                 self._misses += 1
                 return None
 
+            now = time.time()
+            if row[1] < now - _ACCESS_TOUCH_INTERVAL_SECONDS:
+                try:
+                    # Coalesce warm-run writes to once per key per day. Never
+                    # move a concurrent writer's more recent timestamp back.
+                    self._connection.execute(
+                        "UPDATE cache_entries SET last_used_at = ? "
+                        "WHERE cache_key = ? AND last_used_at < ?",
+                        (now, key, now),
+                    )
+                except sqlite3.Error:
+                    pass
             self._hits += 1
             return dict(decoded)
 
@@ -894,10 +953,11 @@ class DigestCache:
             if self._connection is None:
                 return
 
-            pending: list[tuple[str, str]] = []
+            written_at = time.time()
+            pending: list[tuple[str, str, float]] = []
             for pending_key, pending_value in self._entries.items():
                 try:
-                    pending.append((pending_key, _serialize_entry(pending_value)))
+                    pending.append((pending_key, _serialize_entry(pending_value), written_at))
                 except Exception:
                     # A malformed/non-JSON value remains usable in memory but
                     # must not prevent independent serializable rows persisting.
@@ -909,8 +969,9 @@ class DigestCache:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.executemany(
                     """
-                    INSERT INTO cache_entries(cache_key, value_json) VALUES (?, ?)
-                    ON CONFLICT(cache_key) DO UPDATE SET value_json=excluded.value_json
+                    INSERT INTO cache_entries(cache_key, value_json, last_used_at) VALUES (?, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        value_json=excluded.value_json, last_used_at=excluded.last_used_at
                     """,
                     pending,
                 )
@@ -924,8 +985,31 @@ class DigestCache:
                 # already computed and returned to the caller.
                 pass
             else:
-                for persisted_key, _encoded in pending:
+                for persisted_key, _encoded, _written_at in pending:
                     self._entries.pop(persisted_key, None)
+                if time.monotonic() >= self._next_gc_at:
+                    try:
+                        _collect_database_garbage(self._connection, now=written_at)
+                    except sqlite3.Error:
+                        pass
+                    self._next_gc_at = time.monotonic() + _GC_INTERVAL_SECONDS
+
+    def collect_garbage(self, *, now: float | None = None) -> int:
+        """Delete at most 256 rows unused for 180 days; return the removed count.
+
+        Opens and occasional writes also sweep automatically. ``now`` is
+        injectable for deterministic maintenance tests. Memory-only and failed
+        stores have no durable rows to collect; maintenance errors are nonfatal.
+        """
+        with self._lock:
+            if self._connection is None:
+                return 0
+            try:
+                return _collect_database_garbage(
+                    self._connection, now=time.time() if now is None else now,
+                )
+            except sqlite3.Error:
+                return 0
 
     def pending_batches(self) -> list[dict]:
         """Read submission receipts; persistent I/O errors must fail closed."""

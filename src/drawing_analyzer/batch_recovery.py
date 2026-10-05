@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from . import diagnostics
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
-from .digest_cache import DigestCache, _SCHEMA_VERSION, get_default_digest_cache
+from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
 
 _log = diagnostics.get_logger()
@@ -132,7 +132,7 @@ def _persist_submitted_batch(cache: Any, batch_id: str, slots: list, *,
     recovery_cache(cache).record_batch({
         "batch_id": batch_id, "transport": "BATCH", "stage": stage,
         "submitted_at": time.time(), "results_expire_at": created_ts + RESULTS_RETENTION_SECONDS,
-        "schema_version": _SCHEMA_VERSION, "runs": runs, "items": items,
+        "schema_version": cache_schema_version(stage), "runs": runs, "items": items,
         "file_ids": list(dict.fromkeys(fid for slot in slots for fid in slot.file_ids)),
     })
 
@@ -149,7 +149,7 @@ def finish_batch_record(cache: Any, batch_id: str, raw: dict) -> dict[str, dict]
     if record is None:
         return {}
     entries: dict[str, dict] = {}
-    if record["schema_version"] == _SCHEMA_VERSION:
+    if record["schema_version"] == cache_schema_version(record["stage"]):
         if record["stage"] == "digest":
             from .batch_digest import _Slot, _parse_item
             from .digest import cache_entry_from_digest

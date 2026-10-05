@@ -432,9 +432,21 @@ consume ledger entries and nothing else.
   PyMuPDF. The README's AGPL licensing story depends on this; `anchor.py` and
   `tiling.py` work on extracted word rectangles to preserve it.
 - **I-6 — cache correctness:** prompt versions are content hashes
-  (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`); bump
-  `digest_cache._SCHEMA_VERSION` manually whenever what is stored or sent
-  changes. A hash covers only what it is given. Model-visible user-turn framing
+  (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`); when what is stored or
+  sent changes beyond those hashes, bump only the affected namespace constant
+  in `digest_cache`: `_DIGEST_SCHEMA_VERSION` for digest parsing/request/storage
+  (both key levels and batch recovery), `_CRITIQUE_SCHEMA_VERSION` for critique parsing/merging/
+  request/storage (both key levels and batch recovery), `_IDENTITY_SCHEMA_VERSION`
+  for set identity, `_REVIEW_PLAN_SCHEMA_VERSION` for review plans,
+  `_CITATION_SCHEMA_VERSION` for citation verdicts, and
+  `_INVESTIGATION_SCHEMA_VERSION` for investigation verdicts/traces. Shared
+  serialized finding changes may require both digest and critique bumps. All
+  six start at 10 to preserve existing keys; `_LEGACY_SCHEMA_VERSION` stays
+  fixed at 10 for JSON migration. `_DB_FORMAT_VERSION` is storage-only:
+  migrate tables in place, never wipe paid rows on a version mismatch. Unused
+  rows expire after 180 idle days, at most 256 per open/hourly write sweep;
+  migration starts a full retention window and hits refresh it (daily).
+  A hash covers only what it is given. Model-visible user-turn framing
   lives in `digest.SHARED_USER_FRAMING_STRINGS`, which **both** hashes splat.
   A string added elsewhere must be hashed by the author.
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
