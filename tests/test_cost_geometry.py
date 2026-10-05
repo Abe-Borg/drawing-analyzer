@@ -41,8 +41,8 @@ from drawing_analyzer.models import (
 )
 from drawing_analyzer.pipeline import estimate_image_tokens_for_set
 
-OPUS = "claude-opus-5"
-SONNET = "claude-sonnet-5"
+OPUS = "claude-opus-5-5"
+SONNET = "claude-sonnet-5-5"
 #: A standard-tier model: 1568-token image cap instead of 4784.
 HAIKU = "claude-haiku-4-5-20251001"
 

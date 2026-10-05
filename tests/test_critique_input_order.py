@@ -124,6 +124,8 @@ def test_skipped_fresh_page_does_not_shift_later_render(monkeypatch) -> None:
 
 def test_batch_reusable_and_fresh_inputs_keep_page_order(monkeypatch) -> None:
     a, b, c = (_sheet("A", 0), _sheet("B", 1), _sheet("C", 2))
+    monkeypatch.setattr(pipeline, "iter_sheet_prescan", lambda _paths, **_kwargs:
+                        ((sheet.ref, f"identity-{sheet.ref.source_name}", None) for sheet in (a, b, c)))
     reusable = [
         ReusableSheetUpload(
             ref=sheet.ref, rows=1, cols=1,

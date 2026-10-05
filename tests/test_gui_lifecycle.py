@@ -258,6 +258,35 @@ def test_callback_exception_is_logged_shown_and_non_fatal(monkeypatch):
     assert "still running" in shown[0]
 
 
+def test_worker_logs_full_traceback_before_showing_error(monkeypatch, tmp_path):
+    from drawing_analyzer import diagnostics
+
+    diagnostics.reset_for_tests()
+    log_path = tmp_path / "diagnostics.log"
+    diagnostics.configure_file_logging(log_path, capture_sdk=False)
+    shown = []
+    try:
+        with _gui_module() as (gui, _tk):
+            def broken_pipeline(*args, **kwargs):
+                raise RuntimeError("analysis failed at the inner frame")
+            monkeypatch.setattr(gui, "extract_drawing_context", broken_pipeline)
+            def show_error(message):
+                trace = log_path.read_text(encoding="utf-8")
+                assert "Traceback (most recent call last)" in trace
+                assert "broken_pipeline" in trace
+                assert "RuntimeError: analysis failed at the inner frame" in trace
+                shown.append(message)
+            stub = types.SimpleNamespace(
+                after=lambda _delay, callback: callback(), _on_error=show_error,
+                _progress_from_thread=lambda *a: None,
+                _log_from_thread=lambda *a: None, _status_from_thread=lambda *a: None,
+            )
+            gui.DrawingAnalyzerApp._worker(stub, [], "")
+        assert shown == ["analysis failed at the inner frame"]
+    finally:
+        diagnostics.reset_for_tests()
+
+
 def test_callback_reporter_survives_every_channel_failing(monkeypatch):
     """The reporter of last resort must never raise from inside Tk's handler."""
     with _gui_module() as (gui, tk):

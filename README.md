@@ -721,7 +721,7 @@ section. The identity call runs on Sonnet 5 by default
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
 
-**Model-authored review plan.** From the identity + digest heads, a second
+**Model-authored review plan.** From the identity's canonical review facts, a second
 text-only call authors the per-discipline checklist a specialist for *this* set
 would apply — one-line "flag X when Y" items in the exact review-profile style,
 bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`, with
@@ -735,20 +735,24 @@ machinery below (after any user checklists), snapshotted with
 `source="model"`, exported as `review_plan.md`, and cached content-addressed so
 warm re-runs rebuild it byte-identically (keeping the critique cache hot).
 
-Routine revisions retain that checklist when at least one readable sheet is
-unchanged and the detected review scope still matches: disciplines, project and
-set type, jurisdiction, language, units, and adopted code editions/amendments.
-Revision compatibility requires detected disciplines plus a project type,
-jurisdiction, or named adopted code. Locale-only or other partial identities
-require a new plan when the corpus changes; exact-corpus cache hits remain valid.
+The planner consumes and caches only canonical review facts: disciplines,
+project and set type, jurisdiction, country/region, language, units, and adopted
+code editions/amendments. Routine revisions retain the checklist whenever those
+facts match, even if no sheets remain unchanged. Reuse requires detected
+disciplines plus a project type, jurisdiction, or named adopted code. With an
+insufficient identity, the planner falls back to digest-based authoring without
+caching that plan.
+
 Renaming a PDF, adding/removing a page, revising a sheet, or recovering a failed
 digest therefore preserves paid critique results for unchanged sheets. Evidence,
 confidence, sheet classifications, and code source labels do not reset the plan.
-The bindings persist across restarts and follow sheet content rather than its
-filename or page number. Changed review requirements or planner settings require
-a new plan; sets with no shared sheets, unknown identities, and conflicting prior plans also
-require authoring. Retained plans are identified in `review_plan.md` and the run
-journal. The critique cache continues to hash the exact injected checklist,
+The scope cache persists across restarts; its key never includes filenames,
+page counts, or digest prose. Changed review requirements or planner settings
+require a new plan. Older corpus-based plan entries miss once under the new
+planner prompt; a newly authored checklist can also miss existing critique
+entries once. Per-sheet caches keep their existing schema and keys. Retained
+plans are identified in `review_plan.md` and the run journal. The critique cache
+continues to hash the exact injected checklist,
 including any edited user profiles.
 
 Both stages ride the critique stack automatically (`qc_markups=True`, or an
@@ -1672,6 +1676,25 @@ content — and the run tells you which file changed and that a re-run is needed
 The other files are marked up normally.
 
 ### Stuck batches and the stall watch
+
+Accepted digest and critique batches, including follow-up and recovery rounds,
+are recorded in the digest cache before polling. On the next run, finished
+batches are collected into the cache before new work is submitted. Sheets owned
+by a batch that is still processing are left with a retriable status instead of
+being submitted again. This works after an application exit or crash when cache
+persistence is enabled.
+
+Recovery also runs when ordinary result caching is disabled, including after
+switching from Economy to real-time analysis. If the submission receipt cannot
+be saved, the accepted batch is canceled. Its uploads are released only after
+the API confirms the batch has ended; otherwise they remain retained.
+
+Interrupted results downloads retry from the beginning using the normal
+transient-error backoff. If collection remains unavailable, the run returns
+retriable errors for the affected sheets and keeps the batch record for the next
+run. A failed download never triggers another paid batch round. Records are
+removed after results reach the durable cache, or after the API's results
+retention window expires (29 days from batch creation).
 
 The Message Batches API is asynchronous and occasionally *sticks*: a submitted
 batch sits at `processing=N` with **zero** completions, sometimes for hours,

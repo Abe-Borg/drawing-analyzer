@@ -110,6 +110,8 @@ _LOCAL_SAFETY_FACTORS: dict[str, float] = {
     # of that tokenizer change, which is exactly why its budget must not be
     # estimated with a Sonnet-4.6-era assumption. The authoritative number
     # remains the ``count_tokens`` preflight; this table is the fallback gate.
+    "claude-opus-5-5": 1.10,
+    "claude-sonnet-5-5": 1.10,
     "claude-opus-5": 1.10,
     "claude-sonnet-5": 1.10,
     "claude-opus-4-8": 1.10,

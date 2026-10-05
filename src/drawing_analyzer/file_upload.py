@@ -209,6 +209,9 @@ class ReusableSheetUpload:
     cols: int
     content: list[dict]
     file_ids: list[str] = field(default_factory=list)
+    # Content-addressed digest key, available to direct critique callers that
+    # have no pipeline level-1 key. Never use remote file IDs as cache identity.
+    digest_cache_key: str | None = None
     _owns_cleanup: bool = field(default=True, init=False, repr=False)
     _ownership_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False

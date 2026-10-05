@@ -411,9 +411,10 @@ def identity_cache_key(
     free and any content/prompt/param change re-runs. The ``stage=identity``
     namespace tag keeps this from ever colliding with digest/critique keys, so
     adding it needs no ``_SCHEMA_VERSION`` bump (nothing stored under existing
-    keys changes shape). Keeping the identity — and therefore the model-authored
-    review plan derived from it — warm-run stable is what protects the critique
-    ``profiles_key`` cache economics.
+    keys changes shape). Keeping the identity — and therefore the canonical
+    review facts derived from it — warm-run stable protects the review-plan
+    cache. The planner independently keys on those facts, so identity provenance
+    changes do not invalidate paid critique reads.
     """
     h = hashlib.sha256()
     for part in (
@@ -432,8 +433,7 @@ def identity_cache_key(
 
 
 def review_plan_cache_key(
-    corpus_hash: str,
-    identity_hash: str,
+    scope_hash: str,
     *,
     model: str,
     prompt_version: str,
@@ -444,11 +444,12 @@ def review_plan_cache_key(
 ) -> str:
     """Content-address one run's *model-authored review plan* (Phase A §20.2).
 
-    Keyed on the exact planner corpus AND the identity it consumed (a changed
-    identity must re-plan even over identical digests), plus the request params
-    and the total-items cap (a different cap yields a different plan). Same
-    namespace-isolation rationale as :func:`identity_cache_key` — no
-    ``_SCHEMA_VERSION`` bump. A stable cached plan is what keeps the critique's
+    Keyed on canonical review facts, never sheet inventory or digest prose,
+    plus request params and the total-items cap. The planner consumes only these
+    facts; changed disciplines or adopted codes must re-plan. The new prompt
+    fingerprint and ``contract=2`` isolate older corpus-based entries without a
+    global ``_SCHEMA_VERSION`` bump that would discard paid per-sheet reads.
+    A stable cached plan is what keeps the critique's
     ``profiles_key`` byte-identical across warm runs, preserving the Phase 19B
     cached-critique fast path.
     """
@@ -456,14 +457,14 @@ def review_plan_cache_key(
     for part in (
         f"schema={_SCHEMA_VERSION}",
         "stage=review_plan",
+        "contract=2",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_tokens={int(max_tokens)}",
         f"effort={effort or ''}",
         f"thinking={'1' if use_thinking else '0'}",
         f"max_items={int(max_items)}",
-        f"identity={identity_hash or ''}",
-        f"corpus={corpus_hash or ''}",
+        f"scope={scope_hash or ''}",
     ):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
@@ -719,6 +720,12 @@ def _ensure_database_schema(connection: sqlite3.Connection) -> None:
     """Create tables and transactionally invalidate incompatible cache rows."""
     connection.execute("BEGIN IMMEDIATE")
     try:
+        # Submission receipts outlive content-schema invalidation. Losing a
+        # receipt would strand work already accepted (and billed) by the API.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pending_batches ("
+            "batch_id TEXT PRIMARY KEY, value_json TEXT NOT NULL) WITHOUT ROWID"
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS cache_metadata (
@@ -774,7 +781,7 @@ def _open_database(path: Path) -> sqlite3.Connection:
     try:
         connection.execute(f"PRAGMA busy_timeout={int(_BUSY_TIMEOUT_SECONDS * 1000)}")
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA synchronous=FULL")
         _ensure_database_schema(connection)
     except Exception:
         connection.close()
@@ -804,6 +811,7 @@ class DigestCache:
         # contains only legacy/failure fallback rows whose newest value has not
         # reached SQLite.
         self._entries: dict[str, dict] = {}
+        self._batch_records: dict[str, dict] = {}
         self._connection: sqlite3.Connection | None = None
         self._hits = 0
         self._misses = 0
@@ -895,6 +903,52 @@ class DigestCache:
             else:
                 for persisted_key, _encoded in pending:
                     self._entries.pop(persisted_key, None)
+
+    def pending_batches(self) -> list[dict]:
+        """Read submission receipts; persistent I/O errors must fail closed."""
+        with self._lock:
+            if not self._persist:
+                return [json.loads(_serialize_entry(v)) for v in self._batch_records.values()]
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            return [json.loads(row[0]) for row in self._connection.execute(
+                "SELECT value_json FROM pending_batches ORDER BY batch_id"
+            )]
+
+    def record_batch(self, record: dict) -> None:
+        """Commit an accepted batch before polling; unlike cache.put, be strict."""
+        encoded = _serialize_entry(record)
+        with self._lock:
+            if not self._persist:
+                self._batch_records[record["batch_id"]] = json.loads(encoded)
+                return
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            self._connection.execute(
+                "INSERT INTO pending_batches(batch_id, value_json) VALUES (?, ?) "
+                "ON CONFLICT(batch_id) DO UPDATE SET value_json=excluded.value_json",
+                (record["batch_id"], encoded),
+            )
+
+    def forget_batch(self, batch_id: str) -> None:
+        with self._lock:
+            if not self._persist:
+                self._batch_records.pop(batch_id, None)
+                return
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            self._connection.execute("DELETE FROM pending_batches WHERE batch_id = ?", (batch_id,))
+
+    def batch_entries_persisted(self, keys: list[str]) -> bool:
+        """Do not discard a receipt while paid results exist only in the overlay."""
+        with self._lock:
+            if not self._persist:
+                return True
+            return self._connection is not None and all(
+                key not in self._entries and self._connection.execute(
+                    "SELECT 1 FROM cache_entries WHERE cache_key = ?", (key,)
+                ).fetchone() is not None for key in keys
+            )
 
     def stats(self) -> dict:
         with self._lock:
@@ -1004,9 +1058,9 @@ _default_lock = threading.Lock()
 def get_default_digest_cache() -> DigestCache:
     """Process-wide digest cache, built once from the env config.
 
-    Only the real run paths (the GUI / standalone analyzer, via
-    ``extract_drawing_context(use_cache=True)``) reach this; unit tests inject
-    their own :class:`DigestCache` so they never touch the on-disk file.
+    Batch submission also uses this store for receipts when cache lookups are
+    disabled or a get/put adapter is supplied. Tests inject a DigestCache or
+    redirect the configured default path to their own temporary directory.
     """
     global _default_cache
     with _default_lock:

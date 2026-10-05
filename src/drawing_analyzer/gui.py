@@ -415,7 +415,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=(
                 "Drop construction drawing PDFs "
                 "(one or many; multi-sheet PDFs are split page-by-page). "
-                "Each sheet is read by Claude Opus 5 and summarized to text."
+                "Each sheet is read by Claude Opus 5.5 and summarized to text."
             ),
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_secondary"],
@@ -1947,6 +1947,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 save_tile_artifacts=save_tiles,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
+            _log.exception("Analysis worker failed")
             self.after(0, lambda e=exc: self._on_error(str(e)))
             return
         self.after(0, lambda: self._on_done(ctx))

@@ -43,7 +43,7 @@ from .digest import (
     sheet_digest_from_cache_entry,
     specs_cache_fragment,
 )
-from .digest_cache import digest_cache_key_level1
+from .digest_cache import digest_cache_key, digest_cache_key_level1
 from .models import (
     Finding,
     NumericClaim,
@@ -58,7 +58,6 @@ from .models import (
 )
 from .render import (
     inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets,
-    sheet_content_fingerprint,
 )
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import (
@@ -867,6 +866,7 @@ def _digest_sheets_concurrent(
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
     journal: "Any" = None,
+    recovery_state: Any = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -880,6 +880,22 @@ def _digest_sheets_concurrent(
     completed = 0
 
     def _run(index: int, rendered) -> tuple[int, SheetDigest]:
+        # Receipts written before level-1 identities were supplied still carry
+        # the exact image/request key. Honor them even with ordinary caching off
+        # or with tile artifacts forcing a render of an already recovered sheet.
+        if recovery_state is not None and (recovery_state.recovered or recovery_state.blocked):
+            key = digest_cache_key(
+                rendered, model=model, prompt_version=DIGEST_PROMPT_VERSION,
+                max_tokens=max_tokens, effort=effort, use_thinking=use_thinking,
+                focus=focus_cache_fragment(focus), specs=specs_cache_fragment(specs_text),
+                sheet_text=rendered.sheet_text,
+            )
+            entry = recovery_state.recovered.get(key)
+            if entry is not None:
+                return index, sheet_digest_from_cache_entry(entry, rendered.ref)
+            error = recovery_state.blocked.get(key)
+            if error:
+                return index, SheetDigest(ref=rendered.ref, text="", error=error)
         return index, digest_sheet(
             rendered,
             client=client,
@@ -947,6 +963,8 @@ def _digest_sheets_via_batch(
     reusable_upload_sink: "list[Any] | None" = None,
     on_page_error: "Any" = None,
     journal: "Any" = None,
+    level1_keys: dict | None = None,
+    recovery_state: Any = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -998,6 +1016,8 @@ def _digest_sheets_via_batch(
         on_status=on_status,
         focus=focus,
         specs_text=specs_text,
+        level1_keys=level1_keys,
+        recovery_state=recovery_state,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -1051,7 +1071,6 @@ def _level1_partition(
     focus: str | None,
     specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
-    planner_sheet_keys: dict[tuple[str, int], str] | None = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -1066,9 +1085,6 @@ def _level1_partition(
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
     - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
-
-    When supplied, ``planner_sheet_keys`` receives content keys that omit page
-    location but retain render/digest settings, for review-plan continuity.
     """
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     miss_only: set[tuple[str, int]] = set()
@@ -1092,16 +1108,6 @@ def _level1_partition(
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
-        if planner_sheet_keys is not None:
-            # A plan snapshot follows sheet content through PDF renames and
-            # inventory changes. The digest's usual key includes page location;
-            # keep all its request settings but omit that locator for bindings.
-            planner_sheet_keys[rk] = digest_cache_key_level1(
-                sheet_content_fingerprint(identity), model=model,
-                prompt_version=DIGEST_PROMPT_VERSION, max_tokens=max_tokens,
-                effort=effort, use_thinking=use_thinking,
-                focus=focus_frag, specs=specs_frag,
-            )
         entry = cache.get(key)
         if entry is not None:
             cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
@@ -1322,6 +1328,7 @@ def _run_critique_stage(
     on_status: StatusCallback | None = None,
     render_spool: Any = None,
     reusable_uploads: "list[Any] | None" = None,
+    recovery_state: Any = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -1354,9 +1361,11 @@ def _run_critique_stage(
         critique_model,
         critique_runs,
         critique_sheet_self_consistent,
+        critique_result_from_entry,
+        CritiqueResult,
         critique_structured_outputs_enabled,
     )
-    from .digest_cache import critique_cache_key_level1
+    from .digest_cache import critique_cache_key, critique_cache_key_level1
     from .profiles import profiles_cache_fragment
 
     model = critique_model()
@@ -1367,9 +1376,11 @@ def _run_critique_stage(
     level1_identities: dict[tuple[str, int], str] = {}
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
-    if cache is not None:
+    if (cache is not None or use_batch or
+            (recovery_state is not None and (recovery_state.recovered or recovery_state.blocked))):
         cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+            cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
         )
         if cached_by_ref:
@@ -1378,10 +1389,35 @@ def _run_critique_stage(
                 len(cached_by_ref), total,
             )
 
+    recovery_degraded = []
+    if recovery_state is not None and (recovery_state.recovered or recovery_state.blocked):
+        for ref in list_sheets(paths):
+            rk = _refkey(ref)
+            identity = level1_identities.get(rk)
+            if identity is None:
+                continue
+            # A submitted batch used the unconstrained contract, independently
+            # of the real-time structured-output preference on this restart.
+            key = critique_cache_key_level1(
+                identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
+                max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
+                use_thinking=True, runs=runs, profiles_key=profiles_key, structured_key=None,
+            )
+            entry = recovery_state.recovered.get(key)
+            error = recovery_state.blocked.get(key)
+            if entry is not None:
+                cached_by_ref[rk] = critique_result_from_entry(entry, ref)
+            elif error:
+                cached_by_ref[rk] = CritiqueResult(findings=[], requested_runs=runs, completed_runs=0, error=error)
+                recovery_degraded.append(f"{ref.display_label}: {error}")
+            else:
+                continue
+            only.discard(rk)
+
     workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
-    degraded: list[str] = []
+    degraded: list[str] = recovery_degraded
     # Sheets the input merge could not produce at all — spool load and the
     # one-page re-render fallback both returned None. These used to be dropped
     # silently by ``_ordered_inputs``, so the stage reported COMPLETE having
@@ -1618,6 +1654,15 @@ def _run_critique_stage(
             _rendered_for_critique(),
             client=client, cache=cache, model=model, runs=runs, profiles=profiles,
             progress=progress, total=miss_total, on_status=on_status,
+            recovery_state=recovery_state,
+            level1_keys={
+                rk: critique_cache_key_level1(
+                    identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
+                    max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
+                    use_thinking=True, runs=runs, profiles_key=profiles_key,
+                    structured_key=None,  # Batch reads are explicitly unconstrained.
+                ) for rk, identity in level1_identities.items()
+            },
         )
         for ref, res in collect_critique_batch(
             batch, client=client, cache=cache, progress=progress, on_log=on_log,
@@ -1625,6 +1670,24 @@ def _run_critique_stage(
         ):
             _ingest_miss(res, ref)
     elif miss_total > 0:
+        def _critique_rendered(rendered):
+            # Older receipts without level-1 keys can still match the rendered
+            # input before a new real-time request spends anything.
+            if recovery_state is not None and (recovery_state.recovered or recovery_state.blocked):
+                key = critique_cache_key(
+                    rendered, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
+                    max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
+                    use_thinking=True, runs=runs, sheet_text=rendered.sheet_text,
+                    profiles_key=profiles_key, structured_key=None,
+                )
+                entry = recovery_state.recovered.get(key)
+                if entry is not None:
+                    return critique_result_from_entry(entry, rendered.ref)
+                error = recovery_state.blocked.get(key)
+                if error:
+                    return CritiqueResult(findings=[], requested_runs=runs, completed_runs=0, error=error)
+            return critique_sheet_self_consistent(rendered, client=client, cache=cache, profiles=profiles)
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             in_flight: dict = {}
 
@@ -1644,8 +1707,7 @@ def _run_critique_stage(
 
             for rendered in _rendered_for_critique():
                 in_flight[executor.submit(
-                    critique_sheet_self_consistent,
-                    rendered, client=client, cache=cache, profiles=profiles,
+                    _critique_rendered, rendered,
                 )] = rendered.ref
                 while len(in_flight) >= workers:
                     _collect_one()
@@ -2984,21 +3046,32 @@ def extract_drawing_context(
         workers=_resolve_workers(max_workers, total),
     )
 
-    # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
-    # rendering and skip rasterization for them (the dominant re-run cost). Only
-    # when a cache is active — with no cache every sheet renders as before, and
-    # geometry (for the QC stages) is captured during that render.
+    # Receipt recovery is independent of ordinary result caching and transport.
+    # A caller disabling cache reuse must still collect/block paid batch work.
+    from .batch_recovery import BatchReceiptError, recover_pending_batches
+
+    recovery_state = None
+    recovery_error = None
+    try:
+        recovery_state = recover_pending_batches(client, cache)
+    except Exception as exc:
+        _log.exception("batch recovery store unavailable at run start")
+        recovery_error = (f"batch recovery store unavailable ({type(exc).__name__}); "
+                          "restore the recovery store and retry next run")
+
+    # Recognize unchanged sheets before rendering. Uncached batch runs also
+    # compute level-1 keys for their receipts; they never probe ordinary entries.
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     level1_keys: dict[tuple[str, int], str] = {}
-    planner_sheet_keys: dict[tuple[str, int], str] = {}
     only: set[tuple[str, int]] | None = None
-    if cache is not None:
+    if (cache is not None or use_batch or recovery_error or
+            (recovery_state is not None and (recovery_state.recovered or recovery_state.blocked))):
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+            cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
             effort=effort, focus=focus or None, specs_text=specs_text or None,
             snapshot_by_path=snapshot_by_path,
-            planner_sheet_keys=planner_sheet_keys if config.run_review_plan else None,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -3036,6 +3109,18 @@ def extract_drawing_context(
                 len(cached_by_ref), total,
                 f"{len(cached_by_ref)} sheet(s) from cache — skipping render",
             )
+
+    # A live or temporarily unreadable receipt already owns these requests,
+    # even if the user switched transports for this run. Do not pay again.
+    if recovery_error or recovery_state is not None:
+        for ref in refs:
+            rk = _refkey(ref)
+            error = recovery_error or recovery_state.blocked.get(level1_keys.get(rk))
+            if rk not in cached_by_ref and error:
+                cached_by_ref[rk] = SheetDigest(ref=ref, text="", error=error)
+                if only is None:
+                    only = {_refkey(r) for r in refs}
+                only.discard(rk)
 
     miss_total = total if only is None else len(only)
 
@@ -3091,17 +3176,29 @@ def extract_drawing_context(
     miss_sheets: list[SheetDigest] = []
     if miss_total > 0:
         if use_batch:
-            miss_sheets = _digest_sheets_via_batch(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                client=client, model=model, max_tokens=max_tokens,
-                use_thinking=use_thinking, effort=effort, cache=cache,
-                progress=progress, total=miss_total, on_log=on_log,
-                on_status=on_status, focus=focus or None,
-                specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads,
-                on_page_error=_on_page_error, journal=journal,
-            )
+            try:
+                miss_sheets = _digest_sheets_via_batch(
+                    paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                    client=client, model=model, max_tokens=max_tokens,
+                    use_thinking=use_thinking, effort=effort, cache=cache,
+                    progress=progress, total=miss_total, on_log=on_log,
+                    on_status=on_status, focus=focus or None,
+                    specs_text=specs_text or None,
+                    geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                    reusable_upload_sink=reusable_uploads,
+                    on_page_error=_on_page_error, journal=journal, level1_keys=level1_keys,
+                    recovery_state=recovery_state,
+                )
+            except Exception as exc:  # I-3: a failed batch stage still ships the usable sheets
+                _log.exception("drawing batch stage failed")
+                miss_sheets = [
+                    SheetDigest(ref=ref, text="", error=(
+                        str(exc) if isinstance(exc, BatchReceiptError) else
+                        f"drawing batch stage failed ({type(exc).__name__}); "
+                        "retry next run to collect any retained batch"
+                    ))
+                    for ref in refs if _refkey(ref) not in cached_by_ref
+                ]
         else:
             miss_sheets = _digest_sheets_concurrent(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
@@ -3112,6 +3209,7 @@ def extract_drawing_context(
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error, render_sink=render_sink,
                 journal=journal,
+                recovery_state=recovery_state,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
@@ -3470,7 +3568,7 @@ def extract_drawing_context(
         cross_future = stage_executor.submit(_run_cross_qc_call)
 
     # Review plan (Phase A §20.2): the model authors THIS set's specialist
-    # checklist from the identity + digests. Injected below through the existing
+    # checklist from canonical review facts. Injected below through the existing
     # profile machinery (after the user's own profiles) so checklist rendering,
     # the critique cache fragment, and manifest snapshots apply unchanged. A
     # failure degrades this stage only — the critique still runs (I-3).
@@ -3489,7 +3587,6 @@ def extract_drawing_context(
 
                 pres = author_review_plan(
                     set_identity_obj, sheets, client=client, cache=cache,
-                    sheet_keys=planner_sheet_keys,
                 )
                 review_plan_stage.calls_planned = 1
                 _record_usage(
@@ -3619,6 +3716,8 @@ def extract_drawing_context(
             "STAGE_START", stage="critique", sheets=total, reads=config.critique_reads,
         )
         try:
+            if recovery_error:
+                raise OSError(recovery_error)
             if all_profiles:
                 _log.info(
                     "critique: applying %d review profile(s): %s",
@@ -3633,6 +3732,7 @@ def extract_drawing_context(
                 use_batch=critique_use_batch, on_log=on_log, on_status=on_status,
                 render_spool=render_spool,
                 reusable_uploads=reusable_uploads,
+                recovery_state=recovery_state,
             )
             numeric_claims.extend(c_claims)
             critique_stage.items_out = len(critique_findings)
