@@ -1212,6 +1212,77 @@ def _assert_degraded_honestly(ctx, stage: str, allowed=("PARTIAL", "FAILED")):
     assert ctx.ok_sheet_count == 2
 
 
+@pytest.mark.parametrize("bad_reads", [1, 2])
+@pytest.mark.parametrize("cache_level", [1, 2])
+def test_critique_replacement_status_and_cache(tmp_path, monkeypatch, bad_reads, cache_level):
+    srcs = G.build_mini_set(tmp_path / "set")
+    cache = DigestCache(None, persist=False)
+    client = G.mini_client()
+    original_critique = client._critique
+
+    def critique_response(text, system=""):
+        message = original_critique(text, system)
+        if "VAV-3" not in text:
+            return message
+        read = client.critique_calls["VAV-3"]
+        if 2 <= read <= 1 + bad_reads:
+            body = '```json\n{"findings": trunc'
+        else:
+            body = "```json\n" + json.dumps({"findings": [G.MINI_F1]}) + "\n```"
+        return FakeMessage(
+            content=[FakeTextBlock(text=body)],
+            usage=FakeUsage(input_tokens=100, output_tokens=20),
+        )
+
+    monkeypatch.setattr(client, "_critique", critique_response)
+    critique_keys = []
+    original_put = cache.put
+
+    def record_put(key, entry):
+        # The image-keyed write precedes promotion to the pre-render key.
+        if entry.get("requested_runs") == 2 and any(
+            f["source_name"] == "M-101.pdf" for f in entry["findings"]
+        ):
+            critique_keys.append(key)
+        original_put(key, entry)
+
+    monkeypatch.setattr(cache, "put", record_put)
+
+    def run(run_client, work_dir):
+        return extract_drawing_context(
+            srcs, client=run_client, rows=2, cols=2, cache=cache,
+            reference_audit=True, qc_markups=True, qc_work_dir=work_dir,
+        )
+
+    ctx = run(client, tmp_path / "qc1")
+    assert client.critique_calls == {"VAV-3": 3, "EQUIPMENT SCHEDULE": 2}
+    stage = next(s for s in ctx.stage_results if s.stage == "critique")
+    expected = "COMPLETE" if bad_reads == 1 else "PARTIAL"
+    assert stage.status == ctx.qc_status == expected
+    assert bool(stage.errors) == (bad_reads == 2)
+    assert stage.items_out == 1
+    assert any(f.source_quote == "VAV-3" for f in ctx.findings)
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+    usage = next(r for r in ctx.run_usage.records
+                 if r.stage_family == "critique" and r.input_tokens == 300)
+    assert usage.output_tokens == 60 and usage.terminal_status == expected
+    assert usage.parse_success == (bad_reads == 1)
+    # A successful replacement writes both critique cache levels; a remaining
+    # shortfall writes neither, even though it produced a useful finding.
+    assert len(critique_keys) == (2 if bad_reads == 1 else 0)
+
+    if cache_level == 2 and critique_keys:
+        original_get = cache.get
+        level1_key = critique_keys[1]
+        monkeypatch.setattr(cache, "get", lambda key: (
+            None if key == level1_key else original_get(key)
+        ))
+    rerun_client = G.mini_client()
+    rerun = run(rerun_client, tmp_path / "qc2")
+    assert rerun.qc_status == "COMPLETE"
+    assert rerun_client.critique_calls == ({} if bad_reads == 1 else {"VAV-3": 2})
+
+
 @pytest.mark.parametrize(
     "sabotage,stage",
     [
