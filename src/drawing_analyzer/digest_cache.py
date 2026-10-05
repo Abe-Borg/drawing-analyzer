@@ -720,6 +720,12 @@ def _ensure_database_schema(connection: sqlite3.Connection) -> None:
     """Create tables and transactionally invalidate incompatible cache rows."""
     connection.execute("BEGIN IMMEDIATE")
     try:
+        # Submission receipts outlive content-schema invalidation. Losing a
+        # receipt would strand work already accepted (and billed) by the API.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS pending_batches ("
+            "batch_id TEXT PRIMARY KEY, value_json TEXT NOT NULL) WITHOUT ROWID"
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS cache_metadata (
@@ -775,7 +781,7 @@ def _open_database(path: Path) -> sqlite3.Connection:
     try:
         connection.execute(f"PRAGMA busy_timeout={int(_BUSY_TIMEOUT_SECONDS * 1000)}")
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA synchronous=FULL")
         _ensure_database_schema(connection)
     except Exception:
         connection.close()
@@ -805,6 +811,7 @@ class DigestCache:
         # contains only legacy/failure fallback rows whose newest value has not
         # reached SQLite.
         self._entries: dict[str, dict] = {}
+        self._batch_records: dict[str, dict] = {}
         self._connection: sqlite3.Connection | None = None
         self._hits = 0
         self._misses = 0
@@ -896,6 +903,52 @@ class DigestCache:
             else:
                 for persisted_key, _encoded in pending:
                     self._entries.pop(persisted_key, None)
+
+    def pending_batches(self) -> list[dict]:
+        """Read submission receipts; persistent I/O errors must fail closed."""
+        with self._lock:
+            if not self._persist:
+                return [json.loads(_serialize_entry(v)) for v in self._batch_records.values()]
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            return [json.loads(row[0]) for row in self._connection.execute(
+                "SELECT value_json FROM pending_batches ORDER BY batch_id"
+            )]
+
+    def record_batch(self, record: dict) -> None:
+        """Commit an accepted batch before polling; unlike cache.put, be strict."""
+        encoded = _serialize_entry(record)
+        with self._lock:
+            if not self._persist:
+                self._batch_records[record["batch_id"]] = json.loads(encoded)
+                return
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            self._connection.execute(
+                "INSERT INTO pending_batches(batch_id, value_json) VALUES (?, ?) "
+                "ON CONFLICT(batch_id) DO UPDATE SET value_json=excluded.value_json",
+                (record["batch_id"], encoded),
+            )
+
+    def forget_batch(self, batch_id: str) -> None:
+        with self._lock:
+            if not self._persist:
+                self._batch_records.pop(batch_id, None)
+                return
+            if self._connection is None:
+                raise OSError("batch recovery store is unavailable")
+            self._connection.execute("DELETE FROM pending_batches WHERE batch_id = ?", (batch_id,))
+
+    def batch_entries_persisted(self, keys: list[str]) -> bool:
+        """Do not discard a receipt while paid results exist only in the overlay."""
+        with self._lock:
+            if not self._persist:
+                return True
+            return self._connection is not None and all(
+                key not in self._entries and self._connection.execute(
+                    "SELECT 1 FROM cache_entries WHERE cache_key = ?", (key,)
+                ).fetchone() is not None for key in keys
+            )
 
     def stats(self) -> dict:
         with self._lock:
@@ -1005,9 +1058,9 @@ _default_lock = threading.Lock()
 def get_default_digest_cache() -> DigestCache:
     """Process-wide digest cache, built once from the env config.
 
-    Only the real run paths (the GUI / standalone analyzer, via
-    ``extract_drawing_context(use_cache=True)``) reach this; unit tests inject
-    their own :class:`DigestCache` so they never touch the on-disk file.
+    Batch submission also uses this store for receipts when cache lookups are
+    disabled or a get/put adapter is supplied. Tests inject a DigestCache or
+    redirect the configured default path to their own temporary directory.
     """
     global _default_cache
     with _default_lock:

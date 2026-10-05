@@ -93,6 +93,29 @@ def _enforce_hermetic_api_key(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_batch_recovery_store(monkeypatch, tmp_path, _isolate_session_batch_recovery_store):
+    """Default batch receipts must never reach a developer's real cache."""
+    from drawing_analyzer import digest_cache
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CACHE_PATH", str(tmp_path / "digest.sqlite3"))
+    monkeypatch.setattr(digest_cache, "_default_cache", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_session_batch_recovery_store(tmp_path_factory):
+    """Module/session fixture runs also need a hermetic default receipt store."""
+    from drawing_analyzer import digest_cache
+
+    with pytest.MonkeyPatch.context() as patch:
+        root = tmp_path_factory.mktemp("session_batch_recovery")
+        patch.setenv("DRAWING_ANALYZER_CACHE_PATH", str(root / "digest.sqlite3"))
+        patch.setattr(digest_cache, "_default_cache", None)
+        yield
+        if digest_cache._default_cache is not None:
+            digest_cache._default_cache.close()
+
+
 @pytest.fixture
 def fake_anthropic():
     """Expose the ``fake_anthropic`` helper module as a fixture.
