@@ -234,7 +234,7 @@ def recover_pending_batches(client: Any, cache: Any, *, sleep=time.sleep) -> Bat
                              for fid in pending.get("file_ids", [])}
                 _release_uploaded_files(
                     resolved_client, [fid for fid in record.get("file_ids", []) if fid not in protected],
-                    in_background=True, on_log=None,
+                    in_background=True, on_log=None, cache=store,
                 )
                 _log.info("recovered retained batch %s without a new submission", batch_id)
                 continue
@@ -243,4 +243,8 @@ def recover_pending_batches(client: Any, cache: Any, *, sleep=time.sleep) -> Bat
             error = f"batch {batch_id} collection failed ({type(exc).__name__}); retry next run to collect the existing batch"
         for key in _record_keys(record):
             state.blocked[key] = error
+    # Also covers crashes during upload, before any receipt existed, and files
+    # retained after failed cancellation. Runs even when cache reuse is off.
+    from .file_upload import reap_uploaded_files
+    reap_uploaded_files(client, store, sleep=sleep)
     return state

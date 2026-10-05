@@ -11,9 +11,9 @@ the request body stays tiny. The same file-id references ride into the Message
 Batches API for the 50% batch discount, and the batch's 256 MB envelope is never
 approached because each item body is just a handful of ids.
 
-Uploaded files are best-effort deleted after the batch is collected
-(:func:`delete_files`); they cost nothing to store, but cleanup keeps the org's
-file storage from accumulating a fresh image set on every run.
+Uploaded files persist until deleted and count against the organization's
+100 GB storage cap. Each successful upload is recorded locally before use;
+parallel, retrying cleanup and a startup reaper reclaim interrupted runs.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterable, Iterator
 from .diagnostics import get_logger, summarize_exc
 from .digest import (
     _error_status,
+    _is_transient_error,
     _is_transient_status_error,
     _retry_backoff_seconds,
     build_user_content_blocks,
@@ -62,6 +63,13 @@ DEFAULT_UPLOAD_MAX_RETRIES = 4
 # idempotent retries), so a lost response still can't orphan a stored file.
 DEFAULT_UPLOAD_WORKERS = 6
 _UPLOAD_WORKERS_ENV = "DRAWING_ANALYZER_UPLOAD_WORKERS"
+
+DEFAULT_DELETE_WORKERS = 6
+DEFAULT_DELETE_MAX_RETRIES = 4
+# A batch may need its images for 24h after submission. Allow another hour
+# for clock skew/status propagation, including later batches reusing the IDs.
+UPLOAD_REAP_MIN_AGE_SECONDS = 25 * 60 * 60
+_TERMINAL_BATCH_STATUSES = frozenset({"ended", "failed", "expired", "canceled"})
 
 
 def _resolve_upload_workers(image_count: int, override: int | None = None) -> int:
@@ -330,14 +338,16 @@ def upload_sheet_images(
     sleep: Any = time.sleep,
     on_image: ImageProgress | None = None,
     task_instruction: str | None = None,
+    cache: Any = None,
 ) -> SheetUpload:
     """Upload a sheet's overview + tiles via the Files API; build file-id content.
 
     Returns the user-turn content blocks (image-by-file_id, identical framing to
     the base64 path via :func:`~drawing_analyzer.digest.build_user_content_blocks`)
     plus the uploaded ``file_id``s for cleanup. Raises on an upload failure; the
-    caller treats the sheet as failed and deletes any ids already uploaded, so a
-    partial upload never leaks files.
+    caller treats the sheet as failed and attempts to delete every uploaded id.
+    Each successful upload is synchronously journaled in the batch recovery
+    store so crashes and failed cleanup can be revisited at startup.
 
     ``task_instruction`` overrides the closing instruction of the assembled
     content (default: the digest task). The critique batch path (Phase 23C) passes
@@ -359,13 +369,18 @@ def upload_sheet_images(
     orphan it) — those are left to the SDK's idempotent internal retries.
     ``sleep`` is injectable so tests don't wait; a permanent failure (or exhausted
     retries) re-raises for the caller to capture as a failed sheet. On the first
-    failure, every image that *did* upload is deleted, so a partial upload never
-    leaks files no matter which image failed.
+    failure, every image that *did* upload is queued for retrying deletion;
+    any IDs whose deletion fails remain recorded for the reaper.
 
     Progress callbacks are throttled to completion events: ``on_image`` fires once
     as each image lands (and once per transient-retry wave), carrying a coherent
     running completed-count so a concurrent upload's status line stays sensible.
     """
+    from .batch_recovery import recovery_cache
+
+    store = recovery_cache(cache)
+    # Refuse uploads when ownership cannot be read durably.
+    store.recorded_uploads()
     stem = _safe_stem(sheet)
     label = sheet.ref.display_label
     total_images = 1 + len(sheet.tiles)
@@ -376,6 +391,7 @@ def upload_sheet_images(
 
     lock = threading.Lock()
     completed = 0
+    uploaded_ids: list[str] = []
     # Once any image fails for good, queued uploads short-circuit instead of
     # hammering the API for a sheet that is already doomed.  Workers already in
     # the Files API may finish; their IDs are collected and deleted below.
@@ -433,6 +449,16 @@ def upload_sheet_images(
                 aborted.set()
                 raise
         fid = _uploaded_id(uploaded)
+        if not fid:
+            aborted.set()
+            raise ValueError("Files API upload returned no file id")
+        with lock:
+            uploaded_ids.append(fid)
+        try:
+            store.record_uploaded_file(fid)
+        except Exception:
+            aborted.set()
+            raise
         with lock:
             completed += 1
             _log.debug(
@@ -461,15 +487,12 @@ def upload_sheet_images(
                     error = exc
 
     if error is not None:
-        # Delete every image that DID upload, regardless of which one failed, so
-        # a partial upload never leaks — the same guarantee the sequential path
-        # gave, now order-independent.
-        uploaded_ids = list(by_position.values())
-        delete_files(client, uploaded_ids)
+        # Include IDs whose journal write or progress callback failed too.
+        deleted = delete_files(client, uploaded_ids, cache=store)
         _log.warning(
             "deleted %d already-uploaded image(s) after a failed sheet upload: "
             "sheet=%s",
-            len(uploaded_ids), label,
+            len(deleted), label,
         )
         raise error
 
@@ -486,16 +509,120 @@ def upload_sheet_images(
     return SheetUpload(content=content, file_ids=file_ids)
 
 
-def delete_files(client: Any, file_ids: list[str]) -> None:
-    """Best-effort delete uploaded files; never raises (cleanup is advisory)."""
+def delete_files(
+    client: Any, file_ids: list[str], *, cache: Any = None,
+    max_workers: int = DEFAULT_DELETE_WORKERS,
+    max_retries: int = DEFAULT_DELETE_MAX_RETRIES, sleep: Any = time.sleep,
+) -> list[str]:
+    """Delete with at most six workers and bounded transient-error retries.
+
+    Deletion is idempotent, so status, connection and timeout failures can all
+    be retried. A 404 is already deleted. Return successful/absent IDs; failed
+    IDs stay in the ownership journal for startup cleanup. Cleanup errors are
+    logged and never sink a run.
+    """
     files = getattr(client, "files", None)
     deleter = getattr(files, "delete", None)
     if deleter is None:
-        return
-    for fid in file_ids:
-        if not fid:
-            continue
+        return []
+    ids = list(dict.fromkeys(fid for fid in file_ids if fid))
+    if not ids:
+        return []
+    from .batch_recovery import recovery_cache
+
+    store = recovery_cache(cache)
+
+    def delete_one(fid: str) -> bool:
+        for attempt in range(max(0, max_retries) + 1):
+            try:
+                deleter(fid)
+                break
+            except Exception as exc:  # noqa: BLE001 - cleanup is nonfatal
+                if _error_status(exc) == 404:
+                    break
+                transient = _is_transient_error(exc) or isinstance(exc, (ConnectionError, TimeoutError))
+                if transient and attempt < max_retries:
+                    delay = _retry_backoff_seconds(attempt)
+                    _log.warning("files-api delete %s retry %d/%d in %.0fs: %s",
+                                 fid, attempt + 1, max_retries, delay, summarize_exc(exc))
+                    sleep(delay)
+                    continue
+                _log.warning("files-api delete failed; retained for reaper: %s | %s",
+                             fid, summarize_exc(exc))
+                return False
         try:
-            deleter(fid)
-        except Exception:  # noqa: BLE001 - cleanup must never sink a run
-            pass
+            store.forget_uploaded_file(fid)
+        except Exception as exc:
+            # A future 404 will let the reaper finish this bookkeeping.
+            _log.warning("files-api delete journal update failed: %s | %s", fid, summarize_exc(exc))
+        return True
+
+    workers = max(1, min(max_workers, DEFAULT_DELETE_WORKERS, len(ids)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="file-delete") as executor:
+        results = list(executor.map(delete_one, ids))
+    return [fid for fid, deleted in zip(ids, results) if deleted]
+
+
+def reap_uploaded_files(client: Any = None, cache: Any = None, *, now: float | None = None,
+                        sleep: Any = time.sleep) -> list[str]:
+    """Reap locally recorded uploads older than the 24h batch bound + 1h.
+
+    Never list remote files or infer ownership from filenames. A live batch
+    receipt, or a receipt whose remote status cannot be checked, protects all
+    its IDs regardless of age. Submission/reuse restarts the age bound.
+    """
+    from .batch_recovery import recovery_cache, _read_with_retry
+
+    try:
+        store = recovery_cache(cache)
+        cutoff = (time.time() if now is None else now) - UPLOAD_REAP_MIN_AGE_SECONDS
+        candidates = {record["file_id"] for record in store.recorded_uploads()
+                      if max(record["uploaded_at"], record["last_needed_at"]) < cutoff}
+        if not candidates:
+            return []
+        receipts = store.pending_batches()
+        if client is None:
+            from .client import get_client
+            client = get_client()
+        protected: set[str] = set()
+        terminal_receipts: set[str] = set()
+        for record in receipts:
+            ids = set(record.get("file_ids", []))
+            if not ids.intersection(candidates):
+                continue
+            try:
+                batch = _read_with_retry(
+                    lambda: client.messages.batches.retrieve(record["batch_id"]), sleep=sleep,
+                )
+                status = (batch.get("processing_status", "") if isinstance(batch, dict)
+                          else getattr(batch, "processing_status", ""))
+                if str(status).lower() in _TERMINAL_BATCH_STATUSES:
+                    terminal_receipts.add(record["batch_id"])
+                    continue
+            except Exception as exc:
+                _log.warning("upload reaper cannot check batch %s; protecting files: %s",
+                             record["batch_id"], summarize_exc(exc))
+            protected.update(ids)
+        # Status reads can take time. Recheck local state so a new batch/reuse
+        # recorded while we checked the old receipts cannot lose its images.
+        candidates.intersection_update(
+            record["file_id"] for record in store.recorded_uploads()
+            if max(record["uploaded_at"], record["last_needed_at"]) < cutoff
+        )
+        for record in store.pending_batches():
+            if record["batch_id"] not in terminal_receipts:
+                protected.update(record.get("file_ids", []))
+        deleted = delete_files(client, sorted(candidates - protected), cache=store, sleep=sleep)
+        for fid in deleted:
+            _log.info("upload reaper deleted file_id=%s", fid)
+        _log.info("upload reaper reclaimed %d file(s); protected %d eligible file(s)",
+                  len(deleted), len(candidates & protected))
+        return deleted
+    except Exception as exc:
+        _log.warning("upload reaper skipped: %s", summarize_exc(exc))
+        return []
+
+
+def start_upload_reaper() -> None:
+    """Start maintenance off the GUI thread; interrupted IDs remain durable."""
+    threading.Thread(target=reap_uploaded_files, daemon=True, name="upload-reaper").start()

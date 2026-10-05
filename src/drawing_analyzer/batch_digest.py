@@ -103,7 +103,7 @@ from .digest import (
 from .digest_cache import digest_cache_key
 from .batch_recovery import (
     BatchReceiptError, finish_batch_record, read_batch_results, record_submitted_batch,
-    recover_pending_batches,
+    recover_pending_batches, recovery_cache,
 )
 from .file_upload import (
     ReusableSheetUpload,
@@ -287,22 +287,23 @@ def _release_uploaded_files(
     *,
     in_background: bool,
     on_log: LogCallback | None,
+    cache: Any = None,
 ) -> None:
     """Delete a collected batch's uploaded files; optionally off the hot path.
 
-    Cleanup deletes one file per request, so a collected set of a few hundred
-    images can take many minutes — and under a Files-API overload (the same wave
-    that makes the uploads themselves slow) it stretches further, all of it after
-    the digests are already in hand. Run synchronously it strands the result
-    behind a long, silent stall (the GUI looks frozen after the run is really
-    done). With ``in_background`` the digests return immediately and the
-    best-effort delete runs on a daemon thread; the files cost nothing to store,
-    so losing the tail of the cleanup if the process exits is harmless.
+    Deletes use bounded parallelism and retry transient failures. Background
+    cleanup lets results return immediately, but a daemon can be interrupted
+    when the GUI exits. Files persist until deleted and consume the org's
+    100 GB storage cap; their durable ownership records remain until deletion
+    succeeds, so the startup reaper can reclaim an interrupted cleanup later.
     """
     if not file_ids:
         return
+    # Capture the store before dispatch: the default may be replaced/closed
+    # while this daemon is running (for example, by an embedding application).
+    store = recovery_cache(cache)
     if not in_background:
-        delete_files(client, file_ids)
+        delete_files(client, file_ids, cache=store)
         return
     if on_log is not None:
         on_log(
@@ -311,8 +312,8 @@ def _release_uploaded_files(
         )
 
     def _do() -> None:
-        delete_files(client, file_ids)
-        _log.debug("background cleanup released %d uploaded file(s)", len(file_ids))
+        deleted = delete_files(client, file_ids, cache=store)
+        _log.debug("background cleanup released %d/%d uploaded file(s)", len(deleted), len(file_ids))
 
     _run_in_background(_do)
 
@@ -549,6 +550,7 @@ def _finish_digest_uploads(
     reusable_upload_sink: list[ReusableSheetUpload] | None,
     cleanup_in_background: bool,
     on_log: LogCallback | None,
+    cache: Any = None,
 ) -> None:
     """Transfer safe uploads to critique, deleting every unclaimed remainder.
 
@@ -583,6 +585,7 @@ def _finish_digest_uploads(
             leftovers,
             in_background=cleanup_in_background,
             on_log=on_log,
+            cache=cache,
         )
 
 
@@ -1870,7 +1873,7 @@ def submit_drawing_batch(
                 on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
 
         try:
-            upload = upload_sheet_images(client, sheet, on_image=on_image)
+            upload = upload_sheet_images(client, sheet, on_image=on_image, cache=cache)
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
             rid = request_id_of(exc)
             hint = upload_failure_hint(exc)
@@ -2005,7 +2008,7 @@ def submit_drawing_batch(
                 "drawing batch submit failed; deleting %d uploaded file(s)",
                 len(leaked),
             )
-            delete_files(client, leaked)
+            delete_files(client, leaked, cache=cache)
             raise
         batch_id = _get(mb, "id")
         for s in slots:
@@ -2016,7 +2019,7 @@ def submit_drawing_batch(
                                    client=client, submitted=mb, sleep=sleep)
         except BatchReceiptError as exc:
             if exc.files_safe:
-                delete_files(client, _take_slot_upload_ids(slots))
+                delete_files(client, _take_slot_upload_ids(slots), cache=cache)
             raise
         # Record the batch id + the custom_id → sheet map up front. This is the
         # rosetta stone for reading the rest of the run: a later "item sheet__3
@@ -2341,7 +2344,7 @@ def collect_drawing_batch(
     manifest the critique does not adopt remains the sink owner's cleanup
     responsibility. ``cleanup_in_background`` runs any final
     delete on a daemon thread so the digests return immediately instead of
-    stalling behind a long, silent file-by-file cleanup (see
+    waiting for parallel, retrying cleanup (see
     :func:`_release_uploaded_files`); left ``False`` (the default) the delete is
     synchronous, which the unit tests rely on. Result reads retry transient
     failures from the start. Exhausted collection returns retriable per-sheet
@@ -2449,7 +2452,7 @@ def collect_drawing_batch(
                 if files_released:
                     _finish_digest_uploads(
                         batch,
-                        client=client,
+                        client=client, cache=cache,
                         reusable_upload_sink=reusable_upload_sink,
                         cleanup_in_background=cleanup_in_background,
                         on_log=on_log,
@@ -2464,7 +2467,7 @@ def collect_drawing_batch(
                                    "retry next run to collect the existing batch"),
                         )
                 leaked = _take_slot_upload_ids(batch.slots)
-                _release_uploaded_files(client, leaked, in_background=cleanup_in_background, on_log=on_log)
+                _release_uploaded_files(client, leaked, in_background=cleanup_in_background, on_log=on_log, cache=cache)
 
         else:
             # The batch never reached a terminal state: request counts frozen
@@ -2609,7 +2612,7 @@ def collect_drawing_batch(
                 # and anything the rescue produced is already in hand.
                 _finish_digest_uploads(
                     batch,
-                    client=client,
+                    client=client, cache=cache,
                     reusable_upload_sink=reusable_upload_sink,
                     cleanup_in_background=cleanup_in_background,
                     on_log=on_log,
