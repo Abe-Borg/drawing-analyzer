@@ -204,13 +204,14 @@ def _cost_preview_app(gui, tk, monkeypatch):
     return app, workers, callbacks, summaries
 
 
-def _preview_pdf(tmp_path):
+def _preview_pdf(tmp_path, pages=None):
     pymupdf = pytest.importorskip("pymupdf")
     pdf = tmp_path / "drawings.pdf"
     with pymupdf.open() as doc:
-        for i in range(3):
-            page = doc.new_page(width=34 * 72, height=44 * 72)
-            page.insert_text((72, 72), f"FP-10{i} PRE-ACTION VALVE SCHEDULE")
+        for i, (width, height, vector) in enumerate(pages or [(34, 44, True)] * 3):
+            page = doc.new_page(width=width * 72, height=height * 72)
+            if vector:
+                page.insert_text((72, 72), f"FP-10{i} PRE-ACTION VALVE SCHEDULE")
         doc.save(pdf)
     return pdf
 
@@ -267,6 +268,31 @@ def test_gui_discards_superseded_preflight_and_rewritten_file_bases(tmp_path, mo
         assert app._usable_preflight_bases()
         pdf.write_bytes(pdf.read_bytes() + b"\n%changed\n")
         assert app._usable_preflight_bases() is None
+
+
+def test_gui_measured_estimate_prices_each_pages_physical_grid(tmp_path, monkeypatch):
+    from drawing_analyzer.cost import estimate_drawing_set_cost, estimate_exhaustive_run_cost
+
+    pdf = _preview_pdf(tmp_path, [(8.5, 11, True), (11, 17, True),
+                                 (34, 44, True), (8.5, 11, False)])
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, summaries = _cost_preview_app(gui, tk, monkeypatch)
+        app._add_pdfs([pdf])
+        workers.pop()()
+        callbacks.pop()()
+        bases = app._usable_preflight_bases()
+        # Pixel/render oracles from the mixed-size grid qualification: 20x1,
+        # 2x1, 6x6 vector grids and the 1x1 raster grid, on the hi-res tier.
+        expected = 7_399 + 14_352 + 93_013 + 9_568
+        standard = estimate_drawing_set_cost(4, bases=bases)
+        exhaustive = estimate_exhaustive_run_cost(4, bases=bases)
+        assert standard.shape_aware and exhaustive.shape_aware
+        assert standard.image_tokens == expected
+        digest = next(c for c in exhaustive.components if c.stage == "Digest")
+        assert digest.input_tokens == expected + 4 * 800
+        assert f"~{expected:,} digest image tokens" in summaries[-1]
+        assert standard.output_tokens_low == 4 * 4_000 + 2_000
+        assert standard.output_tokens == 4 * 64_000 + 2_000
 
 
 def test_profile_suggestion_failure_keeps_measured_gui_bases(tmp_path, monkeypatch):

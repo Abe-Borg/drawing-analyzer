@@ -20,7 +20,7 @@ long-edge in pixels (Opus 5 / Sonnet 5: 4784 tokens / 2576 px; older models: 156
 **exceeds** that cap is **rejected** (HTTP 400 ``invalid_request_error``), not
 downscaled — unlike the <=20-image case, where an oversized image is silently
 resized. A 6x6 sheet is 36 tiles + 1 overview = 37 images, so the 2000 px hard
-cap applies to every drawing-digest request (Anthropic vision docs, "Request
+cap applies to that grid (Anthropic vision docs, "Request
 limits"; every constant in this module was re-verified against the current docs
 at ``platform.claude.com`` in 2026-07 and is unchanged).
 
@@ -45,13 +45,13 @@ Two many-image render targets both sit under the cap:
   sheet with an *empty* text layer (a scanned or pasted-raster sheet), where the
   pixels are the only information channel and dropping resolution would drop
   data. It renders a few px under the cap; the 8 px margin covers the proven
-  ``<=1`` px per-axis ``fz_round_rect`` overshoot (~272 effective DPI on a
+  ``<=1`` px per-axis ``fz_round_rect`` overshoot (~234 minimum tile DPI on a
   34"x44" E-size sheet, vs. ~49 DPI for the whole sheet sent as one image; the
   margin costs <0.5% of linear resolution), so a rounded tile can never reach
   cap+1 and trip the rejection.
 
-This failure mode is invisible to the hermetic tests because a fake client never
-rasterizes or serializes the pixmap.
+Fake clients do not enforce these API limits; geometry tests must check the
+rendered pixel sizes explicitly.
 """
 from __future__ import annotations
 
@@ -59,12 +59,16 @@ import math
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
-# Default grid. A 6x6 split of an E-size sheet lands each tile just under the
-# vision cap at ~272 DPI (crisp for 3/32" note text). Overridable per call.
+# Legacy/reference grid; adaptive pages resolve their own rows and columns.
 DEFAULT_GRID_ROWS = 6
 DEFAULT_GRID_COLS = 6
+
+# One overview leaves at most 99 tiles in Claude's 100-image request budget.
+MAX_IMAGES_PER_SHEET = 100
+FIXED_GRID_ENV = "DRAWING_ANALYZER_FIXED_GRID"
 
 # Fractional overlap added to each interior tile edge so a symbol / label that
 # straddles a tile boundary still appears whole in at least one tile.
@@ -111,7 +115,7 @@ MANY_IMAGES_THRESHOLD = 20
 # Image tokens scale with the SQUARE of effective resolution — a tile's cost is
 # its pixel area over 750 — and the tiles ride the digest plus both critique
 # reads, so the vector target is the single highest-leverage number in the app's
-# bill. On a 34x44" sheet at the 6x6 grid: 1560 px is ~197 DPI and ~92.9k image
+# bill. On a 34x44" sheet at the 6x6 grid: 1560 px is ~183 minimum tile DPI and ~92.9k image
 # tokens/sheet; 1400 px is ~19% fewer, 1240 px ~37% fewer, 1100 px ~50% fewer.
 #
 # Whether any of those hold up is a QUALITY question this module cannot answer,
@@ -368,28 +372,107 @@ def rendered_pixel_size(
     return max(0, int(width)), max(0, int(height))
 
 
+def effective_tile_dpi(
+    page_width_pt: float, page_height_pt: float, *, rows: int, cols: int,
+    overlap_frac: float = DEFAULT_OVERLAP_FRAC, is_raster: bool = False,
+) -> float:
+    """Lowest render DPI among the actual overlapping tile rectangles."""
+    target = target_long_edge_px(total_images_for_grid(rows, cols), is_raster=is_raster)
+    return min(
+        72.0 * zoom_for_rect(tr.width, tr.height, target)
+        for tr in tile_rects(page_width_pt, page_height_pt, rows=rows, cols=cols,
+                             overlap_frac=overlap_frac)
+    )
+
+
+class InfeasibleGridError(ValueError):
+    """A page cannot meet the tile DPI floor within the image budget."""
+
+
+def choose_grid(
+    page_width_pt: float, page_height_pt: float, *,
+    rows: int | None = None, cols: int | None = None,
+    overlap_frac: float = DEFAULT_OVERLAP_FRAC, is_raster: bool = False,
+) -> tuple[int, int]:
+    """Resolve a page's grid from its displayed (CropBox, rotated) size.
+
+    An explicit dimension pins the grid (the other defaults to six), as does
+    DRAWING_ANALYZER_FIXED_GRID=1. Otherwise minimize Opus 5 image tokens, using
+    the exact pixel geometry and request-count target, subject to every tile
+    meeting the matching vector/raster ANSI E 6x6 DPI floor. ANSI E and ARCH E1
+    retain 6x6 and their existing cache keys. All candidates cover the full page.
+    A page too large to meet the floor within the image budget fails explicitly.
+    """
+    if rows is not None or cols is not None or fixed_grid_enabled():
+        resolved = (DEFAULT_GRID_ROWS if rows is None else rows,
+                    DEFAULT_GRID_COLS if cols is None else cols)
+        if min(resolved) < 1:
+            raise ValueError("grid dimensions must be positive")
+        return resolved
+    if not all(math.isfinite(v) and v > 0 for v in (page_width_pt, page_height_pt)):
+        raise ValueError("page dimensions must be finite and positive")
+    # Include the per-call measurement override in the memoization key.
+    return _choose_grid(page_width_pt, page_height_pt, max(0.0, overlap_frac),
+                        is_raster, target_long_edge_px(37, is_raster=is_raster))
+
+
+def fixed_grid_enabled() -> bool:
+    """The rollback switch, resolved per call rather than at import time."""
+    return os.environ.get(FIXED_GRID_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@lru_cache(maxsize=512)
+def _choose_grid(w: float, h: float, overlap: float, raster: bool,
+                 many_target: int) -> tuple[int, int]:
+    from .core.tokenizer import estimate_image_tokens_total
+
+    floor = effective_tile_dpi(44 * 72, 34 * 72, rows=6, cols=6,
+                               overlap_frac=overlap, is_raster=raster)
+    short, long = sorted((w / 72.0, h / 72.0))
+    if (any(abs(short - sw) < 0.01 and abs(long - lw) < 0.01
+            for sw, lw in ((34.0, 44.0), (30.0, 42.0)))
+            and effective_tile_dpi(w, h, rows=6, cols=6, overlap_frac=overlap,
+                                   is_raster=raster) + 1e-9 >= floor):
+        return DEFAULT_GRID_ROWS, DEFAULT_GRID_COLS
+    best = None
+    for r in range(1, MAX_IMAGES_PER_SHEET):
+        for c in range(1, (MAX_IMAGES_PER_SHEET - 1) // r + 1):
+            if effective_tile_dpi(w, h, rows=r, cols=c, overlap_frac=overlap,
+                                  is_raster=raster) + 1e-9 < floor:
+                continue
+            sizes = image_pixel_sizes(w, h, rows=r, cols=c, overlap_frac=overlap,
+                                      is_raster=raster)
+            score = (estimate_image_tokens_total(sizes, model="claude-opus-5"),
+                     r * c, max(w / c, h / r), r, c)
+            if best is None or score < best:
+                best = score
+    if best is None:
+        raise InfeasibleGridError("page cannot meet the ANSI E tile DPI floor within 100 images")
+    return best[-2], best[-1]
+
+
 def image_pixel_sizes(
     page_width_pt: float,
     page_height_pt: float,
     *,
-    rows: int = DEFAULT_GRID_ROWS,
-    cols: int = DEFAULT_GRID_COLS,
+    rows: int | None = None,
+    cols: int | None = None,
     overlap_frac: float = DEFAULT_OVERLAP_FRAC,
     is_raster: bool = False,
 ) -> list[tuple[int, int]]:
     """Every image one sheet request carries, as ``(width_px, height_px)``.
 
     The overview first, then the tiles in :func:`tile_rects` order — the same
-    order, count and geometry :func:`render.render_page` produces, resolved
-    through the same :func:`target_long_edge_px` policy (so the <=20-image branch
-    and the vector-target override behave identically here and there).
+    order, count and geometry :func:`render.render_sheet` produces, resolved
+    through :func:`choose_grid` and the same :func:`target_long_edge_px` policy
+    (so the <=20-image branch and vector-target override behave identically).
 
     This is the single place the estimate's geometry arithmetic lives (§10.1).
     A GUI preview, the command-line estimator and the tests all call it rather
     than each re-deriving zoom and pixel sizes; two copies of this arithmetic is
     how a preview starts quoting a set the renderer will not produce.
 
-    **Every tile is included.** ``render_page`` drops pixel-uniform tiles, but
+    **Every tile is included.** ``render_sheet`` drops pixel-uniform tiles, but
     that is decided from rendered pixels, and blank-tile suppression must not be
     *predicted* here (§10.1 item 6): a vector sheet's words cluster in the title
     block while the drawing body is lines, so "no words in this cell" says
@@ -397,6 +480,8 @@ def image_pixel_sizes(
     quotes slightly high; predicting a suppression that does not happen quotes
     low, which is the direction that matters before a spend.
     """
+    rows, cols = choose_grid(page_width_pt, page_height_pt, rows=rows, cols=cols,
+                             overlap_frac=overlap_frac, is_raster=is_raster)
     total = total_images_for_grid(rows, cols)
     target = target_long_edge_px(total, is_raster=is_raster)
     sizes = [

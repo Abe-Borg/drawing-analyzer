@@ -38,7 +38,8 @@ the runtime. Its wide upper end describes an extreme grouping, not typical
 spend. Digest thinking is never counted as input to later text passes. Batch
 discounts apply to digest/critique output; prefix-cache discounts apply only to
 critique input. The current Opus 5.5 price and cache-read multiplier come from
-the shared pricing registry. No per-page grid policy is installed in this tree.
+the shared pricing registry. Measured image inputs now price the renderer's
+physical-size grid policy separately for each page, including mixed-size sets.
 
 Both GUI headlines and dialogs show the band. Standard `total_cost` and
 `output_tokens` retain their compatibility fields and now represent the upper

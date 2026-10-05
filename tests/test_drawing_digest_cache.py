@@ -11,6 +11,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 import drawing_analyzer.digest_cache as digest_cache_module
 from drawing_analyzer.digest import DIGEST_PROMPT_VERSION, digest_sheet
 from drawing_analyzer.digest_cache import (
@@ -78,6 +80,26 @@ def _key(sheet, **over):
     )
     base.update(over)
     return digest_cache_key(sheet, **base)
+
+
+@pytest.mark.parametrize("critique", [False, True])
+def test_identical_images_with_different_grids_or_labels_cannot_share_cache(critique):
+    params = dict(model=OPUS, prompt_version="same", max_tokens=8000,
+                  effort="high", use_thinking=True)
+    key_fn = critique_cache_key if critique else digest_cache_key
+    if critique:
+        params["runs"] = 2
+    # A suppressed page has only an overview, regardless of its planned grid.
+    a, b = _sheet(tiles=()), _sheet(tiles=())
+    a.rows, a.cols = 6, 6
+    b.rows, b.cols = 20, 1
+    assert key_fn(a, **params) != key_fn(b, **params)
+    a, b = _sheet(), _sheet()
+    b.tiles[0].row = 1
+    assert key_fn(a, **params) != key_fn(b, **params)
+    a, b = _sheet(), _sheet()
+    b.omitted_tiles = [(1, 0)]
+    assert key_fn(a, **params) != key_fn(b, **params)
 
 
 def test_key_stable_for_same_inputs():

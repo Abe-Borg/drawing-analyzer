@@ -15,6 +15,98 @@ E_W = 44 * 72
 E_H = 34 * 72
 
 
+@pytest.mark.parametrize("shape,vector,raster", [
+    ((8.5, 11), (20, 1), (1, 1)),
+    ((11, 8.5), (1, 20), (1, 1)),
+    ((11, 17), (2, 1), (2, 1)),
+    ((17, 11), (1, 2), (1, 2)),
+    ((18, 24), (2, 2), (3, 2)),
+    ((24, 36), (3, 2), (4, 3)),
+    ((34, 44), (6, 6), (6, 6)),
+    ((44, 34), (6, 6), (6, 6)),
+    ((30, 42), (6, 6), (6, 6)),
+    ((42, 30), (6, 6), (6, 6)),
+    ((36, 48), (4, 3), (7, 5)),
+    ((60, 80), (11, 9), (11, 9)),
+])
+def test_grid_choice_from_displayed_size(shape, vector, raster):
+    w, h = (v * 72 for v in shape)
+    assert tiling.choose_grid(w, h) == vector
+    assert tiling.choose_grid(w, h, is_raster=True) == raster
+
+
+@pytest.mark.parametrize("shape", [(8.5, 11), (11, 17), (24, 36), (30, 42),
+                                     (34, 44), (36, 48), (60, 80), (4, 65)])
+@pytest.mark.parametrize("raster", [False, True])
+@pytest.mark.parametrize("overlap", [0.0, 0.08, 0.20])
+def test_adaptive_grid_preserves_dpi_and_full_coverage(shape, raster, overlap):
+    w, h = (v * 72 for v in shape)
+    rows, cols = tiling.choose_grid(w, h, overlap_frac=overlap, is_raster=raster)
+    target = tiling.target_long_edge_px(rows * cols + 1, is_raster=raster)
+    baseline = tiling.tile_rects(E_W, E_H, rows=6, cols=6, overlap_frac=overlap)
+    floor = min(72 * tiling.zoom_for_rect(t.width, t.height,
+                 tiling.target_long_edge_px(37, is_raster=raster)) for t in baseline)
+    rects = tiling.tile_rects(w, h, rows=rows, cols=cols, overlap_frac=overlap)
+    assert all(72 * target / max(t.width, t.height) + 1e-9 >= floor for t in rects)
+    # Every base cell is contained in its crop: proves full coverage, including
+    # internal seams, rather than checking only the outer page boundary (I-1).
+    for t in rects:
+        assert t.x0 <= t.col * w / cols + 1e-9
+        assert t.y0 <= t.row * h / rows + 1e-9
+        assert t.x1 + 1e-9 >= (t.col + 1) * w / cols
+        assert t.y1 + 1e-9 >= (t.row + 1) * h / rows
+    sizes = tiling.image_pixel_sizes(w, h, overlap_frac=overlap, is_raster=raster)
+    assert len(sizes) == rows * cols + 1 <= tiling.MAX_IMAGES_PER_SHEET
+    if len(sizes) > 20:
+        assert max(max(s) for s in sizes) <= 2000
+    else:
+        assert target == 2576
+
+
+@pytest.mark.parametrize("shape,raster", [((8.5, 11), False), ((11, 17), False),
+                                         ((24, 36), True), ((4, 65), True)])
+def test_chosen_grid_minimizes_image_tokens_over_all_feasible_grids(shape, raster):
+    from drawing_analyzer.core.tokenizer import estimate_image_tokens_total
+
+    w, h = (v * 72 for v in shape)
+    floor = tiling.effective_tile_dpi(E_W, E_H, rows=6, cols=6, is_raster=raster)
+    chosen_tokens = estimate_image_tokens_total(
+        tiling.image_pixel_sizes(w, h, is_raster=raster), model="claude-opus-5")
+    for rows in range(1, 100):
+        for cols in range(1, 99 // rows + 1):
+            if tiling.effective_tile_dpi(w, h, rows=rows, cols=cols,
+                                        is_raster=raster) + 1e-9 < floor:
+                continue
+            tokens = estimate_image_tokens_total(tiling.image_pixel_sizes(
+                w, h, rows=rows, cols=cols, is_raster=raster), model="claude-opus-5")
+            assert chosen_tokens <= tokens, (rows, cols, chosen_tokens, tokens)
+
+
+def test_fixed_grid_switch_and_caller_pins_win(monkeypatch):
+    assert tiling.choose_grid(612, 792) == (20, 1)
+    monkeypatch.setenv(tiling.FIXED_GRID_ENV, "1")
+    assert tiling.choose_grid(612, 792) == (6, 6)
+    assert tiling.choose_grid(612, 792, rows=2, cols=3) == (2, 3)
+    assert tiling.choose_grid(612, 792, rows=2) == (2, 6)
+    monkeypatch.delenv(tiling.FIXED_GRID_ENV)
+    assert tiling.choose_grid(612, 792) == (20, 1)
+    assert tiling.choose_grid(612, 792, cols=2) == (6, 2)
+
+
+def test_impossible_dpi_floor_is_reported_instead_of_rendering_below_it():
+    with pytest.raises(ValueError, match="DPI floor"):
+        tiling.choose_grid(200 * 72, 200 * 72)
+
+
+def test_nearly_e_size_page_still_must_meet_the_floor():
+    # The standard-size recognition tolerance must not admit a slightly larger
+    # sheet to 6x6 when its worst tile would fall below the baseline DPI.
+    w, h = 44.005 * 72, 34 * 72
+    rows, cols = tiling.choose_grid(w, h)
+    assert tiling.effective_tile_dpi(w, h, rows=rows, cols=cols) >= (
+        tiling.effective_tile_dpi(E_W, E_H, rows=6, cols=6))
+
+
 def test_grid_count_is_rows_times_cols():
     rects = tiling.tile_rects(E_W, E_H, rows=6, cols=6)
     assert len(rects) == 36
