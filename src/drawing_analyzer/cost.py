@@ -11,6 +11,7 @@ count (cheap to obtain via ``render.list_sheets``).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -139,8 +140,8 @@ class ImageTokenEstimate:
     #: Pages counted by how their render target was decided.
     vector_pages: int = 0
     raster_pages: int = 0
-    #: Pages that could not be classified, or could not be measured, and were
-    #: therefore priced at the conservative allowance. Never dropped, never
+    #: Pages that could not be classified, measured, or assigned a feasible grid
+    #: and were therefore priced at the conservative allowance. Never dropped, never
     #: quietly treated as vector.
     unknown_pages: int = 0
     unmeasured_pages: int = 0
@@ -185,8 +186,9 @@ def estimate_image_tokens_for_bases(
     must be estimated with their own resolved models, never counted once and
     reused (§2.4).
 
-    A page classified ``unknown``, or one that could not be measured, falls back
-    to the conservative per-sheet allowance and is counted separately. It is
+    A page classified ``unknown``, one that could not be measured, or one with
+    no feasible adaptive grid falls back to the conservative per-sheet allowance
+    and is counted separately. It is
     never assumed vector: vector is the *cheaper* target, so guessing it would
     quote low on precisely the pages least understood.
     """
@@ -202,7 +204,8 @@ def estimate_image_tokens_for_bases(
         width = float(getattr(basis, "width_pt", 0.0) or 0.0)
         height = float(getattr(basis, "height_pt", 0.0) or 0.0)
         measurable = (
-            bool(getattr(basis, "geometry_ok", False)) and width > 0 and height > 0
+            bool(getattr(basis, "geometry_ok", False))
+            and all(math.isfinite(v) and v > 0 for v in (width, height))
         )
         if not measurable:
             unmeasured += 1
@@ -212,14 +215,21 @@ def estimate_image_tokens_for_bases(
             unknown += 1
             total += conservative_per_sheet
             continue
+        try:
+            sizes = tiling.image_pixel_sizes(
+                width, height, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                is_raster=classification == CLASSIFICATION_RASTER,
+            )
+        except tiling.InfeasibleGridError:
+            # Retain this page in the budget, without claiming a measured grid.
+            # Rendering will report its failure; the confirmation must still open.
+            unknown += 1
+            total += conservative_per_sheet
+            continue
         if classification == CLASSIFICATION_RASTER:
             raster += 1
         else:
             vector += 1
-        sizes = tiling.image_pixel_sizes(
-            width, height, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            is_raster=classification == CLASSIFICATION_RASTER,
-        )
         total += estimate_image_tokens_total(sizes, model=model)
     return ImageTokenEstimate(
         tokens=total,

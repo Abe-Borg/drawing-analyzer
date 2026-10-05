@@ -106,7 +106,10 @@ map lives in `src/drawing_analyzer/__init__.py`.
   subject to every overlapping tile meeting ANSI E's 44×34 inch 6×6 minimum
   DPI (183.39 vector / 234.17 raster at 8% overlap). Compare like with like and
   resolve the <=20-image 2576 px target versus >20-image 1560/1992 targets
-  before testing DPI. A page with no feasible grid fails explicitly. Keep I-1.
+  before testing DPI. A page with no feasible grid fails explicitly. Cost
+  estimation substitutes the conservative allowance and discloses the fallback;
+  digest and critique prescans report that page's failure and continue, keeping
+  both stages partial while processing the other pages. Keep I-1.
   ANSI E (34×44) and ARCH E1 (30×42), either orientation, retain 6×6 and their
   cache keys; no prompt/schema/render-identity version bump is needed because
   actual rows/cols/target already key the render. Level 2 hashes PNG bytes plus

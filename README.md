@@ -368,6 +368,8 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   the token minimum for portrait vector Letter; raster Letter chooses 1×1.
   Larger sheets can need more than six rows/columns. Pages that cannot meet
   the DPI floor within 100 images are reported as failed, never read below it.
+  Cost confirmation prices those pages at the conservative allowance; digest
+  and critique prescans record their failures and continue with the other pages.
 
   Measured with `tiling.image_pixel_sizes` and `core.tokenizer` on Opus 5,
   counting every tile before blank suppression, per vision read:

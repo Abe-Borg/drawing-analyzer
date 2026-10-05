@@ -385,6 +385,10 @@ def effective_tile_dpi(
     )
 
 
+class InfeasibleGridError(ValueError):
+    """A page cannot meet the tile DPI floor within the image budget."""
+
+
 def choose_grid(
     page_width_pt: float, page_height_pt: float, *,
     rows: int | None = None, cols: int | None = None,
@@ -443,7 +447,7 @@ def _choose_grid(w: float, h: float, overlap: float, raster: bool,
             if best is None or score < best:
                 best = score
     if best is None:
-        raise ValueError("page cannot meet the ANSI E tile DPI floor within 100 images")
+        raise InfeasibleGridError("page cannot meet the ANSI E tile DPI floor within 100 images")
     return best[-2], best[-1]
 
 

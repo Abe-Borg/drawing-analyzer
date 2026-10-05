@@ -50,6 +50,7 @@ from .models import (
     RunConfiguration,
     RunUsage,
     SheetGeometry,
+    SheetRef,
     StageResult,
     UsageRecord,
     resolve_run_configuration,
@@ -1071,6 +1072,7 @@ def _level1_partition(
     focus: str | None,
     specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -1084,7 +1086,10 @@ def _level1_partition(
       the render stream's ``only`` so exactly those sheets rasterize;
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
-    - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
+    - ``geometries`` — every successfully scanned sheet's geometry, for QC.
+
+    Failed pages are reported via ``on_page_error`` and excluded from both
+    cache hits and render misses, so the rest of the set still processes.
     """
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     miss_only: set[tuple[str, int]] = set()
@@ -1093,7 +1098,8 @@ def _level1_partition(
     focus_frag = focus_cache_fragment(focus)
     specs_frag = specs_cache_fragment(specs_text)
     for ref, identity, geometry in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, on_page_error=on_page_error,
     ):
         geometries.append(geometry)
         key = digest_cache_key_level1(
@@ -1239,6 +1245,7 @@ def _critique_level1_partition(
     runs: int,
     profiles_key: str | None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "tuple[dict, set, dict]":
     """Pre-render level-1 cache scan for the critique stage (Phase 19B, §11.5).
 
@@ -1278,7 +1285,8 @@ def _critique_level1_partition(
     # does) needs no assumption about the caller's path-list ordering.
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     for ref, identity, _geom in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, on_page_error=on_page_error,
     ):
         key = critique_cache_key_level1(
             identity,
@@ -1377,12 +1385,20 @@ def _run_critique_stage(
     level1_identities: dict[tuple[str, int], str] = {}
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
+    prescan_degraded: list[str] = []
+
+    def _on_prescan_error(ref: SheetRef, exc: Exception) -> None:
+        prescan_degraded.append(
+            f"{ref.display_label}: page could not be prescanned ({type(exc).__name__})"
+        )
+
     if (cache is not None or use_batch or
             (recovery_state is not None and (recovery_state.recovered or recovery_state.blocked))):
         cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
+            on_page_error=_on_prescan_error,
         )
         if cached_by_ref:
             _log.info(
@@ -1418,7 +1434,7 @@ def _run_critique_stage(
     workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
-    degraded: list[str] = recovery_degraded
+    degraded: list[str] = prescan_degraded + recovery_degraded
     # Sheets the input merge could not produce at all — spool load and the
     # one-page re-render fallback both returned None. These used to be dropped
     # silently by ``_ordered_inputs``, so the stage reported COMPLETE having
@@ -3099,6 +3115,7 @@ def extract_drawing_context(
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
             effort=effort, focus=focus or None, specs_text=specs_text or None,
             snapshot_by_path=snapshot_by_path,
+            on_page_error=_on_page_error,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)

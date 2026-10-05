@@ -51,7 +51,7 @@ def _mixed_pdf(path):
 class _Client(ScriptedQCClient):
     """Run the same scripted reads on real-time and batch transports."""
 
-    def __init__(self):
+    def __init__(self, sheet_scripts=None):
         scripts = []
         for i, (rows, cols) in enumerate(GRIDS):
             label = tiling.tile_label_for(rows - 1, cols - 1)
@@ -67,7 +67,8 @@ class _Client(ScriptedQCClient):
                 token=f"(page {i + 1}/5)", prose=f"Sheet M-{101 + i} - Plan",
                 findings=[finding], read1=([critique], []), read2=([critique], []),
             ))
-        super().__init__(scripts, verify_verdicts=(("equipment marker 1.", "NOT_VISIBLE"),),
+        super().__init__(scripts if sheet_scripts is None else sheet_scripts,
+                         verify_verdicts=(("equipment marker 1.", "NOT_VISIBLE"),),
                          cross_findings=[{
                              "sheet_id": "M-101", "category": "conflict", "severity": "high",
                              "text": "The plan notes disagree about equipment placement.",
@@ -269,6 +270,89 @@ def test_cost_prices_chosen_grids_and_unmeasured_allowance_bounds_large_pages(tm
                 60 * 72, 80 * 72, is_raster=raster), model=model)
             assert tokens <= estimate_image_tokens_for_set(1, model=model)
     assert estimate_image_tokens_for_set(1, model="claude-opus-5") == 478_400
+
+
+def _pdf_with_infeasible_page(tmp_path, *, raster):
+    paths = [tmp_path / "oversized.pdf", tmp_path / "other.pdf"]
+    doc = pymupdf.open()
+    for i, size in enumerate([(8.5, 11), (80, 80), (11, 17)]):
+        page = doc.new_page(width=size[0] * 72, height=size[1] * 72)
+        if i != 1 or not raster:
+            page.insert_text((30, 50), f"SHEET H-10{i}")
+        page.draw_line((0, 0), (page.rect.width, page.rect.height))
+    doc.save(paths[0])
+    doc.close()
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((30, 50), "SHEET H-103")
+    doc.save(paths[1])
+    doc.close()
+    return paths
+
+
+@pytest.mark.parametrize("raster", [False, True])
+def test_prescan_reports_one_infeasible_page_and_continues_without_rendering(tmp_path, monkeypatch, raster):
+    paths = _pdf_with_infeasible_page(tmp_path, raster=raster)
+
+    def no_pixmap(*args, **kwargs):
+        pytest.fail("prescan must not rasterize")
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", no_pixmap)
+    assert len(render.list_sheets(render.inspect_inputs(paths).accepted_paths)) == 4
+    failures = []
+    scanned = list(render.iter_sheet_prescan(
+        paths, on_page_error=lambda ref, exc: failures.append((ref, exc)),
+    ))
+    assert [(ref.pdf_path, ref.page_index) for ref, _, _ in scanned] == [
+        (paths[0], 0), (paths[0], 2), (paths[1], 0),
+    ]
+    assert len(failures) == 1
+    ref, exc = failures[0]
+    assert (ref.pdf_path, ref.page_index) == (paths[0], 1)
+    assert isinstance(exc, tiling.InfeasibleGridError)
+    assert "DPI floor" in str(exc)
+
+
+@pytest.mark.parametrize("raster", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+def test_infeasible_page_keeps_digest_and_critique_partial_while_other_pages_complete(
+    tmp_path, monkeypatch, raster, batch, cached,
+):
+    paths = _pdf_with_infeasible_page(tmp_path, raster=raster)
+    cache = DigestCache(tmp_path / "cache.json") if cached else None
+    scripts = [SheetScript(token=f"(page {i}/3)", prose=f"Sheet H-10{i} - Plan")
+               for i in (1, 3)]
+    scripts.append(SheetScript(token="other.pdf", prose="Sheet H-103 - Plan"))
+    client = _Client(scripts)
+    monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "1")
+    options = dict(
+        cache=cache, use_cache=False, max_workers=1, use_batch=batch,
+        critique_use_batch=batch, synthesize=False, critique=True, cross_qc=False,
+        verify_findings=False, investigate=False, identity=False, review_plan=False,
+        citation_check=False, qc_markups=False,
+    )
+    ctx = extract_drawing_context(paths, client=client, **options)
+    assert ctx.sheet_count == 4 and ctx.ok_sheet_count == 3
+    assert [(s.ref.pdf_path, s.ref.page_index) for s in ctx.sheets] == [
+        (paths[0], 0), (paths[0], 2), (paths[1], 0),
+    ]
+    assert len(client.vision_requests) == 9  # Three healthy pages, three reads each.
+    assert sum(client.digest_calls.values()) == 3
+    assert sum(client.critique_calls.values()) == 6
+    for stage in ("digest", "critique"):
+        result = next(s for s in ctx.stage_results if s.stage == stage)
+        assert result.status == "PARTIAL"
+        assert any("oversized.pdf (page 2/3)" in error for error in result.errors)
+    assert any("oversized.pdf (page 2/3)" in error for error in ctx.errors)
+    if cached:
+        warm_client = _Client(scripts)
+        warm = extract_drawing_context(paths, client=warm_client, **options)
+        assert warm.sheet_count == 4 and warm.ok_sheet_count == 3
+        assert warm_client.vision_requests == []
+        assert all(s.cached for s in warm.sheets)
+        assert all(next(s for s in warm.stage_results if s.stage == name).status == "PARTIAL"
+                   for name in ("digest", "critique"))
 
 
 def test_findings_labels_are_checked_against_each_pages_grid():

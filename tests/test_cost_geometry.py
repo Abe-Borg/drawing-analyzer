@@ -270,6 +270,34 @@ def test_a_page_claiming_vector_with_no_area_still_falls_back():
     assert est.tokens == estimate_image_tokens_for_set(1, model=OPUS)
 
 
+@pytest.mark.parametrize("classification", [CLASSIFICATION_VECTOR, CLASSIFICATION_RASTER])
+@pytest.mark.parametrize("model", [OPUS, HAIKU])
+def test_an_infeasible_grid_is_conservatively_priced_without_losing_other_pages(classification, model):
+    est = estimate_image_tokens_for_bases(
+        [basis(LETTER), basis((80, 80), classification), basis(B)], model=model,
+    )
+    assert est.tokens == tokens(LETTER, model=model) + tokens(B, model=model) + (
+        estimate_image_tokens_for_set(1, model=model)
+    )
+    assert (est.vector_pages, est.raster_pages, est.unknown_pages) == (2, 0, 1)
+    assert est.pages == 3 and not est.fully_measured
+    assert est.unmeasured_pages == 0  # Known dimensions; no feasible grid.
+    assert est.tokens <= est.conservative_tokens
+
+
+@pytest.mark.parametrize("size", [float("inf"), float("nan")])
+def test_nonfinite_page_dimensions_use_the_unmeasured_allowance(size):
+    est = estimate_image_tokens_for_bases([basis((size, 80))], model=OPUS)
+    assert est.tokens == estimate_image_tokens_for_set(1, model=OPUS)
+    assert est.unmeasured_pages == est.unknown_pages == est.pages == 1
+    assert not est.fully_measured
+
+
+def test_cost_fallback_does_not_mask_invalid_caller_grid_dimensions():
+    with pytest.raises(ValueError, match="grid dimensions must be positive"):
+        estimate_image_tokens_for_bases([basis(LETTER)], rows=0, cols=2, model=OPUS)
+
+
 def test_mixed_classifications_are_counted_separately():
     est = estimate_image_tokens_for_bases(
         [basis(E), basis(D, CLASSIFICATION_RASTER), basis(B, CLASSIFICATION_UNKNOWN)],

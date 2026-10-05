@@ -1099,6 +1099,7 @@ def iter_sheet_prescan(
     cols: int | None = None,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "Iterator[tuple[SheetRef, str, SheetGeometry]]":
     """Yield ``(ref, render_identity, geometry)`` per page **without rendering**.
 
@@ -1107,6 +1108,10 @@ def iter_sheet_prescan(
     lightweight geometry the QC stages need, from page-object access alone. The
     pipeline uses the identities to decide which sheets can skip rasterization and
     only feeds the misses to :func:`iter_rendered_sheets`.
+
+    A failed page is reported via ``on_page_error(ref, exc)`` and skipped, just
+    like the render stream. In particular, an infeasible adaptive grid must not
+    abort the remaining pages or be mistaken for a cache hit.
 
     The render identity derives a conservative page-local dependency hash from the
     source's ``content_sha256`` (computed **once per source**) and falls back to
@@ -1144,15 +1149,26 @@ def iter_sheet_prescan(
                     page_count=count,
                     source_id=source_id,
                 )
-                page = doc[i]
-                identity = sheet_render_identity(
-                    page, content_sha256=sha, page_index=i, page_count=count,
-                    rows=rows, cols=cols, overlap_frac=overlap_frac,
-                    dependency_cache=dependency_cache,
-                )
-                geometry = _sheet_geometry_no_render(
-                    page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac
-                )
+                try:
+                    page = doc[i]
+                    rect = page.rect
+                    if not page_dimensions_ok(float(rect.width), float(rect.height)):
+                        raise ValueError(
+                            f"pathological page size {rect.width:.0f}×{rect.height:.0f} pt"
+                        )
+                    identity = sheet_render_identity(
+                        page, content_sha256=sha, page_index=i, page_count=count,
+                        rows=rows, cols=cols, overlap_frac=overlap_frac,
+                        dependency_cache=dependency_cache,
+                    )
+                    geometry = _sheet_geometry_no_render(
+                        page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad page never aborts the set
+                    _log.warning("prescan failed for %s: %s", ref.display_label, exc)
+                    if on_page_error is not None:
+                        on_page_error(ref, exc)
+                    continue
                 yield ref, identity, geometry
         finally:
             doc.close()
