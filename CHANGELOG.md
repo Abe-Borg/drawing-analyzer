@@ -23,6 +23,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   5.5's API default is `medium`). Model id is part of every cache key, so
   digest/critique caches repopulate once on first run.
 
+- Update Anthropic to 1.11.0, httpcore2/httpx2 to 2.13.1, platformdirs to
+  4.12.2, Playwright to 1.63.0, and Linux cryptography to 50.0.2. Synchronize
+  the shared engine pins in `requirements-release.lock` while retaining its
+  existing compatible dependency and test-tool pins.
+
+### Fixed
+
+- Keep `pydantic_core` at 2.46.5, the version required by Pydantic 2.13.5.
+  CI now installs `requirements.txt` and runs `pip check` on Linux and Windows;
+  a regression test checks shared runtime/release pins for drift, and dependency
+  file changes also trigger the Windows installer validation.
+
 ## [1.7.0] - 2026-09-21
 
 ### Added

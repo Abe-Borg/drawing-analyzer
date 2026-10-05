@@ -2,7 +2,8 @@
 #
 # Jobs:
 #   * test            — hermetic suite on the Windows + Linux / Py 3.11 + 3.12
-#                       matrix (no API key, no network). Includes the Phase 27
+#                       matrix using the pinned runtime + release constraints
+#                       (no API key, no network). Includes the Phase 27
 #                       §19.1/§19.2 trust gauntlet.
 #   * browser-security — the mandatory headless-Chromium report exploit suite,
 #                       Linux only (a DOM emulator cannot prove CSP / file:// /
@@ -87,10 +88,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - name: Install (engine + dev)
+      - name: Install (pinned runtime + engine + dev)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install -c requirements-release.lock -r requirements.txt -e ".[dev]"
+          python -m pip check
       - name: Byte-compile sources
         run: python -m compileall -q src
       - name: PyMuPDF import isolation (I-5)

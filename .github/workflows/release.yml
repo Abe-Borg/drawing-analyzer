@@ -51,6 +51,8 @@ on:
       - ".github/workflows/release.yml"
       - "src/drawing_analyzer/core/updates.py"
       - "pyproject.toml"
+      - "requirements.txt"
+      - "requirements-release.lock"
   workflow_dispatch:
 
 # Least privilege by default; the tag-gated publish job elevates to write.

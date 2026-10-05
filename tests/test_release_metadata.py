@@ -11,9 +11,40 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 import drawing_analyzer
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_runtime_and_release_shared_dependency_pins_match():
+    """Release builds and requirements installs must exercise the same pins.
+
+    GUI-only and dev-only dependencies may differ, but shared dependencies
+    must not silently keep the release on an older SDK or transport stack.
+    Actual resolver compatibility is checked by CI's requirements install.
+    """
+    def pins(filename):
+        result = {}
+        for line in (_REPO_ROOT / filename).read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                requirement = Requirement(line)
+                name = canonicalize_name(requirement.name)
+                result[name] = str(requirement.specifier)
+        return result
+
+    runtime = pins("requirements.txt")
+    release = pins("requirements-release.lock")
+    shared = runtime.keys() & release.keys()
+    assert shared, "runtime and release files have no shared dependency pins"
+    drift = {
+        name: (runtime[name], release[name])
+        for name in shared if runtime[name] != release[name]
+    }
+    assert not drift, f"runtime/release dependency pin drift: {drift}"
 
 
 def test_package_version_matches_pyproject():
