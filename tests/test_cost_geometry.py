@@ -464,8 +464,9 @@ def test_the_real_time_path_is_deliberately_not_linear_in_run_count(monkeypatch)
     """Because the breakpoint only exists at ``runs >= 2``.
 
     One read pays the ordinary rate for its prefix; two reads pay 1.25x twice in
-    the pessimistic scenario the row displays. So one read is ~40% of two, not
-    50%. An earlier version of this test asserted exact halving — which held
+    the pessimistic scenario the row displays. Output, including thinking, is
+    linear and moves the total ratio toward 50%; only input gets the premium.
+    An earlier version of this test asserted exact halving — which held
     under the old flat pricing and is precisely the assumption the cache fix
     breaks. Monotonic and material, without pretending to a linearity that is
     not there.
@@ -474,7 +475,7 @@ def test_the_real_time_path_is_deliberately_not_linear_in_run_count(monkeypatch)
     two = _critique_cost_at(monkeypatch, 2, batch=False)
     four = _critique_cost_at(monkeypatch, 4, batch=False)
     assert one < two < four
-    assert 0.35 < one / two < 0.45, one / two
+    assert 0.4 < one / two < 0.5, one / two
     # Still roughly proportional once every read past the first is a write.
     assert four == pytest.approx(two * 2, rel=0.001)
 
@@ -616,7 +617,7 @@ def test_the_run_band_widens_to_carry_the_cache_scenario():
 
     prefix = estimate_image_tokens_for_set(1, model=OPUS) + 800
     _, pessimistic = _critique_prefix_costs(
-        prefix_tokens=prefix, output_tokens=1_500, sheet_count=10, runs=2,
+        prefix_tokens=prefix, output_tokens=64_000, sheet_count=10, runs=2,
         model=OPUS, batch=False,
     )
     row = next(c for c in fast.components if c.stage.startswith("Critique"))
@@ -625,7 +626,7 @@ def test_the_run_band_widens_to_carry_the_cache_scenario():
 
 
 def test_the_batch_band_is_not_widened_by_a_cache_scenario_that_cannot_happen():
-    """Economy mode has no breakpoint, so the critique contributes no spread."""
+    """Economy still has output spread; only Fast adds prefix-cache spread."""
     economy = estimate_exhaustive_run_cost(10, model=OPUS, batch=True, critique_batch=True)
     fast = estimate_exhaustive_run_cost(10, model=OPUS, batch=False, critique_batch=False)
     assert (economy.high_cost - economy.low_cost) < (fast.high_cost - fast.low_cost)

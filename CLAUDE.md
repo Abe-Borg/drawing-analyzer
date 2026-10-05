@@ -73,9 +73,11 @@ map lives in `src/drawing_analyzer/__init__.py`.
   stage with **its own resolved model** and the runtime's own `critique_runs()`.
   Count critique imagery with the critique model, never reused from the digest
   count (`estimate_image_tokens` clamps at 4784 hi-res / 1568 standard).
-- **Image-token geometry:** the GUI prices from real page shapes when profile
-  preflight has measured the current file list, and from the conservative
-  allowance otherwise. There is no separate scan. `profiles.preflight_scan`
+- **Image-token geometry:** the GUI starts drawing preflight whenever files
+  are loaded, even with no installed profiles. It prices from real page shapes
+  once that scan has measured the current file list, and from the conservative
+  allowance otherwise. Profile suggestions apply only to installed profiles.
+  There is no separate scan. `profiles.preflight_scan`
   returns sheet ids and `SheetCostBasis` from one walk; `estimate_*_cost(bases=…)`
   uses them **only when they cover every sheet** — a partial list falls back
   whole. An unreadable page inside a measured set still takes the conservative

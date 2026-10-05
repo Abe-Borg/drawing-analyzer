@@ -168,6 +168,162 @@ def _stub_app(gui, *, busy=False, export_busy=False):
     return stub, destroyed
 
 
+def _cost_preview_app(gui, tk, monkeypatch):
+    """Real GUI handlers, fake widgets, and an explicitly scheduled worker."""
+    import threading
+
+    workers, callbacks, summaries = [], [], []
+
+    class Worker:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            assert daemon
+
+        def start(self):
+            workers.append(self.target)
+
+    monkeypatch.setattr(gui.threading, "Thread", Worker)
+    var = tk.BooleanVar
+    app = types.SimpleNamespace(
+        _busy=False, _pdfs=[], _profile_vars={}, _profiles_by_name={},
+        _profile_forced_on=set(), _profile_forced_off=set(), _profile_suggested=set(),
+        _preflight_gen=0, _preflight_bases=None, _preflight_fingerprint=None,
+        _preflight_lock=threading.Lock(),
+        _processing_mode_var=tk.StringVar(value="Fast"),
+        _qc_markups_var=var(value=False), _qc_verified_only_var=var(value=False),
+        _ink_rejected_var=var(value=False), _reference_audit_var=var(value=False),
+        _save_tiles_var=var(value=False),
+        _current_focus=lambda: "", _current_specs_text=lambda: "",
+        _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,
+        summary_label=types.SimpleNamespace(configure=lambda **kw: summaries.append(kw["text"])),
+        after=lambda delay, callback: callbacks.append(callback),
+    )
+    for name in ("_add_pdfs", "_refresh_profile_suggestions", "_apply_profile_suggestions",
+                 "_usable_preflight_bases", "_refresh_summary", "_selected_profiles", "_on_process"):
+        setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
+    return app, workers, callbacks, summaries
+
+
+def _preview_pdf(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    pdf = tmp_path / "drawings.pdf"
+    with pymupdf.open() as doc:
+        for i in range(3):
+            page = doc.new_page(width=34 * 72, height=44 * 72)
+            page.insert_text((72, 72), f"FP-10{i} PRE-ACTION VALVE SCHEDULE")
+        doc.save(pdf)
+    return pdf
+
+
+@pytest.mark.parametrize("exhaustive", [False, True])
+def test_loading_files_without_profiles_uses_measured_costs_in_gui(tmp_path, monkeypatch, exhaustive):
+    """Regression: a shipping install has no profile checkboxes at all."""
+    from drawing_analyzer import cost, profiles
+
+    pdf = _preview_pdf(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-no-network")
+
+    def no_profile_suggestions(*args, **kwargs):
+        raise AssertionError("no profiles installed; suggestions should not run")
+
+    monkeypatch.setattr(profiles, "suggest_profiles", no_profile_suggestions)
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, summaries = _cost_preview_app(gui, tk, monkeypatch)
+        app._qc_markups_var.set(exhaustive)
+        app._add_pdfs([pdf])
+        assert len(workers) == 1
+        assert app._usable_preflight_bases() is None
+        workers.pop()()
+        callbacks.pop()()
+        measured = app._usable_preflight_bases()
+        assert len(measured) == 3
+        expected = cost.estimate_drawing_set_cost(3, model=gui.REVIEW_MODEL_DEFAULT, bases=measured)
+        assert expected.shape_aware
+        assert f"~{expected.image_tokens:,} digest image tokens" in summaries[-1]
+        assert summaries[-1] != summaries[0]
+
+        prompts = []
+        tk.messagebox.askyesno = lambda title, prompt: prompts.append(prompt) or False
+        app._on_process()
+        assert len(prompts) == 1
+        assert "measured size and text layer" in prompts[0]
+        assert "pages have not been measured" not in prompts[0]
+        assert "adaptive thinking, which is billed as output" in prompts[0]
+        assert not app._busy  # declining sends nothing
+
+
+def test_gui_discards_superseded_preflight_and_rewritten_file_bases(tmp_path, monkeypatch):
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
+        app._add_pdfs([pdf])
+        first = workers.pop()
+        app._refresh_profile_suggestions()
+        first()
+        callbacks.pop()()
+        assert app._preflight_bases is None  # older generation cannot install bases
+        workers.pop()()
+        callbacks.pop()()
+        assert app._usable_preflight_bases()
+        pdf.write_bytes(pdf.read_bytes() + b"\n%changed\n")
+        assert app._usable_preflight_bases() is None
+
+
+def test_profile_suggestion_failure_keeps_measured_gui_bases(tmp_path, monkeypatch):
+    from drawing_analyzer import profiles
+
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
+        app._profile_vars = {"custom": tk.BooleanVar(value=False)}
+        app._profiles_by_name = {"custom": object()}
+
+        def fail(*args, **kwargs):
+            raise ValueError("bad profile")
+
+        monkeypatch.setattr(profiles, "suggest_profiles", fail)
+        app._add_pdfs([pdf])
+        workers.pop()()
+        callbacks.pop()()
+        assert len(app._usable_preflight_bases()) == 3
+
+
+def test_installed_profile_suggestions_still_respect_manual_overrides(tmp_path, monkeypatch):
+    from drawing_analyzer import profiles
+
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
+        app._profile_vars = {name: tk.BooleanVar(value=False) for name in ("custom", "manual")}
+        app._profiles_by_name = {name: types.SimpleNamespace(name=name) for name in app._profile_vars}
+        app._profile_forced_off.add("custom")
+        app._profile_forced_on.add("manual")
+        suggestions = []
+
+        def suggest(sheet_ids, *, available):
+            suggestions.append((sheet_ids, available))
+            return [available["custom"]]
+
+        monkeypatch.setattr(profiles, "suggest_profiles", suggest)
+        app._add_pdfs([pdf])
+        workers.pop()()
+        callbacks.pop()()
+        assert len(suggestions) == 1
+        assert suggestions[0][1] == app._profiles_by_name
+        assert app._profile_suggested == {"custom"}
+        assert not app._profile_vars["custom"].get()
+        assert app._profile_vars["manual"].get()
+        assert len(app._usable_preflight_bases()) == 3
+
+
+def test_gui_does_not_start_a_preflight_while_busy(monkeypatch):
+    with _gui_module() as (gui, tk):
+        app, workers, _, _ = _cost_preview_app(gui, tk, monkeypatch)
+        app._busy = True
+        app._refresh_profile_suggestions()
+        assert not workers and app._preflight_gen == 0
+
+
 def test_closing_while_idle_closes_immediately():
     """This is a guard, not a ceremony: a quiet window must not prompt."""
     with _gui_module() as (gui, tk):

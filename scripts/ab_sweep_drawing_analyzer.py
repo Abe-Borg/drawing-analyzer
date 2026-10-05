@@ -1155,7 +1155,7 @@ def _estimate_in_process(
         est = estimate_drawing_set_cost(
             sheets, file_count=file_count, model=model, batch=use_batch,
         )
-        out["low_cost"] = out["high_cost"] = est.total_cost
+        out["low_cost"], out["high_cost"] = est.low_cost, est.high_cost
     return out
 
 

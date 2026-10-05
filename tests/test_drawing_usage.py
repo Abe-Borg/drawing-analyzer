@@ -418,10 +418,17 @@ def test_exhaustive_estimate_batch_critique_beats_half_once_a_prefix_is_cached(m
     """
     monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", "2")
     b = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=True))
-    r = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=False))
+    realtime = estimate_exhaustive_run_cost(10, file_count=2, batch=False)
+    r = _critique_component(realtime)
     assert b.input_tokens == r.input_tokens          # same work, different rates
     assert b.cost < r.cost * BATCH_DISCOUNT
-    assert 0.35 < b.cost / r.cost < 0.45
+    assert b.output_tokens == r.output_tokens == 2 * 10 * 64_000
+    # Output, including thinking, receives only the transport discount. The
+    # real-time upper end writes every prefix; that premium applies to input.
+    assert r.cost == pytest.approx(float(usage_record_cost(
+        model=realtime.stage_models.critique, cache_write_tokens=r.input_tokens,
+        output_tokens=r.output_tokens,
+    )))
 
 
 def test_exhaustive_prompt_is_labeled_an_estimate_and_names_stages():
