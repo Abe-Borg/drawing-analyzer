@@ -134,7 +134,18 @@ map lives in `src/drawing_analyzer/__init__.py`.
   (`_one_page_fallback` re-renders exactly the page that failed). A failed spool
   write leaves the key absent (I-3).
 - **Batch recovery** stays on the batch transport for the pipeline
-  (`recovery_transport=RECOVERY_BATCH`): cancel a stalled batch and resubmit
+  and records every accepted digest, follow-up, resubmission, and critique batch
+  in the digest cache's `pending_batches` SQLite table before polling. Receipts
+  carry batch/custom IDs, both cache keys, sheet identity, transport, submit
+  time, and result-retention deadline (29 days from API creation). Run start
+  collects terminal receipts into the cache before new work; live or unreadable
+  receipts block duplicate requests. Every `results()` stream retries transient
+  failures from byte zero through `batch_recovery.read_batch_results`. An
+  exhausted read returns retriable per-sheet errors (I-3) and keeps the receipt;
+  it never submits another paid round just to retry a download. Successful cache
+  writes must be durable before deleting receipts; expired receipts are pruned.
+  Explicit memory-only caches keep receipts in memory, as with digest entries.
+  With `recovery_transport=RECOVERY_BATCH`, cancel a stalled batch and resubmit
   unresolved sheets (`_recover_via_batch_resubmit`). Never silently drop to
   full-rate real-time; when the rounds or budget are spent, unreached sheets
   keep a retriable batch error. Every site that abandons a batch harvests it

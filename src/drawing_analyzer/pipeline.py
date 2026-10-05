@@ -947,6 +947,8 @@ def _digest_sheets_via_batch(
     reusable_upload_sink: "list[Any] | None" = None,
     on_page_error: "Any" = None,
     journal: "Any" = None,
+    level1_keys: dict | None = None,
+    recovery_state: Any = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -998,6 +1000,8 @@ def _digest_sheets_via_batch(
         on_status=on_status,
         focus=focus,
         specs_text=specs_text,
+        level1_keys=level1_keys,
+        recovery_state=recovery_state,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -1618,6 +1622,14 @@ def _run_critique_stage(
             _rendered_for_critique(),
             client=client, cache=cache, model=model, runs=runs, profiles=profiles,
             progress=progress, total=miss_total, on_status=on_status,
+            level1_keys={
+                rk: critique_cache_key_level1(
+                    identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
+                    max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
+                    use_thinking=True, runs=runs, profiles_key=profiles_key,
+                    structured_key=None,  # Batch reads are explicitly unconstrained.
+                ) for rk, identity in level1_identities.items()
+            },
         )
         for ref, res in collect_critique_batch(
             batch, client=client, cache=cache, progress=progress, on_log=on_log,
@@ -2993,6 +3005,15 @@ def extract_drawing_context(
     planner_sheet_keys: dict[tuple[str, int], str] = {}
     only: set[tuple[str, int]] | None = None
     if cache is not None:
+        from .batch_recovery import recover_pending_batches
+
+        recovery_state = None
+        try:
+            recovery_state = recover_pending_batches(client, cache)
+        except Exception:
+            # A broken receipt store must never cause duplicate paid work.
+            # Submit checks it again, and the digest-stage guard degrades misses.
+            _log.exception("batch recovery store unavailable at run start")
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
@@ -3036,6 +3057,16 @@ def extract_drawing_context(
                 len(cached_by_ref), total,
                 f"{len(cached_by_ref)} sheet(s) from cache — skipping render",
             )
+
+    # A live or temporarily unreadable receipt already owns these requests,
+    # even if the user switched transports for this run. Do not pay again.
+    if cache is not None and recovery_state is not None and only is not None:
+        for ref in refs:
+            rk = _refkey(ref)
+            error = recovery_state.blocked.get(level1_keys.get(rk))
+            if rk in only and error:
+                cached_by_ref[rk] = SheetDigest(ref=ref, text="", error=error)
+                only.discard(rk)
 
     miss_total = total if only is None else len(only)
 
@@ -3091,17 +3122,28 @@ def extract_drawing_context(
     miss_sheets: list[SheetDigest] = []
     if miss_total > 0:
         if use_batch:
-            miss_sheets = _digest_sheets_via_batch(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                client=client, model=model, max_tokens=max_tokens,
-                use_thinking=use_thinking, effort=effort, cache=cache,
-                progress=progress, total=miss_total, on_log=on_log,
-                on_status=on_status, focus=focus or None,
-                specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads,
-                on_page_error=_on_page_error, journal=journal,
-            )
+            try:
+                miss_sheets = _digest_sheets_via_batch(
+                    paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                    client=client, model=model, max_tokens=max_tokens,
+                    use_thinking=use_thinking, effort=effort, cache=cache,
+                    progress=progress, total=miss_total, on_log=on_log,
+                    on_status=on_status, focus=focus or None,
+                    specs_text=specs_text or None,
+                    geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                    reusable_upload_sink=reusable_uploads,
+                    on_page_error=_on_page_error, journal=journal, level1_keys=level1_keys,
+                    recovery_state=recovery_state if cache is not None else None,
+                )
+            except Exception as exc:  # I-3: a failed batch stage still ships the usable sheets
+                _log.exception("drawing batch stage failed")
+                miss_sheets = [
+                    SheetDigest(ref=ref, text="", error=(
+                        f"drawing batch stage failed ({type(exc).__name__}); "
+                        "retry next run to collect any retained batch"
+                    ))
+                    for ref in refs if _refkey(ref) not in cached_by_ref
+                ]
         else:
             miss_sheets = _digest_sheets_concurrent(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,

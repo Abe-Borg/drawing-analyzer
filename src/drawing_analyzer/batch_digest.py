@@ -100,6 +100,10 @@ from .digest import (
     specs_cache_fragment,
 )
 from .digest_cache import digest_cache_key
+from .batch_recovery import (
+    finish_batch_record, read_batch_results, record_submitted_batch,
+    recover_pending_batches,
+)
 from .file_upload import (
     ReusableSheetUpload,
     delete_files,
@@ -389,6 +393,18 @@ def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
     return pending
 
 
+def _defer_batch_collection(slots: list, results: list, batch_id: str) -> None:
+    """Return retriable errors without discarding earlier billed attempts."""
+    for slot in slots:
+        _replace_result_with_attempt_history(
+            results, slot, SheetDigest(
+                ref=slot.ref, text="", image_token_estimate=slot.image_estimate,
+                error=(f"batch {batch_id} collection failed; "
+                       "retry next run to collect the existing batch"),
+            ),
+        )
+
+
 def _served_batch_ids(batch: "DrawingBatch") -> list[str]:
     """Batch ids that actually served digests, in first-served order."""
     seen: list[str] = []
@@ -452,6 +468,7 @@ class _Slot:
     # Set when the sheet was uploaded and submitted as a batch item.
     custom_id: str | None = None
     cache_key: str | None = None
+    level1_key: str | None = None
     file_ids: list[str] = field(default_factory=list)
     # Attempt records made under this slot that no result of its own carries,
     # held here until the sheet's real digest lands and absorbs them (§15.6).
@@ -797,6 +814,7 @@ class _HarvestOutcome:
 
     resolved: frozenset[int] = frozenset()
     responded: frozenset[int] = frozenset()
+    read_failed: bool = False
     elapsed: float = 0.0
 
 
@@ -835,8 +853,8 @@ def _harvest_abandoned_batch(
     not — is worse than the re-billing it prevents:
 
     * **Bounded, and never at the rescue's expense.** A batch that does not
-      settle, an unreadable ``results()``, or any exception returns an empty set
-      and the caller resubmits everything, exactly as it does today.
+      settle returns an empty set. An unreadable terminal ``results()`` retries
+      from the start, then defers unresolved sheets while keeping its receipt.
     * **Successes only.** An item that came back errored or empty does not
       resolve its slot — it still needs the rescue — but its billed attempt
       records are parked on the slot (:func:`_park_usage_attempts`) rather than
@@ -869,15 +887,14 @@ def _harvest_abandoned_batch(
         )
         return _HarvestOutcome(elapsed=time.monotonic() - started)
     try:
-        raw: dict[str, Any] = {}
-        for result in client.messages.batches.results(batch_id):
-            raw[_get(result, "custom_id")] = result
-    except Exception as exc:  # noqa: BLE001 - advisory; the rescue proceeds either way
+        raw = read_batch_results(client, batch_id, sleep=sleep)
+        finish_batch_record(cache, batch_id, raw)
+    except Exception as exc:  # I-3: retain the receipt and defer paid work
         _log.warning(
             "harvest of abandoned batch %s could not read results: %s; "
-            "resubmitting every unresolved sheet", batch_id, summarize_exc(exc),
+            "deferring unresolved sheets until the next run", batch_id, summarize_exc(exc),
         )
-        return _HarvestOutcome(elapsed=time.monotonic() - started)
+        return _HarvestOutcome(elapsed=time.monotonic() - started, read_failed=True)
     harvested: set[int] = set()
     responded: set[int] = set()
     billed_but_unusable = 0
@@ -1197,6 +1214,7 @@ def _recover_via_batch_resubmit(
         # per item and intentionally does not advance this counter.
         for slot, _params in pending:
             slot.attempts_submitted += 1
+        record_submitted_batch(cache, retry_id, [s for s, _ in pending], submitted=mb)
         _log.info(
             "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
             round_no, retry_id, len(reqs), request_id_of(mb),
@@ -1232,6 +1250,9 @@ def _recover_via_batch_resubmit(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
+            if harvest.read_failed:
+                _defer_batch_collection([s for s, _ in pending], results, retry_id)
+                break
             if harvest.resolved:
                 recovered += len(harvest.resolved)
                 pending = [
@@ -1253,24 +1274,24 @@ def _recover_via_batch_resubmit(
                 )
             continue
         try:
-            raw: dict[str, Any] = {}
-            for result in client.messages.batches.results(retry_id):
-                raw[_get(result, "custom_id")] = result
+            raw = read_batch_results(client, retry_id, sleep=sleep)
+            finish_batch_record(cache, retry_id, raw)
         except Exception as exc:  # noqa: BLE001 - recovery is best-effort; never crash collection
             # The resubmission reached a terminal status but its results can't be
             # read (the same failure the primary collection path guards against).
             # The batch IS terminal, so it no longer references the shared files
             # (``files_safe`` unaffected); we simply got no digests this round.
-            # Carry every pending sheet forward and let the round/budget bound
-            # end the loop — a crash here would escape the stalled-primary
-            # caller, which has no outer cleanup, and leak the canceled primary
-            # batch's uploaded files instead of returning retriable errors.
+            # Keep the receipt and defer unresolved sheets: another round would
+            # pay again for results already waiting on this terminal batch.
             _log.warning(
-                "batch-resubmit round %d results read failed: %s; carrying "
-                "%d sheet(s) to the next round",
+                "batch-resubmit round %d results read failed: %s; deferring "
+                "%d sheet(s) until the next run",
                 round_no, summarize_exc(exc), len(pending),
             )
-            continue
+            # Reading a billed round failed; keep its receipt and stop.
+            # A new submission would pay for the same round again.
+            _defer_batch_collection([s for s, _ in pending], results, retry_id)
+            break
         still: list[tuple[_Slot, dict]] = []
         for slot, params in pending:
             res = raw.get(slot.custom_id)
@@ -1474,6 +1495,7 @@ def _resubmit_failed_items(
     retry_id = _get(mb, "id")
     for slot, _params in retry:
         slot.attempts_submitted += 1
+    record_submitted_batch(cache, retry_id, [s for s, _ in retry], submitted=mb)
     _log.info(
         "follow-up batch submitted: id=%s items=%d request_id=%s",
         retry_id, len(reqs), request_id_of(mb),
@@ -1512,6 +1534,9 @@ def _resubmit_failed_items(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
+            if harvest.read_failed:
+                _defer_batch_collection([s for s, _ in retry], results, retry_id)
+                return canceled
             if harvest.resolved:
                 retry = [
                     (s, prm) for s, prm in retry
@@ -1541,9 +1566,13 @@ def _resubmit_failed_items(
             )
         return False
 
-    raw_retry: dict[str, Any] = {}
-    for result in client.messages.batches.results(retry_id):
-        raw_retry[_get(result, "custom_id")] = result
+    try:
+        raw_retry = read_batch_results(client, retry_id, sleep=sleep)
+        finish_batch_record(cache, retry_id, raw_retry)
+    except Exception:
+        _log.exception("follow-up batch %s collection failed; receipt kept", retry_id)
+        _defer_batch_collection([s for s, _ in retry], results, retry_id)
+        return True
     recovered = 0
     rescue: list[tuple[_Slot, dict]] = []
     for slot, params in retry:
@@ -1607,6 +1636,9 @@ def submit_drawing_batch(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     specs_text: str | None = None,
+    level1_keys: dict | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    recovery_state: Any = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -1636,6 +1668,7 @@ def submit_drawing_batch(
     focus_fragment = focus_cache_fragment(focus)
     specs_text = normalize_specs_text(specs_text)
     specs_fragment = specs_cache_fragment(specs_text)
+    recovery = recovery_state if recovery_state is not None else recover_pending_batches(client, cache, sleep=sleep)
     slots: list[_Slot] = []
     reqs: list[dict] = []
 
@@ -1708,37 +1741,43 @@ def submit_drawing_batch(
             rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
         )
 
-        cache_key: str | None = None
-        if cache is not None:
-            cache_key = digest_cache_key(
-                sheet,
-                model=model,
-                prompt_version=DIGEST_PROMPT_VERSION,
-                max_tokens=max_tokens,
-                effort=effort,
-                use_thinking=use_thinking,
-                focus=focus_fragment,
-                specs=specs_fragment,
-                sheet_text=sheet.sheet_text,
+        cache_key = digest_cache_key(
+            sheet,
+            model=model,
+            prompt_version=DIGEST_PROMPT_VERSION,
+            max_tokens=max_tokens,
+            effort=effort,
+            use_thinking=use_thinking,
+            focus=focus_fragment,
+            specs=specs_fragment,
+            sheet_text=sheet.sheet_text,
+        )
+        slot.cache_key = cache_key
+        slot.level1_key = (level1_keys or {}).get((str(sheet.ref.pdf_path), sheet.ref.page_index))
+        hit = cache.get(cache_key) if cache is not None else recovery.recovered.get(cache_key)
+        if hit is not None:
+            slot.digest = SheetDigest(
+                ref=sheet.ref,
+                text=hit.get("text", ""),
+                input_tokens=int(hit.get("input_tokens", 0) or 0),
+                output_tokens=int(hit.get("output_tokens", 0) or 0),
+                image_token_estimate=image_est,
+                stop_reason=hit.get("stop_reason"),
+                error=None,
+                cached=True,
+                findings=findings_from_cache(hit, sheet.ref),
             )
-            hit = cache.get(cache_key)
-            if hit is not None:
-                slot.digest = SheetDigest(
-                    ref=sheet.ref,
-                    text=hit.get("text", ""),
-                    input_tokens=int(hit.get("input_tokens", 0) or 0),
-                    output_tokens=int(hit.get("output_tokens", 0) or 0),
-                    image_token_estimate=image_est,
-                    stop_reason=hit.get("stop_reason"),
-                    error=None,
-                    cached=True,
-                    findings=findings_from_cache(hit, sheet.ref),
-                )
-                slots.append(slot)
-                _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
-                if progress is not None:
-                    progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
-                continue
+            slots.append(slot)
+            _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
+            if progress is not None:
+                progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
+            continue
+
+        blocked = recovery.blocked.get(cache_key) or recovery.blocked.get(slot.level1_key)
+        if blocked:
+            slot.digest = SheetDigest(ref=sheet.ref, text="", image_token_estimate=image_est, error=blocked)
+            slots.append(slot)
+            continue
 
         # Files API confirmed unavailable (consecutive 404s already proved the
         # /v1/files route is down while Messages/Batches is healthy): inline this
@@ -1877,6 +1916,7 @@ def submit_drawing_batch(
         slot.file_ids = list(upload.file_ids)
         slot.reusable_upload = ReusableSheetUpload(
             ref=sheet.ref,
+            digest_cache_key=cache_key,
             rows=getattr(sheet, "rows", 0),
             cols=getattr(sheet, "cols", 0),
             content=list(upload.content),
@@ -1921,6 +1961,7 @@ def submit_drawing_batch(
         for s in slots:
             if s.custom_id is not None:
                 s.attempts_submitted = 1
+        record_submitted_batch(cache, batch_id, [s for s in slots if s.custom_id], submitted=mb)
         # Record the batch id + the custom_id → sheet map up front. This is the
         # rosetta stone for reading the rest of the run: a later "item sheet__3
         # FAILED" line, or a lookup of the batch in the Anthropic console, maps
@@ -2246,8 +2287,10 @@ def collect_drawing_batch(
     delete on a daemon thread so the digests return immediately instead of
     stalling behind a long, silent file-by-file cleanup (see
     :func:`_release_uploaded_files`); left ``False`` (the default) the delete is
-    synchronous, which the unit tests rely on. If the batch can't be collected
-    (detached past the elapsed bound, or repeated poll failures) the uploaded
+    synchronous, which the unit tests rely on. Result reads retry transient
+    failures from the start. Exhausted collection returns retriable per-sheet
+    errors and keeps the durable receipt for the next run. If a non-terminal
+    batch can't be collected (detached past the elapsed bound, or repeated poll failures) the uploaded
     files are **left in place** (the remote batch may still be running and needs
     them) and each submitted sheet is marked with a clear, retriable error.
 
@@ -2326,15 +2369,14 @@ def collect_drawing_batch(
         )
         if status in ("ended", "failed", "expired", "canceled"):
             try:
-                raw = {}
-                for result in client.messages.batches.results(batch.batch_id):
-                    raw[_get(result, "custom_id")] = result
+                raw = read_batch_results(client, batch.batch_id, sleep=sleep)
                 for slot in submitted:
                     slot.served_by = batch.batch_id
                     _replace_result_with_attempt_history(
                         results, slot,
                         _parse_item(slot, raw.get(slot.custom_id), cache=cache),
                     )
+                finish_batch_record(cache, batch.batch_id, raw)
                 files_released = True
                 if retry_failed_items:
                     # The follow-up round spends what's LEFT of this call's
@@ -2356,20 +2398,18 @@ def collect_drawing_batch(
                         cleanup_in_background=cleanup_in_background,
                         on_log=on_log,
                     )
-            except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
-                # An unexpected error while collecting a *terminal* batch —
-                # ``results()`` or the follow-up round raising, a parse blowing
-                # up — must not leak the uploaded files (DA-034). The batch is
-                # terminal (no longer processing), so its files are safe to delete
-                # unconditionally; do so best-effort, then re-raise (unchanged
-                # control flow — collect raised here before this guard too, just
-                # leakily).
+            except Exception as exc:  # I-3: keep paid results and the receipt for replay
+                _log.exception("drawing batch %s collection failed; receipt kept", batch.batch_id)
+                for slot in submitted:
+                    if results[slot.index] is None:
+                        results[slot.index] = SheetDigest(
+                            ref=slot.ref, text="", image_token_estimate=slot.image_estimate,
+                            error=(f"batch {batch.batch_id} collection failed ({type(exc).__name__}); "
+                                   "retry next run to collect the existing batch"),
+                        )
                 leaked = _take_slot_upload_ids(batch.slots)
-                _release_uploaded_files(
-                    client, leaked,
-                    in_background=cleanup_in_background, on_log=on_log,
-                )
-                raise
+                _release_uploaded_files(client, leaked, in_background=cleanup_in_background, on_log=on_log)
+
         else:
             # The batch never reached a terminal state: request counts frozen
             # past the stall window ("stalled"), the poll bound hit
@@ -2421,6 +2461,10 @@ def collect_drawing_batch(
                 # every later ``remaining`` is measured from, so the rescue gets
                 # exactly the budget it had before the harvest existed.
                 collect_started += harvest.elapsed
+                if harvest.read_failed:
+                    _defer_batch_collection(
+                        [s for s in submitted if results[s.index] is None], results, batch.batch_id,
+                    )
                 rescue = [
                     (slot, slot.params)
                     for slot in submitted

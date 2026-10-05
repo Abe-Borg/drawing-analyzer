@@ -1673,6 +1673,20 @@ The other files are marked up normally.
 
 ### Stuck batches and the stall watch
 
+Accepted digest and critique batches, including follow-up and recovery rounds,
+are recorded in the digest cache before polling. On the next run, finished
+batches are collected into the cache before new work is submitted. Sheets owned
+by a batch that is still processing are left with a retriable status instead of
+being submitted again. This works after an application exit or crash when cache
+persistence is enabled.
+
+Interrupted results downloads retry from the beginning using the normal
+transient-error backoff. If collection remains unavailable, the run returns
+retriable errors for the affected sheets and keeps the batch record for the next
+run. A failed download never triggers another paid batch round. Records are
+removed after results reach the durable cache, or after the API's results
+retention window expires (29 days from batch creation).
+
 The Message Batches API is asynchronous and occasionally *sticks*: a submitted
 batch sits at `processing=N` with **zero** completions, sometimes for hours,
 while every upload and request in hand is perfectly valid. A healthy 39-sheet

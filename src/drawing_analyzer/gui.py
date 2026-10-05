@@ -1947,6 +1947,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 save_tile_artifacts=save_tiles,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
+            _log.exception("Analysis worker failed")
             self.after(0, lambda e=exc: self._on_error(str(e)))
             return
         self.after(0, lambda: self._on_done(ctx))

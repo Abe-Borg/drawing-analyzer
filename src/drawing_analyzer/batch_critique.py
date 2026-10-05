@@ -46,6 +46,8 @@ batch-lifecycle helpers.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -79,7 +81,11 @@ from .critique import (
 )
 from .diagnostics import get_logger, summarize_exc
 from .digest import _get
-from .digest_cache import critique_cache_key
+from .digest_cache import _SCHEMA_VERSION, critique_cache_key
+from .batch_recovery import (
+    finish_batch_record, read_batch_results, record_submitted_batch,
+    recover_pending_batches,
+)
 from .file_upload import (
     ReusableSheetUpload,
     delete_files,
@@ -109,6 +115,7 @@ class _CSlot:
     custom_ids: list[str] = field(default_factory=list)
     file_ids: list[str] = field(default_factory=list)
     cache_key: str | None = None
+    level1_key: str | None = None
     # The sheet's critique was produced via a synchronous real-time fallback (its
     # Files-API upload failed), so the pipeline prices it REAL_TIME not BATCH.
     rescued: bool = False
@@ -150,6 +157,7 @@ def submit_critique_batch(
     total: int = 0,
     on_status: StatusCallback | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    level1_keys: dict | None = None,
 ) -> CritiqueBatch:
     """Render-stream → cache-or-upload → submit one Message Batch of critique reads.
 
@@ -180,6 +188,7 @@ def submit_critique_batch(
     runs = critique_runs() if runs is None else max(1, int(runs))
     checklists = run_checklists(profiles, runs)
     profiles_key = profiles_cache_fragment(profiles or [])
+    recovery = recover_pending_batches(client, cache, sleep=sleep)
 
     slots: list[_CSlot] = []
     reqs: list[dict] = []
@@ -236,7 +245,8 @@ def submit_critique_batch(
             # critique cache miss. A fresh render still probes the historical
             # level-2 image-bytes key before any upload.
             cache_key: str | None = None
-            if reusable is None and cache is not None:
+            slot.level1_key = (level1_keys or {}).get((str(ref.pdf_path), ref.page_index))
+            if reusable is None:
                 cache_key = critique_cache_key(
                     sheet,
                     model=model,
@@ -248,7 +258,7 @@ def submit_critique_batch(
                     sheet_text=sheet.sheet_text,
                     profiles_key=profiles_key,
                 )
-                hit = cache.get(cache_key)
+                hit = cache.get(cache_key) if cache is not None else recovery.recovered.get(cache_key)
                 if hit is not None:
                     slot.result = critique_result_from_entry(hit, ref)
                     slots.append(slot)
@@ -256,7 +266,31 @@ def submit_critique_batch(
                     if progress is not None:
                         progress(index + 1, total or 0, f"Cached critique {ref.display_label}")
                     continue
-            slot.cache_key = cache_key
+            slot.cache_key = cache_key or slot.level1_key
+            if slot.cache_key is None and reusable is not None:
+                # Direct callers may reuse a digest upload without a pre-scan.
+                # The digest's content key supplies a stable input identity.
+                seed = reusable.digest_cache_key or json.dumps(reusable.content, sort_keys=True)
+                slot.cache_key = hashlib.sha256(json.dumps({
+                    "stage": "critique-reused", "schema": _SCHEMA_VERSION, "seed": seed,
+                    "model": model, "prompt": CRITIQUE_PROMPT_VERSION, "runs": runs,
+                    "max_tokens": max_tokens, "effort": effort, "thinking": use_thinking,
+                    "profiles": profiles_key,
+                }, sort_keys=True).encode("utf-8")).hexdigest()
+            if reusable is not None and slot.cache_key:
+                hit = cache.get(slot.cache_key) if cache is not None else recovery.recovered.get(slot.cache_key)
+                if hit is not None:
+                    slot.result = critique_result_from_entry(hit, ref)
+                    slots.append(slot)
+                    continue
+            blocked = recovery.blocked.get(slot.cache_key) or recovery.blocked.get(slot.level1_key)
+            if blocked:
+                slot.result = CritiqueResult(
+                    findings=[], input_tokens=0, output_tokens=0, runs=0,
+                    requested_runs=runs, completed_runs=0, error=blocked,
+                )
+                slots.append(slot)
+                continue
 
             upload = None
             reused_digest_upload = False
@@ -410,6 +444,10 @@ def submit_critique_batch(
                     runs=runs, by_custom_id={},
                 )
             batch_id = _get(mb, "id")
+            record_submitted_batch(
+                cache, batch_id, [s for s in slots if s.custom_ids],
+                stage="critique", runs=runs, by_custom_id=by_custom_id, submitted=mb,
+            )
             _log.info(
                 "critique batch submitted: id=%s items=%d (%d sheet(s) x %d read(s))",
                 batch_id, len(reqs), len(reqs) // max(1, runs), runs,
@@ -539,9 +577,7 @@ def collect_critique_batch(
         )
         if status in ("ended", "failed", "expired", "canceled"):
             terminal = True
-            raw: dict[str, Any] = {}
-            for result in client.messages.batches.results(batch.batch_id):
-                raw[_get(result, "custom_id")] = result
+            raw = read_batch_results(client, batch.batch_id, sleep=sleep)
             # Group each sheet's reads (keyed by slot identity, order-independent).
             outcomes: dict[int, list[CritiqueRunOutcome]] = {id(s): [] for s in submitted}
             for custom_id, (slot, run_id) in batch.by_custom_id.items():
@@ -573,6 +609,7 @@ def collect_critique_batch(
                             "critique cache write failed for %s: %s",
                             slot.ref.display_label, summarize_exc(exc),
                         )
+            finish_batch_record(cache, batch.batch_id, raw)
         else:
             # Non-terminal (detached / failed / poll_failed): the batch is abandoned
             # for collection. Best-effort cancel it (leaving it running only burns
@@ -607,7 +644,8 @@ def collect_critique_batch(
                 slot.result = CritiqueResult(
                     findings=[], input_tokens=0, output_tokens=0,
                     runs=0, requested_runs=batch.runs, completed_runs=0,
-                    error=f"critique batch collection error: {summarize_exc(exc)}",
+                    error=(f"critique batch {batch.batch_id} collection error: {summarize_exc(exc)}; "
+                           "retry next run to collect the existing batch"),
                 )
     finally:
         # DA-034: release the uploaded files on every exit where the batch no
