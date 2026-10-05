@@ -101,7 +101,7 @@ from .digest import (
 )
 from .digest_cache import digest_cache_key
 from .batch_recovery import (
-    finish_batch_record, read_batch_results, record_submitted_batch,
+    BatchReceiptError, finish_batch_record, read_batch_results, record_submitted_batch,
     recover_pending_batches,
 )
 from .file_upload import (
@@ -393,14 +393,14 @@ def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
     return pending
 
 
-def _defer_batch_collection(slots: list, results: list, batch_id: str) -> None:
+def _defer_batch_collection(slots: list, results: list, batch_id: str, *, error: str | None = None) -> None:
     """Return retriable errors without discarding earlier billed attempts."""
     for slot in slots:
         _replace_result_with_attempt_history(
             results, slot, SheetDigest(
                 ref=slot.ref, text="", image_token_estimate=slot.image_estimate,
-                error=(f"batch {batch_id} collection failed; "
-                       "retry next run to collect the existing batch"),
+                error=error or (f"batch {batch_id} collection failed; "
+                               "retry next run to collect the existing batch"),
             ),
         )
 
@@ -1214,7 +1214,13 @@ def _recover_via_batch_resubmit(
         # per item and intentionally does not advance this counter.
         for slot, _params in pending:
             slot.attempts_submitted += 1
-        record_submitted_batch(cache, retry_id, [s for s, _ in pending], submitted=mb)
+        try:
+            record_submitted_batch(cache, retry_id, [s for s, _ in pending],
+                                   client=client, submitted=mb, sleep=sleep)
+        except BatchReceiptError as exc:
+            files_safe = files_safe and exc.files_safe
+            _defer_batch_collection([s for s, _ in pending], results, retry_id, error=str(exc))
+            break
         _log.info(
             "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
             round_no, retry_id, len(reqs), request_id_of(mb),
@@ -1495,7 +1501,12 @@ def _resubmit_failed_items(
     retry_id = _get(mb, "id")
     for slot, _params in retry:
         slot.attempts_submitted += 1
-    record_submitted_batch(cache, retry_id, [s for s, _ in retry], submitted=mb)
+    try:
+        record_submitted_batch(cache, retry_id, [s for s, _ in retry],
+                               client=client, submitted=mb, sleep=sleep)
+    except BatchReceiptError as exc:
+        _defer_batch_collection([s for s, _ in retry], results, retry_id, error=str(exc))
+        return exc.files_safe
     _log.info(
         "follow-up batch submitted: id=%s items=%d request_id=%s",
         retry_id, len(reqs), request_id_of(mb),
@@ -1961,7 +1972,13 @@ def submit_drawing_batch(
         for s in slots:
             if s.custom_id is not None:
                 s.attempts_submitted = 1
-        record_submitted_batch(cache, batch_id, [s for s in slots if s.custom_id], submitted=mb)
+        try:
+            record_submitted_batch(cache, batch_id, [s for s in slots if s.custom_id],
+                                   client=client, submitted=mb, sleep=sleep)
+        except BatchReceiptError as exc:
+            if exc.files_safe:
+                delete_files(client, _take_slot_upload_ids(slots))
+            raise
         # Record the batch id + the custom_id → sheet map up front. This is the
         # rosetta stone for reading the rest of the run: a later "item sheet__3
         # FAILED" line, or a lookup of the batch in the Anthropic console, maps

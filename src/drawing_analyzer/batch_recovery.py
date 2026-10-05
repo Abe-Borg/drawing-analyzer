@@ -68,8 +68,47 @@ def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[
     return _read_with_retry(read, sleep=sleep)
 
 
-def record_submitted_batch(cache: Any, batch_id: str, slots: list, *,
-                           stage="digest", runs=1, by_custom_id=None, submitted=None) -> None:
+class BatchReceiptError(OSError):
+    """An accepted batch could not be recorded; uploads may still be in use."""
+
+    def __init__(self, batch_id: str, *, files_safe: bool):
+        self.files_safe = files_safe
+        disposition = "cancellation confirmed" if files_safe else "cancellation unconfirmed; uploads retained"
+        super().__init__(f"batch {batch_id} receipt persistence failed ({disposition}); "
+                         "restore the recovery store before retrying")
+
+
+def _cancel_unrecorded_batch(client: Any, batch_id: str, *, sleep) -> bool:
+    """Request cancellation, then confirm the batch no longer uses its files."""
+    terminal = {"ended", "failed", "expired", "canceled"}
+    try:
+        batch = _read_with_retry(lambda: client.messages.batches.cancel(batch_id), sleep=sleep)
+        for attempt in range(DEFAULT_DIGEST_MAX_RETRIES + 1):
+            if str(_get(batch, "processing_status", "")).lower() in terminal:
+                return True
+            if attempt:
+                sleep(_retry_backoff_seconds(attempt - 1))
+            batch = _read_with_retry(lambda: client.messages.batches.retrieve(batch_id), sleep=sleep)
+        return str(_get(batch, "processing_status", "")).lower() in terminal
+    except Exception:
+        _log.exception("unrecorded batch %s cancellation could not be confirmed; retain uploads", batch_id)
+        return False
+
+
+def record_submitted_batch(cache: Any, batch_id: str, slots: list, *, client: Any,
+                           stage="digest", runs=1, by_custom_id=None, submitted=None,
+                           sleep=time.sleep) -> None:
+    try:
+        _persist_submitted_batch(cache, batch_id, slots, stage=stage, runs=runs,
+                                 by_custom_id=by_custom_id, submitted=submitted)
+    except Exception as exc:
+        _log.exception("accepted batch %s receipt persistence failed; requesting cancellation", batch_id)
+        files_safe = _cancel_unrecorded_batch(client, batch_id, sleep=sleep)
+        raise BatchReceiptError(batch_id, files_safe=files_safe) from exc
+
+
+def _persist_submitted_batch(cache: Any, batch_id: str, slots: list, *,
+                             stage, runs, by_custom_id, submitted) -> None:
     items = {}
     for slot in slots:
         ids = slot.custom_ids if stage == "critique" else [slot.custom_id]

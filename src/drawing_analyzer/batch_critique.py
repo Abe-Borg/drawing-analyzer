@@ -83,7 +83,7 @@ from .diagnostics import get_logger, summarize_exc
 from .digest import _get
 from .digest_cache import _SCHEMA_VERSION, critique_cache_key
 from .batch_recovery import (
-    finish_batch_record, read_batch_results, record_submitted_batch,
+    BatchReceiptError, finish_batch_record, read_batch_results, record_submitted_batch,
     recover_pending_batches,
 )
 from .file_upload import (
@@ -158,6 +158,7 @@ def submit_critique_batch(
     on_status: StatusCallback | None = None,
     sleep: Callable[[float], None] = time.sleep,
     level1_keys: dict | None = None,
+    recovery_state: Any = None,
 ) -> CritiqueBatch:
     """Render-stream → cache-or-upload → submit one Message Batch of critique reads.
 
@@ -188,7 +189,7 @@ def submit_critique_batch(
     runs = critique_runs() if runs is None else max(1, int(runs))
     checklists = run_checklists(profiles, runs)
     profiles_key = profiles_cache_fragment(profiles or [])
-    recovery = recover_pending_batches(client, cache, sleep=sleep)
+    recovery = recovery_state if recovery_state is not None else recover_pending_batches(client, cache, sleep=sleep)
 
     slots: list[_CSlot] = []
     reqs: list[dict] = []
@@ -444,10 +445,24 @@ def submit_critique_batch(
                     runs=runs, by_custom_id={},
                 )
             batch_id = _get(mb, "id")
-            record_submitted_batch(
-                cache, batch_id, [s for s in slots if s.custom_ids],
-                stage="critique", runs=runs, by_custom_id=by_custom_id, submitted=mb,
-            )
+            try:
+                record_submitted_batch(
+                    cache, batch_id, [s for s in slots if s.custom_ids], client=client,
+                    stage="critique", runs=runs, by_custom_id=by_custom_id, submitted=mb,
+                    sleep=sleep,
+                )
+            except BatchReceiptError as exc:
+                if exc.files_safe:
+                    delete_files(client, uploaded_all)
+                for slot in slots:
+                    if slot.custom_ids and slot.result is None:
+                        slot.result = CritiqueResult(
+                            findings=[], requested_runs=runs, completed_runs=0, error=str(exc),
+                        )
+                return CritiqueBatch(
+                    batch_id=None, slots=slots, total=total or len(slots),
+                    runs=runs, by_custom_id={},
+                )
             _log.info(
                 "critique batch submitted: id=%s items=%d (%d sheet(s) x %d read(s))",
                 batch_id, len(reqs), len(reqs) // max(1, runs), runs,
@@ -458,7 +473,8 @@ def submit_critique_batch(
         # Delete them so they never leak, then propagate. The expected
         # ``batches.create`` failure is handled non-fatally above and returns, so it
         # never reaches here.
-        delete_files(client, uploaded_all)
+        if batch_id is None:
+            delete_files(client, uploaded_all)
         raise
 
     return CritiqueBatch(

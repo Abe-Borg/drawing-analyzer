@@ -145,6 +145,10 @@ map lives in `src/drawing_analyzer/__init__.py`.
   it never submits another paid round just to retry a download. Successful cache
   writes must be durable before deleting receipts; expired receipts are pruned.
   Explicit memory-only caches keep receipts in memory, as with digest entries.
+  Receipt recovery and blocking also run with ordinary cache reuse disabled and
+  after a transport switch. If a receipt write fails after acceptance, request
+  cancellation and confirm a terminal status before releasing the uploads;
+  unconfirmed cancellation retains them and stops further paid recovery rounds.
   With `recovery_transport=RECOVERY_BATCH`, cancel a stalled batch and resubmit
   unresolved sheets (`_recover_via_batch_resubmit`). Never silently drop to
   full-rate real-time; when the rounds or budget are spent, unreached sheets

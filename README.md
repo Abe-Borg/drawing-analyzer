@@ -1680,6 +1680,11 @@ by a batch that is still processing are left with a retriable status instead of
 being submitted again. This works after an application exit or crash when cache
 persistence is enabled.
 
+Recovery also runs when ordinary result caching is disabled, including after
+switching from Economy to real-time analysis. If the submission receipt cannot
+be saved, the accepted batch is canceled. Its uploads are released only after
+the API confirms the batch has ended; otherwise they remain retained.
+
 Interrupted results downloads retry from the beginning using the normal
 transient-error backoff. If collection remains unavailable, the run returns
 retriable errors for the affected sheets and keeps the batch record for the next

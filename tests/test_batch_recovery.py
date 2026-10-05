@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from drawing_analyzer import batch_digest, batch_recovery, batch_critique, pipeline
-from drawing_analyzer.batch_recovery import recover_pending_batches, read_batch_results
+from drawing_analyzer.batch_recovery import BatchReceiptError, recover_pending_batches, read_batch_results
 from drawing_analyzer.digest_cache import DigestCache
 from tests.test_drawing_batch import _FakeClient, _flaky_then_ok, _make_sheet, _succeed, OPUS, NOSLEEP
 from tests.fixtures.fake_anthropic import FakeBatchResult, FakeBatchResultEnvelope, FakeMessage
@@ -372,3 +372,196 @@ def test_run_with_live_batch_does_not_duplicate_it_after_switching_transport(tmp
     assert ctx.sheet_count == 2 and ctx.ok_sheet_count == 0
     assert len(client.create_calls) == 1 and client.messages_create_calls == []
     assert all("still processing" in sheet.error for sheet in ctx.sheets)
+
+
+@pytest.mark.parametrize("stage", ["digest", "critique"])
+@pytest.mark.parametrize("cancellation", ["ended", "in_progress", "failed"])
+def test_receipt_write_failure_cancels_before_releasing_uploads(stage, cancellation, monkeypatch):
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(_succeed) if stage == "digest" else CritiqueClient(critique_succeed)
+    module = batch_digest if stage == "digest" else batch_critique
+    events = []
+
+    def disk_full(_):
+        raise OSError("receipt disk full")
+
+    def cancel(batch_id):
+        events.append("cancel")
+        client.cancel_calls.append(batch_id)
+        if cancellation == "failed":
+            raise RuntimeError("cancel refused")
+        return SimpleNamespace(processing_status="canceling")
+
+    def retrieve(_):
+        # The first check is still canceling: accepting the cancellation is
+        # insufficient proof that the remote request no longer uses its files.
+        status = "canceling" if "retrieve" not in events else cancellation
+        events.append("retrieve")
+        return SimpleNamespace(processing_status=status)
+
+    def delete(file_id):
+        assert cancellation == "ended" and events.count("retrieve") == 2
+        events.append("delete")
+        client.files.deleted.append(file_id)
+
+    monkeypatch.setattr(cache, "record_batch", disk_full)
+    monkeypatch.setattr(client.messages.batches, "cancel", cancel)
+    monkeypatch.setattr(client.messages.batches, "retrieve", retrieve)
+    monkeypatch.setattr(client.files, "delete", delete)
+    submit = module.submit_drawing_batch if stage == "digest" else module.submit_critique_batch
+    if stage == "digest":
+        with pytest.raises(BatchReceiptError) as caught:
+            submit([_make_sheet(0)], client=client, cache=cache, model=OPUS, sleep=NOSLEEP)
+        assert caught.value.files_safe == (cancellation == "ended")
+    else:
+        batch = submit([_make_sheet(0)], client=client, cache=cache, model=OPUS, sleep=NOSLEEP)
+        assert batch.batch_id is None
+        assert "receipt persistence failed" in batch.slots[0].result.error
+    assert len(client.create_calls) == len(client.cancel_calls) == 1
+    assert cache.pending_batches() == []
+    assert client.files.deleted == (client.files.uploaded_ids if cancellation == "ended" else [])
+
+
+@pytest.mark.parametrize("transport", [batch_digest.RECOVERY_DIRECT, batch_digest.RECOVERY_BATCH])
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(transport, confirmed, monkeypatch):
+    empty = FakeBatchResult(custom_id="sheet__0", result=FakeBatchResultEnvelope(
+        type="succeeded", message=FakeMessage(content=[], stop_reason="max_tokens"),
+    ))
+    client = _FakeClient(_flaky_then_ok({"sheet__0": empty}))
+    cache = DigestCache(None, persist=False)
+    batch = batch_digest.submit_drawing_batch([_make_sheet(0), _make_sheet(1)], client=client, cache=cache, model=OPUS)
+    monkeypatch.setattr(cache, "record_batch", lambda _: (_ for _ in ()).throw(OSError("disk full")))
+
+    def cancel(batch_id):
+        client.cancel_calls.append(batch_id)
+        return SimpleNamespace(processing_status="ended" if confirmed else "canceling")
+
+    monkeypatch.setattr(client.messages.batches, "cancel", cancel)
+    if not confirmed:
+        original = client.messages.batches.retrieve
+        monkeypatch.setattr(client.messages.batches, "retrieve", lambda bid:
+                            original(bid) if len(client.create_calls) == 1 else
+                            SimpleNamespace(processing_status="canceling"))
+    digests = batch_digest.collect_drawing_batch(
+        batch, client=client, cache=cache, sleep=NOSLEEP, cleanup_in_background=False,
+        retry_failed_items=True, recovery_transport=transport,
+    )
+    assert len(client.create_calls) == 2 and len(client.cancel_calls) == 1
+    assert client.rescue_calls == []
+    assert "receipt persistence failed" in digests[0].error
+    assert len(digests[0].usage_attempts) == 1 and digests[1].ok
+    assert client.files.deleted == (client.files.uploaded_ids if confirmed else [])
+
+
+@pytest.mark.parametrize("status", ["ended", "in_progress", "unreadable"])
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+def test_uncached_restart_switching_to_realtime_never_duplicates_paid_work(tmp_path, monkeypatch, status, legacy_receipt):
+    from drawing_analyzer import digest_cache
+
+    path = make_pdf(tmp_path)
+    client = _FakeClient(_succeed, status="in_progress" if status == "in_progress" else "ended")
+    with monkeypatch.context() as patch:
+        patch.setattr(batch_digest, "collect_drawing_batch", lambda *a, **k: (_ for _ in ()).throw(SystemExit()))
+        with pytest.raises(SystemExit):
+            pipeline.extract_drawing_context(
+                [path], client=client, cache=None, use_cache=False, use_batch=True,
+                rows=1, cols=1, model=OPUS, synthesize=False,
+            )
+    store = digest_cache.get_default_digest_cache()
+    record, = store.pending_batches()
+    assert all(item["level1_key"] for item in record["items"].values())
+    if legacy_receipt:
+        for item in record["items"].values():
+            item["level1_key"] = None
+        store.record_batch(record)
+    store.close()
+    monkeypatch.setattr(digest_cache, "_default_cache", None)
+    if status == "unreadable":
+        client.results_raises = RuntimeError("download unavailable")
+    ctx = pipeline.extract_drawing_context(
+        [path], client=client, cache=None, use_cache=False, use_batch=False,
+        rows=1, cols=1, model=OPUS, synthesize=False,
+    )
+    assert len(client.create_calls) == 1 and client.messages_create_calls == []
+    assert ctx.sheet_count == 2 and ctx.ok_sheet_count == (2 if status == "ended" else 0)
+    if status == "ended":
+        assert all(sheet.cached for sheet in ctx.sheets)
+        assert digest_cache.get_default_digest_cache().pending_batches() == []
+    else:
+        assert all("retry" in sheet.error for sheet in ctx.sheets)
+        assert len(digest_cache.get_default_digest_cache().pending_batches()) == 1
+
+
+@pytest.mark.parametrize("status", ["ended", "in_progress", "unreadable"])
+@pytest.mark.parametrize("use_batch", [False, True])
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+def test_uncached_critique_stage_uses_startup_recovery_before_new_calls(tmp_path, monkeypatch, status, use_batch, legacy_receipt):
+    from drawing_analyzer import critique, digest_cache
+    from drawing_analyzer.models import RunUsage
+
+    path = make_pdf(tmp_path)
+    client = CritiqueClient(critique_succeed, status="in_progress" if status == "in_progress" else "ended")
+    kwargs = dict(rows=1, cols=1, overlap_frac=0.05, client=client, cache=None,
+                  progress=None, total=2, max_workers=1, run_usage=RunUsage())
+    with monkeypatch.context() as patch:
+        patch.setattr(batch_critique, "collect_critique_batch", lambda *a, **k: (_ for _ in ()).throw(SystemExit()))
+        with pytest.raises(SystemExit):
+            pipeline._run_critique_stage([path], use_batch=True, **kwargs)
+    store = digest_cache.get_default_digest_cache()
+    record, = store.pending_batches()
+    assert all(item["level1_key"] for item in record["items"].values())
+    if legacy_receipt:
+        for item in record["items"].values():
+            item["level1_key"] = None
+        store.record_batch(record)
+    store.close()
+    monkeypatch.setattr(digest_cache, "_default_cache", None)
+    if status == "unreadable":
+        client.results_raises = RuntimeError("critique download unavailable")
+    recovery = recover_pending_batches(client, None, sleep=NOSLEEP)
+    monkeypatch.setattr(critique, "critique_sheet_self_consistent", lambda *a, **k: pytest.fail("paid critique was duplicated"))
+    findings, _, errors = pipeline._run_critique_stage([path], use_batch=use_batch, recovery_state=recovery, **kwargs)
+    assert len(client.create_calls) == 1
+    assert bool(findings) == (status == "ended")
+    assert len(errors) == (0 if status == "ended" else 2)
+    assert len(digest_cache.get_default_digest_cache().pending_batches()) == (0 if status == "ended" else 1)
+
+
+def test_unavailable_receipt_store_blocks_uncached_realtime_spending(tmp_path, monkeypatch):
+    path = make_pdf(tmp_path)
+    client = _FakeClient(_succeed)
+    monkeypatch.setattr(batch_recovery, "recover_pending_batches", lambda *a, **k: (_ for _ in ()).throw(OSError("store locked")))
+    ctx = pipeline.extract_drawing_context(
+        [path], client=client, cache=None, use_cache=False, use_batch=False,
+        rows=1, cols=1, model=OPUS, synthesize=False,
+    )
+    assert ctx.sheet_count == 2 and ctx.ok_sheet_count == 0
+    assert all("recovery store unavailable" in sheet.error for sheet in ctx.sheets)
+    assert client.create_calls == client.messages_create_calls == []
+
+
+def test_uncached_run_does_not_reuse_ordinary_entries_after_receipt_is_collected(tmp_path):
+    from drawing_analyzer.digest_cache import get_default_digest_cache
+
+    path = make_pdf(tmp_path)
+    client = _FakeClient(_succeed)
+    kwargs = dict(client=client, cache=None, use_cache=False, rows=1, cols=1,
+                  model=OPUS, synthesize=False)
+    first = pipeline.extract_drawing_context([path], use_batch=True, **kwargs)
+    assert first.ok_sheet_count == 2 and get_default_digest_cache().pending_batches() == []
+    second = pipeline.extract_drawing_context([path], use_batch=False, **kwargs)
+    assert second.ok_sheet_count == 2 and second.cached_sheet_count == 0
+    assert len(client.create_calls) == 1 and len(client.messages_create_calls) == 2
+
+
+def test_receipt_write_failure_degrades_pipeline_after_confirmed_cancellation(tmp_path, monkeypatch):
+    path = make_pdf(tmp_path)
+    client = _FakeClient(_succeed)
+    cache = DigestCache(tmp_path / "digest.sqlite3")
+    monkeypatch.setattr(cache, "record_batch", lambda _: (_ for _ in ()).throw(OSError("disk full")))
+    ctx = run_pipeline(path, client, cache)
+    assert ctx.sheet_count == 2 and ctx.ok_sheet_count == 0
+    assert all("receipt persistence failed" in sheet.error for sheet in ctx.sheets)
+    assert len(client.create_calls) == len(client.cancel_calls) == 1
+    assert client.files.deleted == client.files.uploaded_ids
