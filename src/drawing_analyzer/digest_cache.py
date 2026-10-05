@@ -931,12 +931,17 @@ class DigestCache:
             now = time.time()
             if row[1] < now - _ACCESS_TOUCH_INTERVAL_SECONDS:
                 try:
-                    # Coalesce warm-run writes to once per key per day. Never
-                    # move a concurrent writer's more recent timestamp back.
+                    # Coalesce warm-run writes to once per key per day. GC in
+                    # another process may delete the row after SELECT: restore
+                    # that validated value so this hit remains durable. On a
+                    # conflict, preserve the other writer's payload and never
+                    # move its more recent timestamp back.
                     self._connection.execute(
-                        "UPDATE cache_entries SET last_used_at = ? "
-                        "WHERE cache_key = ? AND last_used_at < ?",
-                        (now, key, now),
+                        "INSERT INTO cache_entries(cache_key, value_json, last_used_at) "
+                        "VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET "
+                        "last_used_at = excluded.last_used_at "
+                        "WHERE cache_entries.last_used_at < excluded.last_used_at",
+                        (key, raw_value, now),
                     )
                 except sqlite3.Error:
                     pass

@@ -196,6 +196,67 @@ def test_garbage_collection_is_bounded_and_keeps_current_and_refreshed_rows(tmp_
         cache.close()
 
 
+@pytest.mark.parametrize("concurrent_action", ["collect", "replace"])
+def test_stale_hit_survives_gc_between_read_and_refresh(
+    concurrent_action, tmp_path, monkeypatch,
+):
+    now = 100_000_000.0
+    monkeypatch.setattr(cache_module.time, "time", lambda: now)
+    path = tmp_path / "cache.sqlite3"
+    reader = DigestCache(path)
+    other = DigestCache(path)
+    original = {"text": "paid digest"}
+    replacement = {"text": "newer paid digest"}
+    expected = replacement if concurrent_action == "replace" else original
+    reader.put("paid", original)
+    reader._connection.execute(
+        "UPDATE cache_entries SET last_used_at=? WHERE cache_key='paid'",
+        (now - cache_module._CACHE_MAX_IDLE_SECONDS - 1,),
+    )
+    original_json = reader._connection.execute(
+        "SELECT value_json FROM cache_entries WHERE cache_key='paid'",
+    ).fetchone()[0]
+    real_loads = cache_module.json.loads
+    raced = False
+
+    def decode_with_concurrent_gc(raw, *args, **kwargs):
+        nonlocal raced
+        decoded = real_loads(raw, *args, **kwargs)
+        if not raced and raw == original_json:
+            raced = True
+            # Force the other connection to collect exactly after SELECT,
+            # before this hit refreshes its timestamp; no scheduling race.
+            assert other.collect_garbage(now=now) == 1
+            if concurrent_action == "replace":
+                other.put("paid", replacement)
+                other._connection.execute(
+                    "UPDATE cache_entries SET last_used_at=? WHERE cache_key='paid'", (now + 60,),
+                )
+        return decoded
+
+    monkeypatch.setattr(cache_module.json, "loads", decode_with_concurrent_gc)
+    try:
+        assert reader.get("paid") == original  # The read's original snapshot.
+        assert raced
+        durable = other._connection.execute(
+            "SELECT value_json, last_used_at FROM cache_entries WHERE cache_key='paid'",
+        ).fetchone()
+        assert durable is not None, "a hit must restore the row collected during decoding"
+        assert real_loads(durable[0]) == expected
+        assert durable[1] == (now + 60 if concurrent_action == "replace" else now)
+        assert other.collect_garbage(now=now) == 0
+    finally:
+        reader.close()
+        other.close()
+
+    # The refreshed row must still be a durable hit on the next run.
+    reopened = DigestCache(path)
+    try:
+        assert reopened.get("paid") == expected
+    finally:
+        reopened.close()
+
+
 @pytest.mark.parametrize("trigger", ["open", "write"])
 def test_idle_garbage_collection_runs_automatically(trigger, tmp_path, monkeypatch):
     now = 100_000_000.0
