@@ -547,13 +547,14 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
 class _CountingClient(BetaClientMixin):
     """Fake client that counts calls per stage and answers each with valid output."""
 
-    def __init__(self, findings: list[dict]):
+    def __init__(self, findings: list[dict], *, plan_reply: str = _PLAN_OK,
+                 digest_prose: str | None = None):
         self.calls = {
             "digest": 0, "critique": 0, "cross": 0, "synth": 0,
             "verify": 0, "citation": 0, "identity": 0, "plan": 0,
             "investigate": 0, "other": 0,
         }
-        prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
+        prose = digest_prose or "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
         digest_text = prose + "\n\n" + _digest_block(findings)
         calls = self.calls
 
@@ -599,7 +600,7 @@ class _CountingClient(BetaClientMixin):
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 if s == PLANNER_SYSTEM_PROMPT:
                     calls["plan"] += 1
-                    return FakeMessage(content=[FakeTextBlock(text=_PLAN_OK)],
+                    return FakeMessage(content=[FakeTextBlock(text=plan_reply)],
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 calls["other"] += 1
                 return FakeMessage(content=[FakeTextBlock(text="ok")],
@@ -684,6 +685,107 @@ def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
     f2 = next(f for f in ctx2.findings if f.refs)
     assert [(a.reference, a.status) for a in f2.citations] == \
         [(a.reference, a.status) for a in f1.citations]
+
+
+@pytest.mark.parametrize("sheet_count", [1, 3])
+def test_exhaustive_revisions_only_reread_changed_sheets(tmp_path, sheet_count):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    # Separate, distinct pages make the call counts meaningful. The one-sheet
+    # case also proves plan reuse no longer needs an unchanged-sheet anchor.
+    sources = []
+    for i in range(sheet_count):
+        path = tmp_path / f"M-{101 + i}.pdf"
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=792, height=612)
+            page.insert_text((80, 120), f"VAV-{i + 1} SERVES ROOM {120 + i}")
+            page.insert_text((650, 560), f"M-{101 + i}")
+            doc.save(str(path))
+        sources.append(path)
+
+    cache_path = tmp_path / "cache.sqlite"
+
+    def run(label):
+        # Return a different plan if a rerun wrongly buys another authoring.
+        plan_reply = _PLAN_OK if label == "cold" else _PLAN_OK.replace(
+            "Flag a VAV scheduled without a corresponding plan tag.",
+            "Flag a VAV without an airflow value in the schedule.",
+        )
+        client = _CountingClient(
+            [], plan_reply=plan_reply,
+            digest_prose={
+                "revised": "Sheet M-101 - Mechanical - Plan\nREV 2: SUPPLY AIRFLOW 500 CFM",
+                "added": "Sheet M-201 - Mechanical - Plan\nVAV-99 SERVES ROOM 999",
+            }.get(label),
+        )
+        cache = DigestCache(cache_path)
+        try:
+            ctx = extract_drawing_context(
+                sources, client=client, rows=2, cols=2, max_workers=1,
+                qc_markups=True, cache=cache, qc_work_dir=tmp_path / label,
+            )
+        finally:
+            cache.close()
+        assert ctx.qc_status == "COMPLETE", ctx.errors
+        return client, ctx
+
+    cold_client, cold = run("cold")
+    assert cold_client.calls["plan"] == 1
+    assert cold_client.calls["critique"] == 2 * sheet_count
+
+    sources[0] = sources[0].rename(tmp_path / "renamed.pdf")
+    renamed_client, renamed = run("renamed")
+    assert renamed_client.calls["identity"] == 1
+    assert renamed_client.calls["plan"] == renamed_client.calls["critique"] == 0
+
+    with pymupdf.open(str(sources[0])) as doc:
+        doc[0].insert_text((80, 180), "REV 2: SUPPLY AIRFLOW 500 CFM")
+        doc.saveIncr()
+    revised_client, revised = run("revised")
+    assert revised_client.calls["identity"] == 1
+    assert revised_client.calls["plan"] == 0
+    assert revised_client.calls["digest"] == 1
+    assert revised_client.calls["critique"] == 2
+    assert revised.cached_sheet_count == sheet_count - 1
+    assert cold.review_plan_profiles == renamed.review_plan_profiles == revised.review_plan_profiles
+    if sheet_count > 1:
+        # Set-level passes still refresh for the changed source/content.
+        assert renamed_client.calls["synth"] == revised_client.calls["synth"] == 1
+        assert renamed_client.calls["cross"] == revised_client.calls["cross"] == 1
+
+    # Change the page count in the same source: level-1 keys miss, while the
+    # unchanged page's rendered-content (level-2) critique entry must still hit.
+    with pymupdf.open(str(sources[0])) as doc:
+        page = doc.new_page(width=792, height=612)
+        page.insert_text((80, 120), "VAV-99 SERVES ROOM 999")
+        page.insert_text((650, 560), "M-201")
+        doc.saveIncr()
+    added_client, added = run("added")
+    assert added_client.calls["plan"] == 0
+    assert added_client.calls["digest"] == 1
+    assert added_client.calls["critique"] == 2
+    assert added.cached_sheet_count == sheet_count
+    assert added_client.calls["identity"] == added_client.calls["synth"] == 1
+    assert added_client.calls["cross"] == 1
+
+    # Remove the original page and shift the added page to index zero. The
+    # remaining sheets' two reads were already paid for under this checklist.
+    with pymupdf.open(str(sources[0])) as doc:
+        doc.delete_page(0)
+        doc.saveIncr()
+    removed_client, removed = run("removed")
+    assert removed_client.calls["plan"] == 0
+    assert removed_client.calls["digest"] == removed_client.calls["critique"] == 0
+    assert removed.cached_sheet_count == sheet_count
+    assert removed_client.calls["identity"] == 1
+    if sheet_count > 1:
+        assert removed_client.calls["synth"] == removed_client.calls["cross"] == 1
+
+    for ctx in (renamed, revised, added, removed):
+        assert ctx.review_plan_profiles == cold.review_plan_profiles
+        records = [r for r in ctx.run_usage.records if r.stage_family == "review_plan"]
+        assert records and all(r.cache_hit and r.transport == "CACHE" for r in records)
+        assert all(r.input_tokens == r.output_tokens == 0 for r in records)
 
 
 def _make_edition_pdf(path: Path) -> Path:
