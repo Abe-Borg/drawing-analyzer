@@ -58,7 +58,6 @@ from .models import (
 )
 from .render import (
     inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets,
-    sheet_content_fingerprint,
 )
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import (
@@ -1051,7 +1050,6 @@ def _level1_partition(
     focus: str | None,
     specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
-    planner_sheet_keys: dict[tuple[str, int], str] | None = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -1066,9 +1064,6 @@ def _level1_partition(
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
     - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
-
-    When supplied, ``planner_sheet_keys`` receives content keys that omit page
-    location but retain render/digest settings, for review-plan continuity.
     """
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     miss_only: set[tuple[str, int]] = set()
@@ -1092,16 +1087,6 @@ def _level1_partition(
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
-        if planner_sheet_keys is not None:
-            # A plan snapshot follows sheet content through PDF renames and
-            # inventory changes. The digest's usual key includes page location;
-            # keep all its request settings but omit that locator for bindings.
-            planner_sheet_keys[rk] = digest_cache_key_level1(
-                sheet_content_fingerprint(identity), model=model,
-                prompt_version=DIGEST_PROMPT_VERSION, max_tokens=max_tokens,
-                effort=effort, use_thinking=use_thinking,
-                focus=focus_frag, specs=specs_frag,
-            )
         entry = cache.get(key)
         if entry is not None:
             cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
@@ -2990,7 +2975,6 @@ def extract_drawing_context(
     # geometry (for the QC stages) is captured during that render.
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     level1_keys: dict[tuple[str, int], str] = {}
-    planner_sheet_keys: dict[tuple[str, int], str] = {}
     only: set[tuple[str, int]] | None = None
     if cache is not None:
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
@@ -2998,7 +2982,6 @@ def extract_drawing_context(
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
             effort=effort, focus=focus or None, specs_text=specs_text or None,
             snapshot_by_path=snapshot_by_path,
-            planner_sheet_keys=planner_sheet_keys if config.run_review_plan else None,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -3470,7 +3453,7 @@ def extract_drawing_context(
         cross_future = stage_executor.submit(_run_cross_qc_call)
 
     # Review plan (Phase A §20.2): the model authors THIS set's specialist
-    # checklist from the identity + digests. Injected below through the existing
+    # checklist from canonical review facts. Injected below through the existing
     # profile machinery (after the user's own profiles) so checklist rendering,
     # the critique cache fragment, and manifest snapshots apply unchanged. A
     # failure degrades this stage only — the critique still runs (I-3).
@@ -3489,7 +3472,6 @@ def extract_drawing_context(
 
                 pres = author_review_plan(
                     set_identity_obj, sheets, client=client, cache=cache,
-                    sheet_keys=planner_sheet_keys,
                 )
                 review_plan_stage.calls_planned = 1
                 _record_usage(

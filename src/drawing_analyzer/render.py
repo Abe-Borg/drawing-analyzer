@@ -676,21 +676,6 @@ def sheet_render_identity(
     return "|".join(parts)
 
 
-def sheet_content_fingerprint(render_identity: str) -> str:
-    """Identify unchanged sheet content independently of its place in a PDF.
-
-    Review-plan snapshot bindings need continuity when a sibling page is added
-    or removed (or this sheet moves). Retain the dependency graph, conservative
-    whole-source fallback, renderer/configuration, and identity scheme; omit
-    only the page locator. Existing digest/critique keys keep the full identity.
-    """
-    content_parts = [
-        part for part in render_identity.split("|")
-        if not part.startswith(("page_index=", "page_count="))
-    ]
-    return hashlib.sha256("|".join(content_parts).encode("utf-8")).hexdigest()
-
-
 # The verification pass renders a small crop around a finding at high DPI. This
 # caps the crop's long edge so a coarse (whole-tile) anchor can't produce a huge
 # pixmap; it sits under the single-image regime's native long edge, so a crop is

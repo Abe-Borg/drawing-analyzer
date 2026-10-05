@@ -411,9 +411,10 @@ def identity_cache_key(
     free and any content/prompt/param change re-runs. The ``stage=identity``
     namespace tag keeps this from ever colliding with digest/critique keys, so
     adding it needs no ``_SCHEMA_VERSION`` bump (nothing stored under existing
-    keys changes shape). Keeping the identity — and therefore the model-authored
-    review plan derived from it — warm-run stable is what protects the critique
-    ``profiles_key`` cache economics.
+    keys changes shape). Keeping the identity — and therefore the canonical
+    review facts derived from it — warm-run stable protects the review-plan
+    cache. The planner independently keys on those facts, so identity provenance
+    changes do not invalidate paid critique reads.
     """
     h = hashlib.sha256()
     for part in (
@@ -432,8 +433,7 @@ def identity_cache_key(
 
 
 def review_plan_cache_key(
-    corpus_hash: str,
-    identity_hash: str,
+    scope_hash: str,
     *,
     model: str,
     prompt_version: str,
@@ -444,11 +444,12 @@ def review_plan_cache_key(
 ) -> str:
     """Content-address one run's *model-authored review plan* (Phase A §20.2).
 
-    Keyed on the exact planner corpus AND the identity it consumed (a changed
-    identity must re-plan even over identical digests), plus the request params
-    and the total-items cap (a different cap yields a different plan). Same
-    namespace-isolation rationale as :func:`identity_cache_key` — no
-    ``_SCHEMA_VERSION`` bump. A stable cached plan is what keeps the critique's
+    Keyed on canonical review facts, never sheet inventory or digest prose,
+    plus request params and the total-items cap. The planner consumes only these
+    facts; changed disciplines or adopted codes must re-plan. The new prompt
+    fingerprint and ``contract=2`` isolate older corpus-based entries without a
+    global ``_SCHEMA_VERSION`` bump that would discard paid per-sheet reads.
+    A stable cached plan is what keeps the critique's
     ``profiles_key`` byte-identical across warm runs, preserving the Phase 19B
     cached-critique fast path.
     """
@@ -456,14 +457,14 @@ def review_plan_cache_key(
     for part in (
         f"schema={_SCHEMA_VERSION}",
         "stage=review_plan",
+        "contract=2",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_tokens={int(max_tokens)}",
         f"effort={effort or ''}",
         f"thinking={'1' if use_thinking else '0'}",
         f"max_items={int(max_items)}",
-        f"identity={identity_hash or ''}",
-        f"corpus={corpus_hash or ''}",
+        f"scope={scope_hash or ''}",
     ):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")

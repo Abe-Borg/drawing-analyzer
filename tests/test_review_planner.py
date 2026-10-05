@@ -252,18 +252,18 @@ def test_author_review_plan_happy_path():
     assert res.item_count == 3 and len(res.profiles) == 2
     assert "# Model-authored review plan" in res.markdown
     assert "NFPA 13 2016 §19.2.3.2.5" in res.markdown
-    # The identity context led the user turn; the system prompt is verbatim.
+    # Canonical facts lead the user turn; the system prompt is verbatim.
     assert client.calls[0]["system"] == PLANNER_SYSTEM_PROMPT
     user_text = client.calls[0]["messages"][0]["content"]
-    assert user_text.startswith("SET IDENTITY (model-detected):")
-    assert "California, United States" in user_text
+    assert user_text.startswith("SET REVIEW FACTS:")
+    assert "california, united states" in user_text
 
 
 def test_author_review_plan_without_identity_still_runs():
     client = _FakeClient(_reply())
     res = author_review_plan(None, [_sheet(0)], client=client)
     assert res.ok
-    assert "SET IDENTITY: unavailable" in client.calls[0]["messages"][0]["content"]
+    assert "SET IDENTITY: insufficient" in client.calls[0]["messages"][0]["content"]
 
 
 def test_author_review_plan_malformed_reply_is_failed():
@@ -322,6 +322,40 @@ def test_author_review_plan_cache_misses_on_different_identity():
     client2 = _FakeClient(_reply())
     res = author_review_plan(other_identity, [_sheet(0)], client=client2, cache=cache)
     assert not res.cached and len(client2.calls) == 1   # identity re-keys the plan
+
+
+def test_planner_request_depends_only_on_canonical_review_facts():
+    identity = replace(_IDENTITY, adopted_codes=(AdoptedCode(
+        "NFPA 13", "2016", quote="adopt NFPA 13 2016", source_sheet="old.pdf",
+    ),))
+    first_text, omitted = build_planner_user_text(identity, [_sheet(0)])
+    revised_identity = replace(
+        identity, confidence="low", evidence=("different evidence",), notes="new notes",
+        sheet_disciplines=(("FP-999", "fire protection"),),
+        adopted_codes=(replace(identity.adopted_codes[0], quote="new quote",
+                               source_sheet="new.pdf", origin="regex"),),
+    )
+    second_text, second_omitted = build_planner_user_text(
+        revised_identity, [_sheet(8, "Entirely different digest prose")],
+    )
+    assert first_text == second_text
+    assert omitted == second_omitted == 0
+    assert "set.pdf" not in first_text and "old.pdf" not in first_text
+    assert "Sheet FP-101" not in first_text and "adopt NFPA" not in first_text
+
+
+def test_scope_cache_reuses_plan_without_any_unchanged_sheet():
+    cache = DigestCache(None, persist=False)
+    first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
+    keys = set(cache._entries)
+    client = _FakeClient(_reply({"plans": [{"discipline": "fire protection", "items": [
+        {"text": "Flag different wording if authoring runs again."}]}]}))
+    revised = author_review_plan(
+        _IDENTITY, [_sheet(0, "Completely revised sheet content")], client=client, cache=cache,
+    )
+    assert revised.cached and client.calls == []
+    assert set(cache._entries) == keys
+    assert profiles_cache_fragment(revised.profiles) == profiles_cache_fragment(first.profiles)
 
 
 @pytest.mark.parametrize("change", ["rename", "add", "remove", "revise", "recover"])
@@ -409,17 +443,13 @@ def test_revision_replans_when_planner_settings_change(setting, monkeypatch):
     assert result.ok and not result.cached and len(client.calls) == 1
 
 
-def test_no_overlap_and_unknown_scope_do_not_share_plans():
+def test_unknown_scope_does_not_share_plans():
     cache = DigestCache(None, persist=False)
-    author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
-    client = _FakeClient(_reply())
-    assert not author_review_plan(_IDENTITY, [_sheet(1, "Unrelated set")],
-                                  client=client, cache=cache).cached
-    assert len(client.calls) == 1
     author_review_plan(None, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
     client = _FakeClient(_reply())
     assert not author_review_plan(None, [_sheet(0), _sheet(1)], client=client, cache=cache).cached
     assert len(client.calls) == 1
+    assert cache._entries == {}
 
 
 @pytest.mark.parametrize("identity", [
@@ -450,11 +480,12 @@ def test_partial_identity_does_not_retain_a_plan_across_shared_boilerplate(ident
     shared = _sheet(0, "General notes shared between drawing sets")
     original = [shared, _sheet(1, "Fire protection dry-system layout")]
     first = author_review_plan(identity, original, client=_FakeClient(_reply()), cache=cache)
-    # The exact-corpus cache remains valid even when revision compatibility
-    # cannot be established from the partial identity.
+    # A digest-based fallback cannot be keyed only on an incomplete scope.
     warm_client = _FakeClient(_reply())
     warm = author_review_plan(identity, original, client=warm_client, cache=cache)
-    assert warm.cached and warm_client.calls == []
+    assert warm.ok and not warm.cached and len(warm_client.calls) == 1
+    assert "Fire protection dry-system layout" in warm_client.calls[0]["messages"][0]["content"]
+    assert cache._entries == {}
     electrical_plan = {"plans": [{"discipline": "electrical", "items": [
         {"text": "Flag a circuit with an unlabelled breaker."}]}]}
     client = _FakeClient(_reply(electrical_plan))
@@ -480,17 +511,19 @@ def test_substantive_identity_still_retains_a_revision_plan(context):
     assert profiles_cache_fragment(result.profiles) == profiles_cache_fragment(first.profiles)
 
 
-def test_conflicting_snapshots_require_a_new_plan():
+def test_same_review_facts_share_one_snapshot_across_sheet_inventories():
     cache = DigestCache(None, persist=False)
     a, b = _sheet(0, "First project"), _sheet(1, "Second project")
-    for sd in (a, b):
-        author_review_plan(_IDENTITY, [sd], client=_FakeClient(_reply()), cache=cache)
     client = _FakeClient(_reply())
-    result = author_review_plan(_IDENTITY, [a, b], client=client, cache=cache)
-    assert result.ok and not result.cached and len(client.calls) == 1
+    results = [author_review_plan(_IDENTITY, sheets, client=client, cache=cache)
+               for sheets in ([a], [b], [a, b])]
+    assert len(client.calls) == 1 and len(cache._entries) == 1
+    assert all(result.ok for result in results)
+    assert all(result.cached for result in results[1:])
+    assert len({profiles_cache_fragment(result.profiles) for result in results}) == 1
 
 
-def test_revision_bindings_survive_restart_and_extend_to_new_sheets(tmp_path):
+def test_scope_cache_survives_restart_without_shared_sheets(tmp_path):
     path = tmp_path / "plans.sqlite"
     cache = DigestCache(path)
     first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
@@ -500,7 +533,7 @@ def test_revision_bindings_survive_restart_and_extend_to_new_sheets(tmp_path):
     added = _sheet(1, "New sheet FP-102")
     second = author_review_plan(_IDENTITY, [_sheet(0), added], client=client, cache=cache)
     assert second.reused and client.calls == []
-    # Remove the original anchor: the new sheet now retains the same snapshot.
+    # Remove the original sheet entirely: the scope still selects the snapshot.
     third = author_review_plan(_IDENTITY, [added], client=client, cache=cache)
     assert third.reused and client.calls == []
     assert profiles_cache_fragment(third.profiles) == profiles_cache_fragment(first.profiles)
@@ -516,18 +549,6 @@ def test_empty_cached_plan_is_reauthored():
     client = _FakeClient(_reply())
     result = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache)
     assert result.ok and not result.cached and len(client.calls) == 1
-
-
-def test_legacy_exact_entry_seeds_revision_bindings_without_authoring():
-    cache = DigestCache(None, persist=False)
-    first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)
-    cache._entries = {key: entry for key, entry in cache._entries.items()
-                      if not key.startswith("stage:review_plan_binding:")}
-    client = _FakeClient(_reply())
-    warm = author_review_plan(_IDENTITY, [_sheet(0)], client=client, cache=cache)
-    revision = author_review_plan(_IDENTITY, [_sheet(0), _sheet(1)], client=client, cache=cache)
-    assert warm.cached and not warm.reused and revision.reused and client.calls == []
-    assert profiles_cache_fragment(revision.profiles) == profiles_cache_fragment(first.profiles)
 
 
 def test_dropped_item_accounting_survives_exact_and_revision_hits():

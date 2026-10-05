@@ -721,7 +721,7 @@ section. The identity call runs on Sonnet 5 by default
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
 
-**Model-authored review plan.** From the identity + digest heads, a second
+**Model-authored review plan.** From the identity's canonical review facts, a second
 text-only call authors the per-discipline checklist a specialist for *this* set
 would apply — one-line "flag X when Y" items in the exact review-profile style,
 bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`, with
@@ -735,20 +735,24 @@ machinery below (after any user checklists), snapshotted with
 `source="model"`, exported as `review_plan.md`, and cached content-addressed so
 warm re-runs rebuild it byte-identically (keeping the critique cache hot).
 
-Routine revisions retain that checklist when at least one readable sheet is
-unchanged and the detected review scope still matches: disciplines, project and
-set type, jurisdiction, language, units, and adopted code editions/amendments.
-Revision compatibility requires detected disciplines plus a project type,
-jurisdiction, or named adopted code. Locale-only or other partial identities
-require a new plan when the corpus changes; exact-corpus cache hits remain valid.
+The planner consumes and caches only canonical review facts: disciplines,
+project and set type, jurisdiction, country/region, language, units, and adopted
+code editions/amendments. Routine revisions retain the checklist whenever those
+facts match, even if no sheets remain unchanged. Reuse requires detected
+disciplines plus a project type, jurisdiction, or named adopted code. With an
+insufficient identity, the planner falls back to digest-based authoring without
+caching that plan.
+
 Renaming a PDF, adding/removing a page, revising a sheet, or recovering a failed
 digest therefore preserves paid critique results for unchanged sheets. Evidence,
 confidence, sheet classifications, and code source labels do not reset the plan.
-The bindings persist across restarts and follow sheet content rather than its
-filename or page number. Changed review requirements or planner settings require
-a new plan; sets with no shared sheets, unknown identities, and conflicting prior plans also
-require authoring. Retained plans are identified in `review_plan.md` and the run
-journal. The critique cache continues to hash the exact injected checklist,
+The scope cache persists across restarts; its key never includes filenames,
+page counts, or digest prose. Changed review requirements or planner settings
+require a new plan. Older corpus-based plan entries miss once under the new
+planner prompt; a newly authored checklist can also miss existing critique
+entries once. Per-sheet caches keep their existing schema and keys. Retained
+plans are identified in `review_plan.md` and the run journal. The critique cache
+continues to hash the exact injected checklist,
 including any edited user profiles.
 
 Both stages ride the critique stack automatically (`qc_markups=True`, or an
