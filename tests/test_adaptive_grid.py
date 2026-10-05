@@ -14,7 +14,7 @@ from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT, parse_findings
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT
 from drawing_analyzer.digest_cache import (
     DigestCache, critique_cache_key_level1, digest_cache_key_level1,
-    digest_cache_key, critique_cache_key, _SCHEMA_VERSION,
+    digest_cache_key, critique_cache_key, _DIGEST_SCHEMA_VERSION,
 )
 from drawing_analyzer.models import SheetRef
 from drawing_analyzer.pipeline import estimate_image_tokens_for_set, extract_drawing_context
@@ -206,7 +206,7 @@ def test_large_sheet_cache_keys_and_images_unchanged(shape, raster):
     adaptive = render.sheet_render_identity(page, **kw)
     assert adaptive == legacy
     assert adaptive.startswith("render-identity-v4|")
-    assert _SCHEMA_VERSION == 10  # Existing E/E1 cache entries remain admissible.
+    assert _DIGEST_SCHEMA_VERSION == 10  # Existing E/E1 cache entries remain admissible.
     params = dict(model="claude-opus-5", prompt_version="unchanged",
                   max_tokens=8000, effort="high", use_thinking=True)
     assert digest_cache_key_level1(adaptive, **params) == digest_cache_key_level1(legacy, **params)

@@ -81,7 +81,7 @@ from .critique import (
 )
 from .diagnostics import get_logger, summarize_exc
 from .digest import _get
-from .digest_cache import _SCHEMA_VERSION, critique_cache_key
+from .digest_cache import cache_schema_version, critique_cache_key
 from .batch_recovery import (
     BatchReceiptError, finish_batch_record, read_batch_results, record_submitted_batch,
     recover_pending_batches,
@@ -273,7 +273,7 @@ def submit_critique_batch(
                 # The digest's content key supplies a stable input identity.
                 seed = reusable.digest_cache_key or json.dumps(reusable.content, sort_keys=True)
                 slot.cache_key = hashlib.sha256(json.dumps({
-                    "stage": "critique-reused", "schema": _SCHEMA_VERSION, "seed": seed,
+                    "stage": "critique-reused", "schema": cache_schema_version("critique"), "seed": seed,
                     "model": model, "prompt": CRITIQUE_PROMPT_VERSION, "runs": runs,
                     "max_tokens": max_tokens, "effort": effort, "thinking": use_thinking,
                     "profiles": profiles_key,

@@ -1149,7 +1149,7 @@ def _journal_environment(
 
     Everything a later reader needs to know *which* code analyzed the set: the
     effective model, the renderer build (PyMuPDF/MuPDF — the pixels), the
-    prompt-content versions (the request contract), the digest-cache schema,
+    prompt-content versions (the request contract), each cache namespace schema,
     and the canonical coordinate space. Prompt hashes are shown truncated —
     they identify, the caches consume the full value. Defensive throughout: an
     unimportable module degrades to "unavailable", never a failed run.
@@ -1160,7 +1160,7 @@ def _journal_environment(
     # the renderer fingerprint *call*, guarded narrowly so a degraded renderer
     # never erases the rest of the identity block.
     from .critique import CRITIQUE_PROMPT_VERSION
-    from .digest_cache import _SCHEMA_VERSION as _cache_schema
+    from .digest_cache import cache_schema_version
     from .models import COORDINATE_SPACE_VERSION
     from .render import _renderer_environment_fingerprint
     from .verify import VERIFY_PROMPT_VERSION
@@ -1178,7 +1178,9 @@ def _journal_environment(
         digest_prompt=str(DIGEST_PROMPT_VERSION)[:12],
         critique_prompt=str(CRITIQUE_PROMPT_VERSION)[:12],
         verify_prompt=str(VERIFY_PROMPT_VERSION),
-        cache_schema=_cache_schema,
+        **{f"{stage}_cache_schema": cache_schema_version(stage) for stage in (
+            "digest", "critique", "identity", "review_plan", "citation", "investigation",
+        )},
         coordinate_space=COORDINATE_SPACE_VERSION,
     )
 
