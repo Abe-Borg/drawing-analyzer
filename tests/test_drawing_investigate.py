@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from drawing_analyzer import investigate as inv
 from drawing_analyzer.investigate import (
     INVESTIGATE_SYSTEM_PROMPT,
@@ -303,6 +305,51 @@ def test_save_failure_blocks_the_image(tmp_path):
 # --------------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+def test_5_5_investigation_preserves_thinking_and_request_prefix(monkeypatch, model):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from drawing_analyzer import investigate as investigation
+
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", model)
+    monkeypatch.setattr(investigation, "_strict_tools_available", True)
+    responses = []
+    snapshots = []
+
+    def without_cache(value):
+        if isinstance(value, dict):
+            return {k: without_cache(v) for k, v in value.items() if k != "cache_control"}
+        if isinstance(value, list):
+            return [without_cache(v) for v in value]
+        return value
+
+    def responder(kw, n):
+        snapshots.append(deepcopy(kw))
+        if n == 1:
+            response = FakeMessage(content=[], stop_reason="pause_turn")
+        elif n == 2:
+            response = _tool_use()
+            # Simulate another conversation disabling the global strict latch.
+            # This conversation must keep the schemas that signed its thinking.
+            investigation._strict_tools_available = False
+        else:
+            response = _verdict()
+        response.content.insert(0, SimpleNamespace(type="thinking", thinking="", signature=f"signed-{n}"))
+        responses.append(deepcopy(response.content))
+        return response
+
+    client = _LoopClient(responder)
+    result, _ = _run_one(client, max_rounds=1)
+    assert result.verified == 1 and len(snapshots) == 3
+    for prev, curr in zip(snapshots, snapshots[1:]):
+        assert without_cache(curr["system"]) == without_cache(prev["system"])
+        assert without_cache(curr["tools"]) == without_cache(prev["tools"])
+        assert without_cache(curr["messages"][:len(prev["messages"])]) == without_cache(prev["messages"])
+    assistants = [m["content"] for m in snapshots[-1]["messages"] if m["role"] == "assistant"]
+    assert assistants == responses[:2]
+    assert snapshots[-1]["tool_choice"] == {"type": "none"}
 
 
 def test_investigation_upgrades_uncertain_to_verified(tmp_path):

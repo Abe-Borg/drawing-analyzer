@@ -92,6 +92,25 @@ def test_estimate_request_cost_unknown_model_is_none():
     assert estimate_request_cost(1_000, 1_000, model="nope") is None
 
 
+@pytest.mark.parametrize("model,reuse,no_reuse", [
+    ("claude-opus-5-5", 5.20, 10.00),
+    ("claude-sonnet-5-5", 2.70, 5.00),
+    ("claude-opus-5", 6.75, 12.50),
+])
+def test_estimator_uses_each_models_cache_read_rate(model, reuse, no_reuse):
+    from drawing_analyzer.cost import _critique_prefix_costs, _specs_cost_contribution
+
+    assert _critique_prefix_costs(
+        sheet_count=1, prefix_tokens=1_000_000, output_tokens=0,
+        model=model, batch=False, runs=2,
+    ) == pytest.approx((reuse, no_reuse))
+    tokens, spec_cost = _specs_cost_contribution(
+        spec_chars=4_000_000, sheet_count=2, model=model, batch=False,
+    )
+    assert tokens == 2_000_000
+    assert spec_cost == pytest.approx(reuse)
+
+
 # --------------------------------------------------------------------------- #
 # drawing-set estimate
 # --------------------------------------------------------------------------- #
@@ -346,7 +365,7 @@ def test_zero_citation_cap_quotes_no_citation_spend(monkeypatch):
 
 
 def test_search_only_citation_model_quotes_no_fetch_input(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MODEL", OPUS)
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MODEL", "claude-opus-5")
     monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "2")
     est = estimate_exhaustive_run_cost(100)
     row = next(c for c in est.components if c.stage == "Citation checks")

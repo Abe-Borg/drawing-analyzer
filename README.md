@@ -1637,6 +1637,12 @@ runs.
 
 ## Configuration
 
+`claude-opus-5-5` and `claude-sonnet-5-5` are registered model overrides.
+Switching the review model invalidates the digest and critique caches once:
+their keys include the resolved model, so the first run with the new model
+rebuilds them and later runs reuse its entries. Model selection remains a
+quality decision for an A/B run.
+
 | Variable | Default | Effect |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |

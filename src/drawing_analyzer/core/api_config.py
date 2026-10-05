@@ -25,7 +25,7 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
                                               (default Sonnet 5.5; needs web
                                               fetch, which Opus 5 lacks).
-    DRAWING_ANALYZER_REFUSAL_FALLBACK     — the Opus 5 server-side refusal
+    DRAWING_ANALYZER_REFUSAL_FALLBACK     — the server-side refusal
                                               fallback (default on; any falsy
                                               value disables it — see
                                               apply_refusal_fallback).
@@ -390,8 +390,8 @@ class ModelCapabilities:
     # flag on a tool definition. One capability for both because the API ships
     # them as one feature with one model roster — a model that takes a
     # constrained response takes a constrained tool argument. Anthropic lists
-    # Opus 5, Opus 4.8, Sonnet 5 and Haiku 4.5 as supported; Sonnet 4.6 is
-    # absent from that roster and so declares ``False`` here even though it is
+    # both 5.5 models, Opus 5, Opus 4.8, Sonnet 5 and Haiku 4.5 as supported.
+    # Sonnet 4.6 is absent and so declares ``False`` here even though it is
     # otherwise a current model, which is exactly why this is a registry
     # capability and not a generation test (the same rule
     # ``supports_refusal_fallback`` exists to enforce).
@@ -405,7 +405,17 @@ class ModelCapabilities:
     supports_structured_outputs: bool = False
 
 
-# Profiles verified against Anthropic's models overview and effort reference.
+# 5.5 profiles verified independently on 2026-10-05 against:
+# https://platform.claude.com/docs/en/models/overview
+# https://platform.claude.com/docs/en/models/opus-5-5/migration-guide
+# https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide
+# Feature references: build-with-claude/{effort,vision,structured-outputs,
+# batch-processing} and agents-and-tools/tool-use/{web-search-tool,web-fetch-tool}.
+# Both accept our dynamic-filtering web_search_20260209 / web_fetch_20260209
+# variants (and the older basic variants). Web fetch is available on Opus 5.5
+# even though Opus 5 excludes it; Sonnet 5.5 adds refusal fallback.
+#
+# Older profiles verified against Anthropic's models overview and effort reference.
 # The models overview states that Opus 5, Opus 4.8, Opus 4.7, Opus 4.6,
 # Sonnet 5, and Sonnet 4.6 all support 300k batch output via the
 # ``output-300k-2026-03-24`` header, and lists a 128k synchronous max output
@@ -413,32 +423,8 @@ class ModelCapabilities:
 # capabilities; unregistered ids fall through to the conservative defaults.
 _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
     MODEL_OPUS_5_5: ModelCapabilities(
-        # Opus 5.5 succeeds Opus 5 with the same 1M context, 128k output,
-        # tokenizer, effort roster, hi-res vision and structured outputs.
-        # Thinking can no longer be disabled on it, which this app never did
-        # (see :func:`thinking_config_for`); its API default effort is
-        # ``medium`` rather than ``high``, which is why every request site
-        # states its effort explicitly.
-        supports_adaptive_thinking=True,
-        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
-        supports_extended_output_beta=True,
-        context_window=1_000_000,
-        supported_effort_levels=_EFFORT_LEVELS_FULL,
-        supports_hires_vision=True,
-        # Web fetch is left undeclared (as on Opus 5): no default routes a
-        # fetch-needing stage to Opus, and an undeclared flag degrades to
-        # search-only rather than risking a 400.
-        supports_web_fetch=False,
-        supports_web_search=True,
-        # Same classifier-decline behaviour as Opus 5 (``bio`` joins the
-        # categories), so the server-side fallback stays opted in.
-        supports_refusal_fallback=True,
-        supports_structured_outputs=True,
-    ),
-    MODEL_SONNET_5_5: ModelCapabilities(
-        # Sonnet 5.5 succeeds Sonnet 5: same 1M context, 128k output,
-        # tokenizer and prices. Thinking cannot be sent as ``disabled`` (a
-        # 400) and forced ``tool_choice`` is rejected; this app sends neither.
+        # Always-on adaptive thinking; API default effort is medium. Our
+        # review requests explicitly select high through the phase policy.
         supports_adaptive_thinking=True,
         max_output_tokens=MAX_OUTPUT_TOKENS_128K,
         supports_extended_output_beta=True,
@@ -447,6 +433,22 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supports_hires_vision=True,
         supports_web_fetch=True,
         supports_web_search=True,
+        # The migration guide recommends fallbacks: "default" for refusals.
+        supports_refusal_fallback=True,
+        supports_structured_outputs=True,
+    ),
+    MODEL_SONNET_5_5: ModelCapabilities(
+        # Adaptive thinking accepts all five effort levels. The optional
+        # between_tools mode accepts only low/medium/high; we use adaptive.
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        supports_web_fetch=True,
+        supports_web_search=True,
+        supports_refusal_fallback=True,
         supports_structured_outputs=True,
     ),
     MODEL_OPUS_5: ModelCapabilities(
@@ -747,8 +749,8 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 #
 # - Sonnet verification (PHASE_VERIFICATION{,_RETRY,_CONTINUATION}): medium.
 # - Opus verification (i.e. escalation): high.
-# - Digest / critique (PHASE_REVIEW): high — the level both stages have always
-#   sent, and the level the API applies when the field is omitted.
+# - Digest / critique (PHASE_REVIEW): explicit high, including on Opus 5.5
+#   whose API default would otherwise be medium.
 # - Deep review (PHASE_CROSS_CHECK): xhigh, clamped to high on any model whose
 #   roster lacks it (Sonnet 4.6 and older).
 # - Harvest: low. Structuring one prose item into a Finding is formatting, not
@@ -1339,23 +1341,20 @@ def extract_cache_diagnostics(message) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Refusal fallback (Opus 5 elevated safety classifiers)
+# Refusal fallback (models with elevated safety classifiers)
 # ---------------------------------------------------------------------------
 #
-# Claude Opus 5 ships with elevated cybersecurity safeguards whose classifiers
+# Registered fallback models ship with safety classifiers whose decisions
 # can decline a request outright — HTTP 200, ``stop_reason="refusal"`` — rather
 # than erroring. A construction-drawing review is unlikely to trip them, but an
 # unrecovered false positive would silently drop that sheet/finding's coverage
 # (I-1) with no distinguishing signal from any other empty/garbled response.
-# Anthropic recommends every Opus 5 caller opt into ``fallbacks: "default"``,
+# Anthropic recommends callers opt into ``fallbacks: "default"``,
 # which re-runs a declined request server-side on the recommended substitute
-# (cyber-category refusals route to Opus 4.8) inside the same call — sticky for
-# the rest of that turn, billed at the serving model's own rate. Opus 4.8 is
-# registered in ``_MODEL_CAPABILITIES`` with the exact same effort / thinking /
-# output-cap / hi-res-vision support and the exact same $5/$25-per-MTok pricing
-# as Opus 5, and nothing downstream branches on ``response.model`` — so a
-# fallback changes nothing about this app's request shape, capabilities, or
-# billing; it only recovers a call that would otherwise come back empty.
+# inside the same call, sticky for the rest of that turn. Supported categories
+# and substitute models differ by requested model; see:
+# https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
+# Both 5.5 migration guides recommend configuring this recovery.
 #
 # Real-time (non-batch) calls only: the parameter is rejected outright on the
 # Message Batches API, which is how the standard review path submits its bulk
@@ -1374,7 +1373,7 @@ ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"
 # documented as unavailable on Bedrock/Vertex/Foundry), and unlike the
 # investigation loop's own task budgets, digest/critique/verification are not
 # optional QC add-ons — they are the core deliverable. A rejection must never
-# be allowed to turn every subsequent Opus 5 call into a permanent failure, so
+# be allowed to turn every subsequent eligible call into a permanent failure, so
 # (mirroring investigate.py's ``_task_budget_available`` latch) the first
 # fallback-specific rejection turns the feature off for the rest of the
 # process and every call reverts to the plain (non-beta) transport.
@@ -1384,7 +1383,7 @@ _REFUSAL_FALLBACK_REJECTION_MARKERS = ("fallback", REFUSAL_FALLBACK_BETA)
 
 
 def refusal_fallback_enabled() -> bool:
-    """Whether to attach the Opus 5 refusal-fallback parameter. Default ON.
+    """Whether to attach the refusal-fallback parameter. Default ON.
 
     Opt out via ``DRAWING_ANALYZER_REFUSAL_FALLBACK`` set to a falsy value —
     an operator debugging a raw refusal (rather than its recovered fallback)
@@ -1454,7 +1453,7 @@ def messages_namespace(client: Any, kwargs: dict):
 
 
 def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method: str) -> Any:
-    """Issue one Messages request, opting Opus 5 into the refusal fallback and
+    """Issue one Messages request, opting capable models into refusal fallback and
     self-healing if the platform rejects the beta/parameter itself.
 
     ``method`` is ``"create"`` (returns the ``Message`` directly) or

@@ -890,6 +890,24 @@ def test_per_family_cost_reconciles_with_the_run_total():
     assert float(ru.total_estimated_cost) == 4.00
 
 
+def test_model_swap_summary_preserves_per_model_cache_read_costs():
+    from drawing_analyzer.pipeline import _record_usage
+
+    ru = RunUsage()
+    for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5"):
+        _record_usage(ru, family="critique", instance=model, model=model,
+                      cache_read_tokens=1_000_000)
+    ctx = _Ctx([_Finding()], cost=ru.total_estimated_cost)
+    ctx.run_usage = ru
+    summary = summarize_run(ctx)
+    assert summary["estimated_cost_usd"] == pytest.approx(0.90)
+    assert summary["by_family"]["critique"]["cost"] == pytest.approx(0.90)
+    assert {m: s["cost"] for m, s in summary["by_model"].items()} == {
+        "claude-opus-5-5": 0.20, "claude-sonnet-5-5": 0.20, "claude-opus-5": 0.50,
+    }
+    assert summary["usage_axes"]["unpriced_records"] == 0
+
+
 def test_the_summary_now_emits_family_cost_alongside_tokens():
     """It computed this and dropped it: "cheaper" could not be told from "did less"."""
     ctx = _Ctx([_Finding()])
