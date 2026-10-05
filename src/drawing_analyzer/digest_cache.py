@@ -785,6 +785,29 @@ def _ensure_database_schema(connection: sqlite3.Connection) -> None:
             "CREATE TABLE IF NOT EXISTS pending_batches ("
             "batch_id TEXT PRIMARY KEY, value_json TEXT NOT NULL) WITHOUT ROWID"
         )
+        # Files persist until explicitly deleted and count against the org's
+        # storage cap. Keep ownership even after a batch receipt is collected.
+        uploads_exist = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='uploaded_files'"
+        ).fetchone() is not None
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS uploaded_files ("
+            "file_id TEXT PRIMARY KEY, uploaded_at REAL NOT NULL, "
+            "last_needed_at REAL NOT NULL) WITHOUT ROWID"
+        )
+        # Upgrade receipts from versions that did not journal individual uploads.
+        # Their submission time is a conservative lower bound for cleanup age.
+        legacy_receipts = (connection.execute("SELECT value_json FROM pending_batches")
+                           if not uploads_exist else ())
+        for (encoded,) in legacy_receipts:
+            record = json.loads(encoded)
+            submitted_at = record.get("submitted_at", time.time())
+            connection.executemany(
+                "INSERT INTO uploaded_files VALUES (?, ?, ?) "
+                "ON CONFLICT(file_id) DO UPDATE SET "
+                "last_needed_at=MAX(last_needed_at, excluded.last_needed_at)",
+                ((fid, submitted_at, submitted_at) for fid in record.get("file_ids", []) if fid),
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS cache_metadata (
@@ -881,6 +904,7 @@ class DigestCache:
         # reached SQLite.
         self._entries: dict[str, dict] = {}
         self._batch_records: dict[str, dict] = {}
+        self._uploaded_files: dict[str, dict] = {}
         self._connection: sqlite3.Connection | None = None
         self._hits = 0
         self._misses = 0
@@ -1033,14 +1057,74 @@ class DigestCache:
         with self._lock:
             if not self._persist:
                 self._batch_records[record["batch_id"]] = json.loads(encoded)
+                for fid in record.get("file_ids", []):
+                    if fid:
+                        self._remember_upload(fid, record.get("submitted_at", time.time()))
                 return
             if self._connection is None:
                 raise OSError("batch recovery store is unavailable")
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "INSERT INTO pending_batches(batch_id, value_json) VALUES (?, ?) "
+                    "ON CONFLICT(batch_id) DO UPDATE SET value_json=excluded.value_json",
+                    (record["batch_id"], encoded),
+                )
+                submitted_at = record.get("submitted_at", time.time())
+                self._connection.executemany(
+                    "INSERT INTO uploaded_files VALUES (?, ?, ?) "
+                    "ON CONFLICT(file_id) DO UPDATE SET "
+                    "last_needed_at=MAX(last_needed_at, excluded.last_needed_at)",
+                    ((fid, submitted_at, submitted_at) for fid in record.get("file_ids", []) if fid),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+    def _remember_upload(self, file_id: str, timestamp: float) -> None:
+        record = self._uploaded_files.setdefault(file_id, {
+            "file_id": file_id, "uploaded_at": timestamp, "last_needed_at": timestamp,
+        })
+        record["last_needed_at"] = max(record["last_needed_at"], timestamp)
+
+    def record_uploaded_file(self, file_id: str, *, uploaded_at: float | None = None) -> None:
+        """Commit app ownership immediately after upload, before submitting it."""
+        timestamp = time.time() if uploaded_at is None else uploaded_at
+        with self._lock:
+            if not self._persist:
+                self._remember_upload(file_id, timestamp)
+                return
+            if self._connection is None:
+                raise OSError("upload recovery store is unavailable")
             self._connection.execute(
-                "INSERT INTO pending_batches(batch_id, value_json) VALUES (?, ?) "
-                "ON CONFLICT(batch_id) DO UPDATE SET value_json=excluded.value_json",
-                (record["batch_id"], encoded),
+                "INSERT INTO uploaded_files VALUES (?, ?, ?) "
+                "ON CONFLICT(file_id) DO UPDATE SET "
+                "last_needed_at=MAX(last_needed_at, excluded.last_needed_at)",
+                (file_id, timestamp, timestamp),
             )
+
+    def recorded_uploads(self) -> list[dict]:
+        """Read only locally recorded IDs; I/O errors must fail closed."""
+        with self._lock:
+            if not self._persist:
+                return [dict(record) for record in self._uploaded_files.values()]
+            if self._connection is None:
+                raise OSError("upload recovery store is unavailable")
+            return [dict(zip(("file_id", "uploaded_at", "last_needed_at"), row))
+                    for row in self._connection.execute(
+                        "SELECT file_id, uploaded_at, last_needed_at FROM uploaded_files ORDER BY file_id"
+                    )]
+
+    def forget_uploaded_file(self, file_id: str) -> None:
+        """Forget ownership only after deletion succeeds (or returns 404)."""
+        with self._lock:
+            if not self._persist:
+                self._uploaded_files.pop(file_id, None)
+                return
+            if self._connection is None:
+                raise OSError("upload recovery store is unavailable")
+            self._connection.execute("DELETE FROM uploaded_files WHERE file_id = ?", (file_id,))
 
     def forget_batch(self, batch_id: str) -> None:
         with self._lock:

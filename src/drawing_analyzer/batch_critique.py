@@ -24,7 +24,8 @@ This module fixes both halves for a ``use_batch`` run:
 * **Files are released on every exit** — a fully-collected batch, a confirmed
   cancel, or an unexpected collection error (best-effort cancel, then release).
   A non-terminal batch this run could not cancel keeps its files (it may still be
-  running; they expire server-side). That is the DA-034 finally-path guarantee.
+  running; the startup reaper revisits them once safe). That is the DA-034
+  finally-path guarantee.
 
 When the digest stage retained a terminal upload, the critique can adopt that
 same manifest after its level-1 cache miss. Only the closing task instruction is
@@ -340,7 +341,7 @@ def submit_critique_batch(
                 try:
                     upload = upload_sheet_images(
                         client, sheet,
-                        task_instruction=_CRITIQUE_TASK_INSTRUCTION,
+                        task_instruction=_CRITIQUE_TASK_INSTRUCTION, cache=cache,
                         on_image=on_image,
                     )
                 except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
@@ -431,7 +432,7 @@ def submit_critique_batch(
                     "and degrading %d batched sheet(s) to no-critique",
                     summarize_exc(exc), len(uploaded_all), len(batched),
                 )
-                delete_files(client, uploaded_all)
+                delete_files(client, uploaded_all, cache=cache)
                 for s in batched:
                     s.result = CritiqueResult(
                         findings=[], input_tokens=0, output_tokens=0,
@@ -453,7 +454,7 @@ def submit_critique_batch(
                 )
             except BatchReceiptError as exc:
                 if exc.files_safe:
-                    delete_files(client, uploaded_all)
+                    delete_files(client, uploaded_all, cache=cache)
                 for slot in slots:
                     if slot.custom_ids and slot.result is None:
                         slot.result = CritiqueResult(
@@ -474,7 +475,7 @@ def submit_critique_batch(
         # ``batches.create`` failure is handled non-fatally above and returns, so it
         # never reaches here.
         if batch_id is None:
-            delete_files(client, uploaded_all)
+            delete_files(client, uploaded_all, cache=cache)
         raise
 
     return CritiqueBatch(
@@ -540,7 +541,8 @@ def collect_critique_batch(
     batch no longer needs them — a fully-collected terminal batch, a confirmed
     cancel, or an unexpected collection error (best-effort cancel, then release).
     A non-terminal batch this run could not cancel keeps its files (it may still be
-    running remotely; they expire server-side) and that retention is logged.
+    running remotely; the startup reaper revisits them once safe) and that
+    retention is logged.
     """
     # ``None`` means "the app's bound", resolved HERE rather than as a keyword
     # default so ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is read per call
@@ -667,16 +669,17 @@ def collect_critique_batch(
         # DA-034: release the uploaded files on every exit where the batch no
         # longer needs them — a terminal (fully-collected) batch or one we
         # confirmed canceled. A non-terminal batch we could NOT cancel may still be
-        # running, so its files are retained (safe detach) and expire server-side.
+        # running, so its files are retained until the startup reaper can safely
+        # delete them.
         if terminal or canceled:
             _release_uploaded_files(
                 client, batch.all_file_ids,
-                in_background=cleanup_in_background, on_log=on_log,
+                in_background=cleanup_in_background, on_log=on_log, cache=cache,
             )
         elif batch.all_file_ids:
             _log.warning(
                 "critique batch %s not collected and not canceled; retaining %d "
-                "uploaded file(s) (they expire server-side)",
+                "uploaded file(s) (the startup reaper revisits them once safe)",
                 batch.batch_id, len(batch.all_file_ids),
             )
 

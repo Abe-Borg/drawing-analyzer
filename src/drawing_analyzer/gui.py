@@ -2991,4 +2991,7 @@ def main() -> None:
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     app = DrawingAnalyzerApp()
+    # The app has loaded its saved key; maintenance must not block the UI.
+    from .file_upload import start_upload_reaper
+    start_upload_reaper()
     app.mainloop()

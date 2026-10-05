@@ -3851,7 +3851,7 @@ def extract_drawing_context(
 
                         _release_uploaded_files(
                             cleanup_client, unclaimed_ids,
-                            in_background=True, on_log=on_log,
+                            in_background=True, on_log=on_log, cache=cache,
                         )
                 except Exception as cleanup_exc:  # noqa: BLE001 - stage is additive
                     _log.warning(
