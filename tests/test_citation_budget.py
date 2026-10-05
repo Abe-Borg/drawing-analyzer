@@ -72,6 +72,49 @@ def test_normalization_folds_edition_wrappers_and_lettered_section_markers():
     )
 
 
+@pytest.mark.parametrize("ref", [
+    "NFPA 13-2016 §8.15.1", "nfpa 13 - 2016 Section 8.15.1",
+    "NFPA-13-2016 Sec. 8.15.1", "NFPA 13–2016 §8.15.1",
+])
+def test_normalization_folds_code_edition_hyphens(ref):
+    assert citation.normalize_reference(ref) == citation.normalize_reference("NFPA 13 (2016) §8.15.1")
+
+
+@pytest.mark.parametrize("ref", [
+    "NFPA 13 §2016-2019", "NFPA 13 Section 2016–2019",
+    "NFPA 13 Sec. 2016.1-2019.1", "NFPA 13-2016.1 §8.15.1",
+])
+def test_edition_hyphen_normalization_preserves_section_ranges(ref):
+    normalized = citation.normalize_reference(ref)
+    assert "-" in normalized
+    assert normalized != citation.normalize_reference(ref.replace("-", " ").replace("–", " "))
+
+
+def test_edition_aliases_use_one_budget_slot_and_keep_another_ref_eligible(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "2")
+    refs = ["NFPA 13-2016 §8.15.1", "NFPA 13 (2016) Section 8.15.1", "NFPA 13 2016 §8.15.1"]
+    findings = [_finding(ref, severity="high", qc_id=f"QC-{i:03d}") for i, ref in enumerate(refs)]
+    other = _finding("NFPA 72 §1.1", severity="low", qc_id="QC-004")
+    client = _Client()
+    result = citation.check_citations([*findings, other], [], client=client)
+    assert result.checked == result.requests == len(client.calls) == 2
+    assert result.skipped_over_budget == 0 and not result.partial
+    assert all(f.citation.status == "CHECKED_SUPPORTS" for f in [*findings, other])
+    assert [f.citations[0].reference for f in findings] == refs
+
+
+def test_edition_alias_warm_run_reuses_one_verdict_cache_entry():
+    cache = DigestCache(None, persist=False)
+    first = _finding("NFPA 13-2016 §8.15.1")
+    citation.check_citations([first], [], client=_Client(), cache=cache)
+    second = _finding("NFPA 13 (2016) Section 8.15.1")
+    client = _Client()
+    result = citation.check_citations([second], [], client=client, cache=cache)
+    assert result.cached_requests == 1 and result.requests == 0
+    assert client.calls == [] and cache.stats()["size"] == 1
+    assert second.citations[0].reference == second.refs[0]
+
+
 def test_variants_share_claim_assessment_and_keep_original_display():
     refs = ["NFPA 13 §8.15.1", "NFPA 13 Section 8.15.1", "nfpa 13 8.15.1"]
     findings = [_finding(ref, qc_id=f"QC-{i:03d}") for i, ref in enumerate(refs)]

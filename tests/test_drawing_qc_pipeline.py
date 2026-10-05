@@ -749,6 +749,34 @@ def test_pipeline_prices_citation_cache_writes_at_requested_one_hour_ttl(tmp_pat
     assert record.estimated_cost > usage_record_cost(**kwargs)
 
 
+def test_pipeline_records_a_citation_request_even_when_server_reports_zero_usage(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    inner = client.messages
+
+    class _Messages(StreamingMessagesMixin):
+        def create(self, **kwargs):
+            response = inner.create(**kwargs)
+            if _system_text(kwargs.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
+                response.usage = FakeUsage(input_tokens=0, output_tokens=0,
+                                          server_tool_use=FakeServerToolUse(web_search_requests=0))
+            return response
+
+    client.messages = _Messages()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True, verify_findings=False,
+        cache=DigestCache(None, persist=False), qc_work_dir=tmp_path / "qc",
+    )
+    records = [r for r in ctx.run_usage.records if r.stage_family == "citation"]
+    assert client.calls["citation"] == len(records) == 1
+    assert records[0].transport == "REAL_TIME"
+    assert records[0].input_tokens == records[0].output_tokens == records[0].estimated_cost == 0
+    assert records[0].billable_tool_uses == {}
+
+
 def test_pipeline_discloses_citation_budget_tail_in_stage_warnings(tmp_path, monkeypatch):
     from drawing_analyzer.digest_cache import DigestCache
 
@@ -761,6 +789,7 @@ def test_pipeline_discloses_citation_budget_tail_in_stage_warnings(tmp_path, mon
     )
     stage = next(s for s in ctx.stage_results if s.stage == "citation")
     assert client.calls["citation"] == 0
+    assert not any(r.stage_family == "citation" for r in ctx.run_usage.records)
     assert stage.status == ctx.qc_status == "PARTIAL"
     assert any("per-run citation budget (0)" in w and "DRAWING_ANALYZER_CITATION_MAX_REFS" in w
                for w in stage.warnings)
@@ -791,6 +820,7 @@ def test_pipeline_skips_rejected_citations_and_discloses_reason(tmp_path):
     )
     stage = next(s for s in ctx.stage_results if s.stage == "citation")
     assert client.calls["verify"] > 0 and client.calls["citation"] == 0
+    assert not any(r.stage_family == "citation" for r in ctx.run_usage.records)
     assert stage.status == ctx.qc_status == "PARTIAL"
     assert any("all citing findings are REJECTED" in warning for warning in stage.warnings)
     cited = [f for f in ctx.findings if f.refs]
@@ -822,7 +852,7 @@ def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
     stages = {s.stage: s.status for s in ctx2.stage_results}
     assert stages["citation"] == "COMPLETE"                 # a hit is never PARTIAL
     recs = [r for r in ctx2.run_usage.records if r.stage_family == "citation"]
-    assert any(r.transport == "CACHE" and r.cache_hit for r in recs)
+    assert len(recs) == 1 and recs[0].transport == "CACHE" and recs[0].cache_hit
     assert all(r.input_tokens == 0 and r.output_tokens == 0 for r in recs)
     assert all((r.billable_tool_uses or {}).get("web_search", 0) == 0 for r in recs)
     # The reconstructed verdicts match the cold run's.

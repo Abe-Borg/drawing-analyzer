@@ -176,14 +176,21 @@ def normalize_reference(ref: str) -> str:
     words Table/Chapter: those distinguish citations rather than format them.
     """
     text = unicodedata.normalize("NFKC", str(ref or "")).casefold()
-    text = re.sub(r"§+|\b(?:sections?|secs?)\b\.?", " ", text)
-    # Edition/outer wrappers are cosmetic; numbered/lettered subsections stay.
-    text = re.sub(r"\(((?:19|20)\d{2})\)", r" \1 ", text)
-    text = re.sub(r"^\s*\((.*)\)\s*$", r"\1", text)
     text = re.sub(r"[‐‑‒–—−]", "-", text)
     text = re.sub(r"\s*([./()\-])\s*", r"\1", text)
     text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)
     text = re.sub(r"(?<!\d)-|-(?!\d)", " ", text)
+    # A known code family followed by -YEAR uses an edition separator, not a
+    # section range. Keep section markers until after this match so even a
+    # year-shaped range such as "NFPA 13 §2016-2019" retains its hyphen.
+    text = re.sub(
+        rf"\b({_CODE_TOKEN})\s*-\s*({_YEAR})\b(?!\.\d)",
+        r"\1 \2", text, flags=re.IGNORECASE,
+    )
+    text = re.sub(r"§+|\b(?:sections?|secs?)\b\.?", " ", text)
+    # Edition/outer wrappers are cosmetic; numbered/lettered subsections stay.
+    text = re.sub(r"\(((?:19|20)\d{2})\)", r" \1 ", text)
+    text = re.sub(r"^\s*\((.*)\)\s*$", r"\1", text)
     text = re.sub(r"[^\w./()\-]+", " ", text)
     return " ".join(text.split())
 

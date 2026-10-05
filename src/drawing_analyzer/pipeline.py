@@ -2388,24 +2388,27 @@ def _run_qc_stages(
                 # bound for responses that carried no server count — and is
                 # honestly ZERO on a fully cache-served run, so no ``or``
                 # fallback may reintroduce a fee for work that never ran.
-                _record_usage(
-                    run_usage, family="citation", instance="citation",
-                    model=citation_model(),
-                    input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
-                    # The stage caches its tool schemas, so on a multi-reference
-                    # run most of the input is billed as a cache READ that
-                    # ``input_tokens`` does not report. Omitting these made a
-                    # cached citation stage look near-free in the ledger.
-                    cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
-                    cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
-                    # System, tools, and paused conversation prefixes all ask
-                    # for 1h cache entries (2x writes rather than 1.25x).
-                    cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
-                    billable_tool_uses={"web_search": int(
-                        getattr(cires, "web_search_requests", 0) or 0
-                    )},
-                    terminal_status="PARTIAL" if partial else "COMPLETE",
-                )
+                # Count issued requests, not tokens: skipped/warm-only stages
+                # made no real-time call, while a zero-usage response still did.
+                if cires.requests:
+                    _record_usage(
+                        run_usage, family="citation", instance="citation",
+                        model=citation_model(),
+                        input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
+                        # The stage caches its tool schemas, so on a multi-reference
+                        # run most of the input is billed as a cache READ that
+                        # ``input_tokens`` does not report. Omitting these made a
+                        # cached citation stage look near-free in the ledger.
+                        cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
+                        cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
+                        # System, tools, and paused conversation prefixes all ask
+                        # for 1h cache entries (2x writes rather than 1.25x).
+                        cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
+                        billable_tool_uses={"web_search": int(
+                            getattr(cires, "web_search_requests", 0) or 0
+                        )},
+                        terminal_status="PARTIAL" if partial else "COMPLETE",
+                    )
                 cached_chunks = int(getattr(cires, "cached_requests", 0) or 0)
                 if cached_chunks:
                     # Phase B: verdict-cache hits ride their own CACHE record
