@@ -653,6 +653,68 @@ def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
     assert ctx.configuration_kind == "NORMAL"
 
 
+def test_pipeline_text_truncation_stays_complete_and_warns_on_cold_and_warm_runs(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+    from drawing_analyzer.export import write_drawing_export
+
+    a = _make_pdf(tmp_path / "M-101.pdf")
+    b = _make_pdf(tmp_path / "M-102.pdf")
+    with pymupdf.open(a) as doc:
+        for row in range(60):
+            doc[0].insert_text(
+                (80, 220 + row * 5),
+                "GENERAL NOTES: COORDINATE EQUIPMENT LOCATIONS AND CLEARANCES WITH ALL TRADES.",
+                fontsize=4,
+            )
+        doc.saveIncr()
+    with pymupdf.open(a) as doc:
+        omitted = len(doc[0].get_text()) - 4000
+    assert omitted > 0
+    cache = DigestCache(None, persist=False)
+
+    for label in ("cold", "warm"):
+        client = _CountingClient([_VAV_FINDING])
+        ctx = extract_drawing_context(
+            [a, b], client=client, rows=2, cols=2, cache=cache,
+            qc_markups=True, qc_work_dir=tmp_path / label,
+        )
+        stage = next(s for s in ctx.stage_results if s.stage == "cross_qc")
+        assert stage.status == ctx.qc_status == "COMPLETE"
+        assert ctx.run_journal.final_status == "COMPLETE"
+        assert any(f"{omitted} char(s) omitted" in warning for warning in stage.warnings)
+        folder = write_drawing_export(
+            ctx, tmp_path / f"{label}-export", source_names=[a.name, b.name],
+        )
+        manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+        manifest_stage = next(s for s in manifest["stages"] if s["stage"] == "cross_qc")
+        assert manifest_stage["status"] == "COMPLETE"
+        assert manifest_stage["warnings"] == stage.warnings
+        assert manifest["status"]["qc_status"] == "COMPLETE"
+        if label == "warm":
+            assert client.calls["cross"] == 0
+            records = [r for r in ctx.run_usage.records if r.stage_family == "cross_qc"]
+            assert len(records) == 1 and records[0].cache_hit
+            assert records[0].input_tokens == records[0].output_tokens == 0
+        else:
+            assert client.calls["cross"] == 1
+
+
+def test_pipeline_omitted_cross_qc_findings_stay_partial(tmp_path, monkeypatch):
+    from drawing_analyzer import cross_qc
+
+    monkeypatch.setattr(cross_qc, "cross_sheet_qc", lambda *_a, **_k: cross_qc.CrossQCResult(
+        complete=True, budget_degraded=False, findings_omitted=1,
+    ))
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    ctx = extract_drawing_context(
+        [src], client=_CountingClient([_VAV_FINDING]), rows=2, cols=2,
+        qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    stage = next(s for s in ctx.stage_results if s.stage == "cross_qc")
+    assert stage.status == ctx.qc_status == "PARTIAL"
+    assert any("1 finding(s) omitted" in warning for warning in stage.warnings)
+
+
 def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
     # Phase B: a warm re-run serves citation verdicts from the TTL cache —
     # zero citation API calls, zero web-search fees, a CACHE usage record,
