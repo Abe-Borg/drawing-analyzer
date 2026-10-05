@@ -20,8 +20,9 @@ Design mirrors the digest pipeline: crops render sequentially on the calling
 thread (PyMuPDF is not thread-safe and lives only in :mod:`render`), while the
 small verify calls run concurrently on a bounded pool. Transient errors reuse
 :mod:`digest`'s retry/backoff. The pass is additive and non-fatal (I-3): a
-per-finding failure degrades that finding to ``UNCERTAIN``; a fatal failure
-(no key / auth) marks the remaining findings ``SKIPPED`` and the run continues.
+per-call failure marks that finding ``FAILED``; a fatal failure
+(no key / auth / repeated permanent 4xx) marks the remaining findings ``SKIPPED``
+and the run continues.
 
 This module imports **no PDF engine** — crops are rendered through
 :func:`render.iter_region_crops` (I-5). Anchor rectangles are in the canonical
@@ -158,6 +159,41 @@ def verify_structured_outputs_enabled(model: str) -> bool:
 # HTTP statuses that mean the whole pass is doomed (bad/again missing key): mark
 # the rest SKIPPED rather than burning a doomed call on every finding.
 _FATAL_STATUSES = frozenset({401, 403})
+_PERMANENT_FAILURE_THRESHOLD = 3
+
+
+class _PermanentFailures:
+    """Pass-local, thread-safe counts of identical non-transient 4xx errors.
+
+    Count only final failures, after capability fallbacks and retries. Distinct
+    request errors and exhausted transient errors must not doom unrelated calls.
+    """
+
+    def __init__(self, fatal: threading.Event) -> None:
+        self.fatal = fatal
+        self._lock = threading.Lock()
+        self._counts: dict[tuple[int, str], int] = {}
+
+    def record(self, exc: Exception) -> None:
+        status = _error_status(exc)
+        if status in _FATAL_STATUSES:
+            self.fatal.set()
+        elif status is not None and 400 <= status < 500 and not _is_transient_error(exc):
+            # Prefer the SDK's error body: request ids and other exception
+            # metadata are not part of the API's rejection reason.
+            body = getattr(exc, "body", None)
+            if isinstance(body, dict):
+                error = body.get("error")
+                if not isinstance(error, dict):
+                    error = {k: v for k, v in body.items() if k != "request_id"}
+                detail = json.dumps(error, sort_keys=True)
+            else:
+                detail = getattr(exc, "message", None) or str(exc)
+            key = (status, detail)
+            with self._lock:
+                self._counts[key] = self._counts.get(key, 0) + 1
+                if self._counts[key] >= _PERMANENT_FAILURE_THRESHOLD:
+                    self.fatal.set()
 
 
 def default_verify_model() -> str:
@@ -674,6 +710,21 @@ class _CallResult(NamedTuple):
     degrade: str | None
 
 
+def _failed_call(
+    exc: Exception, artifacts: list[EvidenceArtifact], *,
+    structured: bool, fatal: threading.Event,
+    failures: _PermanentFailures | None,
+) -> _CallResult:
+    if failures is not None:
+        failures.record(exc)
+    elif _error_status(exc) in _FATAL_STATUSES:
+        fatal.set()
+    return _CallResult(
+        Verification(status="FAILED", note=_clean_error(exc), evidence=list(artifacts)),
+        0, 0, False, structured, DEGRADE_FAILED,
+    )
+
+
 def _verify_one(
     finding: Finding,
     crop_png: bytes,
@@ -685,6 +736,7 @@ def _verify_one(
     sleep: Any,
     fatal: threading.Event,
     structured: bool = False,
+    failures: _PermanentFailures | None = None,
 ) -> _CallResult:
     """One verify call (runs on the pool). Never raises.
 
@@ -726,18 +778,10 @@ def _verify_one(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            note = _clean_error(exc)
-            if _error_status(exc) in _FATAL_STATUSES:
-                fatal.set()
-                return _CallResult(
-                    Verification(status="SKIPPED", note=note, evidence=list(artifacts)),
-                    0, 0, False, send_structured, None,
-                )
-            # Permanent, non-fatal (e.g. 400): keep the finding but stay uncertain.
-            _log.warning("verify finding %s failed: %s", finding.id, note)
-            return _CallResult(
-                Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)),
-                0, 0, False, send_structured, DEGRADE_FAILED,
+            _log.warning("verify finding %s failed: %s", finding.id, _clean_error(exc))
+            return _failed_call(
+                exc, artifacts, structured=send_structured,
+                fatal=fatal, failures=failures,
             )
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
@@ -758,10 +802,10 @@ class VerifyResult:
     """Lightweight tally of a verification pass.
 
     ``malformed`` / ``truncated`` / ``failed`` count the live calls that
-    produced **no settled verdict** and were left UNCERTAIN — a garbled reply,
+    produced **no settled verdict** — a garbled reply,
     a reply cut off by the envelope or declined, a call that failed outright.
-    They are a breakdown of ``uncertain``, not additional to it, and they are
-    observational: nothing here changes a status or the stage's completeness.
+    ``malformed`` / ``truncated`` are a breakdown of ``uncertain``; ``failed``
+    counts the separate ``FAILED`` status, which is never investigated.
     They exist because ``_parse_verdict_with_validity`` always knew which
     UNCERTAINs were judgments and which were not, and threw that away at the
     call site, so no run could say whether its UNCERTAIN share came from the
@@ -807,7 +851,7 @@ class VerifyResult:
 
     @property
     def not_judged(self) -> int:
-        """Live calls that returned no verdict (all left UNCERTAIN)."""
+        """Live calls that returned no verdict (UNCERTAIN or FAILED)."""
         return self.malformed + self.truncated + self.failed
 
     def degradation_note(self, label: str = "verification") -> str | None:
@@ -823,7 +867,8 @@ class VerifyResult:
         return (
             f"{label}: {self.not_judged} of {self.api_calls} live verdict calls "
             f"returned no judgment (malformed={self.malformed}, "
-            f"truncated={self.truncated}, failed={self.failed}); each was left UNCERTAIN"
+            f"truncated={self.truncated}, failed={self.failed}); "
+            "malformed/truncated replies were left UNCERTAIN, failed calls were marked FAILED"
         )
 
 
@@ -914,7 +959,7 @@ def verify_findings(
     ``sheets`` provide per-finding geometry (page size) and the source PDF (via
     ``.ref``); a finding whose sheet isn't found, or whose crop fails to render,
     is left ``SKIPPED``. Crops render sequentially (grouped per PDF) while the
-    small verify calls run on a bounded pool. Never raises: a fatal auth failure
+    small verify calls run on a bounded pool. Never raises: a fatal verifier failure
     marks the remaining findings ``SKIPPED``; the run continues (I-3). Returns a
     :class:`VerifyResult` tally.
     """
@@ -958,6 +1003,7 @@ def verify_findings(
     renderer = crop_renderer or _default_crop_renderer
     workers = _resolve_workers(max_workers, len(items))
     fatal = threading.Event()
+    failures = _PermanentFailures(fatal)
     total = len(items)
     done = 0
     used_evidence_names: set[str] = set()
@@ -1065,11 +1111,11 @@ def verify_findings(
                         continue
                     result.cache_misses += 1
 
-                # A cached verdict remains usable after an auth failure, but an
+                # A cached verdict remains usable after a fatal failure, but an
                 # uncached request must not be submitted once the pass is doomed.
                 if fatal.is_set():
                     finding.verification = Verification(
-                        status="SKIPPED", note="verification aborted (auth failure)",
+                        status="SKIPPED", note="verification aborted (fatal verifier failure)",
                         evidence=artifacts,
                     )
                     result._count("SKIPPED")
@@ -1101,7 +1147,7 @@ def verify_findings(
                     _verify_one, finding, crop_png,
                     artifacts,
                     client=resolved_client, model=model, max_retries=max_retries,
-                    sleep=sleep, fatal=fatal, structured=structured,
+                    sleep=sleep, fatal=fatal, structured=structured, failures=failures,
                 )
                 result.api_calls += 1
                 in_flight[fut] = (finding, dir_name, cache_keys)
@@ -1121,9 +1167,9 @@ def verify_findings(
                 result._count("SKIPPED")
 
     _log.info(
-        "verification: %d verified, %d rejected, %d uncertain, %d skipped "
+        "verification: %d verified, %d rejected, %d uncertain, %d failed, %d skipped "
         "(not judged: malformed=%d truncated=%d failed=%d; input=%d output=%d tok)",
-        result.verified, result.rejected, result.uncertain, result.skipped,
+        result.verified, result.rejected, result.uncertain, result.failed, result.skipped,
         result.malformed, result.truncated, result.failed,
         result.input_tokens, result.output_tokens,
     )
@@ -1373,6 +1419,8 @@ def _prepare_cross_one(
 def _call_prepared_cross(
     prepared: _PreparedCrossVerification, *,
     client: Any, max_retries: int, sleep: Any,
+    fatal: threading.Event | None = None,
+    failures: _PermanentFailures | None = None,
 ) -> _CallResult:
     """Run only the independent model call; rendering has already completed.
 
@@ -1384,6 +1432,7 @@ def _call_prepared_cross(
     # not when ``prepared.kwargs`` was built: it must not leak into
     # ``_cross_verify_cache_key``, which was computed from the pre-fallback
     # kwargs (I-6 cache correctness).
+    fatal = fatal if fatal is not None else threading.Event()
     kwargs = prepared.kwargs
     model = str(kwargs.get("model", ""))
     keyed_structured = "format" in (kwargs.get("output_config") or {})
@@ -1419,10 +1468,10 @@ def _call_prepared_cross(
             _log.warning(
                 "cross-verify finding %s failed: %s", prepared.finding.id, note
             )
-            v = Verification(
-                status="UNCERTAIN", note=note, evidence=prepared.artifacts
+            return _failed_call(
+                exc, prepared.artifacts, structured=send_structured,
+                fatal=fatal, failures=failures,
             )
-            return _CallResult(v, 0, 0, False, send_structured, DEGRADE_FAILED)
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -1542,22 +1591,13 @@ def verify_cross_findings(
 
     workers = _resolve_workers(max_workers, max(1, len(misses_by_index)))
     if misses_by_index and resolved_client is not None:
+        fatal = threading.Event()
+        failures = _PermanentFailures(fatal)
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            submitted = [
-                (
-                    index,
-                    prepared,
-                    executor.submit(
-                        _call_prepared_cross, prepared, client=resolved_client,
-                        max_retries=max_retries, sleep=sleep,
-                    ),
-                )
-                for index, prepared in misses_by_index.items()
-            ]
-            result.api_calls += len(submitted)
-            # Futures are resolved in input order for deterministic attachment;
-            # they were all submitted first, so their API calls still overlap.
-            for index, prepared, future in submitted:
+            submitted: list = []
+
+            def _collect_cross() -> None:
+                index, prepared, future = submitted.pop(0)
                 try:
                     res: _CallResult = future.result()
                     outcomes[index] = (res.verification, res.input_tokens, res.output_tokens)
@@ -1578,12 +1618,36 @@ def verify_cross_findings(
                     )
                     outcomes[index] = (
                         Verification(
-                            status="UNCERTAIN", note=note,
+                            status="FAILED", note=note,
                             evidence=prepared.artifacts,
                         ),
                         0,
                         0,
                     )
+                    result._count_degrade(DEGRADE_FAILED)
+
+            # Bound submissions so a fatal latch also stops unsent requests.
+            # Resolve in input order while up to ``workers`` calls overlap.
+            for index, prepared in misses_by_index.items():
+                if fatal.is_set():
+                    outcomes[index] = (
+                        Verification(
+                            status="SKIPPED",
+                            note="verification aborted (fatal verifier failure)",
+                            evidence=prepared.artifacts,
+                        ), 0, 0,
+                    )
+                    continue
+                future = executor.submit(
+                    _call_prepared_cross, prepared, client=resolved_client,
+                    max_retries=max_retries, sleep=sleep, fatal=fatal, failures=failures,
+                )
+                submitted.append((index, prepared, future))
+                result.api_calls += 1
+                if len(submitted) >= workers:
+                    _collect_cross()
+            while submitted:
+                _collect_cross()
 
     for index, f in enumerate(dual):
         outcome = outcomes[index]
@@ -1603,9 +1667,9 @@ def verify_cross_findings(
             progress(index + 1, total, f"Verifying conflict {index + 1}/{total}")
 
     _log.info(
-        "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped "
+        "cross-verification: %d verified, %d rejected, %d uncertain, %d failed, %d skipped "
         "(not judged: malformed=%d truncated=%d failed=%d)",
-        result.verified, result.rejected, result.uncertain, result.skipped,
+        result.verified, result.rejected, result.uncertain, result.failed, result.skipped,
         result.malformed, result.truncated, result.failed,
     )
     restore_provenance()

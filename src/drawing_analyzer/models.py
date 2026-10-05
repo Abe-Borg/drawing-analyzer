@@ -726,7 +726,7 @@ FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
 ANCHOR_STATUSES = frozenset({"EXACT", "FUZZY", "TILE", "UNANCHORED"})
 # ``verification.status`` — the outcome of the (model or deterministic) check.
 VERIFICATION_STATUSES = frozenset(
-    {"VERIFIED", "REJECTED", "UNCERTAIN", "DETERMINISTIC", "SKIPPED"}
+    {"VERIFIED", "REJECTED", "UNCERTAIN", "FAILED", "DETERMINISTIC", "SKIPPED"}
 )
 # Arithmetic-provenance vocabulary (Phase 25 §17.5). ``computation_method`` records
 # that the *operation* was done by the host (never the model's own arithmetic);
@@ -947,6 +947,8 @@ class EvidenceArtifact:
 class Verification:
     """The verification verdict for a finding (filled by the verify pass).
 
+    ``FAILED`` means the verifier call could not run, rather than a verifier's
+    inconclusive ``UNCERTAIN`` judgment. Failed calls must not be investigated.
     ``DETERMINISTIC`` marks a finding produced by an offline auditor that never
     hit the API (a reference/arithmetic/naming check); such findings are trusted
     without a model re-check. ``evidence`` is the full ordered list of

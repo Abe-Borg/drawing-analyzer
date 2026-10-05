@@ -1323,6 +1323,8 @@ class InvestigateResult:
 
 
 def _candidates(findings: Iterable[Finding]) -> list[Finding]:
+    # FAILED verification calls never judged the drawing and cannot justify
+    # spending the investigation budget. Only an UNCERTAIN verdict qualifies.
     picked = [
         f for f in findings
         if f.verification is not None

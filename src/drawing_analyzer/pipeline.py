@@ -2148,13 +2148,13 @@ def _run_qc_stages(
                     parent="verify",
                 )
             _log.info(
-                "verification: %d verified, %d rejected, %d uncertain, %d skipped",
-                vres.verified, vres.rejected, vres.uncertain, vres.skipped,
+                "verification: %d verified, %d rejected, %d uncertain, %d failed, %d skipped",
+                vres.verified, vres.rejected, vres.uncertain, vres.failed, vres.skipped,
             )
-            # A live call that returned no judgment (garbled, truncated,
-            # failed) is counted UNCERTAIN like a real NOT_VISIBLE; the note
+            # A live call that returned no judgment is UNCERTAIN for a garbled
+            # or truncated reply, FAILED for a call failure; the note
             # keeps the two apart in run.log and the manifest. Warning, not
-            # error: observational, and it never changes the stage status.
+            # error: the counts below determine the stage status.
             degradation = vres.degradation_note()
             if degradation:
                 verify_stage.warnings.append(degradation)
@@ -2187,10 +2187,10 @@ def _run_qc_stages(
                     model=verify_model, transport="CACHE", cache_hit=True,
                     parent="verify_cross",
                 )
-            if cres.verified or cres.rejected or cres.uncertain or cres.skipped:
+            if cres.verified or cres.rejected or cres.uncertain or cres.skipped or cres.failed:
                 _log.info(
-                    "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
-                    cres.verified, cres.rejected, cres.uncertain, cres.skipped,
+                    "cross-verification: %d verified, %d rejected, %d uncertain, %d failed, %d skipped",
+                    cres.verified, cres.rejected, cres.uncertain, cres.failed, cres.skipped,
                 )
             degradation = cres.degradation_note("cross-verification")
             if degradation:
@@ -2205,7 +2205,7 @@ def _run_qc_stages(
         # unavailable or no crop could be built — it does not raise. So the stage
         # status is derived from the actual verdicts, not merely from "no exception":
         # findings actually judged (VERIFIED/REJECTED/UNCERTAIN) make it COMPLETE;
-        # eligible findings that were *all* skipped make it PARTIAL (verification was
+        # eligible findings that were *all* skipped or failed make it PARTIAL (verification was
         # required but could not run); zero eligible/counted findings is a valid skip.
         # Both failure flags are tested BEFORE the counts: an exception leaves its
         # result None, contributing nothing to ``counted``, so a crash judged by
@@ -2214,7 +2214,7 @@ def _run_qc_stages(
             if r is None:
                 return 0, 0
             judged = r.verified + r.rejected + r.uncertain
-            return judged, judged + r.skipped
+            return judged, judged + r.skipped + r.failed
         p_judged, p_counted = _counts(vres)
         c_judged, c_counted = _counts(cres)
         judged, counted = p_judged + c_judged, p_counted + c_counted
@@ -2233,11 +2233,11 @@ def _run_qc_stages(
         elif counted == 0:
             verify_stage.status = "SKIPPED_VALID"   # no eligible model findings
         elif judged == 0:
-            # Eligible findings existed but every one was skipped (client down /
-            # crops failed) — the required stage did not actually verify anything.
+            # Eligible findings existed but every one was skipped or failed —
+            # the required stage did not actually verify anything.
             verify_stage.status = "PARTIAL"
             verify_stage.warnings.append(
-                "all eligible findings were skipped (client unavailable or crops failed)"
+                "all eligible findings were skipped or failed (verifier could not run)"
             )
         else:
             verify_stage.status = "COMPLETE"

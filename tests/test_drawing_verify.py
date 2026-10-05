@@ -85,6 +85,40 @@ class _StatusError(Exception):
         self.status_code = status_code
 
 
+class _ScriptedVerifyClient(BetaClientMixin):
+    def __init__(self, outcomes):
+        self.calls = 0
+        lock = threading.Lock()
+
+        class _Messages(StreamingMessagesMixin):
+            def create(_self, **_kwargs):
+                with lock:
+                    outcome = outcomes[min(self.calls, len(outcomes) - 1)]
+                    self.calls += 1
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return _FakeResp(outcome)
+
+        self.messages = _Messages()
+
+
+@pytest.fixture(params=["single", "cross"])
+def verifier_pass(request, monkeypatch):
+    """Exercise failure policy through both public verification entry points."""
+    if request.param == "single":
+        return _finding, _run
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+
+    def run(findings, **kwargs):
+        return verify_cross_findings(
+            findings, [_sheet("primary.pdf"), _sheet("other.pdf")],
+            model=OPUS, sleep=lambda _s: None, **kwargs,
+        )
+
+    return _cross_finding, run
+
+
 def _sheet(source="s.pdf"):
     ref = SheetRef(pdf_path=Path(source), page_index=0, source_name=source, page_count=1)
     ov = ImageTile(png_bytes=b"O", width_px=10, height_px=10, kind="overview")
@@ -422,7 +456,7 @@ def test_verify_retries_transient_then_succeeds(tmp_path):
     assert state["n"] == 2   # one transient, one success
 
 
-def test_verify_permanent_error_is_uncertain_not_fatal():
+def test_verify_permanent_error_is_failed_not_fatal():
     class _Boom(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
@@ -431,8 +465,8 @@ def test_verify_permanent_error_is_uncertain_not_fatal():
             self.messages = _M()
     f = _finding("conf")
     res = _run([f], client=_Boom())
-    assert f.verification.status == "UNCERTAIN"   # kept, not skipped, not rejected
-    assert res.uncertain == 1
+    assert f.verification.status == "FAILED"
+    assert res.uncertain == 0 and res.failed == 1
 
 
 def test_verify_fatal_auth_skips_remaining():
@@ -449,10 +483,155 @@ def test_verify_fatal_auth_skips_remaining():
     client = _Auth()
     findings = [_finding("a"), _finding("b"), _finding("c")]
     res = _run(findings, client=client, max_workers=1)
-    assert all(f.verification.status == "SKIPPED" for f in findings)
+    assert [f.verification.status for f in findings] == ["FAILED", "SKIPPED", "SKIPPED"]
     # The fatal error short-circuits the rest — not every finding is called.
     assert client.calls < len(findings)
-    assert res.skipped == 3
+    assert res.skipped == 2 and res.failed == 1
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500, 503])
+def test_failed_verifier_calls_never_start_investigations(verifier_pass, status):
+    from drawing_analyzer.investigate import investigate_findings
+
+    make, run = verifier_pass
+    finding = make("failed-call")
+    client = _ScriptedVerifyClient([_StatusError(status, "bad request")])
+    result = run([finding], client=client, max_retries=2)
+    assert finding.verification.status == "FAILED"
+    assert (result.failed, result.uncertain, result.not_judged) == (1, 0, 1)
+    assert client.calls == (3 if status in (429, 500, 503) else 1)
+
+    investigator = _ScriptedVerifyClient([AssertionError("paid investigation started")])
+    investigation = investigate_findings([finding], [], client=investigator)
+    assert investigation.investigated == 0 and investigator.calls == 0
+
+
+@pytest.mark.parametrize("status", [400, 404, 413, 422])
+def test_identical_permanent_errors_latch_across_the_pass(verifier_pass, status):
+    make, run = verifier_pass
+    error = _StatusError(status, "invalid model override")
+    settled = '{"verdict":"CONFIRMED","note":"visible"}'
+    # Successes between errors do not reset the per-pass count.
+    client = _ScriptedVerifyClient([error, settled, error, settled, error])
+    findings = [make(str(i)) for i in range(10)]
+    result = run(findings, client=client, max_workers=1)
+    assert client.calls == result.api_calls == 5
+    assert [f.verification.status for f in findings] == [
+        "FAILED", "VERIFIED", "FAILED", "VERIFIED", "FAILED",
+        "SKIPPED", "SKIPPED", "SKIPPED", "SKIPPED", "SKIPPED",
+    ]
+    assert (result.failed, result.verified, result.skipped, result.uncertain) == (3, 2, 5, 0)
+    assert "aborted" in findings[-1].verification.note
+
+    # A new pass gets a fresh latch and can recover after fixing configuration.
+    recovered = _ScriptedVerifyClient([settled])
+    assert run(findings, client=recovered, max_workers=1).verified == 10
+    assert recovered.calls == 10
+
+
+def test_different_4xx_errors_do_not_trip_the_latch(verifier_pass):
+    make, run = verifier_pass
+    client = _ScriptedVerifyClient([
+        _StatusError(400, "bad shape"), _StatusError(400, "bad model"),
+        _StatusError(404, "bad shape"),
+    ] * 2 + ['{"verdict":"CONFIRMED"}'])
+    findings = [make(str(i)) for i in range(7)]
+    result = run(findings, client=client, max_workers=1)
+    assert client.calls == result.api_calls == 7
+    assert (result.failed, result.verified, result.skipped) == (6, 1, 0)
+
+
+def test_matching_api_errors_ignore_per_request_ids(verifier_pass):
+    make, run = verifier_pass
+    errors = []
+    for i in range(3):
+        error = _StatusError(400, f"bad model (request req_{i})")
+        error.body = {
+            "type": "error", "request_id": f"req_{i}",
+            "error": {"type": "invalid_request_error", "message": "bad model"},
+        }
+        errors.append(error)
+    client = _ScriptedVerifyClient(errors)
+    result = run([make(str(i)) for i in range(6)], client=client, max_workers=1)
+    assert client.calls == result.failed == result.skipped == 3
+
+
+@pytest.mark.parametrize("status", [408, 409, 429, 503])
+def test_exhausted_transient_errors_do_not_trip_the_latch(verifier_pass, status):
+    make, run = verifier_pass
+    client = _ScriptedVerifyClient([_StatusError(status)])
+    findings = [make(str(i)) for i in range(5)]
+    result = run(findings, client=client, max_workers=1, max_retries=2)
+    assert client.calls == 15 and result.api_calls == 5
+    assert (result.failed, result.skipped, result.uncertain) == (5, 0, 0)
+
+
+def test_permanent_failure_latch_bounds_concurrent_calls(verifier_pass):
+    make, run = verifier_pass
+    client = _ScriptedVerifyClient([_StatusError(400, "invalid model")])
+    findings = [make(str(i)) for i in range(20)]
+    result = run(findings, client=client, max_workers=4)
+    # At most three matching failures plus the calls already in flight.
+    assert 3 <= client.calls <= 6
+    assert result.failed == client.calls == result.api_calls
+    assert result.skipped == 20 - result.failed
+    assert all(f.verification.status in ("FAILED", "SKIPPED") for f in findings)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_failure_latches_immediately_in_both_passes(verifier_pass, status):
+    make, run = verifier_pass
+    client = _ScriptedVerifyClient([_StatusError(status)])
+    findings = [make(str(i)) for i in range(5)]
+    result = run(findings, client=client, max_workers=1)
+    assert client.calls == result.api_calls == result.failed == 1
+    assert [f.verification.status for f in findings] == ["FAILED"] + ["SKIPPED"] * 4
+
+
+def test_failed_call_remains_distinct_in_exports_and_report(verifier_pass, tmp_path):
+    import csv
+    import io
+    import json
+
+    from drawing_analyzer import export, html_report
+    from drawing_analyzer.investigate import _candidates
+    from tests.fixtures.fake_context import FakeContext
+
+    make, run = verifier_pass
+    failed, uncertain = make("failure"), make("inconclusive")
+    cache = DigestCache(tmp_path / "cache")
+    result = run(
+        [failed, uncertain], client=_ScriptedVerifyClient([
+            _StatusError(400, "bad <model> override"),
+            '{"verdict":"NOT_VISIBLE","note":"outside crop"}',
+        ]), max_workers=1, cache=cache, evidence_dir=tmp_path / "evidence",
+    )
+    assert result.failed == result.uncertain == 1
+    assert _candidates([failed, uncertain]) == [uncertain]
+    requests = [json.loads(p.read_text()) for p in (tmp_path / "evidence").rglob("request.json")]
+    assert {r["verdict"] for r in requests} == {"FAILED", "UNCERTAIN"}
+    assert failed.verification.evidence
+
+    ctx = FakeContext(sheets=[], findings=[failed, uncertain])
+    export.write_qc_outputs(ctx, tmp_path)
+    payload = json.loads((tmp_path / "findings.json").read_text())
+    restored = [Finding.from_dict(f) for f in payload["findings"]]
+    assert [f.verification.status for f in restored] == ["FAILED", "UNCERTAIN"]
+    assert _candidates(restored) == [restored[1]]
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "findings.csv").read_text(encoding="utf-8-sig"))))
+    assert [r["verification_status"] for r in rows] == ["FAILED", "UNCERTAIN"]
+    assert rows[0]["verification_note"] == failed.verification.note
+    from drawing_analyzer.annotate import _trust_note
+    assert "Verifier could not run" in _trust_note(failed, unverified=True, rejected=False)
+    report = html_report.build_html_report(ctx, source_names=[])
+    assert 'data-status="FAILED"' in report and ">Verifier could not run<" in report
+    assert 'data-status="UNCERTAIN"' in report and ">Uncertain<" in report
+    assert failed.verification.note in report
+
+    # Failure results are not cached; recovery must make a new live call.
+    recovered = _ScriptedVerifyClient(['{"verdict":"CONFIRMED","note":"visible"}'])
+    warm = run([make("failure")], client=recovered, cache=cache)
+    assert warm.cache_hits == 0 and warm.verified == recovered.calls == 1
 
 
 def test_verify_client_unavailable_skips_all(monkeypatch):
@@ -855,7 +1034,7 @@ def test_verify_carries_provenance_on_every_exit_not_only_the_verdict():
 
     errored = _finding("SUM-C", verif=_arithmetic_verification())
     _run([errored], client=_Boom())
-    assert errored.verification.status == "UNCERTAIN"
+    assert errored.verification.status == "FAILED"
     assert errored.verification.operand_origin == "MODEL_TRANSCRIBED"
 
 
@@ -937,7 +1116,8 @@ def test_verify_tallies_a_malformed_reply_as_not_judged():
     assert result.not_judged == 1
     assert result.degradation_note() == (
         "verification: 1 of 1 live verdict calls returned no judgment "
-        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN"
+        "(malformed=1, truncated=0, failed=0); "
+        "malformed/truncated replies were left UNCERTAIN, failed calls were marked FAILED"
     )
 
 
@@ -971,7 +1151,7 @@ def test_verify_tallies_a_failed_call_as_not_judged():
             self.messages = _Messages()
 
     result = _run([_finding("failure")], client=_FailureClient())
-    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (1, 0, 0, 1)
+    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (0, 0, 0, 1)
 
 
 def test_a_genuine_not_visible_is_a_judgment_not_a_degradation():
@@ -1149,7 +1329,7 @@ def test_verify_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
 
     client = _Broke()
     result = _run([_finding("a")], client=client, max_retries=0)
-    assert result.uncertain == 1 and result.failed == 1 and client.calls == 1
+    assert result.uncertain == 0 and result.failed == 1 and client.calls == 1
     assert V.STRUCTURED_OUTPUTS.available is True
 
 

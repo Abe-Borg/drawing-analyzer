@@ -131,7 +131,7 @@ REVIEW_NOTES_PAGE_LABEL = "AI DRAFT REVIEW - AI REVIEW NOTES"
 
 # Verification statuses trusted unconditionally. Under the Part III gating
 # amendment (§18) the exhaustive default inks EVERYTHING except REJECTED —
-# UNCERTAIN / SKIPPED render in the dashed "unverified" style; the conservative
+# UNCERTAIN / FAILED / SKIPPED render in the dashed "unverified" style; the conservative
 # "verified & deterministic only" mode (opt-in) restricts ink to this set.
 _TRUSTED = frozenset({"VERIFIED", "DETERMINISTIC"})
 # Rejected findings render grey/struck when explicitly opted in (--ink-rejected).
@@ -168,6 +168,7 @@ _TRUST_NOTE = {
     "VERIFIED": "AI-verified against the drawing.",
     "DETERMINISTIC": "Found by an exact text check of the drawings - not an AI judgment.",
     "UNCERTAIN": "Not yet verified - double-check on the sheet.",
+    "FAILED": "Verifier could not run - double-check on the sheet.",
     "SKIPPED": "Not yet verified - double-check on the sheet.",
     "REJECTED": "Rejected on AI re-check - kept for the record only.",
 }
@@ -213,6 +214,7 @@ _INDEX_STATUS_LABEL = {
     "VERIFIED": "Verified",
     "DETERMINISTIC": "Computed",
     "UNCERTAIN": "Check",
+    "FAILED": "Verifier failed",
     "SKIPPED": "Check",
     "REJECTED": "Rejected",
 }
@@ -744,10 +746,13 @@ def _trust_note(finding: Finding, *, unverified: bool, rejected: bool) -> str:
         return _TRUST_NOTE["REJECTED"]
     v = getattr(finding, "verification", None)
     origin = getattr(v, "operand_origin", "") if v is not None else ""
+    failed_note = _TRUST_NOTE["FAILED"] if getattr(v, "status", "") == "FAILED" else ""
     if origin == "TEXT_EXTRACTED":
-        return _TRUST_NOTE_TEXT_EXTRACTED
+        return " ".join(filter(None, (_TRUST_NOTE_TEXT_EXTRACTED, failed_note)))
     if origin == "MODEL_TRANSCRIBED":
-        return _TRUST_NOTE_MODEL_TRANSCRIBED
+        return " ".join(filter(None, (_TRUST_NOTE_MODEL_TRANSCRIBED, failed_note)))
+    if failed_note:
+        return _with_evidence_reason(finding, failed_note, status="FAILED")
     if unverified:
         note = (
             _TRUST_NOTE_SINGLE_READ
