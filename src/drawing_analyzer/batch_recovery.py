@@ -244,7 +244,8 @@ def recover_pending_batches(client: Any, cache: Any, *, sleep=time.sleep) -> Bat
         for key in _record_keys(record):
             state.blocked[key] = error
     # Also covers crashes during upload, before any receipt existed, and files
-    # retained after failed cancellation. Runs even when cache reuse is off.
-    from .file_upload import reap_uploaded_files
-    reap_uploaded_files(client, store, sleep=sleep)
+    # retained after failed cancellation. File delete retries must not delay
+    # analysis; only receipt recovery belongs on the synchronous path.
+    from .file_upload import start_upload_reaper
+    start_upload_reaper(client, store, sleep=sleep)
     return state

@@ -275,13 +275,101 @@ def test_startup_recovery_reaps_orphans_after_restart(tmp_path, monkeypatch):
     cache = DigestCache(path)
     files = Files()
     monkeypatch.setattr(file_upload.time, "time", lambda: NOW)
+    threads = []
+    start = file_upload.start_upload_reaper
+
+    def track(*args, **kwargs):
+        threads.append(start(*args, **kwargs))
+
+    monkeypatch.setattr(file_upload, "start_upload_reaper", track)
     state = recover_pending_batches(client_for(files), cache, sleep=NOSLEEP)
     assert not state.blocked and not state.recovered
+    threads[0].join(timeout=5)
+    assert not threads[0].is_alive()
     assert files.deleted == ["old-orphan"]
     cache.close()
     cache = DigestCache(path)
     assert cache.recorded_uploads() == []
     cache.close()
+
+
+def test_receipt_recovery_returns_while_orphan_delete_is_stalled(store, monkeypatch):
+    store.record_uploaded_file("old-orphan", uploaded_at=OLD)
+    # A live receipt must be checked and block duplicate paid work before return.
+    pending = receipt("live", ["live-file"], submitted_at=NOW)
+    pending["items"] = {"sheet": {"cache_key": "paid-key"}}
+    store.record_batch(pending)
+    delete_started = threading.Event()
+    release_delete = threading.Event()
+    recovery_done = threading.Event()
+    threads = []
+    result = []
+    errors = []
+    monkeypatch.setattr(file_upload.time, "time", lambda: NOW)
+    start = file_upload.start_upload_reaper
+
+    def track(*args, **kwargs):
+        threads.append(start(*args, **kwargs))
+
+    def stalled_delete(fid, attempt):
+        delete_started.set()
+        assert release_delete.wait(timeout=5)
+
+    files = Files(stalled_delete)
+    client = client_for(files, {"live": "in_progress"})
+    monkeypatch.setattr(file_upload, "start_upload_reaper", track)
+
+    def recover():
+        try:
+            result.append(recover_pending_batches(client, store, sleep=NOSLEEP))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            recovery_done.set()
+
+    recovery = threading.Thread(target=recover, daemon=True)
+    recovery.start()
+    try:
+        assert delete_started.wait(timeout=5)
+        assert recovery_done.wait(timeout=1), "orphan delete stalled synchronous recovery"
+        assert not errors
+        assert "paid-key" in result[0].blocked
+        assert files.deleted == []
+        assert {r["file_id"] for r in store.recorded_uploads()} == {"old-orphan", "live-file"}
+    finally:
+        release_delete.set()
+        recovery.join(timeout=5)
+        for thread in threads:
+            thread.join(timeout=5)
+    assert files.deleted == ["old-orphan"]
+
+
+def test_background_reaper_coalesces_overlapping_requests_and_allows_later_runs(store, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def reap(client, cache, *, sleep):
+        calls.append((client, cache, sleep))
+        started.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(file_upload, "reap_uploaded_files", reap)
+    first = file_upload.start_upload_reaper("client", store, sleep=NOSLEEP)
+    try:
+        assert started.wait(timeout=5)
+        overlapping = file_upload.start_upload_reaper("client", store, sleep=NOSLEEP)
+        overlapping.join(timeout=1)
+        assert not overlapping.is_alive()
+        assert calls == [("client", store, NOSLEEP)]
+    finally:
+        release.set()
+        first.join(timeout=5)
+    assert not first.is_alive()
+    later = file_upload.start_upload_reaper("client", store, sleep=NOSLEEP)
+    later.join(timeout=5)
+    assert not later.is_alive()
+    assert calls == [("client", store, NOSLEEP)] * 2
 
 
 def test_legacy_pending_receipt_ids_migrate_and_are_not_resurrected(tmp_path):

@@ -70,6 +70,8 @@ DEFAULT_DELETE_MAX_RETRIES = 4
 # for clock skew/status propagation, including later batches reusing the IDs.
 UPLOAD_REAP_MIN_AGE_SECONDS = 25 * 60 * 60
 _TERMINAL_BATCH_STATUSES = frozenset({"ended", "failed", "expired", "canceled"})
+_reaper_lock = threading.Lock()
+_active_reaper_stores: set[Any] = set()
 
 
 def _resolve_upload_workers(image_count: int, override: int | None = None) -> int:
@@ -623,6 +625,28 @@ def reap_uploaded_files(client: Any = None, cache: Any = None, *, now: float | N
         return []
 
 
-def start_upload_reaper() -> None:
-    """Start maintenance off the GUI thread; interrupted IDs remain durable."""
-    threading.Thread(target=reap_uploaded_files, daemon=True, name="upload-reaper").start()
+def start_upload_reaper(client: Any = None, cache: Any = None, *,
+                        sleep: Any = time.sleep) -> threading.Thread:
+    """Dispatch maintenance without delaying GUI startup or receipt recovery.
+
+    Concurrent startup/run requests share one active reaper per store. The
+    daemon may be interrupted at exit; unremoved IDs remain durably recorded.
+    Return the thread so callers/tests can await maintenance explicitly.
+    """
+    def run() -> None:
+        from .batch_recovery import recovery_cache
+
+        store = recovery_cache(cache)
+        with _reaper_lock:
+            if store in _active_reaper_stores:
+                return
+            _active_reaper_stores.add(store)
+        try:
+            reap_uploaded_files(client, store, sleep=sleep)
+        finally:
+            with _reaper_lock:
+                _active_reaper_stores.discard(store)
+
+    thread = threading.Thread(target=run, daemon=True, name="upload-reaper")
+    thread.start()
+    return thread
