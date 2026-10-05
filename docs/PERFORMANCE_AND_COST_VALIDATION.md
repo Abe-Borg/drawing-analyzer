@@ -6,6 +6,50 @@ repeated runs**, never single runs. The harness is
 `scripts/benchmark_drawing_analyzer.py`; it writes
 `benchmark_report.{json,md}` for attachment to the release record.
 
+## Pre-run estimate assumptions
+
+Drawing preflight runs when files are loaded, including installations with no
+review profiles. A single background scan supplies page geometry and optional
+profile suggestions. Generation and file fingerprints still gate measured
+bases; incomplete or stale scans use the existing image allowance.
+
+No real `run_manifest.json` usage records were supplied for this calibration.
+The output range is therefore a planning allowance, **including billed adaptive
+thinking**, rather than a measured average:
+
+| Quantity | Lower planning end | Upper planning end |
+| --- | --- | --- |
+| Digest or critique output per read | 4,000 tokens | Runtime read envelope, currently 64,000 tokens, clamped to the stage model |
+| Exhaustive findings per sheet | 8 | 20 |
+| Investigation per uncertain finding | Up to 3 evidence requests + closing call; 1,500 output tokens/call | Configured request limit, currently 6 + closing call; full 16,000-token output envelope/call |
+
+The finding assumption allows growth beyond the recorded standard run's 287
+findings on 39 sheets (7.36 per sheet) from critique, cross-QC and auditors. It
+is not an observed exhaustive distribution. Investigation respects the runtime
+finding cap and round override; its upper input estimate includes accumulated
+evidence and complete assistant replies, including thinking blocks in the tool
+loop's history. The model's advisory task budget is not a
+host-enforced spending limit.
+
+Cross-QC includes map and reconciliation calls above the runtime's 40-sheet
+threshold. Without known discipline groups, its band spans the fewest possible
+shards through one shard per sheet, with reconciliation fact/pair limits from
+the runtime. Its wide upper end describes an extreme grouping, not typical
+spend. Digest thinking is never counted as input to later text passes. Batch
+discounts apply to digest/critique output; prefix-cache discounts apply only to
+critique input. The current Opus 5.5 price and cache-read multiplier come from
+the shared pricing registry. Measured image inputs now price the renderer's
+physical-size grid policy separately for each page, including mixed-size sets.
+
+Both GUI headlines and dialogs show the band. Standard `total_cost` and
+`output_tokens` retain their compatibility fields and now represent the upper
+planning end; `low_cost`, `high_cost` and `output_tokens_low` expose the band.
+These ranges are not spending caps: retries, input text and actual finding
+volume can move a run outside them. To replace the assumptions with measured
+values, use billable per-read usage output (which includes thinking), retain
+paid retries, exclude local cache hits, separate stage/model/transport, and
+divide findings by the run's successfully read sheet count.
+
 ## How to run
 
 ```bash

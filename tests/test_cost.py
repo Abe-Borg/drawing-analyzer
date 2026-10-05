@@ -15,7 +15,7 @@ from drawing_analyzer.core.pricing import (
 from drawing_analyzer.cost import (
     _ASSUMED_FOCUS_OUTPUT_TOKENS as FOCUS_OUT,
     _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET as FOCUS_PER_SHEET,
-    _ASSUMED_OUTPUT_TOKENS_PER_SHEET as OUT_PER_SHEET,
+    _ASSUMED_DIGEST_TEXT_TOKENS_PER_SHEET as TEXT_PER_SHEET,
     _ASSUMED_PROMPT_TOKENS_PER_SHEET as PROMPT_PER_SHEET,
     _ASSUMED_SYNTHESIS_OUTPUT_TOKENS as SYNTH_OUT,
     estimate_drawing_set_cost,
@@ -25,6 +25,7 @@ from drawing_analyzer.cost import (
 )
 
 OPUS = "claude-opus-5-5"
+OUT_PER_SHEET = 64_000
 
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +115,7 @@ def test_drawing_estimate_synthesis_adds_a_pass():
     # Synthesis re-reads the digests (10*OUT) + one prompt overhead as input,
     # and emits the overview as output.
     assert synth.output_tokens == base.output_tokens + SYNTH_OUT
-    assert synth.input_tokens == base.input_tokens + 10 * OUT_PER_SHEET + PROMPT_PER_SHEET
+    assert synth.input_tokens == base.input_tokens + 10 * TEXT_PER_SHEET + PROMPT_PER_SHEET
     assert synth.total_cost > base.total_cost
 
 
@@ -150,11 +151,12 @@ def test_format_prompt_unknown_model_says_unavailable():
 def test_drawing_estimate_focus_adds_sections_and_a_pass():
     base = estimate_drawing_set_cost(10, model=OPUS, synthesize=False)
     focused = estimate_drawing_set_cost(10, model=OPUS, synthesize=False, focus=True)
-    digest_out = 10 * (OUT_PER_SHEET + FOCUS_PER_SHEET)
+    digest_out = 10 * OUT_PER_SHEET
+    digest_text = 10 * (TEXT_PER_SHEET + FOCUS_PER_SHEET)
     # Each sheet's digest grows by its focus-findings section, and the focus
     # report re-reads the (grown) digests + one prompt overhead as input.
     assert focused.output_tokens == digest_out + FOCUS_OUT
-    assert focused.input_tokens == base.input_tokens + digest_out + PROMPT_PER_SHEET
+    assert focused.input_tokens == base.input_tokens + digest_text + PROMPT_PER_SHEET
     assert focused.total_cost > base.total_cost
 
 
@@ -186,7 +188,7 @@ def test_drawing_estimate_batch_keeps_synthesis_at_realtime_rate():
     with_synthesis = estimate_drawing_set_cost(
         10, model=OPUS, batch=True, synthesize=True
     )
-    synth_input = 10 * OUT_PER_SHEET + PROMPT_PER_SHEET
+    synth_input = 10 * TEXT_PER_SHEET + PROMPT_PER_SHEET
     expected_delta = estimate_request_cost(
         synth_input, SYNTH_OUT, model=OPUS, batch=False
     )
@@ -200,11 +202,11 @@ def test_drawing_estimate_batch_keeps_focus_report_at_realtime_rate():
         10, model=OPUS, batch=True, synthesize=False, focus=True
     )
     digest_input = focused.image_tokens + 10 * PROMPT_PER_SHEET
-    digest_output = 10 * (OUT_PER_SHEET + FOCUS_PER_SHEET)
+    digest_output = 10 * OUT_PER_SHEET
     digest_cost = estimate_request_cost(
         digest_input, digest_output, model=OPUS, batch=True
     )
-    focus_input = digest_output + PROMPT_PER_SHEET
+    focus_input = 10 * (TEXT_PER_SHEET + FOCUS_PER_SHEET) + PROMPT_PER_SHEET
     focus_cost = estimate_request_cost(
         focus_input, FOCUS_OUT, model=OPUS, batch=False
     )
@@ -574,26 +576,15 @@ def test_no_dialog_claims_the_qc_stages_always_bill():
         assert "whole set" in text
 
 
-def test_the_copy_fix_moved_no_price():
-    """§9.3 case 8, second half. Wording only — every total is unchanged.
-
-    Values captured from the estimator before the copy edit (re-captured at
-    the Opus 5.5 rates when the default generation moved). If one of these
-    moves, someone "corrected" arithmetic the plan established is already
-    correct (§2.4), and the batch/real-time relationship below is the property
-    that would silently invert.
-    """
-    assert estimate_drawing_set_cost(
-        10, file_count=1, model=OPUS, rows=6, cols=6, batch=True, spec_chars=40_000
-    ).total_cost == pytest.approx(4.08, abs=0.005)
-    assert estimate_drawing_set_cost(
-        10, file_count=1, model=OPUS, rows=6, cols=6, batch=False, spec_chars=40_000
-    ).total_cost == pytest.approx(7.70, abs=0.005)
-
-    ex = estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, rows=6, cols=6, batch=True,
-                                      critique_batch=True, spec_chars=40_000)
-    assert ex.low_cost == pytest.approx(11.93, abs=0.005)
-    assert ex.high_cost == pytest.approx(13.20, abs=0.005)
+def test_specifications_add_the_same_charge_to_both_band_ends():
+    """Thinking bands must preserve transport-specific specification pricing."""
+    for estimator in (estimate_drawing_set_cost, estimate_exhaustive_run_cost):
+        for batch in (True, False):
+            plain = estimator(10, model=OPUS, batch=batch)
+            specs = estimator(10, model=OPUS, batch=batch, spec_chars=40_000)
+            expected = 0.20 if batch else 0.068
+            assert specs.low_cost - plain.low_cost == pytest.approx(expected)
+            assert specs.high_cost - plain.high_cost == pytest.approx(expected)
 
 
 def test_a_dialog_without_specifications_says_nothing_about_them():
@@ -659,3 +650,103 @@ def test_no_user_facing_string_promises_a_longer_wait_than_the_engine_allows():
         f"user-facing text promises up to {max(promised)}h but the engine "
         f"waits {bound_hours}h"
     )
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_standard_band_prices_thinking_as_output_at_both_ends(batch):
+    est = estimate_drawing_set_cost(1, model=OPUS, batch=batch)
+    assert est.output_tokens_low == 4_000
+    assert est.output_tokens == 64_000
+    # Opus 5.5 bills $20/M output ($10/M in Batch). The input is identical
+    # at both ends; none of this output allowance receives an input-cache rate.
+    rate = 10 if batch else 20
+    assert est.high_cost - est.low_cost == pytest.approx(60_000 / 1_000_000 * rate)
+    observed = estimate_request_cost(est.input_tokens, 16_000 + 2_000, model=OPUS, batch=batch)
+    assert est.low_cost < observed < est.high_cost
+    assert est.total_cost == est.high_cost  # compatibility field is the upper end
+
+
+def test_thinking_is_not_sent_back_as_synthesis_or_focus_input():
+    est = estimate_drawing_set_cost(2, model=OPUS, focus=True)
+    assert est.input_tokens - est.image_tokens == 2 * 800 + 2 * (2 * 2_500 + 800)
+    assert est.output_tokens_low == 2 * 4_500 + 2_000 + 2_000
+    assert est.output_tokens == 2 * 64_000 + 2_000 + 2_000
+
+
+def test_read_bands_obey_model_output_ceiling(monkeypatch):
+    from dataclasses import replace
+    from drawing_analyzer.core import api_config
+
+    caps = api_config.model_capabilities(OPUS)
+    monkeypatch.setitem(api_config._MODEL_CAPABILITIES, OPUS, replace(caps, max_output_tokens=8_000))
+    est = estimate_drawing_set_cost(1, model=OPUS)
+    assert est.output_tokens == 8_000
+    full = estimate_exhaustive_run_cost(1, model=OPUS)
+    critique = next(c for c in full.components if c.stage.startswith("Critique"))
+    assert critique.output_tokens == 2 * 8_000
+
+
+@pytest.mark.parametrize("batch,critique_batch", [(True, True), (False, False), (False, True)])
+def test_exhaustive_band_sums_each_stage_once(batch, critique_batch):
+    est = estimate_exhaustive_run_cost(39, model=OPUS, batch=batch, critique_batch=critique_batch)
+    digest, critique = est.components[0], next(c for c in est.components if c.stage.startswith("Critique"))
+    assert (digest.output_tokens_low, digest.output_tokens) == (39 * 4_000, 39 * 64_000)
+    assert (critique.output_tokens_low, critique.output_tokens) == (2 * 39 * 4_000, 2 * 39 * 64_000)
+    assert est.low_cost == pytest.approx(sum(c.low_cost for c in est.components))
+    assert est.high_cost == pytest.approx(sum(c.cost for c in est.components))
+    assert est.low_cost < est.high_cost
+
+
+def test_findings_band_includes_recorded_standard_volume_and_exhaustive_growth():
+    est = estimate_exhaustive_run_cost(39, model=OPUS)
+    verify = next(c for c in est.components if c.stage == "Verification")
+    assert verify.output_tokens_low == 39 * 8 * 1_400
+    assert verify.output_tokens == 39 * 20 * 1_400
+    assert 287 < verify.output_tokens_low / 1_400
+    assert "8–20 findings per sheet" in format_exhaustive_cost_prompt(est)
+
+
+def test_investigation_prices_six_evidence_requests_and_the_closing_call(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", "1")
+    est = estimate_exhaustive_run_cost(39, model=OPUS)
+    inv = next(c for c in est.components if c.stage == "Investigation")
+    assert inv.output_tokens_low == 4 * 1_500
+    assert inv.output_tokens == 7 * 16_000
+    assert inv.input_tokens_low == 4 * 6_000
+    assert inv.input_tokens == 7 * 6_000 + 21 * (4_000 + 16_000)
+    assert "6 evidence requests + closing verdict" in inv.note
+
+
+def test_investigation_honors_round_budget_and_resolved_model(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS", "2")
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", "1")
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", "claude-sonnet-5")
+    inv = next(c for c in estimate_exhaustive_run_cost(39, model=OPUS).components if c.stage == "Investigation")
+    assert inv.output_tokens == 3 * 16_000
+    assert inv.output_tokens_low == 3 * 1_500
+    assert inv.cost == pytest.approx(estimate_request_cost(inv.input_tokens, inv.output_tokens, model="claude-sonnet-5"))
+
+
+@pytest.mark.parametrize("sheets,min_calls", [(40, 1), (41, 3), (81, 4)])
+def test_cross_qc_accounts_for_shards_and_reconciliation(sheets, min_calls):
+    cross = next(c for c in estimate_exhaustive_run_cost(sheets, model=OPUS).components if c.stage == "Cross-sheet QC")
+    assert cross.output_tokens_low == min_calls * 2_000
+    assert cross.output_tokens >= min_calls * 16_000
+    if sheets > 40:
+        assert "discipline shard(s)" in cross.note
+        assert "reconciliation call(s)" in cross.note
+        assert cross.input_tokens > cross.input_tokens_low
+
+
+def test_dialogs_explain_the_output_band_without_promising_half_price():
+    for text in (_dialog(batch=True), _exhaustive_dialog(batch=True, critique_batch=True)):
+        assert "adaptive thinking, which is billed as output" in text
+        assert "No real run usage records" in text
+        assert "under half" not in text
+        assert "not a cap" in text
+
+
+def test_unknown_standard_stage_voids_both_band_ends(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "unknown-price")
+    est = estimate_drawing_set_cost(2, model=OPUS)
+    assert est.low_cost is None and est.high_cost is None

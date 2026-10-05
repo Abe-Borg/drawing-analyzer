@@ -3,16 +3,15 @@
 Reading drawings is the app's most expensive action — one Opus 5 vision call
 per sheet, each carrying the overview image plus every grid tile. This estimates
 the spend *before* the run so the GUI can surface it and let the operator
-confirm or cancel. It is deliberately a rough, slightly-high estimate (the image
--token figure is the per-model worst case, and per-sheet output/prompt sizes are
-fixed assumptions) — the goal is an honest order-of-magnitude heads-up, not an
-invoice. Pure + hermetic (no PyMuPDF, no network): the caller supplies the sheet
-count (cheap to obtain via ``render.list_sheets``).
+confirm or cancel. Image inputs use measured geometry when available; billed
+output includes adaptive thinking and is quoted as a planning band. Without
+real usage records these are assumptions, not an invoice or a spending cap.
+Pure + hermetic (no PyMuPDF, no network).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import math
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
@@ -52,9 +51,13 @@ def _batch_wait_sentence() -> str:
 # Per-sheet text overhead of the digest prompt (system + user instruction); the
 # images dominate, so a fixed estimate is fine.
 _ASSUMED_PROMPT_TOKENS_PER_SHEET = 800
-# Typical structured digest output per sheet — well under the 16k cap; real
-# digests rarely approach it, so using the cap would wildly overstate cost.
-_ASSUMED_OUTPUT_TOKENS_PER_SHEET = 2_000
+# Visible digest text, used only when a later stage reads the digest. Thinking
+# is billed as output but never passed to synthesis, focus or cross-sheet QC.
+_ASSUMED_DIGEST_TEXT_TOKENS_PER_SHEET = 2_000
+# No real run manifests are available for calibration. A 4k lower planning
+# allowance includes modest thinking; the upper end uses the runtime's full
+# read envelope. The recorded 16k-thinking reads fit inside this band.
+_ASSUMED_READ_OUTPUT_TOKENS_LOW = 4_000
 # The synthesis pass emits one set-level overview.
 _ASSUMED_SYNTHESIS_OUTPUT_TOKENS = 2_000
 # A per-run focus adds one per-sheet "Focus findings" section to each digest
@@ -66,6 +69,24 @@ _ASSUMED_FOCUS_OUTPUT_TOKENS = 2_000
 # implicit elsewhere in this module's assumed-token constants — used to turn
 # an uploaded project-specifications char count into a display token count.
 _SPEC_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _read_output_band(*, model: str, critique: bool = False, focus: bool = False) -> tuple[int, int]:
+    from .core.api_config import output_cap_for_model
+    from .critique import DEFAULT_CRITIQUE_MAX_TOKENS
+    from .digest import DEFAULT_DIGEST_MAX_TOKENS
+
+    high = output_cap_for_model(
+        model, requested=DEFAULT_CRITIQUE_MAX_TOKENS if critique else DEFAULT_DIGEST_MAX_TOKENS
+    )
+    low = _ASSUMED_READ_OUTPUT_TOKENS_LOW
+    if focus and not critique:
+        low += _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
+    return min(low, high), high
+
+
+def _sum_costs(costs: Sequence[float | None]) -> float | None:
+    return None if any(c is None for c in costs) else sum(c for c in costs if c is not None)
 
 
 def _specs_cost_contribution(
@@ -291,6 +312,13 @@ class DrawingCostEstimate:
     #: measured set (unreadable, or unclassifiable). 0 on a fully conservative
     #: estimate too — read it together with ``shape_aware``.
     unmeasured_pages: int = 0
+    #: The legacy output_tokens/total_cost fields carry the upper planning end.
+    output_tokens_low: int | None = None
+    low_cost: float | None = None
+
+    @property
+    def high_cost(self) -> float | None:
+        return self.total_cost
 
 
 def estimate_drawing_set_cost(
@@ -334,12 +362,16 @@ def estimate_drawing_set_cost(
     image_tokens, shape_aware, unmeasured = _image_tokens_for(
         sheet_count, bases, rows=rows, cols=cols, model=model
     )
-    digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
+    read_low, read_high = _read_output_band(model=model, focus=focus)
+    digest_output = sheet_count * read_high
+    digest_output_low = sheet_count * read_low
+    digest_text = sheet_count * _ASSUMED_DIGEST_TEXT_TOKENS_PER_SHEET
     if focus:
-        digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
+        digest_text += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
     digest_input = image_tokens + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
     input_tokens = digest_input
     output_tokens = digest_output
+    output_tokens_low = digest_output_low
     stage_costs: list[float | None] = [
         estimate_request_cost(
             digest_input, digest_output, model=model, batch=batch
@@ -347,10 +379,10 @@ def estimate_drawing_set_cost(
     ]
 
     if synthesize and sheet_count >= 2:
-        # Synthesis re-reads the per-sheet digests (≈ digest_output) as text.
-        synth_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        synth_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         input_tokens += synth_input
         output_tokens += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
+        output_tokens_low += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
         stage_costs.append(estimate_request_cost(
             synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
             model=stage_models.synthesis, batch=False,
@@ -358,17 +390,19 @@ def estimate_drawing_set_cost(
 
     if focus and sheet_count >= 1:
         # The focus report likewise re-reads the per-sheet digests as text.
-        focus_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        focus_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         input_tokens += focus_input
         output_tokens += _ASSUMED_FOCUS_OUTPUT_TOKENS
+        output_tokens_low += _ASSUMED_FOCUS_OUTPUT_TOKENS
         stage_costs.append(estimate_request_cost(
             focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
             model=stage_models.focus, batch=False,
         ))
 
-    total_cost = None if any(c is None for c in stage_costs) else sum(
-        c for c in stage_costs if c is not None
-    )
+    low_cost = _sum_costs([estimate_request_cost(
+        digest_input, digest_output_low, model=model, batch=batch
+    ), *stage_costs[1:]])
+    total_cost = _sum_costs(stage_costs)
     spec_display_tokens, spec_cost = _specs_cost_contribution(
         spec_chars, sheet_count, model=model, batch=batch
     )
@@ -377,6 +411,7 @@ def estimate_drawing_set_cost(
     # that case. Propagates an unknown-priced model's ``None`` from either
     # side, rather than coercing it into a bogus, spec-cost-only total.
     total_cost = None if total_cost is None or spec_cost is None else total_cost + spec_cost
+    low_cost = None if low_cost is None or spec_cost is None else low_cost + spec_cost
     input_tokens += spec_display_tokens
     return DrawingCostEstimate(
         sheet_count=sheet_count,
@@ -385,7 +420,9 @@ def estimate_drawing_set_cost(
         image_tokens=image_tokens,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        output_tokens_low=output_tokens_low,
         total_cost=total_cost,
+        low_cost=low_cost,
         batch=batch,
         spec_chars=spec_chars,
         shape_aware=shape_aware,
@@ -402,8 +439,14 @@ _BASIS_MEASURED = (
 )
 _BASIS_CONSERVATIVE = (
     "Conservative planning estimate — the pages have not been measured yet, so "
-    "this assumes the most expensive shape. The real figure is usually well "
-    "under half of it."
+    "the image allowance assumes the most expensive shape."
+)
+
+_OUTPUT_BAND_NOTE = (
+    "Output ranges include adaptive thinking, which is billed as output. "
+    "No real run usage records were supplied for calibration; the read ranges "
+    "allow modest thinking through the full per-read output envelope. "
+    "Retries and unusually large text inputs can add cost."
 )
 
 
@@ -438,8 +481,11 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         f"{friendly_model_name(est.model)} vision — {how}.",
         "",
         f"Estimated usage: ~{est.input_tokens:,} input tokens "
-        f"(~{est.image_tokens:,} from images) / ~{est.output_tokens:,} output.",
+        f"(~{est.image_tokens:,} from images) / "
+        f"{est.output_tokens_low if est.output_tokens_low is not None else est.output_tokens:,}"
+        f"–{est.output_tokens:,} output.",
         _basis_line(est.shape_aware, est.unmeasured_pages),
+        _OUTPUT_BAND_NOTE,
     ]
     if est.spec_chars:
         # WP-04 §9.2. The old line promised a ~0.1x prompt-cache read on BOTH
@@ -466,7 +512,10 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             if est.batch else ""
         )
         lines.append(
-            f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough "
+            "Estimated cost: "
+            + (f"${est.low_cost:,.2f} – ${est.high_cost:,.2f}" if est.low_cost is not None
+               else f"~${est.total_cost:,.2f}")
+            + f"{batch_note} — a rough "
             "estimate, not a cap. "
             + ("The image figure now comes from the pages themselves, but the "
                "text riding with each sheet is not bounded by it, so a "
@@ -508,15 +557,13 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
 #
 # When QC Markups is on the run is the full exhaustive stack (DA-010), so the
 # digest-only figure above badly under-states it. This preview adds a component
-# per paid QC stage and a total **range** — verification and citation scale with
-# the finding / unique-claim count, which isn't known until the digests complete,
-# so they are quoted as a per-sheet low–high band rather than a single number.
+# per paid QC stage and a total range: billed thinking, finding/claim volume,
+# investigation rounds, prefix reuse and discipline sharding vary pre-run.
 
 # Per-read critique output. Each of the two reads bills the sheet's image input
 # again (its input ≈ the digest images) — but in a ``use_batch`` run both reads
 # ride one Message Batch referencing a single shared upload (Phase 23C), so the
 # rate is halved and the sheet is uploaded once, not re-rendered per read.
-_ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ = 1_500
 _ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
 _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
 _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS = 500
@@ -544,9 +591,11 @@ _ASSUMED_IDENTITY_OUTPUT_TOKENS = 1_200
 _ASSUMED_PLAN_INPUT_TOKENS_BASE = 2_000
 _ASSUMED_PLAN_INPUT_TOKENS_PER_SHEET = 250
 _ASSUMED_PLAN_OUTPUT_TOKENS = 2_500
-# Finding / unique-claim counts are unknown pre-run — a per-sheet low–high band.
-_FINDINGS_PER_SHEET_LOW = 0.5
-_FINDINGS_PER_SHEET_HIGH = 3.0
+# A recorded standard run had 287 / 39 = 7.36 findings per sheet. Exhaustive
+# mode adds critique, cross-QC and auditor findings. This 8–20 planning band
+# allows that growth; it is an assumption, not a measured distribution.
+_FINDINGS_PER_SHEET_LOW = 8.0
+_FINDINGS_PER_SHEET_HIGH = 20.0
 _CLAIMS_PER_SHEET_LOW = 0.1
 _CLAIMS_PER_SHEET_HIGH = 1.0
 # Phase C investigation — a multi-turn escalation of the findings that stay
@@ -555,9 +604,10 @@ _CLAIMS_PER_SHEET_HIGH = 1.0
 # (history replay + one new crop per turn). Capped at the per-run default
 # budget — the cap the stage itself enforces, which scales with the set.
 _UNCERTAIN_FINDINGS_FRACTION = 0.2
-_ASSUMED_INVESTIGATE_ROUNDS = 3
+_ASSUMED_INVESTIGATE_ROUNDS_LOW = 3
 _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND = 6_000
-_ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND = 300
+_ASSUMED_INVESTIGATE_EVIDENCE_TOKENS_PER_ROUND = 4_000
+_ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND_LOW = 1_500
 
 
 @dataclass(frozen=True)
@@ -570,6 +620,9 @@ class CostComponent:
     cost: float | None       # None when the model's price is unknown
     transport: str           # "batch" | "real-time"
     note: str = ""
+    low_cost: float | None = None
+    output_tokens_low: int | None = None
+    input_tokens_low: int | None = None
 
 
 @dataclass(frozen=True)
@@ -692,14 +745,22 @@ def _stage_note(note: str, *, stage_model: str, primary: str) -> str:
 def _component(
     stage: str, input_tokens: int, output_tokens: int, *, model: str, batch: bool,
     extra_cost: float = 0.0, note: str = "", primary_model: str | None = None,
+    input_tokens_low: int | None = None, output_tokens_low: int | None = None,
 ) -> CostComponent:
     base = estimate_request_cost(input_tokens, output_tokens, model=model, batch=batch)
     cost = None if base is None else base + extra_cost
+    low_base = estimate_request_cost(
+        input_tokens if input_tokens_low is None else input_tokens_low,
+        output_tokens if output_tokens_low is None else output_tokens_low,
+        model=model, batch=batch,
+    )
     if primary_model is not None:
         note = _stage_note(note, stage_model=model, primary=primary_model)
     return CostComponent(
         stage=stage, input_tokens=input_tokens, output_tokens=output_tokens,
         cost=cost, transport="batch" if batch else "real-time", note=note,
+        low_cost=None if low_base is None else low_base + extra_cost,
+        input_tokens_low=input_tokens_low, output_tokens_low=output_tokens_low,
     )
 
 
@@ -741,8 +802,6 @@ def _critique_prefix_costs(
     read gets no breakpoint either. Both collapse to ordinary input, so both
     scenarios return the same figure.
     """
-    from decimal import Decimal
-
     per_read_out = usage_record_cost(
         model=model, output_tokens=output_tokens, batch=batch
     )
@@ -770,6 +829,55 @@ def _critique_prefix_costs(
     return float(reuse), float(no_reuse)
 
 
+def _cross_qc_component(sheet_count: int, digest_text: int, *, model: str,
+                        primary_model: str) -> CostComponent:
+    """Price map/reconcile work without pretending we know discipline groups.
+
+    With only a sheet count, ceil(n/40) is the fewest shards, and n is the
+    most (one discipline per sheet). Carry both scenarios rather than quote
+    the minimum as if it were the actual shard count. Reconciliation uses the
+    runtime's fact limits and pair-call backstop; actual facts can cost less.
+    """
+    from math import ceil
+    from .core.api_config import PHASE_CROSS_QC, phase_output_cap
+    from .cross_qc import (
+        DEFAULT_MAP_MAX_FACTS, MAX_FACTS_PER_RECONCILE,
+        MAX_SHEETS_SINGLE_CALL, _MAX_RECONCILE_PAIR_CALLS,
+    )
+
+    sharded = sheet_count > MAX_SHEETS_SINGLE_CALL
+    maps_low = ceil(sheet_count / MAX_SHEETS_SINGLE_CALL) if sharded else 1
+    maps_high = sheet_count if sharded else 1
+
+    def reconcile_calls(maps: int) -> int:
+        if not sharded:
+            return 0
+        facts = maps * DEFAULT_MAP_MAX_FACTS
+        if facts <= MAX_FACTS_PER_RECONCILE:
+            return 1
+        groups = ceil(facts / max(1, MAX_FACTS_PER_RECONCILE // 2))
+        return min(groups * (groups - 1) // 2, _MAX_RECONCILE_PAIR_CALLS)
+
+    rec_low, rec_high = reconcile_calls(maps_low), reconcile_calls(maps_high)
+    # Cross-QC also reads up to 4k characters of text layer per sheet. Compact
+    # map facts are assumed to occupy 150 tokens each, plus the sheet manifest.
+    def inputs(maps: int, recs: int) -> int:
+        fact_tokens = min(maps * DEFAULT_MAP_MAX_FACTS, MAX_FACTS_PER_RECONCILE) * 150
+        return (digest_text + sheet_count * 1_000 + maps * _ASSUMED_PROMPT_TOKENS_PER_SHEET
+                + recs * (fact_tokens + sheet_count * 30 + _ASSUMED_PROMPT_TOKENS_PER_SHEET))
+
+    high_out = phase_output_cap(PHASE_CROSS_QC, model=model)
+    note = (f"{maps_low}–{maps_high} discipline shard(s) + {rec_low}–{rec_high} "
+            "reconciliation call(s); discipline grouping and fact volume unknown"
+            if sharded else "one text-only whole-set pass")
+    return _component(
+        "Cross-sheet QC", inputs(maps_high, rec_high), (maps_high + rec_high) * high_out,
+        input_tokens_low=inputs(maps_low, rec_low),
+        output_tokens_low=(maps_low + rec_low) * min(_ASSUMED_CROSS_QC_OUTPUT_TOKENS, high_out),
+        model=model, batch=False, note=note + "; thinking included", primary_model=primary_model,
+    )
+
+
 def estimate_exhaustive_run_cost(
     sheet_count: int,
     *,
@@ -791,8 +899,8 @@ def estimate_exhaustive_run_cost(
     prices Economy (both batch), Hybrid (real-time digest/batch critique), and
     Fast (both real-time) without changing any model or review contract.
     Synthesis, focus, cross-QC,
-    verification, and citation still run real-time. Verification and citation
-    are quoted as a low–high band because their volume tracks the finding /
+    verification, and citation still run real-time. Output includes thinking
+    in a low–high band. Verification and citation also vary with the finding /
     unique-claim count. Verification is priced with the same independently
     configurable model the runtime verifier resolves.
     A component whose model price is unknown carries ``cost=None`` and makes
@@ -838,14 +946,20 @@ def estimate_exhaustive_run_cost(
     # focus report are synchronous calls even when digest/critique use Batch, so
     # show and price them independently rather than discounting them by mistake.
     digest_input = digest_set_images + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
-    digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
+    read_low, read_high = _read_output_band(model=model, focus=focus)
+    digest_output = sheet_count * read_high
+    digest_output_low = sheet_count * read_low
+    digest_text = sheet_count * _ASSUMED_DIGEST_TEXT_TOKENS_PER_SHEET
     if focus:
-        digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
+        digest_text += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
     spec_display_tokens, spec_cost = _specs_cost_contribution(
         spec_chars, sheet_count, model=model, batch=batch,
     )
     digest_cost = estimate_request_cost(
         digest_input, digest_output, model=model, batch=batch,
+    )
+    digest_low_cost = estimate_request_cost(
+        digest_input, digest_output_low, model=model, batch=batch,
     )
     if digest_cost is None or spec_cost is None:
         digest_total_cost = None
@@ -856,18 +970,20 @@ def estimate_exhaustive_run_cost(
         input_tokens=digest_input + spec_display_tokens,
         output_tokens=digest_output,
         cost=digest_total_cost,
+        low_cost=_sum_costs([digest_low_cost, spec_cost]),
+        output_tokens_low=digest_output_low,
         transport="batch" if batch else "real-time",
-        note="one vision call per sheet",
+        note=f"one vision call per sheet; {read_low:,}–{read_high:,} output tokens/read, including thinking",
     ))
     if sheet_count >= 2:
-        synth_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        synth_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         components.append(_component(
             "Synthesis", synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
             model=stage_models.synthesis, batch=False,
             note="one text-only set overview", primary_model=model,
         ))
     if focus and sheet_count >= 1:
-        focus_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        focus_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         components.append(_component(
             "Focus report", focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
             model=stage_models.focus, batch=False,
@@ -922,9 +1038,15 @@ def estimate_exhaustive_run_cost(
         + _ASSUMED_PROMPT_TOKENS_PER_SHEET
     )
     crit_in = runs * sheet_count * crit_prefix
-    crit_out = runs * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
-    crit_low, crit_high = _critique_prefix_costs(
-        prefix_tokens=crit_prefix, output_tokens=_ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ,
+    crit_read_low, crit_read_high = _read_output_band(model=stage_models.critique, critique=True)
+    crit_out = runs * sheet_count * crit_read_high
+    crit_low, _ = _critique_prefix_costs(
+        prefix_tokens=crit_prefix, output_tokens=crit_read_low,
+        sheet_count=sheet_count, runs=runs,
+        model=stage_models.critique, batch=critique_batch,
+    )
+    _, crit_high = _critique_prefix_costs(
+        prefix_tokens=crit_prefix, output_tokens=crit_read_high,
         sheet_count=sheet_count, runs=runs,
         model=stage_models.critique, batch=critique_batch,
     )
@@ -939,21 +1061,20 @@ def estimate_exhaustive_run_cost(
         # The representative row shows the pessimistic end, matching how
         # verification and citation are displayed; the band carries both.
         cost=crit_high,
+        low_cost=crit_low,
+        output_tokens_low=runs * sheet_count * crit_read_low,
         transport="batch" if critique_batch else "real-time",
         note=_stage_note(
-            f"{runs} full read(s) per sheet{transport_note}",
+            f"{runs} full read(s) per sheet{transport_note}; "
+            f"{crit_read_low:,}–{crit_read_high:,} output tokens/read, including thinking",
             stage_model=stage_models.critique, primary=model,
         ),
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
     if sheet_count >= 2:
-        cross_in = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET + _ASSUMED_PROMPT_TOKENS_PER_SHEET
-        components.append(_component(
-            "Cross-sheet QC", cross_in, _ASSUMED_CROSS_QC_OUTPUT_TOKENS,
-            model=stage_models.cross_qc, batch=False,
-            note="text-only whole-set pass", primary_model=model,
-        ))
+        components.append(_cross_qc_component(sheet_count, digest_text, model=stage_models.cross_qc,
+                                              primary_model=model))
 
     # Prose harvest — a small straggler-structuring allowance.
     components.append(_component(
@@ -989,26 +1110,42 @@ def estimate_exhaustive_run_cost(
                   f"{friendly_model_name(citation_model)}"),
         )
 
-    def _investigate(findings: float) -> CostComponent:
-        from .core.api_config import VERIFICATION_ESCALATION_MODEL
+    def _investigate(findings: float, *, high: bool) -> CostComponent:
+        from .core.api_config import PHASE_INVESTIGATION, phase_output_cap
 
         # The stage's own per-run cap, which scales with the set — quoting a
         # flat 10 here under-stated a large set several-fold.
-        from .investigate import investigation_max_findings
+        from .investigate import investigation_max_findings, investigation_max_rounds
 
         n = min(max(0, round(findings * _UNCERTAIN_FINDINGS_FRACTION)),
                 investigation_max_findings(sheet_count))
-        rounds = n * _ASSUMED_INVESTIGATE_ROUNDS
+        evidence_rounds = investigation_max_rounds()
+        if not high:
+            evidence_rounds = min(evidence_rounds, _ASSUMED_INVESTIGATE_ROUNDS_LOW)
+        # One initial/evidence call per request plus the forced closing verdict.
+        calls = evidence_rounds + 1
+        per_call_out = phase_output_cap(PHASE_INVESTIGATION, model=stage_models.investigation)
+        if not high:
+            per_call_out = min(per_call_out, _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND_LOW)
+        input_tokens = calls * _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND
+        if high:
+            # The tool loop replays complete assistant content (thinking blocks
+            # included) along with accumulated crops/tool results. Allow full
+            # prior replies at the input rate; prompt-cache reuse can lower it.
+            input_tokens += calls * (calls - 1) // 2 * (
+                _ASSUMED_INVESTIGATE_EVIDENCE_TOKENS_PER_ROUND
+                + per_call_out
+            )
         # The escalation tier resolves through ``investigation_model()``, which
         # honours DRAWING_ANALYZER_INVESTIGATION_MODEL before falling back to
         # the escalation constant this used to read directly.
         return _component(
             "Investigation",
-            rounds * _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND,
-            rounds * _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND,
+            n * input_tokens,
+            n * calls * per_call_out,
             model=stage_models.investigation, batch=False,
-            note=f"~{n} uncertain finding(s) × ~{_ASSUMED_INVESTIGATE_ROUNDS}-turn "
-                 f"evidence loop with "
+            note=f"~{n} uncertain finding(s) × up to {evidence_rounds} evidence requests "
+                 f"+ closing verdict; thinking and history replay included, with "
                  f"{friendly_model_name(stage_models.investigation)}",
         )
 
@@ -1016,14 +1153,12 @@ def estimate_exhaustive_run_cost(
     high_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_HIGH)
     low_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_LOW)
     high_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_HIGH)
-    low_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_LOW)
-    high_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_HIGH)
+    low_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_LOW, high=False)
+    high_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_HIGH, high=True)
 
-    # ``components`` (for display) so far holds the fixed stages; the high band is
-    # shown as the representative verification/citation rows. The low/high totals
-    # sum the *fixed* stages once and swap in the low vs high volume variants — so
-    # the band is exactly the finding/citation-count spread and low_cost <= high_cost.
-    def _total(variants: list[CostComponent]) -> float | None:
+    # Sum each stage at its own band end once, including the volume variants.
+    # Keep the per-stage low ends for a dialog whose rows add up to its totals.
+    def _total(variants: list[CostComponent], *, low: bool = False) -> float | None:
         """Sum every component, or ``None`` if any one of them is unpriced.
 
         An unpriced component must make the whole total unavailable, not drop
@@ -1039,22 +1174,17 @@ def estimate_exhaustive_run_cost(
         ``RunUsage.total_estimated_cost``: an unknown price means "no dollar
         figure", never "a smaller dollar figure".
         """
-        priced = [c.cost for c in components + variants]
-        return None if any(c is None for c in priced) else sum(priced)
+        return _sum_costs([
+            c.low_cost if low and c.low_cost is not None else c.cost
+            for c in components + variants
+        ])
 
-    # The critique row in ``components`` already carries ``crit_high``; the low
-    # band swaps in the successful-reuse figure. ``None`` on either side voids the
-    # whole total, exactly as an unpriced component does.
-    crit_delta = (
-        None if crit_low is None or crit_high is None else crit_low - crit_high
-    )
-
-    def _with_crit(total: float | None) -> float | None:
-        return None if total is None or crit_delta is None else total + crit_delta
-
-    low_cost = _with_crit(_total([low_verify, low_investigate, low_citation]))
+    low_cost = _total([low_verify, low_investigate, low_citation], low=True)
     high_cost = _total([high_verify, high_investigate, high_citation])
-    components = components + [high_verify, high_investigate, high_citation]
+    components += [replace(hi, low_cost=lo.cost, input_tokens_low=lo.input_tokens,
+                           output_tokens_low=lo.output_tokens)
+                   for lo, hi in ((low_verify, high_verify), (low_investigate, high_investigate),
+                                  (low_citation, high_citation))]
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
@@ -1090,6 +1220,10 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         "finding investigation loop, and citation checks.",
         "",
         _basis_line(est.shape_aware, est.unmeasured_pages),
+        _OUTPUT_BAND_NOTE,
+        f"Finding volume assumes {_FINDINGS_PER_SHEET_LOW:g}–{_FINDINGS_PER_SHEET_HIGH:g} "
+        "findings per sheet, allowing for critique, cross-QC and auditors beyond "
+        "the recorded standard run's 287 findings on 39 sheets (~7.4 per sheet).",
         "",
         "Estimated cost by stage:",
     ]
@@ -1105,13 +1239,15 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
                "in flight before the cache is readable pay the write rate.)")
         )
     for c in est.components:
-        money = f"~${c.cost:,.2f}" if c.cost is not None else "n/a"
+        money = (f"${c.low_cost:,.2f}–${c.cost:,.2f}"
+                 if c.cost is not None and c.low_cost is not None and c.low_cost != c.cost
+                 else f"~${c.cost:,.2f}" if c.cost is not None else "n/a")
         lines.append(f"  • {c.stage}: {money} ({c.transport}) — {c.note}")
     if est.low_cost is not None and est.high_cost is not None:
         lines += [
             "",
             f"Estimated total: ${est.low_cost:,.2f} – ${est.high_cost:,.2f} — a rough "
-            "range, not a cap (verification and citation scale with how many "
+            "range, not a cap (output includes thinking; verification and citation scale with how many "
             "findings and code citations turn up, and the text riding with each "
             "sheet is not bounded by the image "
             + ("figure" if est.shape_aware else "allowance")

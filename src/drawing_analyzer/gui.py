@@ -1456,14 +1456,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         return self._preflight_bases
 
     def _refresh_profile_suggestions(self) -> None:
-        """Auto-suggest applicable profiles for the loaded files (off the UI thread).
+        """Measure loaded files and suggest any installed profiles off the UI thread.
 
         Runs the cheap text-only preflight in a worker thread and marshals the
         checkbox updates back via ``after`` so the UI stays responsive (§16.4). The
         PyMuPDF access is serialized under a lock (PyMuPDF is not thread-safe), and
         a generation counter means only the most recent preflight's result is applied.
         """
-        if not self._profile_vars or self._busy:
+        if self._busy:
             return
         pdfs = list(self._pdfs)
         self._preflight_gen += 1
@@ -1474,11 +1474,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._preflight_bases = None
         self._preflight_fingerprint = None
         fingerprint = sources_fingerprint(pdfs)
+        available = dict(self._profiles_by_name) if self._profile_vars else {}
 
         def _work() -> None:
             bases: list = []
             try:
-                from .profiles import suggest_profiles_and_cost_bases
+                from .profiles import preflight_scan, suggest_profiles
 
                 # Serialize PyMuPDF access across overlapping preflights (I-5).
                 # One walk yields both the profile suggestion and the per-page
@@ -1486,11 +1487,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 # already built measured 0.4 ms for 120 sheets, against 6,896 ms
                 # for a second scan of the same set — so there is no second scan.
                 with self._preflight_lock:
-                    profiles, bases = suggest_profiles_and_cost_bases(pdfs)
+                    scan = preflight_scan(pdfs)
+                bases = scan.cost_bases
+                profiles = suggest_profiles(scan.sheet_ids, available=available) if available else []
                 names = [p.name for p in profiles]
             except Exception as exc:  # noqa: BLE001 - preflight is a hint, never fatal
-                _log.info("profile preflight failed: %s", exc)
-                names, bases = [], []
+                _log.info("drawing preflight failed: %s", exc)
+                names = []
             self.after(0, lambda: self._apply_profile_suggestions(
                 names, gen, bases, fingerprint))
 
@@ -1510,15 +1513,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # would be worse than pricing conservatively.
         self._preflight_bases = list(bases) if bases else None
         self._preflight_fingerprint = fingerprint if bases else None
-        from .profiles import resolve_profile_selection
+        if self._profile_vars:
+            from .profiles import resolve_profile_selection
 
-        self._profile_suggested = set(names)
-        on = set(resolve_profile_selection(
-            names, user_selected=self._profile_forced_on,
-            user_deselected=self._profile_forced_off,
-        ))
-        for name, var in self._profile_vars.items():
-            var.set(name in on)      # non-suggested, non-forced → unchecked (no leak)
+            self._profile_suggested = set(names)
+            on = set(resolve_profile_selection(
+                names, user_selected=self._profile_forced_on,
+                user_deselected=self._profile_forced_off,
+            ))
+            for name, var in self._profile_vars.items():
+                var.set(name in on)  # non-suggested, non-forced → unchecked
         # The estimate the summary is showing was computed before these bases
         # existed. Without this it stays on the conservative figure until some
         # unrelated option toggle happens to refresh it — so the measured number
@@ -1775,8 +1779,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
         else:
             cost = (
-                f"~${digest_est.total_cost:,.2f} (est.)"
-                if digest_est.total_cost is not None
+                f"~${digest_est.low_cost:,.2f}–${digest_est.high_cost:,.2f} (est.)"
+                if digest_est.low_cost is not None and digest_est.high_cost is not None
                 else "cost n/a"
             )
         label.configure(
@@ -1820,7 +1824,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # low–high band (§15.7); otherwise the digest-only figure. Nothing is sent
         # until this is confirmed.
         refs = list_sheets(self._pdfs)
-        # WP-05 §10.3/§10.4: price from each page's real shape when the profile
+        # WP-05 §10.3/§10.4: price from each page's real shape when the drawing
         # preflight has already measured this exact file list, and fall back to
         # the conservative allowance otherwise — the user clicked Analyze before
         # the scan finished, or it failed. No blocking, no second PDF owner, and
