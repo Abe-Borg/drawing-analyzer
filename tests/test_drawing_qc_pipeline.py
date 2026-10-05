@@ -715,6 +715,89 @@ def test_pipeline_omitted_cross_qc_findings_stay_partial(tmp_path, monkeypatch):
     assert any("1 finding(s) omitted" in warning for warning in stage.warnings)
 
 
+def test_pipeline_prices_citation_cache_writes_at_requested_one_hour_ttl(tmp_path):
+    from drawing_analyzer.core.pricing import usage_record_cost
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    inner = client.messages
+
+    class _Messages(StreamingMessagesMixin):
+        def create(self, **kwargs):
+            response = inner.create(**kwargs)
+            if _system_text(kwargs.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
+                assert kwargs["system"][-1]["cache_control"]["ttl"] == "1h"
+                assert kwargs["tools"][-1]["cache_control"]["ttl"] == "1h"
+                response.usage.cache_creation_input_tokens = 1000
+                response.usage.cache_read_input_tokens = 2000
+            return response
+
+    client.messages = _Messages()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True, verify_findings=False,
+        cache=DigestCache(None, persist=False), qc_work_dir=tmp_path / "qc",
+    )
+    record = next(r for r in ctx.run_usage.records
+                  if r.stage_family == "citation" and r.transport == "REAL_TIME")
+    assert record.cache_write_ttl == "1h"
+    assert record.cache_write_tokens == 1000 and record.cache_read_tokens == 2000
+    kwargs = dict(model=record.model, input_tokens=record.input_tokens,
+                  output_tokens=record.output_tokens, cache_write_tokens=record.cache_write_tokens,
+                  cache_read_tokens=record.cache_read_tokens, billable_tool_uses=record.billable_tool_uses)
+    assert record.estimated_cost == usage_record_cost(**kwargs, cache_write_ttl="1h")
+    assert record.estimated_cost > usage_record_cost(**kwargs)
+
+
+def test_pipeline_discloses_citation_budget_tail_in_stage_warnings(tmp_path, monkeypatch):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "0")
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True, verify_findings=False,
+        cache=DigestCache(None, persist=False), qc_work_dir=tmp_path / "qc",
+    )
+    stage = next(s for s in ctx.stage_results if s.stage == "citation")
+    assert client.calls["citation"] == 0
+    assert stage.status == ctx.qc_status == "PARTIAL"
+    assert any("per-run citation budget (0)" in w and "DRAWING_ANALYZER_CITATION_MAX_REFS" in w
+               for w in stage.warnings)
+    for finding in ctx.findings:
+        if finding.refs:
+            assert finding.citations and all(a.status == "UNCHECKED" for a in finding.citations)
+            assert all("reference budget (0)" in a.note for a in finding.citations)
+
+
+def test_pipeline_skips_rejected_citations_and_discloses_reason(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    inner = client.messages
+
+    class _Messages(StreamingMessagesMixin):
+        def create(self, **kwargs):
+            response = inner.create(**kwargs)
+            if _system_text(kwargs.get("system", "")) == VERIFY_SYSTEM_PROMPT:
+                response.content = [FakeTextBlock(text='{"verdict":"CONTRADICTED","note":"false claim"}')]
+            return response
+
+    client.messages = _Messages()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True,
+        cache=DigestCache(None, persist=False), qc_work_dir=tmp_path / "qc",
+    )
+    stage = next(s for s in ctx.stage_results if s.stage == "citation")
+    assert client.calls["verify"] > 0 and client.calls["citation"] == 0
+    assert stage.status == ctx.qc_status == "PARTIAL"
+    assert any("all citing findings are REJECTED" in warning for warning in stage.warnings)
+    cited = [f for f in ctx.findings if f.refs]
+    assert cited and all(f.verification.status == "REJECTED" for f in cited)
+    assert all(f.citations[0].status == "UNCHECKED" and "REJECTED" in f.citations[0].note for f in cited)
+
+
 def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
     # Phase B: a warm re-run serves citation verdicts from the TTL cache —
     # zero citation API calls, zero web-search fees, a CACHE usage record,

@@ -572,16 +572,13 @@ _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
 # at medium effort and thinking bills at the OUTPUT rate — so an estimate built
 # on the visible answer alone under-states this stage several-fold.
 _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING = 1_400
-_ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM = 2_000  # web-search prompt + tool results
-# The citation check can now open a cited section with web_fetch, not just read
-# search snippets. Fetched page text lands in the request as ordinary input
-# tokens (web_fetch itself carries no per-use surcharge), and a code-publisher
-# page is large — so the input side is no longer dominated by the prompt. An
-# allowance for roughly one fetched page per claim; the tool's own
-# max_content_tokens caps the worst case well above this.
-_ASSUMED_CITATION_FETCH_TOKENS_PER_CLAIM = 8_000
-_ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM = 400
-_ASSUMED_WEB_SEARCHES_PER_CLAIM = 2
+_ASSUMED_CITATION_INPUT_TOKENS_PER_REF = 2_000  # prompt + search snippets
+# Price roughly one clause-page fetch per normalized ref at the tool's actual
+# content ceiling below. Multiple fetches, claim chunks and pause resumes can
+# cost more; this is a cold-run volume estimate, not a dollar-spend ceiling.
+# Adaptive reasoning shares the output bill with the short visible verdict.
+_ASSUMED_CITATION_OUTPUT_TOKENS_PER_REF = 1_400
+_ASSUMED_WEB_SEARCHES_PER_REF = 2
 # Phase A planning stages — one text-only call each. Identity reads a budgeted
 # corpus (digest heads + early text layers, scaling gently with the set);
 # the planner reads the identity + per-sheet digest heads.
@@ -596,8 +593,9 @@ _ASSUMED_PLAN_OUTPUT_TOKENS = 2_500
 # allows that growth; it is an assumption, not a measured distribution.
 _FINDINGS_PER_SHEET_LOW = 8.0
 _FINDINGS_PER_SHEET_HIGH = 20.0
-_CLAIMS_PER_SHEET_LOW = 0.1
-_CLAIMS_PER_SHEET_HIGH = 1.0
+# Eligible normalized-ref counts are unknown pre-run — a low–high band.
+_REFS_PER_SHEET_LOW = 0.1
+_REFS_PER_SHEET_HIGH = 1.0
 # Phase C investigation — a multi-turn escalation of the findings that stay
 # UNCERTAIN after verification, on the (Opus) escalation model. Each turn
 # re-sends the conversation, so the per-round input allowance dominates
@@ -1095,19 +1093,28 @@ def estimate_exhaustive_run_cost(
                   f"{friendly_model_name(verification_model)}"),
         )
 
-    def _citation(claims: float) -> CostComponent:
-        n = max(0, round(claims))
+    def _citation(refs: float) -> CostComponent:
+        from .citation_check import citation_max_refs, citation_tools
         from .core.pricing import WEB_SEARCH_COST_PER_USE
-        search_cost = float(WEB_SEARCH_COST_PER_USE) * n * _ASSUMED_WEB_SEARCHES_PER_CLAIM
+
+        budget = citation_max_refs()
+        n = min(max(0, round(refs)), budget)
+        resolved_tools = {t["name"]: t for t in citation_tools(citation_model)}
+        fetch_tokens = resolved_tools.get("web_fetch", {}).get("max_content_tokens", 0)
+        searches = min(_ASSUMED_WEB_SEARCHES_PER_REF,
+                       resolved_tools["web_search"]["max_uses"])
+        search_cost = float(WEB_SEARCH_COST_PER_USE) * n * searches
         return _component(
             "Citation checks",
-            n * (_ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM
-                 + _ASSUMED_CITATION_FETCH_TOKENS_PER_CLAIM),
-            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM,
+            n * (_ASSUMED_CITATION_INPUT_TOKENS_PER_REF + fetch_tokens),
+            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_REF,
             model=citation_model, batch=False,
             extra_cost=search_cost,
-            note=(f"~{n} unique claim(s) × web search + page fetch with "
-                  f"{friendly_model_name(citation_model)}"),
+            note=(f"~{n} eligible normalized ref(s), per-run cap {budget}, "
+                  f"~{searches} searches/ref"
+                  + (f" + one clause fetch (≤{fetch_tokens:,} tokens)" if fetch_tokens else "")
+                  + f" with {friendly_model_name(citation_model)}; "
+                  "extra claim chunks/resumes can cost more"),
         )
 
     def _investigate(findings: float, *, high: bool) -> CostComponent:
@@ -1151,8 +1158,8 @@ def estimate_exhaustive_run_cost(
 
     low_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_LOW)
     high_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_HIGH)
-    low_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_LOW)
-    high_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_HIGH)
+    low_citation = _citation(sheet_count * _REFS_PER_SHEET_LOW)
+    high_citation = _citation(sheet_count * _REFS_PER_SHEET_HIGH)
     low_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_LOW, high=False)
     high_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_HIGH, high=True)
 
@@ -1247,8 +1254,10 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         lines += [
             "",
             f"Estimated total: ${est.low_cost:,.2f} – ${est.high_cost:,.2f} — a rough "
-            "range, not a cap (output includes thinking; verification and citation scale with how many "
-            "findings and code citations turn up, and the text riding with each "
+            "range, not a cap on spending (output includes thinking; "
+            "verification scales with finding count; "
+            "citation refs are capped but extra claim chunks/resumes can cost more, "
+            "and the text riding with each "
             "sheet is not bounded by the image "
             + ("figure" if est.shape_aware else "allowance")
             + "). Pricing verified "

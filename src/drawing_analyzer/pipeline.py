@@ -23,6 +23,7 @@ import threading
 from typing import Any, Callable
 
 from .core.api_config import (
+    PHASE_CITATION,
     PHASE_INVESTIGATION,
     REVIEW_MODEL_DEFAULT,
     cache_write_ttl_for,
@@ -2348,7 +2349,7 @@ def _run_qc_stages(
         investigate_stage.status = "SKIPPED_VALID"
     _finish_stage(stage_results, journal, investigate_stage)
 
-    # Citation check (Phase 15): one web-search-backed call per unique code ref,
+    # Citation check (Phase 15): severity-first, capped normalized code refs,
     # judged against the editions the set adopts (harvested from the text
     # layers). Verdicts attach to the findings and ride the popup/CSV/report; a
     # MISMATCH downgrades nothing. Additive and non-fatal (I-3).
@@ -2397,6 +2398,9 @@ def _run_qc_stages(
                     # cached citation stage look near-free in the ledger.
                     cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
                     cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
+                    # System, tools, and paused conversation prefixes all ask
+                    # for 1h cache entries (2x writes rather than 1.25x).
+                    cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
                     billable_tool_uses={"web_search": int(
                         getattr(cires, "web_search_requests", 0) or 0
                     )},
@@ -2414,11 +2418,24 @@ def _run_qc_stages(
                         terminal_status="COMPLETE",
                     )
                 citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
+                rejected_claims = int(getattr(cires, "skipped_rejected", 0) or 0)
+                capped_refs = int(getattr(cires, "skipped_over_budget", 0) or 0)
+                if rejected_claims:
+                    citation_stage.warnings.append(
+                        f"{rejected_claims} cited claim(s) left unchecked because "
+                        "all citing findings are REJECTED"
+                    )
+                if capped_refs:
+                    citation_stage.warnings.append(
+                        f"{capped_refs} normalized reference(s) left unchecked beyond "
+                        f"the per-run citation budget ({cires.ref_budget}); "
+                        "raise DRAWING_ANALYZER_CITATION_MAX_REFS to check more"
+                    )
                 if partial:
                     if cires.error:
                         errors.append(f"Citation check: {cires.error}")
                         citation_stage.errors.append(str(cires.error))
-                    else:
+                    elif not (rejected_claims or capped_refs):
                         citation_stage.warnings.append(
                             "some cited claims left unchecked (request/parser/tool failure)"
                         )

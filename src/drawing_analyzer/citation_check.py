@@ -12,12 +12,16 @@ adopts *and* in the current edition — actually support the finding(s) citing i
 finding ONLY if that finding's claim was included in the request that produced it.
 The old pass sent just the first three finding texts per reference and then pinned
 that single verdict onto *every* finding citing the reference — logically invalid
-when the same section is invoked for different claims. Now every distinct claim for
+when the same section is invoked for different claims. Now every admitted claim for
 a reference is checked (chunked into claim-complete requests when there are many),
 the model returns a **per-claim** verdict keyed by a request-local opaque handle,
 and each resulting :class:`~drawing_analyzer.models.CitationAssessment` is attached
 only to the findings whose claim it covered. A finding with several references keeps
 one assessment *per reference*.
+
+References are normalized before grouping. Claims whose citing findings are all
+REJECTED are left UNCHECKED, as are refs beyond the severity-first per-run budget
+(``DRAWING_ANALYZER_CITATION_MAX_REFS``, default 50). Both carry explicit reasons.
 
 The verdict is informational: ``CHECKED_MISMATCH`` downgrades nothing
 automatically (sometimes the stale citation *is* the finding); it is surfaced to
@@ -40,7 +44,7 @@ they don't batch).
 
 **Per-request verdict cache with a TTL (Phase B).** Complete, fully-parsed
 verdicts are cached content-addressed in the run's ``DigestCache`` (namespace
-``stage=citation``) keyed on the exact ref + claim texts + editions/jurisdiction
+``stage=citation``) keyed on the normalized ref + claim texts + editions/jurisdiction
 context + model + prompt version + search budget — so a warm re-run serves the
 same verdicts without re-paying for web searches. Web truth drifts, so entries
 expire: ``DRAWING_ANALYZER_CITATION_TTL_DAYS`` (default 30; ``0`` disables the
@@ -57,8 +61,9 @@ import hashlib
 import os
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Iterable
 
 from .core.api_config import (
@@ -66,11 +71,13 @@ from .core.api_config import (
     MODEL_SONNET_5_5,
     PHASE_CITATION,
     WEB_SEARCH_TOOL_TYPE,
+    _cache_control_block,
     apply_effort_config,
     apply_thinking_config,
     build_web_fetch_tool,
     build_web_search_tool,
     call_with_refusal_fallback,
+    cache_policy_for,
     effort_config_for,
     model_capabilities,
     phase_output_cap,
@@ -103,6 +110,10 @@ _log = get_logger()
 
 DEFAULT_CITATION_MAX_TOKENS = CITATION_OUTPUT_CAP
 DEFAULT_CITATION_MAX_RETRIES = 2
+# A fixed run budget keeps large sets from multiplying paid web investigations.
+# Fifty refs leave room for the most severe issues; the unchecked tail is disclosed.
+DEFAULT_CITATION_MAX_REFS = 50
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 # The server-side loop can stop with pause_turn; resume at most this many times.
 _MAX_PAUSE_RESUMES = 3
 # Bound the web searches one citation check may run. A code-compliance question
@@ -115,10 +126,10 @@ _WEB_SEARCH_MAX_USES = 10
 # request, and one or two authoritative pages is the point — more is the model
 # spinning rather than converging.
 _WEB_FETCH_MAX_USES = 4
-# Truncation ceiling on one fetched page. Code-publisher pages are large; 40k
-# leaves room for the model to find its clause without letting a single fetch
-# dominate the request.
-_WEB_FETCH_MAX_CONTENT_TOKENS = 40_000
+# One clause plus nearby definitions/exception text usually takes hundreds to a
+# few thousand tokens. Allow 4k for that context, not 40k of an entire code book.
+# The prompt asks for section-specific pages so truncation does not bury the clause.
+_WEB_FETCH_MAX_CONTENT_TOKENS = 4_000
 # Bounded concurrency — citation checks are few but each runs server-side searches.
 _MAX_WORKERS = 4
 # Claims per request. A reference with more distinct claims is split into this many
@@ -142,6 +153,39 @@ def citation_model() -> str:
     defensible one — and it costs less.
     """
     return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5_5
+
+
+def citation_max_refs() -> int:
+    """Normalized refs admitted per run (``DRAWING_ANALYZER_CITATION_MAX_REFS``).
+
+    Default 50. Zero leaves all eligible claims explicitly unchecked; invalid or
+    negative overrides fall back to the default. Cache hits use the same budget.
+    """
+    try:
+        value = int(os.environ.get("DRAWING_ANALYZER_CITATION_MAX_REFS", "").strip())
+    except ValueError:
+        return DEFAULT_CITATION_MAX_REFS
+    return value if value >= 0 else DEFAULT_CITATION_MAX_REFS
+
+
+def normalize_reference(ref: str) -> str:
+    """Dedup key for a ref; display always retains the original spelling.
+
+    Fold case, Unicode/whitespace and cosmetic punctuation, including section
+    markers. Preserve numeric hierarchy, ranges, subsections, editions and the
+    words Table/Chapter: those distinguish citations rather than format them.
+    """
+    text = unicodedata.normalize("NFKC", str(ref or "")).casefold()
+    text = re.sub(r"§+|\b(?:sections?|secs?)\b\.?", " ", text)
+    # Edition/outer wrappers are cosmetic; numbered/lettered subsections stay.
+    text = re.sub(r"\(((?:19|20)\d{2})\)", r" \1 ", text)
+    text = re.sub(r"^\s*\((.*)\)\s*$", r"\1", text)
+    text = re.sub(r"[‐‑‒–—−]", "-", text)
+    text = re.sub(r"\s*([./()\-])\s*", r"\1", text)
+    text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)
+    text = re.sub(r"(?<!\d)-|-(?!\d)", " ", text)
+    text = re.sub(r"[^\w./()\-]+", " ", text)
+    return " ".join(text.split())
 
 
 def web_search_max_uses() -> int:
@@ -599,6 +643,9 @@ number valid in one edition may have moved in a later one). Be conservative: rep
 a mismatch only when you found concrete evidence of one. Judge each claim on its own \
 — different claims citing the same section can have different verdicts.
 
+Prefer section-specific or clause-level publisher/AHJ pages when fetching text;
+whole code books may be truncated before the relevant clause.
+
 When a PROJECT JURISDICTION/LOCALE line is given, use it to resolve WHICH code, \
 edition, or local amendment applies, and search in the set's language when that \
 helps. The locale is model-detected from the drawings, not ground truth: when \
@@ -825,6 +872,43 @@ class _CheckOutcome:
     truncated: bool = False
 
 
+def _resume_messages_with_cache(messages: list[dict]) -> list[dict]:
+    """Cache through the last block of the newest appended assistant turn.
+
+    Copy SDK/dict blocks without changing server-tool payloads or thinking
+    signatures. Keep the preceding assistant breakpoint as well as the newest:
+    a paused tool turn can exceed the API's 20-block cache lookup window, so
+    the preceding prefix must remain an explicit lookup point. Together with
+    system/tools these sliding breakpoints stay within the API's limit of four.
+    """
+    if not cache_policy_for(PHASE_CITATION).caches_anything:
+        return messages
+    copied = []
+    assistant_contents = []
+    for message in messages:
+        if message["role"] != "assistant":
+            copied.append(message)
+            continue
+        content = []
+        for block in message.get("content") or []:
+            if isinstance(block, dict):
+                cloned = dict(block)
+            elif hasattr(block, "model_dump"):
+                cloned = block.model_dump(mode="json", exclude_none=True)
+            elif is_dataclass(block):
+                cloned = asdict(block)
+            else:
+                cloned = dict(vars(block))
+            cloned.pop("cache_control", None)
+            content.append(cloned)
+        copied.append({**message, "content": content})
+        if content:
+            assistant_contents.append(content)
+    for content in assistant_contents[-2:]:
+        content[-1]["cache_control"] = _cache_control_block()
+    return copied
+
+
 def _check_one(
     ref: str,
     editions_line: str,
@@ -855,7 +939,7 @@ def _check_one(
             "system": system_prompt_with_cache(
                 CITATION_SYSTEM_PROMPT, phase=PHASE_CITATION
             ),
-            "messages": messages,
+            "messages": _resume_messages_with_cache(messages),
             # The system prompt and the two web-tool definitions (which embed
             # the shared blocklist twice) are byte-identical across every
             # citation in a run, so they are a cache prefix, not a per-call
@@ -946,11 +1030,14 @@ class CitationCheckResult:
     claims dominates). ``assessments`` is the flat list of per-claim
     :class:`~drawing_analyzer.models.CitationAssessment` records, each bound to the
     exact findings whose claim it covered (DA-017). ``partial`` is True when any
-    claim was left UNCHECKED / UNRESOLVABLE (a request/parser/tool failure) so the
+    claim was left UNCHECKED / UNRESOLVABLE (including rejected/budget skips) so the
     pipeline can mark the stage PARTIAL, never a clean COMPLETE.
     """
 
-    checked: int = 0                 # unique references a request was sent for
+    checked: int = 0                 # normalized refs admitted (including cache hits)
+    ref_budget: int = 0
+    skipped_rejected: int = 0        # claims whose citing findings are all REJECTED
+    skipped_over_budget: int = 0     # eligible normalized refs beyond the run cap
     requests: int = 0                # claim-complete requests actually issued
     cached_requests: int = 0         # request chunks served from the verdict cache
     supports: int = 0
@@ -1008,8 +1095,8 @@ def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation
 def _citation_payload_hash(
     ref: str, claim_texts: list[str], editions_line: str, jurisdiction_line: str
 ) -> str:
-    """Content hash of one request chunk's exact payload (cache key input)."""
-    joined = "\x1f".join([ref, *claim_texts, editions_line, jurisdiction_line])
+    """Content hash of a chunk, with cosmetic reference variants folded."""
+    joined = "\x1f".join([normalize_reference(ref), *claim_texts, editions_line, jurisdiction_line])
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
@@ -1026,11 +1113,12 @@ def check_citations(
     cache: Any = None,
     now: Any = time.time,
 ) -> CitationCheckResult:
-    """Check every reference against the exact claims citing it; attach assessments.
+    """Check a severity-first budget of refs against their exact citing claims.
 
-    Each distinct claim (a finding's ``text``) for a reference is checked; a
-    reference with many claims is split into claim-complete chunks so none is
-    dropped (DA-017). Each :class:`~drawing_analyzer.models.CitationAssessment` is
+    Cosmetic ref variants share one group. Rejected-only claims and refs beyond
+    ``citation_max_refs()`` receive reasoned UNCHECKED assessments; admitted refs
+    with many claims use claim-complete chunks so none is dropped (DA-017).
+    Each :class:`~drawing_analyzer.models.CitationAssessment` is
     attached (``finding.citations``) only to the findings whose claim it covered,
     and the derived back-compat ``finding.citation`` summarizes a finding's per-ref
     assessments. Additive and non-fatal (I-3): a failure leaves the affected claims
@@ -1052,20 +1140,31 @@ def check_citations(
     # ref -> ordered distinct claims; each claim -> the findings sharing that text.
     ref_order: list[str] = []
     ref_claims: dict[str, dict[str, dict]] = {}
+    ref_aliases: dict[str, str] = {}   # normalized key -> first original spelling
     for f in findings:
         for r in f.refs:
-            ref = str(r).strip()
-            if not ref:
+            original = str(r).strip()
+            normalized = normalize_reference(original)
+            if not normalized:
                 continue
+            ref = ref_aliases.setdefault(normalized, original)
             if ref not in ref_claims:
                 ref_claims[ref] = {}
                 ref_order.append(ref)
             key = _normalize_claim(f.text)
-            claim = ref_claims[ref].setdefault(key, {"text": f.text, "finding_ids": []})
+            claim = ref_claims[ref].setdefault(key, {
+                "text": f.text, "finding_ids": [], "priority": None,
+            })
             if f.id not in claim["finding_ids"]:
                 claim["finding_ids"].append(f.id)
+            if getattr(getattr(f, "verification", None), "status", None) != "REJECTED":
+                priority = (
+                    _SEVERITY_RANK.get(str(f.severity).lower(), 3), f.qc_id or "", f.id or "",
+                )
+                if claim["priority"] is None or priority < claim["priority"]:
+                    claim["priority"] = priority
 
-    result = CitationCheckResult()
+    result = CitationCheckResult(ref_budget=citation_max_refs())
     if not ref_order:
         return result
 
@@ -1077,11 +1176,48 @@ def check_citations(
         else ""
     )
 
-    # Build the claim-complete request work-list.
+    # Skip rejected-only CLAIMS, even when another claim still needs the ref.
+    claim_assessments: dict[tuple[str, str], CitationAssessment] = {}
+    eligible: dict[str, list[dict]] = {}
+    for ref in ref_order:
+        for key, claim in ref_claims[ref].items():
+            if claim["priority"] is None:
+                result.skipped_rejected += 1
+                result.partial = True
+                claim_assessments[(ref, key)] = CitationAssessment(
+                    reference=ref, status="UNCHECKED",
+                    claim_finding_ids=list(claim["finding_ids"]),
+                    note="citation not checked: all citing findings are REJECTED",
+                    adopted_edition=editions_line,
+                )
+            else:
+                eligible.setdefault(ref, []).append(claim)
+
+    # Best eligible finding determines ref priority, matching investigation's
+    # severity/QC-id/id ordering. The normalized ref breaks same-finding ties.
+    ranked_refs = sorted(eligible, key=lambda ref: (
+        min(c["priority"] for c in eligible[ref]), normalize_reference(ref),
+    ))
+    selected_refs = ranked_refs[:result.ref_budget]
+    capped_refs = ranked_refs[result.ref_budget:]
+    result.skipped_over_budget = len(capped_refs)
+    for ref in capped_refs:
+        result.partial = True
+        for claim in eligible[ref]:
+            claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
+                reference=ref, status="UNCHECKED",
+                claim_finding_ids=list(claim["finding_ids"]),
+                note=(f"citation not checked: per-run reference budget ({result.ref_budget}) "
+                      "exceeded; raise DRAWING_ANALYZER_CITATION_MAX_REFS to check more"),
+                adopted_edition=editions_line,
+            )
+
+    # Build the claim-complete request work-list AFTER skipping and budgeting,
+    # before even probing the verdict cache or constructing an API client.
     # request = (ref, request_id, [(handle, claim_dict)])
     requests: list[tuple[str, str, list[tuple[str, dict]]]] = []
-    for ri, ref in enumerate(ref_order):
-        claims = list(ref_claims[ref].values())
+    for ri, ref in enumerate(selected_refs):
+        claims = eligible[ref]
         chunks = [
             claims[i:i + _MAX_CLAIMS_PER_REQUEST]
             for i in range(0, len(claims), _MAX_CLAIMS_PER_REQUEST)
@@ -1090,8 +1226,6 @@ def check_citations(
             handled = [(f"C{j + 1}", c) for j, c in enumerate(chunk)]
             requests.append((ref, f"cite-{ri:02d}-{ci:02d}", handled))
 
-    # ref -> per-claim CitationAssessment (keyed by normalized claim text).
-    claim_assessments: dict[tuple[str, str], CitationAssessment] = {}
     total = len(requests)
     done = 0
 
@@ -1155,13 +1289,6 @@ def check_citations(
         except Exception as exc:  # noqa: BLE001 - no key etc. → skip live work
             result.error = _clean_error(exc)
             result.partial = True
-            if all(entry is None for _req, entry, _key in probes):
-                # Nothing cache-served either: the pass could not run at all.
-                result.unchecked = len(ref_order)
-                _attach_unchecked(
-                    findings, ref_claims, result, note="citation client unavailable"
-                )
-                return result
             client_unavailable = True  # serve the hits; misses go UNCHECKED
 
     def _run(probe: tuple) -> tuple:
@@ -1178,7 +1305,7 @@ def check_citations(
         return ref, rid, handled, outcome, None, key
 
     fresh_requests = 0
-    with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(requests))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(_MAX_WORKERS, len(requests)))) as pool:
         for ref, rid, handled, outcome, entry, key in pool.map(_run, probes):
             done += 1
             if entry is not None:
@@ -1295,7 +1422,7 @@ def check_citations(
                 progress(done, total, f"Checking citation {done}/{total}")
 
     result.assessments = list(claim_assessments.values())
-    result.checked = len(ref_order)
+    result.checked = len(selected_refs)
     # ``requests`` = claim-complete API requests actually ISSUED this run;
     # cache-served chunks count in ``cached_requests`` (zero tokens/searches).
     result.requests = fresh_requests
@@ -1325,59 +1452,27 @@ def check_citations(
         attached: list[CitationAssessment] = []
         seen_refs: set[str] = set()
         for r in f.refs:
-            ref = str(r).strip()
-            if not ref or ref in seen_refs:
+            original = str(r).strip()
+            normalized = normalize_reference(original)
+            ref = ref_aliases.get(normalized)
+            if ref is None or ref in seen_refs:
                 continue
             seen_refs.add(ref)
             a = claim_assessments.get((ref, _normalize_claim(f.text)))
             if a is not None:
-                attached.append(a)
+                # Keep each finding's own spelling in the report/export display.
+                attached.append(a if a.reference == original else replace(a, reference=original))
         f.citations = attached
         combined = _combine_finding_citation(attached)
         if combined is not None:
             f.citation = combined
 
     _log.info(
-        "citation check: %d unique ref(s) — %d support, %d mismatch, %d unchecked, "
+        "citation check: %d unique ref(s), %d admitted (cap %d) — "
+        "%d support, %d mismatch, %d unchecked, "
         "%d unresolvable%s",
-        result.checked, result.supports, result.mismatches, result.unchecked,
+        len(ref_order), result.checked, result.ref_budget,
+        result.supports, result.mismatches, result.unchecked,
         result.unresolvable, " (PARTIAL)" if result.partial else "",
     )
     return result
-
-
-def _attach_unchecked(
-    findings: list[Finding], ref_claims: dict, result: CitationCheckResult, *, note: str
-) -> None:
-    """Attach an UNCHECKED assessment to every finding when the pass could not run
-    at all (no client), so the report still shows the reference was not verified.
-
-    Builds one assessment per ``(reference, claim)`` group — with the *full* set of
-    finding ids sharing that claim — and records them on ``result.assessments`` so
-    the stage's ``items_out`` tally reflects the annotations actually made.
-    """
-    # (ref, normalized claim text) -> UNCHECKED assessment (shared across findings).
-    claim_assessments: dict[tuple[str, str], CitationAssessment] = {}
-    for ref, claims in ref_claims.items():
-        for claim in claims.values():
-            claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
-                reference=ref, status="UNCHECKED",
-                claim_finding_ids=list(claim["finding_ids"]), note=note,
-            )
-    result.assessments = list(claim_assessments.values())
-
-    for f in findings:
-        attached: list[CitationAssessment] = []
-        seen: set[str] = set()
-        for r in f.refs:
-            ref = str(r).strip()
-            if not ref or ref in seen:
-                continue
-            seen.add(ref)
-            a = claim_assessments.get((ref, _normalize_claim(f.text)))
-            if a is not None:
-                attached.append(a)
-        f.citations = attached
-        combined = _combine_finding_citation(attached)
-        if combined is not None:
-            f.citation = combined
