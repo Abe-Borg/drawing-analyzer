@@ -631,9 +631,9 @@ def test_the_prompt_edit_supplies_the_invalidation():
         X.cross_qc_map_system_prompt = original
 
 
-def test_contract_counter_is_not_bumped_by_this_package():
-    # 3, not 2, because P8 item 11 bumped it for its own reason (the `_norm_id`
-    # fold — host-side binding that no key input covers). WP-03B added nothing to
-    # it, which is what this tripwire keeps honest: a bump has to be justified
-    # here before the value moves again.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+def test_contract_counter_tracks_separate_admission_policy_changes():
+    # WP-03B's prompt edit invalidates its own keys without a contract bump.
+    # Version 3 accounted for host-side sheet-handle normalization; version 4
+    # isolates text-truncation admission from legacy cache readers. Every bump
+    # remains justified independently of the evidence changes in this package.
+    assert X._CROSS_QC_CACHE_CONTRACT == 4

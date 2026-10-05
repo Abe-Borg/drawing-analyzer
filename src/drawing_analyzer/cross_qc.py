@@ -124,7 +124,12 @@ _TEXT_LAYER_BUDGET = 4_000
 # therefore the stored result for byte-identical request inputs. A warm entry
 # written under the old normalization would keep serving the smaller finding set.
 # One mechanism for one change: no key field was added beside this.
-_CROSS_QC_CACHE_CONTRACT = 3
+#
+# Bumped to 4: text-layer truncation is now a disclosed input bound, so it can
+# produce complete, cache-admitted results. Isolate that admission policy from
+# older processes sharing the cache, which would reject the same truncated run
+# but otherwise trust the new result's stored completeness flags on read.
+_CROSS_QC_CACHE_CONTRACT = 4
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -1374,10 +1379,9 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
         # tail past SHEET_TEXT_MAX_CHARS became an acceptance input the key did
         # not cover. Add its digest **only when the sheet is actually truncated**
         # — for every untruncated sheet the evidence equals ``text_layer``, which
-        # is already in the key, so the key stays byte-identical and no stored
-        # result is thrown away. Unconditional inclusion would invalidate every
-        # cross-QC entry just as thoroughly as a contract bump, which is why the
-        # contract is deliberately NOT bumped here.
+        # is already in the key, so evidence hashing leaves its key unchanged
+        # within a given contract. The contract separately versions host-side
+        # binding and cache-admission policies.
         #
         # Text-layer truncation is cache-admitted, so this also protects warm
         # results whose host-side grounding used the tail beyond the digest's

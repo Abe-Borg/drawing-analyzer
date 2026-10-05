@@ -988,6 +988,37 @@ def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch)
     assert current != legacy, "the contract must ride the key"
 
 
+@pytest.mark.parametrize("extra_text_chars", [0, 9000])
+def test_cross_qc_cache_isolates_legacy_text_truncation_policy(monkeypatch, extra_text_chars):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets = [_digest("a.pdf"), _digest("b.pdf")]
+    geoms = [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")]
+    geoms[0].sheet_text += "X" * extra_text_chars
+    cache = DigestCache(None, persist=False)
+    client = _CrossClient([[_CONFLICT]])
+    cold = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                          max_retries=0, sleep=_NOOP)
+    assert cold.complete and not cold.cached and client.calls == 1
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 3)
+        legacy.setattr(X._Budget, "degraded", property(
+            lambda budget: budget.omitted > 0 or budget.findings_omitted > 0,
+        ))
+        result = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                                max_retries=0, sleep=_NOOP)
+        assert not result.cached and client.calls == 2
+        assert result.complete is (extra_text_chars == 0)
+        assert result.budget_degraded is (extra_text_chars > 0)
+
+    warm = cross_sheet_qc(sheets, geoms, client=client, cache=cache,
+                          max_retries=0, sleep=_NOOP)
+    assert warm.complete and warm.cached and client.calls == 2
+    assert warm.text_chars_omitted == cold.text_chars_omitted
+    assert warm.input_tokens == warm.output_tokens == 0
+
+
 # --------------------------------------------------------------------------- #
 # Sheet handles fold before matching (P8 item 11)
 # --------------------------------------------------------------------------- #
@@ -1105,7 +1136,7 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # legs validate, and so the stored result, for byte-identical request inputs.
     # A warm entry written under the old normalization would keep serving the
     # smaller finding set forever.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    assert X._CROSS_QC_CACHE_CONTRACT >= 3
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
