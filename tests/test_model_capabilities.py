@@ -50,7 +50,7 @@ def test_stages_that_deliberately_run_on_sonnet():
     # on Opus 5, so an Opus citation check can only read search snippets.
     assert citation_model() == SONNET_5_5
     assert api.model_capabilities(SONNET_5_5).supports_web_fetch is True
-    assert api.model_capabilities(OPUS_5_5).supports_web_fetch is False
+    assert api.model_capabilities(OPUS_5_5).supports_web_fetch is True
     assert api.model_capabilities(OPUS_5).supports_web_fetch is False
     # Advisory-only, with a deterministic regex backstop.
     assert default_identity_model() == SONNET_5_5
@@ -58,18 +58,39 @@ def test_stages_that_deliberately_run_on_sonnet():
     assert harvest_model() == SONNET_5_5
 
 
-def test_5_5_generation_matches_the_previous_generation_request_shape():
-    # Opus 5.5 / Sonnet 5.5 are drop-in successors: same ceilings, effort
-    # roster, vision tier, structured outputs; Opus 5.5 keeps the refusal
-    # fallback opt-in that Opus 5 declared.
-    for new, old in ((OPUS_5_5, OPUS_5), (SONNET_5_5, SONNET_5)):
-        assert api.model_capabilities(new) == api.model_capabilities(old)
-    assert api.model_capabilities(OPUS_5_5).supports_refusal_fallback is True
-    assert OPUS_5_5 in api.OPUS_MODELS and SONNET_5_5 not in api.OPUS_MODELS
-    # Effort is always explicit (Opus 5.5's API default is medium, not high).
-    for model in (OPUS_5_5, SONNET_5_5):
-        assert api.effort_config_for(model=model, phase=api.PHASE_REVIEW) == {"effort": "high"}
-        assert api.thinking_config_for(model=model, phase=api.PHASE_REVIEW) == {"type": "adaptive"}
+@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5])
+def test_5_5_documented_capabilities(model):
+    # Verified against each model's own migration/feature docs (2026-10-05),
+    # not equality with a predecessor: web fetch and refusal fallback differ.
+    assert api.model_capabilities(model) == api.ModelCapabilities(
+        supports_adaptive_thinking=True,
+        max_output_tokens=128_000,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=frozenset({"low", "medium", "high", "xhigh", "max"}),
+        supports_hires_vision=True,
+        supports_web_fetch=True,
+        supports_web_search=True,
+        supports_refusal_fallback=True,
+        supports_structured_outputs=True,
+    )
+    assert api.effort_config_for(model=model, phase=api.PHASE_REVIEW) == {"effort": "high"}
+    assert api.thinking_config_for(model=model, phase=api.PHASE_REVIEW) == {"type": "adaptive"}
+    assert api.effort_config_for(model=model, phase=api.PHASE_CROSS_CHECK) == {"effort": "xhigh"}
+    assert (model in api.OPUS_MODELS) == (model == OPUS_5_5)
+
+
+@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5])
+def test_5_5_hires_vision_estimate_and_batch_ceiling(model):
+    from drawing_analyzer.core.tokenizer import estimate_image_tokens
+
+    assert estimate_image_tokens(3840, 2160, model=model) == 4784
+    assert api.review_max_tokens(model=model) == 128_000
+    with pytest.raises(ValueError, match=api.BATCH_OUTPUT_BETA):
+        api.assert_extended_output_allowed(max_tokens=300_000, betas=[], model=model)
+    api.assert_extended_output_allowed(
+        max_tokens=300_000, betas=[api.BATCH_OUTPUT_BETA], model=model
+    )
 
 
 def test_previous_generation_stays_registered_as_a_valid_override():

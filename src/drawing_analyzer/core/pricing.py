@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-09-08. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-10-05. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -26,8 +26,9 @@ PRICING_EFFECTIVE_DATE = "2026-10-05"
 # caching multipliers below stack with it (Anthropic pricing, "These multipliers
 # stack with other pricing modifiers, including the Batch API discount").
 BATCH_DISCOUNT = 0.5
-# Prompt-caching multipliers on the base *input* rate. A cache READ is 0.1x on
-# every model this app can select. A cache WRITE depends on the requested TTL —
+# Prompt-caching multipliers on the base *input* rate. Cache READ rates are
+# per model: 0.05x on Opus 5.5, 0.1x on the other registered models. A cache
+# WRITE depends on the requested TTL —
 # 1.25x for the default 5-minute entry, 2x for a ``ttl: "1h"`` entry — so the
 # two are separate constants and the write rate is chosen per record by
 # :func:`cache_write_multiplier`.
@@ -94,6 +95,8 @@ class ModelPrice:
 # estimate more than it used to — the 50% over-statement the hedge caused was
 # correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
+    # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-05).
+    # Both 5.5 models read at $0.20/MTok, with different base input rates.
     "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
     "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5"),
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),

@@ -273,6 +273,12 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
     except Exception as exc:  # noqa: BLE001 - re-raised unless strict-specific
         if not _is_strict_tools_rejection(exc):
             raise
+        # A tool-schema edit would invalidate any thinking already produced
+        # against this prefix. Degrade for subsequent investigations, but do
+        # not retry this conversation with a rewritten tools array.
+        if any(m.get("role") == "assistant" for m in kwargs.get("messages", [])):
+            _strict_tools_available = False
+            raise
         # Deliberately NOT gated on ``_strict_tools_available``. Gating it there
         # made the recovery a once-per-process trick: the latch flips on the
         # first rejection, and any later turn that still carried strict schemas
@@ -280,8 +286,8 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
         # added later — would hit this guard already False and re-raise the very
         # error the latch exists to absorb, failing the investigation it was
         # meant to save. The callers are careful (``_investigate_one`` relaxes
-        # per turn once the latch is down), but that is their discipline, not a
-        # property of this function, and I-3 says this stage degrades rather
+        # before a conversation once the latch is down), but that is their
+        # discipline, not a property of this function, and I-3 says this stage degrades rather
         # than fails. Relaxing is idempotent and the retry is one-shot, so the
         # cost of being wrong here is a single extra round trip.
         _strict_tools_available = False
@@ -294,7 +300,11 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
     tools = relaxed.get("tools")
     if isinstance(tools, list):
         relaxed["tools"] = relax_strict_tools(tools)
-    return _investigation_message_turn(client, relaxed, task_budget=task_budget)
+    response = _investigation_message_turn(client, relaxed, task_budget=task_budget)
+    # Pin the accepted schema for this conversation's later turns. The first
+    # request can self-heal; after an assistant response the prefix is fixed.
+    kwargs["tools"] = relaxed["tools"]
+    return response
 
 
 def _investigation_message_turn(client: Any, kwargs: dict, *, task_budget: int) -> Any:
@@ -952,6 +962,7 @@ def _investigate_one(
     pause_count = 0
     task_budget = investigation_task_budget()
     hard_stop = max_rounds + _MAX_PAUSE_RESUMES + 3   # backstop, never hit normally
+    session_tools = tools if _strict_tools_available else relax_strict_tools(tools)
 
     for _iteration in range(hard_stop):
         kwargs: dict = {
@@ -970,13 +981,10 @@ def _investigate_one(
         # leaves tools+system cached, with identical effect on the model: it
         # cannot call a tool either way. (Same reasoning, same mechanism, as
         # the report chat widget's own no-tools close.)
-        # Re-checked per turn, not just per run. ``tools`` is built once for the
-        # whole stage, so without this a latch that flipped on investigation 1
-        # would still send strict schemas on every later turn and eat a 400 plus
-        # a retry each time — up to 40 findings x 6 rounds of wasted round trips
-        # to re-learn what the process already knows.
-        turn_tools = tools if _strict_tools_available else relax_strict_tools(tools)
-        kwargs["tools"] = tools_with_cache(list(turn_tools), phase=PHASE_INVESTIGATION)
+        # Freeze tools for each conversation, even if another call flips the
+        # process latch. Changing schemas after a thinking block breaks 5.5's
+        # preserved-thinking check. The next investigation reads the latch.
+        kwargs["tools"] = tools_with_cache(list(session_tools), phase=PHASE_INVESTIGATION)
         if tool_round >= max_rounds:
             kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
@@ -988,6 +996,7 @@ def _investigate_one(
                 resp = _investigation_message(
                     client, kwargs, task_budget=task_budget
                 )
+                session_tools = kwargs["tools"]
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
                 if _is_transient_error(exc) and attempt < max_retries:

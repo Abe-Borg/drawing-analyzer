@@ -649,6 +649,24 @@ def test_the_strict_tools_latch_degrades_and_retries():
     assert I._strict_tools_available is False
 
 
+def test_strict_schema_rejection_never_rewrites_a_preserved_prefix():
+    client = _LatchClient(_Status400("strict mode is not supported for this model"))
+    kwargs = {
+        "model": "claude-opus-5-5",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "signed"}]},
+            {"role": "user", "content": "continue"},
+        ],
+        "tools": I.investigation_tools(),
+    }
+    with pytest.raises(_Status400):
+        I._investigation_message(client, kwargs, task_budget=0)
+    assert len(client.captured) == 1
+    assert kwargs["tools"][0]["strict"] is True
+    assert I._strict_tools_available is False
+
+
 def test_an_unrelated_400_does_not_disable_strict_tools():
     client = _LatchClient(_Status400("credit balance is too low"))
     kwargs = {

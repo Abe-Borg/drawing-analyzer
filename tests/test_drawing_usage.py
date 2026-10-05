@@ -231,6 +231,32 @@ def test_cache_read_write_and_web_search_pricing():
     assert ws == Decimal("4") * WEB_SEARCH_COST_PER_USE
 
 
+@pytest.mark.parametrize("model,read,write_5m,write_1h", [
+    ("claude-opus-5-5", "0.20", "5", "8"),
+    ("claude-opus-5-5-fast", "0.20", "5", "8"),
+    ("claude-sonnet-5-5", "0.20", "2.5", "4"),
+    ("claude-opus-5", "0.50", "6.25", "10"),
+])
+@pytest.mark.parametrize("batch", [False, True])
+def test_per_model_cache_rates_and_batch_discount(model, read, write_5m, write_1h, batch):
+    factor = Decimal("0.5") if batch else Decimal("1")
+    assert usage_record_cost(model=model, cache_read_tokens=1_000_000, batch=batch) == Decimal(read) * factor
+    assert usage_record_cost(model=model, cache_write_tokens=1_000_000, batch=batch) == Decimal(write_5m) * factor
+    assert usage_record_cost(model=model, cache_write_tokens=1_000_000, cache_write_ttl="1h", batch=batch) == Decimal(write_1h) * factor
+
+
+def test_usage_ledger_prices_opus_5_5_cache_reads_at_five_percent():
+    from drawing_analyzer.pipeline import _record_usage
+
+    ru = RunUsage()
+    _record_usage(ru, family="digest", instance="digest:rt", model="claude-opus-5-5",
+                  cache_read_tokens=1_000_000)
+    _record_usage(ru, family="digest", instance="digest:batch", model="claude-opus-5-5",
+                  transport="BATCH", cache_read_tokens=1_000_000)
+    assert [r.estimated_cost for r in ru.records] == [Decimal("0.20"), Decimal("0.10")]
+    assert ru.total_estimated_cost == Decimal("0.30")
+
+
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
     """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
 

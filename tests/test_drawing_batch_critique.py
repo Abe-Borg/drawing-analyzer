@@ -138,11 +138,14 @@ class _FakeClient:
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
         # Files API + Message Batches are GA (production calls the stable
-        # namespace); ``.beta.messages.stream`` is kept as a mirror because
-        # ``digest.stream_message`` routes the Opus 5 refusal-fallback params
+        # namespace); beta create/stream are kept as mirrors because
+        # refusal-fallback parameters route eligible models
         # (see ``apply_refusal_fallback``) through the beta client namespace.
         stream = lambda **kw: FinalMessageStream(self._messages_create(**kw))  # noqa: E731
-        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches, stream=stream))
+        self.beta = _Obj(
+            files=self.files,
+            messages=_Obj(batches=batches, create=self._messages_create, stream=stream),
+        )
         self.messages = _Obj(
             batches=batches,
             create=self._messages_create,

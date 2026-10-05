@@ -35,12 +35,13 @@ def _reset_latch():
 # --------------------------------------------------------------------------- #
 
 
-def test_attaches_beta_and_param_for_opus_5():
-    kwargs = {"model": OPUS_5, "max_tokens": 1024, "messages": []}
-    out = api.apply_refusal_fallback(kwargs, model=OPUS_5)
+@pytest.mark.parametrize("model", [OPUS_5, "claude-opus-5-5", "claude-sonnet-5-5"])
+def test_attaches_beta_and_param_for_registered_fallback_models(model):
+    kwargs = {"model": model, "max_tokens": 1024, "messages": []}
+    out = api.apply_refusal_fallback(kwargs, model=model)
     assert out["betas"] == [api.REFUSAL_FALLBACK_BETA]
     assert out["fallbacks"] == "default"
-    assert kwargs == {"model": OPUS_5, "max_tokens": 1024, "messages": []}  # not mutated
+    assert kwargs == {"model": model, "max_tokens": 1024, "messages": []}  # not mutated
 
 
 @pytest.mark.parametrize("model", [SONNET_5, OPUS_48, "claude-haiku-4-5", ""])

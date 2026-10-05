@@ -234,6 +234,79 @@ def _annot_count(pdf_path: Path) -> int:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("model,digest_cost", [
+    ("claude-opus-5-5", "0.2036"),
+    ("claude-sonnet-5-5", "0.2018"),
+])
+def test_5_5_pipeline_request_policy_and_priced_ledger(tmp_path, monkeypatch, model, digest_cost):
+    from decimal import Decimal
+    from drawing_analyzer.core import api_config as api
+
+    monkeypatch.setenv("DRAWING_ANALYZER_MODEL", model)
+    monkeypatch.delenv(api.ENV_REFUSAL_FALLBACK, raising=False)
+    monkeypatch.setattr(api, "_refusal_fallback_available", True)
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                            investigate_mode="confirm_after_crop")
+    requests = []
+    beta_requests = []
+    create = client.messages.create
+    beta_messages = client.beta.messages
+    beta_stream = beta_messages.stream
+    beta_create = beta_messages.create
+
+    def capture_beta_stream(**kwargs):
+        beta_requests.append(kwargs.copy())
+        return beta_stream(**kwargs)
+
+    def capture_beta_create(**kwargs):
+        beta_requests.append(kwargs.copy())
+        return beta_create(**kwargs)
+
+    monkeypatch.setattr(beta_messages, "stream", capture_beta_stream)
+    monkeypatch.setattr(beta_messages, "create", capture_beta_create)
+    client.beta = type("Beta", (), {"messages": beta_messages})()
+
+    def capture(**kwargs):
+        requests.append(kwargs)
+        response = create(**kwargs)
+        response.model = kwargs["model"]
+        if _system_text(kwargs.get("system", "")).startswith(DIGEST_SYSTEM_PROMPT):
+            response.usage.cache_read_input_tokens = 1_000_000
+        return response
+
+    monkeypatch.setattr(client.messages, "create", capture)
+    ctx = extract_drawing_context(
+        [src], model=model, client=client, rows=2, cols=2,
+        use_batch=False, critique_use_batch=False, qc_markups=True,
+        qc_work_dir=tmp_path / "qc",
+    )
+    reviews = [kw for kw in requests
+               if _system_text(kw.get("system", "")).startswith(DIGEST_SYSTEM_PROMPT)]
+    assert reviews and all(kw["model"] == model for kw in reviews)
+    for kw in reviews:
+        assert kw["thinking"] == {"type": "adaptive"}
+        assert kw["output_config"]["effort"] == "high"
+        assert kw["fallbacks"] == "default"
+    assert all(api.REFUSAL_FALLBACK_BETA in kw["betas"] for kw in beta_requests)
+    assert any(_system_text(kw.get("system", "")).startswith(DIGEST_SYSTEM_PROMPT)
+               for kw in beta_requests)
+    # All stages satisfy the 5.5 migration constraints, including tool loops.
+    for kw in requests:
+        assert kw.get("thinking", {}).get("type") != "disabled"
+        assert kw.get("tool_choice", {"type": "auto"})["type"] in {"auto", "none"}
+        assert not {"temperature", "top_p", "top_k"} & kw.keys()
+        assert all(t.get("type") != "computer_20251124" and t.get("name") != "advisor"
+                   for t in kw.get("tools", []))
+    records = ctx.run_usage.records
+    assert records and all(r.estimated_cost is not None for r in records)
+    assert ctx.run_usage.total_estimated_cost == sum((r.estimated_cost for r in records), Decimal("0"))
+    digest = next(r for r in records if r.stage_family == "digest")
+    assert digest.model == model and digest.cache_read_tokens == 1_000_000
+    assert digest.estimated_cost == Decimal(digest_cost)
+    assert client.investigate_calls >= 2
+
+
 def test_full_qc_chain(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])

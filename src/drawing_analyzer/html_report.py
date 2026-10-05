@@ -115,8 +115,9 @@ ever sent anywhere for either.
   closing notes) rides beside the message, never inside it.
 
 Two honest limits. The browser copy is capped (quota is shared across every
-local page), and past the cap the oldest exchanges are dropped and the widget
-says so; the saved *file* is never trimmed. And a turn aborted before any
+local page); past the cap, auto-save stops and the widget offers file export.
+History is never trimmed: kept thinking blocks depend on the entire prefix.
+And a turn aborted before any
 content reached ``history`` leaves text on screen that the transcript does not
 contain — ``history`` is the replayable truth, and the transcript follows it.
 
@@ -155,7 +156,9 @@ from urllib.parse import quote
 from .core.api_config import (
     CHAT_MODEL_DEFAULT,
     EFFORT_HIGH,
+    REFUSAL_FALLBACK_BETA,
     model_capabilities,
+    refusal_fallback_enabled,
     web_search_blocked_domains,
 )
 from .core.pricing import price_for
@@ -2885,7 +2888,8 @@ def _chat_bootstrap_html(
         # tells a reader whether the next question still fits.
         "contextWindow": caps.context_window,
         "rates": (
-            {"in": price.input_per_mtok, "out": price.output_per_mtok}
+            {"in": price.input_per_mtok, "out": price.output_per_mtok,
+             "cacheRead": price.cache_read_multiplier}
             if price
             else None
         ),
@@ -2909,6 +2913,11 @@ def _chat_bootstrap_html(
         # has web search, but only the older basic variant. Both had to move for
         # a non-default chat model to work at all.
         "webSearch": caps.supports_web_search,
+        "refusalFallbackBeta": (
+            REFUSAL_FALLBACK_BETA
+            if caps.supports_refusal_fallback and refusal_fallback_enabled()
+            else None
+        ),
         # The source-quality blocklist lives in Python (api_config) and is handed
         # over rather than restated in JS, so the widget and the pipeline's
         # citation check cannot drift into two different policies.
@@ -3671,7 +3680,7 @@ _CHAT_JS = r"""
   //
   // The report block's breakpoint caches tools+system; this second one caches
   // the conversation so far, so each tool round and each later question re-reads
-  // prior rounds at 0.1x instead of full price. Tool results are large and live
+  // prior rounds at the model's cache-read rate. Tool results are large and live
   // in `history` forever, so without this, question 8 still pays full freight for
   // question 1's web-search results. Re-stamping every round also keeps
   // consecutive breakpoints within the API's 20-block lookback window, which a
@@ -3695,25 +3704,31 @@ _CHAT_JS = r"""
   // exactly as the transcript wants it while the request still carries the marker.
   function messagesForRequest(){
     if(!history.length) return history;
-    var i = history.length - 1;
-    var last = history[i];
-    if(last.role !== 'user') return history;
+    // Normalize EVERY plain-string user turn on EVERY request, so a rolling
+    // breakpoint never changes an earlier message's content shape. Assistant
+    // blocks (including empty signed thinking) stay complete and unmodified.
+    var out = history.map(function(m){
+      return typeof m.content === 'string'
+        ? {role: m.role, content: [{type: 'text', text: m.content}]} : m;
+    });
+    var i = out.length - 1;
+    var last = out[i];
+    if(last.role !== 'user') return out;
     // A plain-string content cannot carry cache_control; the API accepts either
     // shape, so the request-side copy is normalized to blocks.
     var blocks = (typeof last.content === 'string')
       ? [{type: 'text', text: last.content}]
       : (Array.isArray(last.content) ? last.content.slice() : null);
-    if(!blocks) return history;
+    if(!blocks) return out;
     for(var k = blocks.length - 1; k >= 0; k--){
       var b = blocks[k];
       if(b && STAMPABLE[b.type]){
         blocks[k] = Object.assign({}, b, {cache_control: {type: 'ephemeral'}});
-        var out = history.slice();
         out[i] = {role: last.role, content: blocks};
         return out;
       }
     }
-    return history;
+    return out;
   }
 
   // Custom tools are executed *in this browser* by the dispatch table below
@@ -3752,6 +3767,7 @@ _CHAT_JS = r"""
     if(CFG.effort){
       req.output_config = {effort: CFG.effort};
     }
+    if(CFG.refusalFallbackBeta) req.fallbacks = 'default';
     // `max_uses` is a PER-REQUEST budget, not per question. Each client-tool
     // round below issues a fresh request (see `step`), so a question that takes
     // several rounds gets this allowance again on each one — the effective
@@ -4277,7 +4293,8 @@ _CHAT_JS = r"""
     if(CFG.rates && CFG.rates.in && CFG.rates.out){
       var base = (sessionUsage.input / 1e6) * CFG.rates.in
         + (sessionUsage.output / 1e6) * CFG.rates.out
-        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in * 0.1;
+        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in
+          * (CFG.rates.cacheRead == null ? 0.1 : CFG.rates.cacheRead);
       var lo = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 1.25;
       var hi = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 2;
       var span = (lo.toFixed(2) === hi.toFixed(2))
@@ -4814,22 +4831,31 @@ _CHAT_JS = r"""
 
   // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
   function streamOnce(bubble, noTools){
-    aborter = new AbortController();
+    var controller = new AbortController();
+    aborter = controller;
     showWaiting(bubble);   // covers every round's wait, not just the first
+    var headers = {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    };
+    var fallbackBeta = CFG.refusalFallbackBeta;
+    if(fallbackBeta) headers['anthropic-beta'] = fallbackBeta;
     return fetch(API_URL, {
       method: 'POST',
-      signal: aborter.signal,
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+      signal: controller.signal,
+      headers: headers,
       body: JSON.stringify(buildRequest(noTools))
     }).then(function(resp){
       if(!resp.ok){
         return resp.json().catch(function(){ return {}; }).then(function(body){
           var msg = (body && body.error && body.error.message) || ('HTTP ' + resp.status);
+          if(resp.status === 400 && fallbackBeta && /fallback/i.test(msg)
+              && !stopRequested && !controller.signal.aborted){
+            CFG.refusalFallbackBeta = null;
+            return streamOnce(bubble, noTools);
+          }
           if(resp.status === 401){
             // WHICH key was rejected decides the recovery, so read that before
             // forgetKey() clears the reader's. A rejected embedded key is no
@@ -4929,7 +4955,7 @@ _CHAT_JS = r"""
       } else if(d.type === 'input_json_delta'){
         st.partial[ev.index] = (st.partial[ev.index] || '') + d.partial_json;
       } else if(d.type === 'signature_delta'){
-        b.signature = d.signature;
+        b.signature = (b.signature || '') + d.signature;
       } else if(d.type === 'citations_delta' && d.citation){
         (b.citations = b.citations || []).push(d.citation);
       }
@@ -5149,6 +5175,7 @@ _CHAT_JS = r"""
     return {
       schema_version: TX_SCHEMA,
       kind: TX_KIND,
+      request_prefix_version: 1,
       report: {
         report_id: CFG.reportId || '',
         title: CFG.title || '',
@@ -5165,26 +5192,32 @@ _CHAT_JS = r"""
   // Serialize to a JSON string. Always scrubbed of key material: a reader can
   // paste a key into the box and an error echo can carry one, and neither may
   // reach durable storage. A `limit` of 0 means "no cap" (the file export).
-  // Trimming drops the OLDEST turns and always resumes at the next reader turn,
-  // so the survivors start a well-formed exchange — never a dangling
-  // tool_result answering a tool_use that was just dropped. Returns null when
-  // there was a conversation but none of it fits.
-  function isReaderTurn(turn){
-    return !!(turn && turn.display && typeof turn.display.text === 'string');
+  // Never trim history to fit: 5.5 signs thinking against all earlier turns.
+  // If secret redaction changes the serialized prefix, remove all thinking
+  // from that saved copy once. The live conversation stays untouched.
+  function withoutThinking(turns){
+    return turns.map(function(t){
+      var m = t.message;
+      if(!m || m.role !== 'assistant' || !Array.isArray(m.content)) return t;
+      var content = m.content.filter(function(b){
+        return b && b.type !== 'thinking' && b.type !== 'redacted_thinking';
+      });
+      return Object.assign({}, t, {message: Object.assign({}, m, {content: content})});
+    }).filter(function(t){
+      return !(t.message && Array.isArray(t.message.content) && !t.message.content.length);
+    });
   }
   function serializeTranscript(limit){
     var payload = transcriptPayload();
-    var text = scrubSecrets(JSON.stringify(payload));
-    if(!limit) return text;
-    while(text.length > limit && payload.turns.length){
-      var i = 1;
-      while(i < payload.turns.length && !isReaderTurn(payload.turns[i])) i++;
-      payload.turns = i >= payload.turns.length ? [] : payload.turns.slice(i);
-      payload.truncated = true;
-      text = scrubSecrets(JSON.stringify(payload));
+    var raw = JSON.stringify(payload);
+    var text = scrubSecrets(raw);
+    if(text !== raw){
+      payload = JSON.parse(text);
+      payload.turns = withoutThinking(payload.turns);
+      payload.thinking_reset = true;
+      text = JSON.stringify(payload);
     }
-    if(!payload.turns.length && history.length) return null;
-    return text;
+    return limit && text.length > limit ? null : text;
   }
 
   // ---------------------------------------------------- transcript: storage
@@ -5358,9 +5391,24 @@ _CHAT_JS = r"""
     clearPendingSelection();
     clearTermHighlight();
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild);
-    replayTranscript(dropUnansweredTail(data.turns));
+    replayTranscript(turnsForReplay(data));
     if(hint) addMsg('da-hint', hint);
     saveTranscript();
+  }
+
+  function turnsForReplay(data){
+    var turns = dropUnansweredTail(data.turns);
+    // Older request shapes, trimmed copies, and imports from another report
+    // or model have a different prefix. Do not replay their stale signatures.
+    // Continue append-only from
+    // the restored text/tool history, with new thinking on subsequent turns.
+    if(data.truncated || data.thinking_reset || data.request_prefix_version !== 1
+        || (data.report && data.report.model && data.report.model !== CFG.model)
+        || String((data.report || {}).report_id || '') !== String(CFG.reportId || '')){
+      turns = withoutThinking(turns);
+      addMsg('da-hint', 'Restored text and tool history; earlier reasoning was reset because the saved context changed.');
+    }
+    return turns;
   }
 
   function restoreFromStorage(){
@@ -5374,7 +5422,7 @@ _CHAT_JS = r"""
       dropStoredTranscript();
       return;
     }
-    var turns = dropUnansweredTail(data.turns);
+    var turns = turnsForReplay(data);
     if(!turns.length) return;
     replayTranscript(turns);
     addMsg('da-hint', 'Restored your previous conversation from this browser.'
@@ -5457,7 +5505,13 @@ _CHAT_JS = r"""
   // would put a fabricated tool outcome into the transcript the model reads
   // back. The visible text of the turn is untouched.
   function stripDanglingToolUse(blocks){
-    return blocks.filter(function(b){ return !b || b.type !== 'tool_use'; });
+    var edited = false;
+    return blocks.filter(function(b){
+      if(b && b.type === 'tool_use'){ edited = true; return false; }
+      // A later thinking block was signed over the removed tool call. Drop
+      // only that trailing reasoning; earlier thinking stays byte-exact.
+      return !(edited && b && (b.type === 'thinking' || b.type === 'redacted_thinking'));
+    });
   }
 
   // apiContent : string|array  — pushed to history as the user turn's content

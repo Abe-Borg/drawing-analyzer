@@ -102,9 +102,8 @@ _FETCH_STUB = """
 def _sent_text(message):
     """The text of a sent message, whichever container shape it arrived in.
 
-    The rolling history cache breakpoint normalizes the *last* user turn to a
-    block array on the way out (a plain string cannot carry ``cache_control``),
-    so a request's final message is blocks while earlier ones stay strings.
+    User turns are normalized to block arrays on every request so a rolling
+    cache breakpoint never changes an earlier message's shape.
     These assertions are about the text that reached the model, not the box it
     travelled in.
     """
@@ -191,7 +190,8 @@ def _finish(page):
 
 
 def _ask(page, question):
-    page.click("#da-chat-fab")
+    if page.locator("#da-chat-fab").is_visible():
+        page.click("#da-chat-fab")
     page.fill("#da-chat-input", question)
     page.click("#da-chat-send")
     _finish(page)
@@ -843,7 +843,7 @@ def test_conversation_survives_a_reload(page, tmp_path):
     page.click("#da-chat-send")
     _wait_turn(page)
     sent = page.evaluate("window.__REQ")[0]["messages"]
-    assert sent[0]["content"] == "what are the conflicts?"
+    assert _sent_text(sent[0]) == "what are the conflicts?"
     assert sent[1]["role"] == "assistant"
     assert _sent_text(sent[-1]) == "and the second one?"
     assert page.evaluate("window.__pwned") is False
@@ -903,7 +903,7 @@ def test_replayed_excerpt_keeps_display_and_api_content_apart(page, tmp_path):
     page.fill("#da-chat-input", "and now?")
     page.click("#da-chat-send")
     _wait_turn(page)
-    first = page.evaluate("window.__REQ")[0]["messages"][0]["content"]
+    first = _sent_text(page.evaluate("window.__REQ")[0]["messages"][0])
     assert "<excerpt>" in first and "UNIQUEPHRASE" in first
 
 
@@ -1023,7 +1023,7 @@ def test_load_json_restores_and_resumes(page, tmp_path):
     page.click("#da-chat-send")
     _wait_turn(page)
     sent = page.evaluate("window.__REQ")[0]["messages"]
-    assert sent[0]["content"] == "earlier question"
+    assert _sent_text(sent[0]) == "earlier question"
     assert _sent_text(sent[-1]) == "follow up"
 
 
@@ -1946,6 +1946,164 @@ def test_default_model_still_gets_thinking_and_web_search(page, tmp_path):
     req = page.evaluate("window.__REQ")[0]
     assert req.get("thinking", {}).get("type") == "adaptive"
     assert any(t.get("name") == "web_search" for t in req["tools"])
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+def test_5_5_chat_preserves_empty_thinking_and_append_only_prefix(page, tmp_path, monkeypatch, model):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", model)
+    first = _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "signature_delta", "signature": "signed-"}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "signature_delta", "signature": "empty"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "tu_signed", "name": "query_findings",
+                           "input": {"severity": "high"}}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[first, _text_turn("answered")])
+    _ask(page, "check the findings")
+    _ask(page, "follow up")
+    requests = page.evaluate("window.__REQ")
+    assert len(requests) == 3
+    expected_thinking = {"type": "thinking", "thinking": "", "signature": "signed-empty"}
+    assert requests[1]["messages"][1]["content"][0] == expected_thinking
+
+    def without_cache(value):
+        if isinstance(value, dict):
+            return {k: without_cache(v) for k, v in value.items() if k != "cache_control"}
+        if isinstance(value, list):
+            return [without_cache(v) for v in value]
+        return value
+
+    for prev, curr in zip(requests, requests[1:]):
+        assert without_cache(curr["system"]) == without_cache(prev["system"])
+        assert without_cache(curr["tools"]) == without_cache(prev["tools"])
+        assert without_cache(curr["messages"][:len(prev["messages"])]) == without_cache(prev["messages"])
+    for req in requests:
+        assert req["model"] == model
+        assert req["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert req["output_config"]["effort"] == "high"
+        assert req["fallbacks"] == "default"
+        assert {t.get("type") for t in req["tools"]} >= {"web_search_20260209", "web_fetch_20260209"}
+        assert req.get("tool_choice", {"type": "auto"})["type"] in {"auto", "none"}
+    # Durable replay keeps the full signed prefix too.
+    page.reload()
+    _ask(page, "after reload")
+    resumed = page.evaluate("window.__REQ")[0]
+    assert resumed["messages"][1]["content"][0] == expected_thinking
+    assert without_cache(resumed["messages"][:len(requests[-1]["messages"])]) == without_cache(requests[-1]["messages"])
+
+
+def test_5_5_chat_storage_limit_keeps_the_full_live_prefix(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "_CHAT_JS", hr._CHAT_JS.replace(
+        "var TX_MAX_CHARS = 500000;", "var TX_MAX_CHARS = 1200;"
+    ))
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("first answer"), _text_turn("x" * 700)])
+    _ask(page, "first question")
+    saved = _stored(page)
+    assert saved and not saved["truncated"]
+    _ask(page, "second question")
+    assert _stored(page) == saved
+    assert "too large" in page.locator("#da-chat-msgs").text_content()
+    _ask(page, "third question")
+    messages = page.evaluate("window.__REQ")[-1]["messages"]
+    assert len(messages) == 5
+    assert _sent_text(messages[0]) == "first question"
+    assert messages[3]["content"] == [{"type": "text", "text": "x" * 700}]
+
+
+def test_redacted_saved_transcript_resets_thinking_without_editing_live_history(page, tmp_path):
+    stream = _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "thinking", "thinking": "", "signature": "live-signature"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "text", "text": "echo sk-ant-do-not-store-this"}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask(page, "question")
+    saved = _stored(page)
+    assert saved["thinking_reset"] is True
+    assert saved["turns"][1]["message"]["content"] == [{"type": "text", "text": "echo sk-ant-[redacted]"}]
+    _ask(page, "follow up")
+    live = page.evaluate("window.__REQ")[-1]["messages"][1]["content"]
+    assert live[0] == {"type": "thinking", "thinking": "", "signature": "live-signature"}
+    assert live[1]["text"] == "echo sk-ant-do-not-store-this"
+    page.reload()
+    _ask(page, "after reload")
+    restored = page.evaluate("window.__REQ")[0]["messages"]
+    assert all(b["type"] not in {"thinking", "redacted_thinking"}
+               for m in restored if m["role"] == "assistant" for b in m["content"])
+
+
+def test_opus_5_5_chat_cache_read_cost(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-opus-5-5")
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {"cache_read_input_tokens": 1_000_000}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": "done"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask(page, "question")
+    assert "est. $0.20" in page.locator("#da-chat-usage").text_content()
+
+
+def test_5_5_chat_fallback_rejection_retries_with_the_same_prefix(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-opus-5-5")
+    _load(page, _chat_doc(), tmp_path)
+    page.evaluate("""() => {
+      var original = window.fetch;
+      window.__FALLBACK_REQUESTS = [];
+      window.fetch = function(url, opts){
+        window.__FALLBACK_REQUESTS.push({body: JSON.parse(opts.body), headers: opts.headers});
+        if(window.__FALLBACK_REQUESTS.length === 1){
+          return Promise.resolve({ok: false, status: 400, json: function(){
+            return Promise.resolve({error: {message: 'server-side-fallback beta unavailable'}});
+          }});
+        }
+        return original(url, opts);
+      };
+    }""")
+    _ask(page, "question")
+    first, retry = page.evaluate("window.__FALLBACK_REQUESTS")
+    assert first["headers"]["anthropic-beta"] == "server-side-fallback-2026-07-01"
+    assert "anthropic-beta" not in retry["headers"]
+    body = first["body"]
+    assert body.pop("fallbacks") == "default"
+    assert body == retry["body"]
+
+
+@pytest.mark.parametrize("truncated", [True, False])
+def test_legacy_transcript_drops_stale_thinking_before_resuming(page, tmp_path, truncated):
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path)
+    report_id = page.evaluate("JSON.parse(document.getElementById('da-chat-config').textContent).reportId")
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript", "schema_version": 1,
+        "report": {"report_id": report_id}, "truncated": truncated,
+        "turns": [
+            {"message": {"role": "user", "content": "kept question"}, "display": {"text": "kept question"}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "signed-over-deleted-turns"},
+                {"type": "text", "text": "kept answer"},
+            ]}},
+        ],
+    }
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+    page.set_input_files("#da-chat-load-input", str(path))
+    _ask(page, "continue")
+    messages = page.evaluate("window.__REQ")[0]["messages"]
+    assert messages[1]["content"] == [{"type": "text", "text": "kept answer"}]
 
 
 def test_a_model_without_adaptive_thinking_is_not_sent_thinking(page, tmp_path, monkeypatch):

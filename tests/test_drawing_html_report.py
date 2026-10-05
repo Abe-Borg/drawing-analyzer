@@ -1593,7 +1593,8 @@ def test_chat_js_persists_transcripts_and_scrubs_them():
     assert "function replayAssistant" in js and "function renderUserBubble" in js
     assert "startBlockUI(st, i, bubble)" in js and "finishBlock(st, i, bubble)" in js
     # ...and every write goes through the secret scrubber.
-    assert "scrubSecrets(JSON.stringify(payload))" in js
+    assert "var raw = JSON.stringify(payload);" in js
+    assert "var text = scrubSecrets(raw);" in js
 
 
 def test_transcript_serializer_never_touches_key_material():

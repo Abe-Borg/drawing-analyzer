@@ -781,12 +781,13 @@ def _critique_prefix_costs(
     scenario          prefix read-equivalents
     ===============  ==========================
     flat (old)        2.00
-    reuse             1.25 + 0.10 = 1.35
+    reuse (Opus 5.5)  1.25 + 0.05 = 1.30
+    reuse (others)    1.25 + 0.10 = 1.35
     no reuse          1.25 x 2    = 2.50
     ===============  ==========================
 
-    So the old number over-quoted successful reuse by ~48% and under-quoted a
-    total miss by ~20%, on the single largest QC line. §10.2 asks for the two
+    The flat number over-quotes successful reuse and under-quotes a total
+    miss, on the single largest QC line. §10.2 asks for the two
     scenarios rather than an invented hit probability, and that is what this
     returns: the low end assumes every repeat read hits, the high end assumes
     every breakpoint misses and re-writes.
