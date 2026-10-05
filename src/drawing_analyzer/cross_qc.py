@@ -27,10 +27,11 @@ Every fact's ``exact_quote`` (and every reconciliation quote) is validated again
 the retained source text before it is trusted — an ungrounded quote never becomes a
 trusted dual-anchor finding.
 
-**Loss-aware budgeting (§16.2, DA-028).** Each sheet's text layer is capped, but the
-omission is *counted and surfaced* (``text_chars_omitted`` / ``budget_degraded``),
-never a silent slice. The same now holds for the per-response findings cap
-(``findings_omitted``): a response carrying more conflicts than
+**Disclosed input bounds (§16.2, DA-028).** Each sheet's text layer is capped, with
+the omission *counted and surfaced* (``text_chars_omitted``), never a silent slice.
+This designed input bound does not make the pass incomplete or prevent caching.
+The per-response findings cap is loss-aware (``findings_omitted`` /
+``budget_degraded``): a response carrying more conflicts than
 ``DEFAULT_CROSS_QC_MAX_FINDINGS`` used to be truncated with no counter and still
 reported ``complete``, which on a large set — where cross-sheet coordination
 conflicts matter most — is indistinguishable from a set that simply had fewer.
@@ -123,7 +124,12 @@ _TEXT_LAYER_BUDGET = 4_000
 # therefore the stored result for byte-identical request inputs. A warm entry
 # written under the old normalization would keep serving the smaller finding set.
 # One mechanism for one change: no key field was added beside this.
-_CROSS_QC_CACHE_CONTRACT = 3
+#
+# Bumped to 4: text-layer truncation is now a disclosed input bound, so it can
+# produce complete, cache-admitted results. Isolate that admission policy from
+# older processes sharing the cache, which would reject the same truncated run
+# but otherwise trust the new result's stored completeness flags on read.
+_CROSS_QC_CACHE_CONTRACT = 4
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -420,9 +426,10 @@ class CrossQCResult:
     ``claims`` are numeric relationships the pass transcribed (Phase 14) for the
     deterministic arithmetic auditor. The Phase-24 fields report the sharded path's
     completeness (§16.3): how many shards ran, whether a reconciliation was required
-    and completed, and whether the text budget was degraded (§16.2). ``complete`` is
-    False when any shard or the reconciliation failed, or the budget was degraded —
-    the pipeline then holds the stage at PARTIAL while still using the findings.
+    and completed, and whether findings were omitted (§16.2). ``complete`` is False
+    when any shard or the reconciliation failed, or findings were omitted — the
+    pipeline then holds the stage at PARTIAL while still using the findings.
+    Text-layer truncation is a disclosed input bound and does not affect completeness.
     """
 
     findings: list[Finding] = field(default_factory=list)
@@ -438,11 +445,12 @@ class CrossQCResult:
     reconciliation_completed: bool = False
     facts_collected: int = 0
     complete: bool = True
-    # §16.2 loss-aware text budgeting telemetry.
+    # §16.2 disclosed text bounds and findings-loss telemetry.
     text_chars_total: int = 0
     text_chars_included: int = 0
     text_chars_omitted: int = 0
     findings_omitted: int = 0
+    # Lost findings, rather than the designed per-sheet text bound.
     budget_degraded: bool = False
     cached: bool = False
     # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed),
@@ -881,7 +889,12 @@ class _Budget:
 
     @property
     def degraded(self) -> bool:
-        return self.omitted > 0 or self.findings_omitted > 0
+        """Only discarded findings make this budget incomplete.
+
+        Text truncation applies the designed per-sheet input bound; its omitted
+        characters remain counted and disclosed without blocking completion or cache.
+        """
+        return self.findings_omitted > 0
 
 
 def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
@@ -921,7 +934,7 @@ def _cap_findings(findings: list[Finding], budget: _Budget) -> list[Finding]:
     counter, no ``budget_degraded``, and ``complete=True`` — so a reviewer on a
     large set, exactly where coordination conflicts matter most, could not tell
     a clean run from a truncated one. Now the loss is recorded and the run
-    reports itself incomplete, the same as any other dropped input.
+    reports itself incomplete. This loses findings, unlike the designed text bound.
     """
     if len(findings) <= DEFAULT_CROSS_QC_MAX_FINDINGS:
         return findings
@@ -1366,16 +1379,13 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
         # tail past SHEET_TEXT_MAX_CHARS became an acceptance input the key did
         # not cover. Add its digest **only when the sheet is actually truncated**
         # — for every untruncated sheet the evidence equals ``text_layer``, which
-        # is already in the key, so the key stays byte-identical and no stored
-        # result is thrown away. Unconditional inclusion would invalidate every
-        # cross-QC entry just as thoroughly as a contract bump, which is why the
-        # contract is deliberately NOT bumped here.
+        # is already in the key, so evidence hashing leaves its key unchanged
+        # within a given contract. The contract separately versions host-side
+        # binding and cache-admission policies.
         #
-        # Reachability, recorded so this is not "dead" code: a >15,000-character
-        # sheet also exceeds the 4,000-character cross-QC budget, so today such a
-        # run is budget-degraded and never cache-admitted at all. This becomes
-        # load-bearing the moment ``_TEXT_LAYER_BUDGET`` rises above
-        # ``SHEET_TEXT_MAX_CHARS``. Computed once per sheet per key build.
+        # Text-layer truncation is cache-admitted, so this also protects warm
+        # results whose host-side grounding used the tail beyond the digest's
+        # 15,000-character text bound. Computed once per sheet per key build.
         evidence = sheet_evidence_text(geom)
         if evidence != text_layer:
             entry["evidence_sha256"] = hashlib.sha256(
@@ -1442,14 +1452,17 @@ def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
         return None
     # Only fully successful results are ever admitted.  Recheck on read so a
     # hand-edited/corrupt entry cannot turn a PARTIAL review into COMPLETE.
-    if not result.complete or result.budget_degraded:
+    if not result.complete or result.budget_degraded or result.findings_omitted > 0:
         return None
     return result
 
 
 def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
     """Admit only a complete, non-degraded cross-QC result."""
-    if result.error is not None or not result.complete or result.budget_degraded:
+    if (
+        result.error is not None or not result.complete
+        or result.budget_degraded or result.findings_omitted > 0
+    ):
         return
     put_stage_cache_entry(
         cache,
@@ -1686,7 +1699,8 @@ def cross_sheet_qc(
         "reconcile(%s) over %d fact(s)%s",
         len(deduped), len(entries), shards_completed, len(shards),
         "ok" if reconciliation_completed else "incomplete", len(all_facts),
-        "" if not budget.degraded else f"; budget degraded ({budget.omitted} chars omitted)",
+        (f"; {budget.omitted} text chars and {budget.findings_omitted} findings omitted"
+         if budget.omitted or budget.findings_omitted else ""),
     )
     result = CrossQCResult(
         findings=deduped,

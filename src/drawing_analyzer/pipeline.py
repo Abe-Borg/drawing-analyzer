@@ -3826,11 +3826,14 @@ def extract_drawing_context(
             # by which the measurement reaches an artifact.
             if getattr(cross_res, "discards", None) is not None:
                 cross_qc_discards = cross_res.discards.to_dict()
-            # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
-            # cross-shard reconciliation completed and the text budget was not
-            # degraded — a failed shard/reconciliation or a silent truncation holds
-            # the stage at PARTIAL while its findings stay usable.
-            cross_complete = bool(getattr(cross_res, "complete", not cross_res.error))
+            # DA-015/DA-028: failed shards/reconciliation and omitted findings hold
+            # the stage at PARTIAL. The designed per-sheet text bound is disclosed
+            # in warnings without blocking completeness, including on cache hits.
+            findings_omitted = getattr(cross_res, "findings_omitted", 0)
+            cross_complete = (
+                bool(getattr(cross_res, "complete", not cross_res.error))
+                and findings_omitted == 0
+            )
             _record_usage(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
@@ -3846,9 +3849,14 @@ def extract_drawing_context(
                 errors.append(f"Cross-sheet QC: {cross_res.error}")
                 cross_stage.errors.append(str(cross_res.error))
                 _log.warning("cross-sheet QC: %s", cross_res.error)
-            if getattr(cross_res, "budget_degraded", False):
+            if getattr(cross_res, "text_chars_omitted", 0) > 0:
                 cross_stage.warnings.append(
-                    f"text budget degraded: {cross_res.text_chars_omitted} char(s) omitted"
+                    "text layer capped at 4,000 chars per sheet: "
+                    f"{cross_res.text_chars_omitted} char(s) omitted"
+                )
+            if findings_omitted > 0:
+                cross_stage.warnings.append(
+                    f"findings budget exceeded: {findings_omitted} finding(s) omitted"
                 )
             if getattr(cross_res, "reconciliation_required", False) and not getattr(
                 cross_res, "reconciliation_completed", True
