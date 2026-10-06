@@ -915,7 +915,7 @@ def _digest_sheets_concurrent(
             specs_text=specs_text,
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         in_flight: set = set()
 
         def _collect_one() -> None:
@@ -1783,7 +1783,7 @@ def _run_critique_stage(
                     return CritiqueResult(findings=[], requested_runs=runs, completed_runs=0, error=error)
             return critique_sheet_self_consistent(rendered, client=client, cache=cache, profiles=profiles)
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
             in_flight: dict = {}
 
             def _collect_one() -> None:
@@ -3604,6 +3604,7 @@ def extract_drawing_context(
     if overlap_stages:
         stage_executor = ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="set-stage",
+            **resource_pressure.worker_binding(),
         )
         _register_stage_executor(stage_executor)
         if config.run_synthesis:

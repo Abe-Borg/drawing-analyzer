@@ -54,11 +54,16 @@ Design rules:
   journal incident events are capped so a pathological run cannot bloat the
   manifest or drown ``run.log``; the aggregates still count everything.
 - **Dependency-free.** No ``psutil``, no PyMuPDF (I-5).
-- **Process-global active recorder**, like the diagnostics logger: the pipeline
-  activates one for the duration of ``extract_drawing_context``
-  (:func:`tracked_run`), and retry loops on worker threads reach it through
-  :func:`note_api_retry` without plumbing a handle through every signature.
-  With no run active the module-level notes are no-ops.
+- **Run-scoped active recorder**, reached like the diagnostics logger: the
+  pipeline activates one for the duration of ``extract_drawing_context``
+  (:func:`tracked_run`), which binds the calling thread to it; every thread
+  pool a run opens binds its workers to the same recorder through
+  :func:`worker_binding` (an ``initializer``), so retry loops reach it through
+  :func:`note_api_retry` without plumbing a handle through every signature,
+  and two runs in one process (the pipeline keeps per-run executor state for
+  exactly that) never see each other's retries. A thread bound to no run
+  falls back to the one live recorder when exactly one run is live, and
+  records nothing — rather than guessing — when several are.
 """
 from __future__ import annotations
 
@@ -1309,42 +1314,82 @@ class ResourcePressure:
 
 
 # --------------------------------------------------------------------------- #
-# The process-wide active recorder (the diagnostics-logger pattern).
+# The active recorder: thread-bound, with a live registry as the fallback.
+#
+# A single process-wide value would let two concurrent runs (library callers;
+# the pipeline keeps per-run executor state to allow them) attribute each
+# other's retries, and finishing out of order would clear the live run's
+# recorder or restore a finished one. So the binding is per thread: the run's
+# own thread is bound by ``tracked_run``, and every pool the run opens binds
+# its workers through ``worker_binding``. A thread bound to no run resolves to
+# the one live recorder only when exactly one run is live — never a guess.
 # --------------------------------------------------------------------------- #
 
-_active_lock = threading.Lock()
-_active: ResourcePressure | None = None
+_binding = threading.local()
+_live_lock = threading.Lock()
+_live: list[ResourcePressure] = []
 
 
 def current() -> ResourcePressure | None:
-    """The recorder of the run in progress, or ``None`` outside a tracked run."""
-    with _active_lock:
-        return _active
+    """The recorder for the calling thread's run, or ``None``.
+
+    The thread's own binding wins; an unbound thread gets the single live
+    recorder when exactly one run is live, else ``None`` (no attribution
+    rather than a wrong one).
+    """
+    bound = getattr(_binding, "pressure", None)
+    if bound is not None:
+        return bound
+    with _live_lock:
+        return _live[0] if len(_live) == 1 else None
+
+
+def bind_thread(pressure: ResourcePressure | None) -> ResourcePressure | None:
+    """Bind the calling thread to ``pressure``; returns its previous binding."""
+    previous = getattr(_binding, "pressure", None)
+    _binding.pressure = pressure
+    return previous
+
+
+def worker_binding() -> dict[str, Any]:
+    """``ThreadPoolExecutor`` kwargs that bind each worker to the caller's run.
+
+    Splat into every pool a run opens: ``ThreadPoolExecutor(max_workers=n,
+    **worker_binding())``. The initializer runs once per worker thread and
+    gives it the recorder the creating thread resolves to *now*, so retries
+    on those workers land on their own run even when another run is live.
+    """
+    return {"initializer": bind_thread, "initargs": (current(),)}
 
 
 def activate(pressure: ResourcePressure) -> ResourcePressure | None:
-    """Make ``pressure`` the active recorder; returns the one it displaced."""
-    global _active
-    with _active_lock:
-        previous = _active
-        _active = pressure
-        return previous
+    """Register ``pressure`` as live and bind this thread to it.
+
+    Returns the thread's previous binding, to hand back to :func:`deactivate`.
+    """
+    with _live_lock:
+        _live.append(pressure)
+    return bind_thread(pressure)
 
 
-def deactivate(previous: ResourcePressure | None = None) -> None:
-    """Restore ``previous`` (or none) as the active recorder."""
-    global _active
-    with _active_lock:
-        _active = previous
+def deactivate(pressure: ResourcePressure, previous: ResourcePressure | None = None) -> None:
+    """Retire ``pressure`` from the live set and restore this thread's binding."""
+    with _live_lock:
+        try:
+            _live.remove(pressure)
+        except ValueError:
+            pass
+    bind_thread(previous)
 
 
 def tracked_run(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Decorator: run ``fn`` with a fresh active :class:`ResourcePressure`.
+    """Decorator: run ``fn`` with a fresh :class:`ResourcePressure` bound to it.
 
-    The pipeline's entry point wears this so every retry loop on every worker
-    thread finds the run's recorder through :func:`current` for exactly the
-    duration of the call. The sampler is stopped on any exit — return or
-    raise — and the previously active recorder (normally none) is restored.
+    The pipeline's entry point wears this so every retry loop on the run's
+    thread and on its pools (see :func:`worker_binding`) finds the run's
+    recorder through :func:`current` for exactly the duration of the call.
+    The sampler is stopped on any exit — return or raise — the recorder leaves
+    the live set, and the thread's previous binding (normally none) returns.
     """
     @wraps(fn)
     def _wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -1354,13 +1399,13 @@ def tracked_run(fn: Callable[..., Any]) -> Callable[..., Any]:
             return fn(*args, **kwargs)
         finally:
             pressure.close()
-            deactivate(previous)
+            deactivate(pressure, previous)
 
     return _wrapped
 
 
 def note_api_retry(exc: BaseException, *, stage: str, attempt: int, backoff_seconds: float) -> None:
-    """Forward a transient retry to the active run's recorder (no-op outside a run)."""
+    """Forward a transient retry to this thread's run recorder (no-op outside a run)."""
     pressure = current()
     if pressure is not None:
         pressure.note_api_retry(exc, stage=stage, attempt=attempt, backoff_seconds=backoff_seconds)

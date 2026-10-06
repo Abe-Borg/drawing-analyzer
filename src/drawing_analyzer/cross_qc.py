@@ -60,7 +60,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
-from . import tiling
+from . import resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -1277,7 +1277,7 @@ def _reconcile_facts(
     if workers == 1:
         pair_results = [_run_pair(union) for union in pair_inputs]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             # ``map`` returns in input order even when requests finish out of
             # order, so finding/claim assembly remains deterministic.
             pair_results = list(pool.map(_run_pair, pair_inputs))
@@ -1640,7 +1640,7 @@ def cross_sheet_qc(
     if workers == 1:
         map_results = [_run_map(shard) for shard in shards]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             # Deterministic input-order fold; only execution is parallel.
             map_results = list(pool.map(_run_map, shards))
 

@@ -173,14 +173,19 @@ map lives in `src/drawing_analyzer/__init__.py`.
 - **Resource pressure** (`resource_pressure.py`): the per-run starvation record
   (`ctx.resource_pressure`), rendered into run.log (`Starvation:` header line +
   *Resource pressure* section), `run_manifest.json` (`resource_pressure`), the
-  report's run-record block and the GUI completion summary. One process-global
-  active recorder per run (`tracked_run` on `extract_drawing_context`;
-  `current()`), the diagnostics-logger pattern. **Every transient retry loop
+  report's run-record block and the GUI completion summary. The active
+  recorder is **thread-bound**: `tracked_run` (on `extract_drawing_context`)
+  binds the run's thread and registers the recorder as live; **every
+  `ThreadPoolExecutor` a run opens takes `**resource_pressure.worker_binding()`**
+  so its workers bind to the same run (two concurrent runs never see each
+  other's retries). `current()` resolves the thread's binding, else the lone
+  live recorder, else `None` — never a guess. **Every transient retry loop
   goes through `digest.transient_retry_wait(exc, attempt, max_retries, sleep,
   stage=…)`**, which records the wait or the give-up; never reintroduce a bare
-  `sleep(_retry_backoff_seconds(attempt))`. The upload, files-cleanup and
-  batch-results loops call `resource_pressure.note_api_retry` /
-  `note_api_give_up` directly. Exhausted agent budgets are
+  `sleep(_retry_backoff_seconds(attempt))`. The upload, files-cleanup,
+  batch-results, batch-poll, batch-harvest and batch-resubmit loops call
+  `resource_pressure.note_api_retry` / `note_api_give_up` directly. Exhausted
+  agent budgets are
   `note_budget_exhausted(stage, kind, count=…)`; a zero count records nothing.
   The host sampler is a daemon thread on an `Event.wait` cadence
   (`DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS`, `0` disables); its scheduling lag

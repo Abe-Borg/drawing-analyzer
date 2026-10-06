@@ -1349,7 +1349,8 @@ directly. Every run carries a **resource-pressure record**
 - **API capacity.** Every transient retry in every stage — digest, critique,
   verification, investigation, identity, review plan, focus, synthesis,
   cross-QC, prose harvest, citation, plus the Files-API upload and the batch
-  results read — is recorded: stage, kind (`rate_limited` 429 / `overloaded`
+  transport's results read, status polling, harvest polling and resubmission
+  — is recorded: stage, kind (`rate_limited` 429 / `overloaded`
   529 / `unavailable` 503 / `server_error` / `timeout` / `connection`), HTTP
   status, attempt, the backoff slept, the server's `retry-after`, the
   `anthropic-ratelimit-*-remaining` headers when the error carried them, the

@@ -288,7 +288,9 @@ def iter_prefetched_sheets(
         if callable(close):
             close()
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheet-render") as executor:
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="sheet-render", **resource_pressure.worker_binding(),
+    ) as executor:
         future = executor.submit(_advance)
         try:
             while True:
@@ -482,7 +484,7 @@ def upload_sheet_images(
     workers = _resolve_upload_workers(total_images, max_workers)
     by_position: dict[int, str] = {}
     error: Exception | None = None
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         futures = {
             executor.submit(_upload_one, pos, image, name): pos
             for pos, image, name in jobs
@@ -575,7 +577,9 @@ def delete_files(
         return True
 
     workers = max(1, min(max_workers, DEFAULT_DELETE_WORKERS, len(ids)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="file-delete") as executor:
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="file-delete", **resource_pressure.worker_binding(),
+    ) as executor:
         results = list(executor.map(delete_one, ids))
     return [fid for fid, deleted in zip(ids, results) if deleted]
 

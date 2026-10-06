@@ -53,6 +53,7 @@ from .core.api_config import (
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .critique import _token_overlap
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FINDING_SEVERITIES,
@@ -1116,7 +1117,7 @@ def harvest_prose(
         futures: dict[int, Any] = {}
         disabled_chains: set[tuple[str, int]] = set()
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             def _prime_chain(key: tuple[str, int]) -> None:
                 if key in disabled_chains:
                     return

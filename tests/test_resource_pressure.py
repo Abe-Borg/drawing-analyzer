@@ -49,7 +49,7 @@ def active():
         yield pressure
     finally:
         pressure.close()
-        rp.deactivate(previous)
+        rp.deactivate(pressure, previous)
 
 
 def _events(journal: RunJournal, code: str) -> list:
@@ -443,6 +443,114 @@ def test_tracked_run_scopes_the_active_recorder_and_stops_its_sampler():
     with pytest.raises(RuntimeError):
         body(fail=True)
     assert rp.current() is None and not seen["monitor"].running
+
+
+def test_concurrent_runs_keep_their_retries_apart():
+    """Two live runs: each pool's workers land on their own recorder, and a
+    thread bound to neither records nothing while both are live."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    both_live = threading.Barrier(2, timeout=10)
+    both_noted = threading.Barrier(2, timeout=10)
+    results: dict[str, rp.ResourcePressure] = {}
+
+    def noted_from_pool(stage: str) -> None:
+        rp.note_api_retry(_status_error(429), stage=stage, attempt=1, backoff_seconds=1.0)
+
+    @rp.tracked_run
+    def run(name: str) -> None:
+        results[name] = rp.current()
+        both_live.wait()                               # the other run is live too
+        with ThreadPoolExecutor(max_workers=2, **rp.worker_binding()) as pool:
+            list(pool.map(noted_from_pool, [name] * 5))
+        rp.note_api_give_up(_status_error(529), stage=name, attempts=3)   # run thread
+        both_noted.wait()
+
+    threads = [threading.Thread(target=run, args=(n,)) for n in ("alpha", "beta")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert not any(t.is_alive() for t in threads)
+    for name in ("alpha", "beta"):
+        p = results[name]
+        assert p.api_retries == 5 and p.api_give_ups == 1
+        assert set(p.api_retries_by_stage) == {name}
+        assert set(p.api_give_ups_by_stage) == {name}
+    assert rp.current() is None                       # both retired
+
+
+def test_unbound_thread_resolves_only_a_lone_live_run():
+    lone = rp.ResourcePressure()
+    other = rp.ResourcePressure()
+    seen: list = []
+    prev = rp.activate(lone)
+    try:
+        threading.Thread(target=lambda: seen.append(rp.current())).start()
+        for t in threading.enumerate():
+            if t is not threading.current_thread() and not t.daemon:
+                t.join(timeout=5)
+        assert seen == [lone]                          # one live run: the fallback
+        prev2 = rp.activate(other)
+        try:
+            t = threading.Thread(target=lambda: seen.append(rp.current()))
+            t.start(); t.join(timeout=5)
+            assert seen[-1] is None                    # two live: no guessing
+        finally:
+            rp.deactivate(other, prev2)
+    finally:
+        rp.deactivate(lone, prev)
+    assert rp.current() is None
+
+
+# --------------------------------------------------------------------------- #
+# Batch transport: polling and resubmission backoffs reach the recorder too
+# --------------------------------------------------------------------------- #
+
+
+class _PollClient:
+    """``messages.batches.retrieve`` fails ``fail_first`` times, then ends."""
+
+    def __init__(self, fail_first: int):
+        self.calls = 0
+        fail = fail_first
+
+        class _Batches:
+            def retrieve(_self, batch_id):
+                self.calls += 1
+                if self.calls <= fail:
+                    raise _status_error(429, {"retry-after": "30"})
+                return SimpleNamespace(
+                    processing_status="ended",
+                    request_counts=SimpleNamespace(succeeded=1, errored=0, canceled=0, expired=0, processing=0),
+                )
+
+        self.messages = SimpleNamespace(batches=_Batches())
+
+
+def test_batch_poll_backoffs_and_give_up_reach_the_recorder(active):
+    from drawing_analyzer import batch_digest as bd
+
+    slept: list[float] = []
+    status = bd._poll_until_terminal(
+        _PollClient(fail_first=2), "msgbatch_x", total=1, cached_done=0,
+        progress=None, on_log=None, sleep=slept.append, max_elapsed_seconds=3600,
+    )
+    assert status == "ended" and len(slept) == 2
+    assert active.api_retries == 2 and active.api_retries_by_stage == {"batch_poll": 2}
+    assert active.api_backoff_seconds == sum(slept)
+    assert active.api_retry_after_max == 30.0
+
+    hopeless = _PollClient(fail_first=10**6)
+    status = bd._poll_until_terminal(
+        hopeless, "msgbatch_y", total=1, cached_done=0,
+        progress=None, on_log=None, sleep=lambda s: None, max_elapsed_seconds=3600,
+    )
+    assert status == "poll_failed"
+    assert hopeless.calls == bd.DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS
+    assert active.api_give_ups_by_stage == {"batch_poll": 1}
+    assert active.api_retries == 2 + bd.DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS - 1
+    assert active.starvation_status == rp.STARVATION_DETECTED
 
 
 # --------------------------------------------------------------------------- #

@@ -53,6 +53,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -1013,7 +1014,7 @@ def verify_findings(
     # the geometry it came from when its EvidenceArtifact is built.
     meta = {id(f): (sheet, rect, dpi) for (f, sheet, rect, dpi) in items}
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         in_flight: dict = {}
 
         def _collect_one() -> None:
@@ -1591,7 +1592,7 @@ def verify_cross_findings(
     if misses_by_index and resolved_client is not None:
         fatal = threading.Event()
         failures = _PermanentFailures(fatal)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
             submitted: list = []
 
             def _collect_cross() -> None:

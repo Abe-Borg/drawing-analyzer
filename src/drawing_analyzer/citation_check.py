@@ -85,6 +85,7 @@ from .core.api_config import (
     thinking_config_for,
     tools_with_cache,
 )
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
@@ -1310,7 +1311,10 @@ def check_citations(
         return ref, rid, handled, outcome, None, key
 
     fresh_requests = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(_MAX_WORKERS, len(requests)))) as pool:
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(_MAX_WORKERS, len(requests))),
+        **resource_pressure.worker_binding(),
+    ) as pool:
         for ref, rid, handled, outcome, entry, key in pool.map(_run, probes):
             done += 1
             if entry is not None:
