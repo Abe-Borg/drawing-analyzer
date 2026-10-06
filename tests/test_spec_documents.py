@@ -95,7 +95,8 @@ class _FakeClient(BetaClientMixin):
 )
 def test_extract_plain_text_reads_directly(tmp_path, name, content):
     p = tmp_path / name
-    p.write_text(content)
+    # Exact bytes: Windows text mode would write CRLF, which the extractor keeps.
+    p.write_text(content, encoding="utf-8", newline="")
     doc = extract_spec_text(p)
     assert doc.ok
     assert doc.text == content.strip()
