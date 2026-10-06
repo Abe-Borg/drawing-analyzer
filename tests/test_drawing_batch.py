@@ -427,48 +427,41 @@ def test_upload_retries_exhausted_then_raises_and_cleans_up():
     assert client.files.deleted == []
 
 
-def test_upload_does_not_retry_permanent_error():
-    # A non-transient error (no transient status / connection class) must fail
-    # fast — never sleep, never retry — so a genuine 4xx ends the sheet at once.
+class APITimeoutError(Exception):  # name matches the SDK's timeout class
+    pass
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # A non-transient error (no transient status / connection class) must
+        # fail fast — never sleep, never retry — so a genuine 4xx ends the sheet
+        # at once.
+        RuntimeError("bad request"),
+        # A lost-response timeout is ambiguous: the server may have already
+        # stored the file. Re-issuing as a fresh upload would orphan that first
+        # id (it never lands in file_ids, so neither cleanup path can delete
+        # it), so the app-level loop retries transient *status* rejections only
+        # — connection/timeout classes are left to the SDK's idempotent
+        # internal retries.
+        APITimeoutError("response lost"),
+    ],
+)
+def test_upload_does_not_retry_permanent_or_ambiguous_errors(error):
     slept: list[float] = []
 
-    class _PermanentBoom(_FakeFiles):
+    class _FailingFiles(_FakeFiles):
         def upload(self, *, file):
-            raise RuntimeError("bad request")
+            raise error
 
     client = _FakeClient(_succeed)
-    client.files = _PermanentBoom()
+    client.files = _FailingFiles()
     client.beta.files = client.files
 
-    with pytest.raises(RuntimeError, match="bad request"):
+    with pytest.raises(type(error)):
         upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append,
                             max_workers=1)
     assert slept == []  # never retried
-
-
-def test_upload_does_not_retry_ambiguous_timeout():
-    # A lost-response timeout is ambiguous: the server may have already stored
-    # the file. Re-issuing as a fresh upload would orphan that first id (it never
-    # lands in file_ids, so neither cleanup path can delete it), so the app-level
-    # loop retries transient *status* rejections only — connection/timeout
-    # classes are left to the SDK's idempotent internal retries.
-    slept: list[float] = []
-
-    class APITimeoutError(Exception):  # name matches the SDK's timeout class
-        pass
-
-    class _TimeoutFiles(_FakeFiles):
-        def upload(self, *, file):
-            raise APITimeoutError("response lost")
-
-    client = _FakeClient(_succeed)
-    client.files = _TimeoutFiles()
-    client.beta.files = client.files
-
-    with pytest.raises(APITimeoutError):
-        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append,
-                            max_workers=1)
-    assert slept == []  # ambiguous timeout is not app-retried
 
 
 def test_upload_reports_per_image_progress():
@@ -1327,18 +1320,6 @@ def test_cleanup_in_background_returns_without_blocking_and_still_deletes(monkey
     assert any("background" in msg.lower() for _, msg in logs)
 
 
-def test_cleanup_synchronous_when_not_backgrounded():
-    # The default (used by direct callers and the rest of the suite) deletes
-    # inline before returning — no daemon thread, no leaked files.
-    client = _FakeClient(_succeed)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(1)]), client=client, model=OPUS, total=1
-    )
-    digests = collect_drawing_batch(batch, client=client, sleep=NOSLEEP)
-    assert digests[0].ok
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
 # --------------------------------------------------------------------------- #
 # Detach / not-collected handling
 # --------------------------------------------------------------------------- #
@@ -1349,9 +1330,11 @@ def test_batch_detach_marks_sheets_and_leaves_files():
     batch = submit_drawing_batch(
         iter([_make_sheet(1)]), client=client, model=OPUS, total=1
     )
+    logs: list[tuple[str, str]] = []
     # Force the poll to immediately exceed the elapsed bound → "detached".
     digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, max_elapsed_seconds=-1
+        batch, client=client, sleep=NOSLEEP, max_elapsed_seconds=-1,
+        on_log=lambda msg, level="info": logs.append((level, msg)),
     )
 
     assert not digests[0].ok
@@ -1362,26 +1345,8 @@ def test_batch_detach_marks_sheets_and_leaves_files():
     # Without the recovery opt-in, the batch is neither canceled nor rescued —
     # the original detach semantics stand for direct callers.
     assert client.cancel_calls == [] and client.rescue_calls == []
-
-
-def test_batch_detach_reports_diagnostics_via_on_log():
-    """An uncollectable batch emits a leveled diagnostic through ``on_log``.
-
-    This is the channel the GUI routes to its activity log, so the operator can
-    see *why* a run came back incomplete rather than just losing the sheets.
-    """
-    client = _FakeClient(_succeed)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(1)]), client=client, model=OPUS, total=1
-    )
-    logs: list[tuple[str, str]] = []
-    collect_drawing_batch(
-        batch,
-        client=client,
-        sleep=NOSLEEP,
-        max_elapsed_seconds=-1,  # force the poll past its bound → "detached"
-        on_log=lambda msg, level="info": logs.append((level, msg)),
-    )
+    # The GUI routes ``on_log`` to its activity log, so the operator can see
+    # *why* a run came back incomplete rather than just losing the sheets.
     assert any(
         level == "warning" and "still processing" in msg for level, msg in logs
     )
@@ -1528,28 +1493,31 @@ def test_stall_window_is_shorter_on_the_first_watch_than_on_later_ones():
     )
 
 
-def test_stall_window_env_override_applies_to_every_watch(monkeypatch):
-    # An operator who names a threshold means it for the whole run — tiering
-    # around an explicit setting would make it unpredictable.
-    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", "12")
-    assert batch_digest._stall_timeout_seconds(first_watch=True) == 720.0
-    assert batch_digest._stall_timeout_seconds(first_watch=False) == 720.0
+_FIRST = batch_digest.DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
+_LATER = batch_digest.DEFAULT_BATCH_STALL_TIMEOUT_SECONDS
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "abc", "0", "-5"])
-def test_stall_window_env_override_ignores_junk(monkeypatch, raw):
-    # Malformed or non-positive values fall back to the tiered defaults rather
-    # than raising or arming a zero-length watch that abandons the first batch
-    # on its first poll.
+@pytest.mark.parametrize(
+    "raw,first,later",
+    [
+        # An operator who names a threshold means it for the whole run —
+        # tiering around an explicit setting would make it unpredictable.
+        ("12", 720.0, 720.0),
+        ("0.1", 60.0, 60.0),  # floored at one minute
+        # Malformed or non-positive values fall back to the tiered defaults
+        # rather than raising or arming a zero-length watch that abandons the
+        # first batch on its first poll.
+        ("", _FIRST, _LATER),
+        ("   ", _FIRST, _LATER),
+        ("abc", _FIRST, _LATER),
+        ("0", _FIRST, _LATER),
+        ("-5", _FIRST, _LATER),
+    ],
+)
+def test_stall_window_env_override(monkeypatch, raw, first, later):
     monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", raw)
-    assert batch_digest._stall_timeout_seconds(first_watch=True) == (
-        batch_digest.DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
-    )
-
-
-def test_stall_window_env_override_is_floored_at_one_minute(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", "0.1")
-    assert batch_digest._stall_timeout_seconds(first_watch=True) == 60.0
+    assert batch_digest._stall_timeout_seconds(first_watch=True) == first
+    assert batch_digest._stall_timeout_seconds(first_watch=False) == later
 
 
 def test_primary_poll_failure_never_drops_to_realtime_and_retains_files():
@@ -1957,37 +1925,25 @@ def _findings_block(items):
     return "```json\n" + _json.dumps({"findings": items}) + "\n```"
 
 
-def test_batch_digest_from_message_parses_findings_and_cleans_prose():
+def test_batch_digest_from_message_parses_and_caches_findings():
     ref = SheetRef(pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf", page_count=1)
     slot = batch_digest._Slot(index=0, ref=ref, image_estimate=1234)
+    slot.cache_key = "batch-key-1"
+    cache = DigestCache(None, persist=False)
     raw = "Sheet M-101 digest.\n\n" + _findings_block([
         {"sheet_id": "M-101", "category": "code", "severity": "high",
          "text": "issue", "source_quote": "VAV-3", "tile": [1, 2]},
     ])
     sd = batch_digest._digest_from_message(
-        slot, FakeMessage(content=[FakeTextBlock(text=raw)]), cache=None
+        slot, FakeMessage(content=[FakeTextBlock(text=raw)]), cache=cache
     )
     assert sd.text == "Sheet M-101 digest."          # prose only, block stripped
     assert "```" not in sd.text
     assert len(sd.findings) == 1 and sd.findings[0].source_quote == "VAV-3"
-
-
-def test_batch_digest_from_message_caches_findings():
-    ref = SheetRef(pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf", page_count=1)
-    slot = batch_digest._Slot(index=0, ref=ref, image_estimate=10)
-    slot.cache_key = "batch-key-1"
-    cache = DigestCache(None, persist=False)
-    raw = "Prose.\n" + _findings_block([
-        {"category": "conflict", "severity": "low", "text": "x"},
-    ])
-    sd = batch_digest._digest_from_message(
-        slot, FakeMessage(content=[FakeTextBlock(text=raw)]), cache=cache
-    )
-    assert len(sd.findings) == 1
     # The findings are serialized into the cache entry and reconstruct cleanly.
     from drawing_analyzer.digest import findings_from_cache
     reconstructed = findings_from_cache(cache.get("batch-key-1"), ref)
-    assert len(reconstructed) == 1 and reconstructed[0].category == "conflict"
+    assert len(reconstructed) == 1 and reconstructed[0].category == "code"
 
 
 class _TerminalPrimaryThenAlwaysStall(_FakeBatches):
@@ -2578,14 +2534,6 @@ def test_stalled_resubmission_also_harvests_its_completed_sheets(monkeypatch):
 # 14b: the collection bound is the Batches API's own 24h SLA, configurable — and
 # a batch that is still completing items when the bound arrives is not stuck.
 # --------------------------------------------------------------------------- #
-
-
-def test_batch_bound_is_the_batches_api_sla():
-    # Every "runs can take hours, sometimes overnight (8+ hours)" string the app
-    # shows was a promise the engine could not keep: it gave up at four.
-    assert batch_digest.DEFAULT_BATCH_MAX_ELAPSED_HOURS == 24
-    assert batch_digest.DEFAULT_BATCH_MAX_ELAPSED_SECONDS == 24 * 3600
-    assert batch_digest._batch_max_elapsed_seconds() == 24 * 3600
 
 
 @pytest.mark.parametrize(

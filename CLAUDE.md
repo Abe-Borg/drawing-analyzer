@@ -37,6 +37,25 @@ pip-audit) and `gates-windows` (hermetic suite on Windows) in its own `needs`
 chain, because branch protection does not apply to a tag push. `ci.yml`
 triggers on `v*` tags for visibility only.
 
+## Writing tests
+
+Every test must be able to fail for a behavioral reason. Do not add tests that
+only check wording (help text, dialog copy, prompt phrasing, log text), search
+source or workflow files for a string, or restate a constant, default, or
+registry entry (`assert X == 400_000`, a model id). They break on every copy
+edit or model upgrade and catch nothing. Golden cache-key hashes are not
+constant pins (they pin a cache contract, I-6), and absence checks that guard
+security (escaping, CSP, no `innerHTML`, no key written) stay.
+
+Before adding a test function, add a case to the parametrized test or the test
+that already drives that code path. Before adding another end-to-end pipeline
+run, check whether the module-scoped gauntlet `oracle` in
+`tests/test_drawing_acceptance.py` already observes it. Reuse the existing
+fakes (`tests/fixtures/fake_anthropic.py`, `tests/fixtures/gauntlet.py`,
+`_FakeClient` in `tests/test_drawing_batch.py`) instead of writing another
+routing client. Compare results whose order the code does not promise (anything
+built on a thread pool, such as deleted Files API ids) as sorted lists or sets.
+
 ## Architecture
 
 A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
