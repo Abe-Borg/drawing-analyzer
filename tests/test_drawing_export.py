@@ -277,13 +277,6 @@ def test_findings_csv_header_and_row_flattening():
     assert "VERIFIED" in row and "evidence/x.png" in row
 
 
-def test_findings_csv_action_column_is_formula_guarded():
-    # DA-031: the action is model text — a leading formula sigil is neutralized.
-    csv = dx.build_findings_csv([_finding(recommended_action="=HYPERLINK(evil)")])
-    row = csv.split("\r\n")[1]
-    assert "'=HYPERLINK(evil)" in row
-
-
 def test_findings_csv_carries_qc_id_and_citation():
     from drawing_analyzer.models import Citation, assign_qc_ids
 
@@ -333,18 +326,13 @@ def test_findings_csv_provenance_columns_appended_at_tail():
     assert bare[-4:] == ["", "", "", ""]
 
 
-def test_findings_csv_is_crlf_terminated():
+def test_findings_csv_framing_is_crlf_and_the_file_has_a_bom(tmp_path):
     csv = dx.build_findings_csv([_finding(), _finding(text="another")])
     assert csv.count("\r\n") == 3                   # header + 2 rows
     assert "\n" not in csv.replace("\r\n", "")      # no bare LFs
+    # Empty is just the header.
+    assert dx.build_findings_csv([]) == ",".join(dx.FINDINGS_CSV_HEADER) + "\r\n"
 
-
-def test_findings_csv_empty_is_just_the_header():
-    csv = dx.build_findings_csv([])
-    assert csv == ",".join(dx.FINDINGS_CSV_HEADER) + "\r\n"
-
-
-def test_write_findings_csv_has_bom_and_crlf(tmp_path):
     path = dx.write_findings_csv([_finding()], tmp_path / "findings.csv")
     raw = path.read_bytes()
     assert raw[:3] == b"\xef\xbb\xbf"               # UTF-8 BOM for Excel
@@ -583,27 +571,6 @@ def test_run_manifest_summarizes_qc_run(tmp_path):
     assert "pdf_path" not in dumped and "content_sha256" not in dumped
 
 
-def test_run_log_and_manifest_leak_no_secret_or_absolute_path(tmp_path):
-    # §18.2 forbidden content: keys and absolute paths cannot reach the
-    # portable artifacts, even when a run error smuggles both.
-    ctx = _make_ctx()
-    ctx.errors = [f"digest failed: x-api-key: {_FAKE_KEY} at {tmp_path}/private/M-101.pdf"]
-    journal = RunJournal(run_id="RUN-leaktest")
-    journal.set_environment(collect_environment(model="claude-opus-5"))
-    journal.emit("API_ERROR", stage="digest", detail=f"401 {_FAKE_KEY}")
-    journal.finish("NOT_REQUESTED")
-    ctx.run_journal = journal
-
-    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
-    log = (folder / "run.log").read_text(encoding="utf-8")
-    manifest_text = (folder / "run_manifest.json").read_text(encoding="utf-8")
-    for text in (log, manifest_text):
-        assert _FAKE_KEY not in text
-        assert str(tmp_path) not in text
-    assert "sk-ant-[REDACTED]" in log
-    assert "RUN-leaktest" in log and "RUN-leaktest" in manifest_text
-
-
 def test_run_manifest_usage_block_is_sanitized_defensively(tmp_path):
     # Even if a future producer embeds a path in a usage instance or custom id,
     # the manifest scrubs it at the boundary (§18.3 defense in depth).
@@ -672,6 +639,7 @@ def test_csv_neutralizes_formula_sigils_in_untrusted_cells():
     f = _finding(
         text='=HYPERLINK("http://evil.example/x","click")',
         source_quote="+cmd|' /C calc'!A0",
+        recommended_action="=HYPERLINK(evil)",
     )
     f.refs = ["@SUM(A1:A9)"]
     f.verification.note = "\t=1+1"
@@ -680,6 +648,7 @@ def test_csv_neutralizes_formula_sigils_in_untrusted_cells():
     assert row["source_quote"].startswith("'+")
     assert row["refs"].startswith("'@")
     assert row["verification_note"].startswith("'")
+    assert row["recommended_action"] == "'=HYPERLINK(evil)"
     # findings.json keeps the canonical, un-prefixed values.
     assert f.text.startswith("=HYPERLINK")
 
@@ -1158,19 +1127,29 @@ def test_every_exported_artifact_redacts_host_error_strings(tmp_path):
     the API key from the error string, while run.log and run_manifest.json in the
     same folder were clean. The export folder is what gets emailed to a client.
     """
-    folder = dx.write_drawing_export(
-        _rooted_ctx(), tmp_path, source_names=[SRC], now=NOW
-    )
+    ctx = _rooted_ctx()
+    # §18.2: an sk-ant key and an unregistered absolute path, smuggled through a
+    # run error and a journal event, take the generic scrubbers instead.
+    ctx.errors.append(f"digest failed: x-api-key: {_FAKE_KEY} at {tmp_path}/private/M-101.pdf")
+    ctx.run_journal.set_environment(collect_environment(model="claude-opus-5"))
+    ctx.run_journal.emit("API_ERROR", stage="digest", detail=f"401 {_FAKE_KEY}")
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
     seen = {}
     for path in sorted(folder.rglob("*")):
         if path.is_file():
-            seen[path.name] = _leaks(path.read_text(encoding="utf-8", errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            seen[path.name] = _leaks(text) + [p for p in (_FAKE_KEY,) if p in text]
     assert seen, "the export wrote nothing"
     assert not any(seen.values()), seen
+    for name in ("run.log", "run_manifest.json"):
+        text = (folder / name).read_text(encoding="utf-8")
+        assert str(tmp_path) not in text, name
+        assert ctx.run_journal.run_id in text, name     # the journal really rendered
     # The diagnostic itself must survive the redaction — this is not a silent drop.
     index = (folder / "00_index.md").read_text(encoding="utf-8")
     assert "AuthenticationError" in index
     assert "SET 01.pdf" in index
+    assert "sk-ant-[REDACTED]" in (folder / "run.log").read_text(encoding="utf-8")
 
 
 def test_redaction_leaves_the_digest_prose_byte_exact(tmp_path):
@@ -1344,17 +1323,12 @@ def test_publish_backoff_never_sleeps_after_the_last_attempt():
     assert slept == list(dx._PUBLISH_BACKOFF_SECONDS)
 
 
-def test_long_path_prefix_literal_is_the_windows_one():
-    r"""Pinned as a literal so every assertion below can use the constant.
-
-    ``\\?\`` — two backslashes, a question mark, one backslash.
-    """
-    assert dx._WIN_LONG_PREFIX == 2 * chr(92) + "?" + chr(92)
-
-
 def test_long_path_text_prefixes_drive_and_unc_paths():
     """N30 — pure string logic, so the Windows form is testable off Windows."""
     pfx = dx._WIN_LONG_PREFIX
+    # Pinned as a literal so every assertion below (and in the tests after it)
+    # can use the constant: two backslashes, a question mark, one backslash.
+    assert pfx == 2 * chr(92) + "?" + chr(92)
     drive = r"C:\Users\abe\out"
     assert dx._long_path_text(drive) == pfx + drive
     # UNC needs the ``UNC\`` form: a bare prefix on \\server is invalid.
@@ -1502,7 +1476,40 @@ def test_export_writes_through_the_long_path_form(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_artifact_names_dedupe_case_insensitively():
+class _NamedRef:
+    def __init__(self, source_name: str) -> None:
+        self.source_name = source_name
+        self.page_index = 0
+
+
+class _QcFinding:
+    def __init__(self, qc_id: str) -> None:
+        self.qc_id = qc_id
+        self.id = qc_id
+
+
+def _alloc_artifact_name(name, used):
+    return dx.safe_artifact_name(name, used=used)
+
+
+def _alloc_sheet_text_name(name, used):
+    return dx._sheet_text_name(_NamedRef(name), used)
+
+
+def _alloc_evidence_dir(name, used):
+    # The verifier's crops live in a per-finding directory (DA-016).
+    from drawing_analyzer import verify as vf
+
+    return vf._reserve_evidence_dir(_QcFinding(name), used)
+
+
+@_pytest_mod.mark.parametrize("allocate, spellings, kept", [
+    (_alloc_artifact_name, ("M-101.pdf", "m-101.pdf", "M-101.PDF"),
+     ("M-101.pdf", "m-101", "M-101")),
+    (_alloc_sheet_text_name, ("M-101", "m-101", "M-101"), None),
+    (_alloc_evidence_dir, ("QC-1", "qc-1", "QC-1"), None),
+], ids=["artifact", "sheet_text", "evidence_dir"])
+def test_name_allocators_dedupe_case_insensitively(allocate, spellings, kept):
     """`M-101.pdf` and `m-101.pdf` are ONE file on Windows and macOS.
 
     Every allocator deduped with a case-*sensitive* set, so a set containing both
@@ -1512,38 +1519,12 @@ def test_artifact_names_dedupe_case_insensitively():
     the fold is only how collisions are *detected*.
     """
     used: set[str] = set()
-    names = [dx.safe_artifact_name(n, used=used)
-             for n in ("M-101.pdf", "m-101.pdf", "M-101.PDF")]
+    names = [allocate(n, used) for n in spellings]
     assert len({n.casefold() for n in names}) == 3, names
-    assert names[0] == "M-101.pdf"            # first one keeps its own spelling
-    assert names[1].startswith("m-101")       # ...and so does each later one
-    assert names[2].startswith("M-101")
-
-
-def test_sheet_text_names_dedupe_case_insensitively():
-    class _Ref:
-        def __init__(self, source_name: str) -> None:
-            self.source_name = source_name
-            self.page_index = 0
-
-    used: set[str] = set()
-    names = [dx._sheet_text_name(_Ref(n), used) for n in ("M-101", "m-101", "M-101")]
-    assert len({n.casefold() for n in names}) == 3, names
-
-
-def test_evidence_directories_dedupe_case_insensitively():
-    """The verifier's crops live in a per-finding directory (DA-016)."""
-    from drawing_analyzer import verify as vf
-
-    class _Finding:
-        def __init__(self, qc_id: str) -> None:
-            self.qc_id = qc_id
-            self.id = qc_id
-
-    used: set[str] = set()
-    names = [vf._reserve_evidence_dir(_Finding(q), used)
-             for q in ("QC-1", "qc-1", "QC-1")]
-    assert len({n.casefold() for n in names}) == 3, names
+    if kept:
+        assert names[0] == kept[0]            # first one keeps its own spelling
+        # ...and so does each later one.
+        assert all(n.startswith(k) for n, k in zip(names[1:], kept[1:])), names
 
 
 def test_every_allocator_uses_the_shared_fold_helpers():

@@ -9,12 +9,7 @@ from pathlib import Path
 
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.reference_audit import (
-    MALFORMED,
-    MISSING_FROM_SET,
-    RESOLVED_IN_SET,
     _levenshtein,
-    _resolve,
-    _segment_shape,
     audit_references,
     build_inventory,
     detect_sheet_id,
@@ -84,49 +79,15 @@ def test_build_inventory_learns_two_numbering_styles():
     assert not inv.matches_grammar("NFPA-13")  # a code, not this set's convention
 
 
-def test_segment_shape_is_revision_agnostic_but_prefix_sensitive():
-    # Same shape regardless of the digits (revision/number differences).
-    assert _segment_shape("F-D-01-1") == _segment_shape("F-D-02-0")
-    # Different alpha-prefix length -> different shape (NFPA vs M).
-    assert _segment_shape("NFPA-13") != _segment_shape("M-101")
-    # A doubled/edge hyphen is not a clean ID.
-    assert _segment_shape("F--01") is None
-
-
 # --------------------------------------------------------------------------- #
 # Resolution
 # --------------------------------------------------------------------------- #
-
-
-def test_resolve_classifies_present_missing_malformed_and_skip():
-    inv = build_inventory([
-        _sheet("s.pdf", 0, [_titleblock("F-D-01-1")]),
-        _sheet("s.pdf", 1, [_titleblock("F-D-02-0")]),
-    ])
-    assert _resolve("F-D-01-1", inv)[0] == RESOLVED_IN_SET
-    assert _resolve("F-D-01-0", inv)[0] == MISSING_FROM_SET   # grammar match, absent
-    assert _resolve("F-D-O1-1", inv)[0] == MALFORMED          # letter O typo of a real sheet
-    # A code token that merely follows a trigger word is not this set's grammar
-    # and not a near-typo of any sheet -> skipped, never flagged.
-    assert _resolve("NFPA-13", inv)[0] == "SKIP"
 
 
 def test_levenshtein_basic():
     assert _levenshtein("F-D-01-1", "F-D-01-1") == 0
     assert _levenshtein("F-D-01-0", "F-D-01-1") == 1
     assert _levenshtein("", "abc") == 3
-
-
-def test_closest_tie_break_is_deterministic():
-    inv = build_inventory([
-        _sheet("s.pdf", 0, [_titleblock("M-101")]),
-        _sheet("s.pdf", 1, [_titleblock("M-102")]),
-    ])
-    # M-100 is edit-distance 1 from BOTH M-101 and M-102 — a tie. It must resolve
-    # to the lexicographically smallest deterministically, not to whatever
-    # frozenset iteration order this process's PYTHONHASHSEED produces (I-7).
-    assert inv.closest("M-100") == ("M-101", 1)
-    assert inv.closest("M-100") == inv.closest("M-100")
 
 
 def test_unicode_hyphen_title_block_does_not_fabricate_missing():

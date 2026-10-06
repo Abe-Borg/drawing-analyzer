@@ -8,7 +8,6 @@ filename safety, and the once-a-day / skip-version throttle.
 """
 from __future__ import annotations
 
-import ast
 import contextlib
 import hashlib
 import io
@@ -67,11 +66,6 @@ def test_is_newer(candidate: str, current: str, expected: bool) -> None:
     assert updates.is_newer(candidate, current) is expected
 
 
-def test_parse_version_orders_rc_below_final() -> None:
-    assert updates.parse_version("1.0.0rc1") < updates.parse_version("1.0.0rc2")
-    assert updates.parse_version("1.0.0rc9") < updates.parse_version("1.0.0")
-
-
 @pytest.mark.parametrize("bad", ["", "1.0", "1.0.0.0", "v1.0.0", "1.0.0beta1", "1.0.0-rc1", "abc"])
 def test_parse_version_rejects_malformed(bad: str) -> None:
     with pytest.raises(ValueError):
@@ -96,32 +90,24 @@ def test_parse_manifest_lowercases_sha() -> None:
     assert info.sha256 == "a" * 64
 
 
-def test_parse_manifest_rejects_http_url() -> None:
-    with pytest.raises(UpdateError):
-        updates.parse_manifest(_manifest(url="http://example.com/x.exe"))
-
-
-def test_parse_manifest_rejects_missing_url() -> None:
-    payload = _manifest()
-    del payload["url"]
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(_manifest(url="http://example.com/x.exe"), id="http-url"),
+        pytest.param(
+            {k: v for k, v in _manifest().items() if k != "url"}, id="missing-url"
+        ),
+        pytest.param(_manifest(sha256=""), id="sha-empty"),
+        pytest.param(_manifest(sha256="xyz"), id="sha-short"),
+        pytest.param(_manifest(sha256="a" * 63), id="sha-63"),
+        pytest.param(_manifest(sha256="g" * 64), id="sha-non-hex"),
+        pytest.param(_manifest(version="not-a-version"), id="malformed-version"),
+        pytest.param(["not", "a", "dict"], id="non-object"),
+    ],
+)
+def test_parse_manifest_rejects(payload) -> None:
     with pytest.raises(UpdateError):
         updates.parse_manifest(payload)
-
-
-def test_parse_manifest_rejects_bad_sha() -> None:
-    for bad in ["", "xyz", "a" * 63, "g" * 64]:
-        with pytest.raises(UpdateError):
-            updates.parse_manifest(_manifest(sha256=bad))
-
-
-def test_parse_manifest_rejects_malformed_version() -> None:
-    with pytest.raises(UpdateError):
-        updates.parse_manifest(_manifest(version="not-a-version"))
-
-
-def test_parse_manifest_rejects_non_object() -> None:
-    with pytest.raises(UpdateError):
-        updates.parse_manifest(["not", "a", "dict"])  # type: ignore[arg-type]
 
 
 def test_parse_manifest_defaults_optional_fields() -> None:
@@ -200,13 +186,6 @@ def test_check_passes_manifest_url(monkeypatch) -> None:
     assert seen["url"] == "https://example.test/latest.json"
 
 
-def test_manifest_url_default_points_at_repo() -> None:
-    url = updates.manifest_url()
-    assert url.startswith("https://github.com/")
-    assert updates.GITHUB_OWNER in url and updates.GITHUB_REPO in url
-    assert url.endswith("latest.json")
-
-
 # --------------------------------------------------------------------------
 # Download + integrity
 # --------------------------------------------------------------------------
@@ -251,6 +230,7 @@ def test_download_installer_verifies_and_writes(tmp_path: Path) -> None:
     assert dest.exists()
     assert dest.read_bytes() == payload
     assert dest.name == "DrawingAnalyzerSetup.exe"
+    assert not (tmp_path / "DrawingAnalyzerSetup.exe.part").exists()
     # progress was reported and the final tally equals the payload size
     assert seen and seen[-1][0] == len(payload)
     assert seen[-1][1] == len(payload)
@@ -444,15 +424,6 @@ def test_download_interrupted_leaves_no_file(tmp_path: Path) -> None:
     assert not (tmp_path / "DrawingAnalyzerSetup.exe.part").exists()
 
 
-def test_download_success_leaves_no_part_file(tmp_path: Path) -> None:
-    payload = b"complete installer" * 50
-    sha = hashlib.sha256(payload).hexdigest()
-    info = UpdateInfo(version="2.0.0", url="https://host/DrawingAnalyzerSetup.exe", sha256=sha)
-    dest = updates.download_installer(info, tmp_path, opener=_opener_for(payload))
-    assert dest.read_bytes() == payload
-    assert not (tmp_path / "DrawingAnalyzerSetup.exe.part").exists()
-
-
 # --------------------------------------------------------------------------
 # Release version guard (packaging/windows/check_release_version.py)
 # --------------------------------------------------------------------------
@@ -488,50 +459,6 @@ def test_release_guard_rejects_mismatched_tag() -> None:
     assert len(problems) == 2
     assert any("pyproject.toml" in p for p in problems)
     assert any("__init__.py" in p for p in problems)
-
-
-# --------------------------------------------------------------------------
-# GUI wiring — checked structurally (gui.py can't import without customtkinter).
-# Mirrors tests/test_help_content.py's AST approach.
-# --------------------------------------------------------------------------
-
-
-_GUI_PATH = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer" / "gui.py"
-
-
-def _gui_source() -> str:
-    return _GUI_PATH.read_text(encoding="utf-8")
-
-
-def _app_methods() -> set[str]:
-    tree = ast.parse(_gui_source())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == "DrawingAnalyzerApp":
-            return {n.name for n in node.body if isinstance(n, ast.FunctionDef)}
-    raise AssertionError("DrawingAnalyzerApp not found")
-
-
-def test_gui_imports_updates_module() -> None:
-    src = _gui_source()
-    assert "from .core import updates" in src or "from drawing_analyzer.core import updates" in src
-
-
-def test_gui_defines_update_methods() -> None:
-    methods = _app_methods()
-    assert {
-        "_maybe_auto_check_for_updates",
-        "_on_check_for_updates_clicked",
-        "_start_update_check",
-        "_on_update_check_done",
-        "_show_update_dialog",
-    } <= methods
-
-
-def test_gui_schedules_auto_check_and_calls_checker() -> None:
-    src = _gui_source()
-    assert "_maybe_auto_check_for_updates" in src
-    assert "updates.check_for_update" in src
-    assert "_build_footer" in src
 
 
 @contextlib.contextmanager

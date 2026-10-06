@@ -76,7 +76,8 @@ def test_parse_number_table(raw, expected):
     assert parse_number(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "abc", "$5.00", None, "1/0", True, [1, 2], {"a": 1}])
+# bool is an int subclass, but True is a JSON true, not the number 1.
+@pytest.mark.parametrize("raw", ["", "abc", "$5.00", None, "1/0", True, False, [1, 2], {"a": 1}])
 def test_parse_number_rejects_unparseable(raw):
     assert parse_number(raw) is None
 
@@ -286,12 +287,6 @@ def test_one_bad_claim_does_not_lose_the_runs_arithmetic(monkeypatch):
     # the Finding is built, so a failure between the two would otherwise leave a
     # counted mismatch with no finding behind it.
     assert res.stats["arithmetic_mismatched"] == len(res.findings)
-
-
-def test_parse_number_boolean_is_not_one():
-    # bool is an int subclass, but True is a JSON true, not the number 1.
-    assert parse_number(True) is None
-    assert parse_number(False) is None
 
 
 def test_no_eval_in_arithmetic_module():

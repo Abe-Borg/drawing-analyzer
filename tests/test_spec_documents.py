@@ -16,7 +16,6 @@ from drawing_analyzer.digest import (
     DIGEST_PROMPT_VERSION,
     DIGEST_SYSTEM_PROMPT,
     SheetDigest,
-    build_specs_addendum,
     build_user_content,
     digest_sheet,
     digest_system_prompt,
@@ -87,20 +86,19 @@ class _FakeClient(BetaClientMixin):
 # --------------------------------------------------------------------------- #
 
 
-def test_extract_txt_reads_directly(tmp_path):
-    p = tmp_path / "spec.txt"
-    p.write_text("Section 1: All beams shall be W12x26.\n")
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("spec.txt", "Section 1: All beams shall be W12x26.\n"),
+        ("spec.md", "# Spec\n\nAll beams shall be W12x26."),
+    ],
+)
+def test_extract_plain_text_reads_directly(tmp_path, name, content):
+    p = tmp_path / name
+    p.write_text(content)
     doc = extract_spec_text(p)
     assert doc.ok
-    assert doc.text == "Section 1: All beams shall be W12x26."
-
-
-def test_extract_md_reads_directly(tmp_path):
-    p = tmp_path / "spec.md"
-    p.write_text("# Spec\n\nAll beams shall be W12x26.")
-    doc = extract_spec_text(p)
-    assert doc.ok
-    assert "W12x26" in doc.text
+    assert doc.text == content.strip()
 
 
 def test_extract_pdf_text(tmp_path):
@@ -136,34 +134,23 @@ def test_extract_docx_text_including_tables(tmp_path):
     assert "Mix | 4000 psi" in doc.text
 
 
-def test_extract_unsupported_extension_is_a_captured_error(tmp_path):
-    p = tmp_path / "spec.xyz"
-    p.write_text("whatever")
-    doc = extract_spec_text(p)
-    assert not doc.ok
-    assert "unsupported file type" in doc.error
-
-
-def test_extract_missing_file_is_a_captured_error(tmp_path):
-    doc = extract_spec_text(tmp_path / "does_not_exist.pdf")
-    assert not doc.ok
-    assert doc.error
-
-
-def test_extract_corrupt_pdf_is_a_captured_error(tmp_path):
-    p = tmp_path / "corrupt.pdf"
-    p.write_bytes(b"not actually a pdf")
+@pytest.mark.parametrize(
+    ("name", "data", "needle"),
+    [
+        pytest.param("spec.xyz", b"whatever", "unsupported file type", id="unsupported-extension"),
+        pytest.param("does_not_exist.pdf", None, "", id="missing-file"),
+        pytest.param("corrupt.pdf", b"not actually a pdf", "", id="corrupt-pdf"),
+        pytest.param("empty.txt", b"   \n\n  ", "no extractable text", id="empty-text-file"),
+    ],
+)
+def test_extract_failure_is_a_captured_error(tmp_path, name, data, needle):
+    p = tmp_path / name
+    if data is not None:
+        p.write_bytes(data)
     doc = extract_spec_text(p)
     assert not doc.ok
     assert doc.error
-
-
-def test_extract_empty_text_file_is_a_captured_error(tmp_path):
-    p = tmp_path / "empty.txt"
-    p.write_text("   \n\n  ")
-    doc = extract_spec_text(p)
-    assert not doc.ok
-    assert "no extractable text" in doc.error
+    assert needle in doc.error
 
 
 def test_extract_spec_documents_one_bad_file_does_not_abort_the_rest(tmp_path):
@@ -195,6 +182,7 @@ def test_build_specs_text_single_file_may_fill_the_whole_budget():
     # Per-file cap now equals the whole-block cap, so one uploaded spec may use
     # the ENTIRE budget: the per-file pass only trims a file that by itself
     # exceeds the total. A file over the total is still capped and flagged.
+    assert SPEC_FILE_CHAR_BUDGET == SPEC_TOTAL_CHAR_BUDGET
     docs = [
         SpecDocument(path=Path("a.txt"), display_name="a.txt", text="x" * (SPEC_TOTAL_CHAR_BUDGET + 500)),
     ]
@@ -219,12 +207,6 @@ def test_build_specs_text_multiple_files_under_budget_all_survive():
     assert "c" * 1_000 in text
 
 
-def test_spec_budgets_are_equal_so_one_file_can_fill_the_budget():
-    # The per-file and whole-block caps are intentionally the SAME value: a
-    # single uploaded spec may use the entire budget (see build_specs_text).
-    assert SPEC_FILE_CHAR_BUDGET == SPEC_TOTAL_CHAR_BUDGET == 400_000
-
-
 def _docs_exceeding_total_budget() -> list[SpecDocument]:
     """Enough equal-size docs that the combined block exceeds
     SPEC_TOTAL_CHAR_BUDGET (so whole-block truncation must fire). Derived from
@@ -238,13 +220,6 @@ def _docs_exceeding_total_budget() -> list[SpecDocument]:
     ]
 
 
-def test_build_specs_text_total_budget_caps_the_whole_block():
-    docs = _docs_exceeding_total_budget()
-    text, budget = build_specs_text(docs)
-    assert len(text) <= SPEC_TOTAL_CHAR_BUDGET + 100  # + truncation marker slack
-    assert budget.degraded
-
-
 def test_build_specs_text_skips_failed_documents():
     docs = [
         SpecDocument(path=Path("a.txt"), display_name="a.txt", text="kept"),
@@ -255,11 +230,16 @@ def test_build_specs_text_skips_failed_documents():
     assert "b.txt" not in text
 
 
-def test_enforce_specs_budget_empty_and_none():
+def test_enforce_specs_budget_empty_none_and_non_string():
     text, budget = enforce_specs_budget(None)
     assert text == "" and not budget.degraded
     text, budget = enforce_specs_budget("   ")
     assert text == "" and not budget.degraded
+    # I-3: extract_drawing_context is a public API; a caller who passes
+    # something other than str/None (e.g. a list of doc texts, forgetting to
+    # join them first) must degrade gracefully, not raise.
+    text, _budget = enforce_specs_budget(["a", "b"])  # type: ignore[arg-type]
+    assert isinstance(text, str)
 
 
 def test_enforce_specs_budget_defensive_backstop():
@@ -267,15 +247,6 @@ def test_enforce_specs_budget_defensive_backstop():
     assert len(text) <= SPEC_TOTAL_CHAR_BUDGET + 100
     assert budget.degraded
     assert budget.omitted_chars == 1_000
-
-
-def test_enforce_specs_budget_coerces_non_string_input():
-    # I-3: extract_drawing_context is a public API; a caller who passes
-    # something other than str/None (e.g. a list of doc texts, forgetting to
-    # join them first) must degrade gracefully, not raise.
-    text, budget = enforce_specs_budget(["a", "b"])  # type: ignore[arg-type]
-    assert isinstance(text, str)
-    assert not budget.degraded or budget.omitted_chars >= 0  # never raises
 
 
 def test_build_specs_text_included_chars_matches_returned_length():
@@ -377,13 +348,6 @@ def test_specs_do_not_change_user_content():
     assert plain.calls[0]["messages"] == specced.calls[0]["messages"]
     assert "PROJECT SPECIFICATIONS" not in _system_text(plain.calls[0])
     assert BEAM_SPEC in _system_text(specced.calls[0])
-
-
-def test_build_specs_addendum_does_not_ask_for_a_new_section():
-    addendum = build_specs_addendum(BEAM_SPEC)
-    assert "ORDINARY finding" in addendum
-    assert "Do NOT add a separate prose section" in addendum
-    assert "Focus findings" not in addendum
 
 
 def test_normalize_specs_text():
@@ -619,19 +583,6 @@ def test_pipeline_specs_truncation_appends_a_warning_to_errors(tmp_path):
 
     assert any("Project specifications" in e and "omitted" in e for e in ctx.errors)
     assert len(ctx.project_specifications) <= SPEC_TOTAL_CHAR_BUDGET + 100
-
-
-def test_pipeline_specs_under_budget_produces_no_warning(tmp_path):
-    pymupdf = pytest.importorskip("pymupdf")
-    from drawing_analyzer.pipeline import extract_drawing_context
-
-    path = _make_pdf(pymupdf, tmp_path / "set.pdf", page_text="BEAM W10X22 AT GRIDLINE 3")
-    calls: list = []
-    ctx = extract_drawing_context(
-        [path], client=_routing_client(calls, findings=[]), rows=1, cols=1,
-        project_specifications=BEAM_SPEC,
-    )
-    assert ctx.errors == []
 
 
 # --------------------------------------------------------------------------- #

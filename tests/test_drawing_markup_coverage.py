@@ -134,12 +134,15 @@ def test_one_cloud_fails_one_succeeds(tmp_path, monkeypatch):
 
 
 def test_out_of_range_page_is_a_failed_receipt(tmp_path):
+    # The valid finding beside it is still WRITTEN; only its cloud counts as ink.
     src = _pdf(tmp_path, pages=1)
-    findings = [_f("on page 9", quote="q", page=9)]
+    findings = [_f("on page 0", quote="ok-q", page=0), _f("on page 9", quote="q", page=9)]
     res = annotate_pdf(src, findings, tmp_path / "r.pdf", include_unverified=True)
-    assert res.annots_written == 0
+    assert res.annots_written == 1
     assert res.coverage_status == "INCOMPLETE"
-    assert [r.status for r in res.receipts] == ["FAILED"]
+    assert sorted(r.status for r in res.receipts) == ["FAILED", "WRITTEN"]
+    failed = next(r for r in res.receipts if r.status == "FAILED")
+    assert failed.placement.page_index == 9
 
 
 # --------------------------------------------------------------------------- #

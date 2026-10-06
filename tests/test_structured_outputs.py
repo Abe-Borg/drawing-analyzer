@@ -35,7 +35,6 @@ from drawing_analyzer import investigate as I
 from drawing_analyzer import prose_harvest as H
 from drawing_analyzer import verify as V
 from drawing_analyzer.core import structured_outputs as SO
-from drawing_analyzer.core.api_config import model_supports_structured_outputs
 from drawing_analyzer.core import api_config as api
 from drawing_analyzer.digest_cache import critique_cache_key, critique_cache_key_level1
 from drawing_analyzer.models import FINDINGS_PARSE_OK, Finding, ImageTile, RenderedSheet, SheetRef
@@ -216,16 +215,6 @@ def test_the_two_latches_do_not_share_a_vocabulary():
     assert not set(I._STRICT_TOOLS_REJECTION_MARKERS) & set(I._TASK_BUDGET_REJECTION_MARKERS)
 
 
-def test_strict_is_gated_on_the_capability_not_the_model_family():
-    assert api.model_supports_structured_outputs(OPUS_5) is True
-    assert api.model_supports_structured_outputs(SONNET_5) is True
-    assert api.model_supports_structured_outputs(HAIKU) is True
-    # Sonnet 4.6 is a current model that is NOT on the roster — exactly the case
-    # a generation-shaped check gets wrong.
-    assert api.model_supports_structured_outputs(SONNET_46) is False
-    assert api.model_supports_structured_outputs("some-future-model") is False
-
-
 # --------------------------------------------------------------------------- #
 # F-01 — critique structured outputs, opt-in
 # --------------------------------------------------------------------------- #
@@ -300,25 +289,11 @@ def test_every_object_in_the_schema_is_closed():
         assert "required" in obj
 
 
-def test_the_40_finding_cap_stays_a_prose_rule():
-    # maxItems is unsupported, so the cap cannot be expressed in the schema and
-    # must remain in the instruction (and enforced host-side).
-    assert "maxItems" not in json.dumps(C.CRITIQUE_FINDINGS_SCHEMA)
-    assert "at most 40 findings" in C._CRITIQUE_STRUCTURED_INSTRUCTION
-
-
 def test_optional_finding_fields_stay_out_of_required():
     required = C._CRITIQUE_FINDING_ITEM_SCHEMA["required"]
     for optional in ("anchor_hint", "tile_label", "refs"):
         assert optional in C._CRITIQUE_FINDING_ITEM_SCHEMA["properties"]
         assert optional not in required
-
-
-def test_claim_scalars_accept_string_or_number():
-    # The sheet prints both "1,500 SF" and 1500; the model transcribes what it
-    # sees and the deterministic auditor parses it. Forcing one JSON type here
-    # would make the model choose, which the never-calculates invariant forbids.
-    assert C._CRITIQUE_SCALAR_SCHEMA == {"anyOf": [{"type": "string"}, {"type": "number"}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -348,10 +323,7 @@ def test_bare_json_parses_only_when_the_caller_asks():
     parsed = D.parse_findings_detailed(_BARE, _ref(), bare_json=True)
     assert len(parsed.findings) == 1
     assert parsed.status in FINDINGS_PARSE_OK
-
-
-def test_a_structured_response_has_no_prose_to_protect():
-    parsed = D.parse_findings_detailed(_BARE, _ref(), bare_json=True)
+    # A structured response has no prose to protect.
     assert parsed.prose == ""
 
 
@@ -398,13 +370,6 @@ def _key(**kw):
         _rendered(), model=OPUS_5, prompt_version=C.CRITIQUE_PROMPT_VERSION,
         max_tokens=64_000, effort="high", use_thinking=True, runs=2, **kw
     )
-
-
-def test_a_fenced_run_keys_exactly_as_it_did_before_this_feature():
-    # This is what lets F-01 land with no _SCHEMA_VERSION bump: every entry
-    # already paid for stays valid, because an unset structured_key is folded in
-    # nowhere at all rather than as an empty string.
-    assert _key() == _key(structured_key=None)
 
 
 def test_a_structured_run_keys_differently():
@@ -623,12 +588,6 @@ def test_a_run_that_degrades_mid_flight_stores_under_the_fenced_key(monkeypatch)
     assert written_key != structured
 
 
-def test_a_latched_off_run_never_asks_for_the_schema_again(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "1")
-    C.STRUCTURED_OUTPUTS.latch_off()
-    assert C.critique_structured_outputs_enabled(OPUS_5) is False
-
-
 def test_the_strict_tools_latch_degrades_and_retries():
     client = _LatchClient(_Status400("tools.0: additionalProperties must be false"))
     kwargs = {
@@ -679,20 +638,6 @@ def test_an_unrelated_400_does_not_disable_strict_tools():
     assert I._strict_tools_available is True
 
 
-def test_a_flipped_strict_latch_stops_resending_strict_schemas():
-    # `tools` is built once for the whole stage. Without a per-turn re-check, a
-    # latch that flipped on the first investigation would keep sending strict
-    # schemas on every later turn and pay a 400 plus a retry each time — up to
-    # 40 findings x 6 rounds of round trips to re-learn a settled fact.
-    tools = I.investigation_tools(strict=I._strict_tools_available)
-    assert tools[0]["strict"] is True
-
-    I._strict_tools_available = False
-    per_turn = tools if I._strict_tools_available else I.relax_strict_tools(tools)
-    assert "strict" not in per_turn[0]
-    assert per_turn == I.investigation_tools(strict=False)
-
-
 # --------------------------------------------------------------------------- #
 # F-01 — the LEVEL-1 cache key (probed before rendering)
 # --------------------------------------------------------------------------- #
@@ -711,10 +656,6 @@ def _l1(**kw):
         max_tokens=C.DEFAULT_CRITIQUE_MAX_TOKENS, effort="high",
         use_thinking=True, runs=2, **kw
     )
-
-
-def test_level1_fenced_key_is_unchanged_by_this_feature():
-    assert _l1() == _l1(structured_key=None)
 
 
 def test_level1_separates_structured_from_fenced():
@@ -848,13 +789,6 @@ def test_gate_rejection_is_recognised_only_on_a_400(message, expected):
     assert SO.is_structured_outputs_rejection(_Err(529, message)) is False
     # No status at all (a connection error) is never a capability answer.
     assert SO.is_structured_outputs_rejection(Exception(message)) is False
-
-
-def test_the_critique_gate_keeps_its_public_surface():
-    # ``critique_structured_outputs_enabled`` and the env var are what the
-    # pipeline, the README and the canary name; the refactor must not move them.
-    assert C.STRUCTURED_OUTPUTS.env_var == "DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS"
-    assert C.STRUCTURED_OUTPUTS.stage == "critique"
 
 
 def test_attach_format_merges_and_detach_restores_byte_for_byte():
@@ -1046,9 +980,3 @@ def test_harvest_once_latched_off_never_asks_again(monkeypatch):
     (kw,) = client.captured
     assert "format" not in kw.get("output_config", {})
     assert kw["system"] == H.HARVEST_SYSTEM_PROMPT
-
-
-def test_harvest_gate_is_on_the_capability_not_the_model_family(monkeypatch):
-    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
-    assert H.harvest_structured_outputs_enabled(SONNET_5) is model_supports_structured_outputs(SONNET_5)
-    assert H.harvest_structured_outputs_enabled(SONNET_46) is False

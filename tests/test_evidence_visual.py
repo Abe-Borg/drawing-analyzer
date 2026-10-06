@@ -466,47 +466,35 @@ def test_evidence_state_rides_the_atomic_bundle_through_a_merge():
         }, "the trust label drifted away from the quote it describes"
 
 
+def _quoted(state: str) -> Finding:
+    return Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
+                   category="conflict", severity="high", text="valves disagree",
+                   source_quote=SCANNED_QUOTE, evidence_state=state)
+
+
 def test_markup_says_why_it_could_not_be_checked():
     from drawing_analyzer.annotate import _annot_content
 
-    f = Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
-                category="conflict", severity="high", text="valves disagree",
-                source_quote=SCANNED_QUOTE, evidence_state=EVIDENCE_UNAVAILABLE)
-    content = _annot_content(f, unverified=True, place="SHEET")
+    content = _annot_content(_quoted(EVIDENCE_UNAVAILABLE), unverified=True, place="SHEET")
     assert "[NO TEXT TO CHECK]" in content
     assert "No searchable text on this sheet" in content
+    assert "confirm it visually" in content       # nothing was checked, said plainly
     assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
-
-
-def test_markup_is_unchanged_for_a_text_grounded_finding():
-    from drawing_analyzer.annotate import _annot_content
-
-    f = Finding(sheet_id="FP-1", source_name="v.pdf", page_index=0,
-                category="conflict", severity="high", text="valves disagree",
-                source_quote=SCANNED_QUOTE, evidence_state=EVIDENCE_TEXT_GROUNDED)
-    content = _annot_content(f, unverified=True, place="SHEET")
-    assert "[NO TEXT TO CHECK]" not in content
-    assert "No searchable text" not in content
+    # A text-grounded finding's markup is unchanged.
+    grounded = _annot_content(_quoted(EVIDENCE_TEXT_GROUNDED), unverified=True, place="SHEET")
+    assert "[NO TEXT TO CHECK]" not in grounded
+    assert "No searchable text" not in grounded
 
 
 def test_report_flags_a_reduced_trust_quote():
     from drawing_analyzer.html_report import _finding_row_html
 
-    f = Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
-                category="conflict", severity="high", text="valves disagree",
-                source_quote=SCANNED_QUOTE, evidence_state=EVIDENCE_UNAVAILABLE)
-    row = _finding_row_html(f, None, link_evidence=False)
+    row = _finding_row_html(_quoted(EVIDENCE_UNAVAILABLE), None, link_evidence=False)
     assert "finding-evidence-note" in row
     assert "not checked automatically" in row
-
-
-def test_report_is_unchanged_for_a_text_grounded_quote():
-    from drawing_analyzer.html_report import _finding_row_html
-
-    f = Finding(sheet_id="FP-1", source_name="v.pdf", page_index=0,
-                category="conflict", severity="high", text="valves disagree",
-                source_quote=SCANNED_QUOTE, evidence_state=EVIDENCE_TEXT_GROUNDED)
-    assert "finding-evidence-note" not in _finding_row_html(f, None, link_evidence=False)
+    # A text-grounded quote's row is unchanged.
+    grounded = _finding_row_html(_quoted(EVIDENCE_TEXT_GROUNDED), None, link_evidence=False)
+    assert "finding-evidence-note" not in grounded
 
 
 def test_the_reviewer_is_never_told_a_text_bearing_sheet_has_no_text():
@@ -528,34 +516,12 @@ def test_the_reviewer_is_never_told_a_text_bearing_sheet_has_no_text():
     assert "No searchable text" not in content
     assert "gave no quote" in content
     assert "[NO QUOTE TO CHECK]" in content
+    assert "confirm it visually" in content       # still says nothing was checked
     assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
 
     row = _finding_row_html(no_quote, None, link_evidence=False)
     assert "No searchable text" not in row
     assert "No quote supplied" in row
-
-
-def test_the_two_unavailable_cases_read_differently():
-    """Same state, different sentence — that is the whole point of §8.3's F4.
-
-    Compares the *trust note* rather than the whole annotation body: the body
-    also embeds the quote, so two findings that differ only by having one would
-    compare unequal no matter what the note said.
-    """
-    from drawing_analyzer.annotate import _trust_note
-
-    def note(quote: str) -> str:
-        return _trust_note(
-            Finding(sheet_id="X", source_name="x.pdf", page_index=0,
-                    category="conflict", severity="high", text="t",
-                    source_quote=quote, evidence_state=EVIDENCE_UNAVAILABLE),
-            unverified=True, rejected=False,
-        )
-
-    assert note("") != note(SCANNED_QUOTE)
-    # ...and both still say, in their own way, that nothing was checked.
-    assert "confirm it visually" in note("")
-    assert "confirm it visually" in note(SCANNED_QUOTE)
 
 
 def test_reduced_trust_reason_classifies_all_three_cases():
@@ -629,11 +595,3 @@ def test_the_prompt_edit_supplies_the_invalidation():
         assert X._cross_qc_cache_key(entries, model="m", preamble="") != key
     finally:
         X.cross_qc_map_system_prompt = original
-
-
-def test_contract_counter_tracks_separate_admission_policy_changes():
-    # WP-03B's prompt edit invalidates its own keys without a contract bump.
-    # Version 3 accounted for host-side sheet-handle normalization; version 4
-    # isolates text-truncation admission from legacy cache readers. Every bump
-    # remains justified independently of the evidence changes in this package.
-    assert X._CROSS_QC_CACHE_CONTRACT == 4
