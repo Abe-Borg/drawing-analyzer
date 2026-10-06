@@ -575,8 +575,22 @@ def test_upload_parallel_cleanup_is_order_independent(monkeypatch):
     # One image fails permanently; every image that DID upload is cleaned up,
     # regardless of which one failed or the order they finished in.
     monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "5")
+    others_in = threading.Event()
+
+    class _FailsAfterTheOthers(_ThreadSafeFiles):
+        # A permanent failure aborts uploads that have not started yet, so how
+        # many land first is up to the scheduler. Holding the failing image
+        # until the other four are in makes the count below deterministic.
+        def upload(self, *, file):
+            if "r2c2" in file[0]:
+                others_in.wait(timeout=10)
+            out = super().upload(file=file)
+            if len(self.uploaded_ids) == 4:
+                others_in.set()
+            return out
+
     client = _FakeClient(_succeed)
-    client.files = _ThreadSafeFiles(fail_map={"r2c2": 999})
+    client.files = _FailsAfterTheOthers(fail_map={"r2c2": 999})
     client.beta.files = client.files
 
     with pytest.raises(_Transient503):
