@@ -58,13 +58,12 @@ from .digest import (
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     _validate_finding_item,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .html_report import classify_section, split_into_sections
 from .ledger import Ledger
@@ -603,8 +602,7 @@ def _structure_item(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="prose_harvest"):
                 attempt += 1
                 continue
             _log.warning("prose-harvest structuring call failed: %s", _clean_error(exc))

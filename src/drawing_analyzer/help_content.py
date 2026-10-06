@@ -609,8 +609,10 @@ _HOW_IT_WORKS = HelpDocument(
                 "Each export carries run.log (readable) and run_manifest.json "
                 "(machine-readable): the run id, the environment, every input accepted or "
                 "rejected, the resolved configuration, a per-sheet and per-stage table, "
-                "token and cost usage, the coverage accounting, and the SHA-256 of every "
-                "file in the export. Both are written even when the run fails."
+                "token and cost usage, the coverage accounting, a resource-starvation "
+                "check (API throttling, host CPU/memory/disk pressure, exhausted agent "
+                "budgets), and the SHA-256 of every file in the export. Both are written "
+                "even when the run fails."
             ),
         ),
     ),
@@ -738,7 +740,9 @@ _WHY_TRUST_IT = HelpDocument(
                 "Every export carries run.log and run_manifest.json: the run id, the exact "
                 "software and model versions, every input accepted or rejected, the "
                 "settings actually used, a per-stage table with statuses and call counts, "
-                "the token and dollar usage, and the SHA-256 hash of every file produced. "
+                "the token and dollar usage, whether the agents were starved of API "
+                "capacity, CPU, memory or disk while they worked, and the SHA-256 hash of "
+                "every file produced. "
                 "They are written even when the run fails, so a bad run leaves the same "
                 "trail as a good one."
             ),

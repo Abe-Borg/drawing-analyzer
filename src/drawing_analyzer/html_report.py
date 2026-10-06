@@ -1589,6 +1589,16 @@ def _run_record_html(ctx: Any) -> str:
     final = str(getattr(journal, "final_status", "") or "")
     if final:
         items.append(f"<li>Final status: {html.escape(final)}</li>")
+    # Resource starvation (API throttling, host pressure, agent budgets): the
+    # record's own one-line verdict, escaped like everything else here.
+    summary = getattr(getattr(ctx, "resource_pressure", None), "summary_line", None)
+    if callable(summary):
+        try:
+            text = str(summary())
+        except Exception:  # noqa: BLE001 - the report never fails on a diagnostic
+            text = ""
+        if text:
+            items.append(f"<li>Resource starvation: {html.escape(text)}</li>")
     items.append(
         "<li>Full event trace: <code>run.log</code> and "
         "<code>run_manifest.json</code>, written into every export folder.</li>"

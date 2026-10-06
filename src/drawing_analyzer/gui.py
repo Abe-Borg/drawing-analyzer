@@ -2106,6 +2106,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     f"in {g['input_tokens']:,} / out {g['output_tokens']:,} tok{money}",
                     level="muted",
                 )
+        # Resource-starvation verdict (API throttling, host CPU/memory/disk,
+        # exhausted agent budgets): one line from the run's own record, so a
+        # slow or partial run says whether the agents were starved and of what.
+        # The full numbers are in run.log / run_manifest.json.
+        pressure = getattr(ctx, "resource_pressure", None)
+        summary_line = getattr(pressure, "summary_line", None)
+        if callable(summary_line):
+            try:
+                starved = getattr(pressure, "starvation_status", "") == "DETECTED"
+                self._log(
+                    f"Resource starvation check: {summary_line()}",
+                    level="warning" if starved else "muted",
+                )
+            except Exception:  # noqa: BLE001 - a diagnostic never breaks the summary
+                pass
         # When exhaustive QC ran, surface the per-stage status so the operator can
         # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5). With
         # the Phase 26B completeness gate open, a PARTIAL with no degraded stage

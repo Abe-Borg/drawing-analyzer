@@ -29,11 +29,10 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     stream_message,
+    transient_retry_wait,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -280,8 +279,7 @@ def synthesize_drawing_set(
             resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, fall back to per-sheet
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="synthesis"):
                 attempt += 1
                 continue
             return SynthesisResult(

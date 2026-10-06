@@ -44,12 +44,11 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .models import AdoptedCode, SetIdentity, source_page_key
 
@@ -557,8 +556,7 @@ def identify_set(
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="identity"):
                 attempt += 1
                 continue
             return IdentityResult(

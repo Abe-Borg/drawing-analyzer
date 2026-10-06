@@ -63,8 +63,8 @@ from .digest import (
     _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
+    transient_retry_wait,
 )
 from .models import (
     EvidenceArtifact,
@@ -774,8 +774,7 @@ def _verify_one(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="verification"):
                 attempt += 1
                 continue
             _log.warning("verify finding %s failed: %s", finding.id, _clean_error(exc))
@@ -1460,8 +1459,7 @@ def _call_prepared_cross(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="verification"):
                 attempt += 1
                 continue
             note = _clean_error(exc)

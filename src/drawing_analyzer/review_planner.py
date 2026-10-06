@@ -44,13 +44,12 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     stream_message,
     _tolerant_json_object,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .models import ProfileSnapshot
 from .set_identity import _as_list
@@ -577,8 +576,7 @@ def author_review_plan(
             resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="review_plan"):
                 attempt += 1
                 continue
             return PlanResult(model_used=model, error=_clean_error(exc))

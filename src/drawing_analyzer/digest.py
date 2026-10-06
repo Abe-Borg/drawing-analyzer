@@ -29,6 +29,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.tokenizer import estimate_image_tokens_total
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
 from .models import (
@@ -216,6 +217,38 @@ def _clean_error(exc: Exception) -> str:
 def _retry_backoff_seconds(attempt: int) -> float:
     """Exponential backoff before retry ``attempt`` (0-based): 2s, 4s, 8s…"""
     return 2.0 * (2 ** attempt)
+
+
+def transient_retry_wait(
+    exc: Exception, attempt: int, max_retries: int, sleep: Any, *, stage: str,
+) -> bool:
+    """Decide one transient retry, wait out its backoff, and record it.
+
+    The single retry decision every stage loop makes — digest, critique,
+    verification, investigation, identity, review plan, focus, synthesis,
+    cross-QC, prose harvest, citation. Returns ``True`` when the caller should
+    try again (the backoff has already been slept); ``False`` when the failure
+    is permanent or the retries are spent. Either way the wait is reported to
+    the run's resource-pressure record (:mod:`drawing_analyzer.resource_pressure`)
+    — a spent *transient* loop as a give-up — so ``run.log`` can tell "the API
+    refused us until we stopped asking" from an ordinary caller error. Before
+    this helper each loop slept and ``continue``d silently, and a run that
+    spent its wall-clock in rate-limit backoff left no trace of it.
+
+    ``attempt`` is the 0-based count of retries already taken; ``sleep`` is
+    injectable so tests never wait. Recording never raises into the loop.
+    """
+    if not _is_transient_error(exc):
+        return False
+    if attempt >= max_retries:
+        resource_pressure.note_api_give_up(exc, stage=stage, attempts=attempt + 1)
+        return False
+    backoff = _retry_backoff_seconds(attempt)
+    resource_pressure.note_api_retry(
+        exc, stage=stage, attempt=attempt + 1, backoff_seconds=backoff
+    )
+    sleep(backoff)
+    return True
 
 
 DIGEST_SYSTEM_PROMPT = """\
@@ -1632,8 +1665,7 @@ def digest_sheet(
                 resp = stream_message(client, kwargs)
                 break
             except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
-                if _is_transient_error(exc) and attempt < max_retries:
-                    sleep(_retry_backoff_seconds(attempt))
+                if transient_retry_wait(exc, attempt, max_retries, sleep, stage="digest"):
                     attempt += 1
                     continue
                 call_error = exc

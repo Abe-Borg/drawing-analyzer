@@ -90,13 +90,12 @@ from .digest import (
     _FENCE_RE,
     _clean_error,
     _get,
-    _is_transient_error,
     _message_text,
     _message_cache_usage,
     _message_usage,
-    _retry_backoff_seconds,
     _server_web_search_requests,
     _tolerant_json_object,
+    transient_retry_wait,
 )
 from .models import (
     Citation,
@@ -966,8 +965,7 @@ def _check_one(
                 resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise
-                if _is_transient_error(exc) and attempt < max_retries:
-                    sleep(_retry_backoff_seconds(attempt))
+                if transient_retry_wait(exc, attempt, max_retries, sleep, stage="citation"):
                     attempt += 1
                     continue
                 return _CheckOutcome(

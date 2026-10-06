@@ -70,13 +70,12 @@ from .digest import (
     _coerce_refs,
     _resolve_tile,
     _get,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     parse_numeric_claims,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .models import (
     EVIDENCE_NOT_MATCHED,
@@ -1054,8 +1053,7 @@ def _call(
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the run
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="cross_qc"):
                 attempt += 1
                 continue
             return None, 0, 0, _clean_error(exc)

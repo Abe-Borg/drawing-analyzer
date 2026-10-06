@@ -853,6 +853,22 @@ def _ledger_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     return lines
 
 
+def _resource_lines(ctx: Any) -> list[str]:
+    """The resource-starvation record's own rendering, or an honest absence.
+
+    The record (:class:`drawing_analyzer.resource_pressure.ResourcePressure`)
+    renders itself — labels, counts and byte totals only — so run.log and
+    ``run_manifest.json`` derive from one object and cannot disagree about
+    whether the agents were starved. A context without one (an older cached
+    context, a hand-built double) says so rather than implying a clean bill.
+    """
+    pressure = getattr(ctx, "resource_pressure", None)
+    render = getattr(pressure, "render_lines", None)
+    if not callable(render):
+        return ["  (no resource-pressure record was attached — starvation was not assessed)"]
+    return [str(line) for line in render()]
+
+
 def _prose_lines(ctx: Any) -> list[str]:
     acc = dict(getattr(ctx, "prose_accounting", None) or {})
     if not acc:
@@ -902,6 +918,12 @@ def render_run_log(
     qc_status = str(getattr(ctx, "qc_status", "NOT_REQUESTED") or "NOT_REQUESTED")
     coverage = str(getattr(ctx, "coverage_status", "NOT_REQUESTED") or "NOT_REQUESTED")
     lines.append(f"QC status:   {qc_status} · markup coverage: {coverage}")
+    starvation = getattr(getattr(ctx, "resource_pressure", None), "starvation_status", "")
+    if starvation:
+        lines.append(
+            f"Starvation:  {starvation} (API throttling, host CPU/memory/disk, agent "
+            "budgets — see Resource pressure below)"
+        )
     environment = dict(journal.environment) if journal is not None else {}
     if environment:
         pairs = [f"{k}={v}" for k, v in environment.items()]
@@ -936,6 +958,7 @@ def render_run_log(
     section("Sheets", lambda c: _sheet_lines(c, roots))
     section("Stages", lambda c: _stage_lines(c, journal, roots))
     section("Usage & estimated cost", _usage_lines)
+    section("Resource pressure (starvation check)", _resource_lines)
     section("Findings, ledger & markup coverage", lambda c: _ledger_lines(c, roots))
     section("Prose carry-through (§14.9)", _prose_lines)
 

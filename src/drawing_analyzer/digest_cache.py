@@ -895,6 +895,16 @@ class DigestCache:
     failures never sink an otherwise successful analysis run.
     """
 
+    @property
+    def path(self) -> Path | None:
+        """The configured on-disk location (``None`` for a memory-only store).
+
+        Read-only identity for callers that need to know *where* the cache
+        lives without touching it — the run's host sampler watches that
+        directory's free space (by label, never by path).
+        """
+        return self._path
+
     def __init__(self, path: Path | None = None, *, persist: bool = True) -> None:
         self._path = Path(path) if path is not None else None
         self._persist = bool(persist and path is not None)
