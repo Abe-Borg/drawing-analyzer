@@ -6,14 +6,52 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-05
+
+### Added
+
+- **Page grids follow the drawing's physical size.** The default renderer
+  chooses a grid for each page while preserving the vector/raster minimum
+  tile DPI of an ANSI E sheet at 6×6. Smaller pages need substantially fewer
+  image tokens; ANSI E and ARCH E1 retain their existing 6×6 imagery.
+  Explicit `rows`/`cols` still take precedence, and
+  `DRAWING_ANALYZER_FIXED_GRID=1` restores the historical default. An
+  infeasible page is reported individually while other pages continue.
+- **Durable Message Batch recovery.** Submitted batches and their uploads
+  are tracked on disk so an interrupted run can recover paid results without
+  submitting the same work again. Recovery also handles receipt-write
+  failures and results that have not yet entered the content cache.
+
 ### Fixed
 
+- Incomplete critique reads are retried once; a truncated read gets a higher
+  output cap. Exhausted retries retain usable findings and disclose partial
+  coverage instead of reporting a complete critique.
+- Preserve critique cache hits across routine drawing-set revisions, cache
+  review plans by substantive canonical set facts, and invalidate cache
+  schemas per stage. Cache garbage collection racing a refresh no longer
+  discards a valid hit. Changing models or rendered grids still requires new
+  reads; paid batch receipts survive content-cache invalidation.
+- Align pre-run estimates with each stage's page geometry, model pricing,
+  and billed thinking. Report chat also accounts for prompt-cache usage.
+- Deduplicate citation checks, enforce their shared search budget, accept
+  equivalent code-edition aliases, and omit usage records for skipped calls.
+- Treat cross-sheet text truncation as a disclosed input bound and version
+  its cache contract, rather than misreporting it as a failed stage.
+- Wait long enough to harvest in-flight batch digests after cancellation,
+  including raised retry caps, reducing duplicate work on resume.
+- Reclaim orphaned Files API uploads using durable tracking and a background
+  startup reaper; cleanup does not block synchronous batch recovery.
 - Verifier call failures now carry `FAILED`, with a "Verifier could not run"
   label in the report and a distinct status in JSON/CSV exports and PDF notes.
   They no longer start paid investigations. Three matching non-transient 4xx
   errors stop uncached calls for the rest of that verification pass; remaining
   findings are `SKIPPED`. Both single-crop and cross-sheet verification retain
   retries for transient errors and stop immediately on authentication failures.
+- Keep `pydantic_core` at 2.46.5, the version required by Pydantic 2.13.5.
+  CI now installs `requirements.txt` and runs `pip check` on Linux and Windows;
+  a regression test checks shared runtime/release pins for drift, and dependency
+  file changes also trigger the Windows installer validation.
 
 ### Changed
 
@@ -36,13 +74,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   4.12.2, Playwright to 1.63.0, and Linux cryptography to 50.0.2. Synchronize
   the shared engine pins in `requirements-release.lock` while retaining its
   existing compatible dependency and test-tool pins.
-
-### Fixed
-
-- Keep `pydantic_core` at 2.46.5, the version required by Pydantic 2.13.5.
-  CI now installs `requirements.txt` and runs `pip check` on Linux and Windows;
-  a regression test checks shared runtime/release pins for drift, and dependency
-  file changes also trigger the Windows installer validation.
 
 ## [1.7.0] - 2026-09-21
 

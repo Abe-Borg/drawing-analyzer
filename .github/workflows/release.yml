@@ -358,6 +358,8 @@ jobs:
           notes+=$'The app is not code-signed, so Windows SmartScreen may warn on '
           notes+=$'first run - choose **More info** then **Run anyway**.\n\n'
           notes+=$'Existing installs will offer this update automatically.'
+          notes+=$'\n\nChanges and compatibility notes: '
+          notes+="[CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${tag}/CHANGELOG.md)."
 
           # A release-candidate tag (vX.Y.ZrcN) is published as a pre-release so
           # GitHub never marks it "latest" — the updater reads
