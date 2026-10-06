@@ -25,7 +25,9 @@ behind a decision is ever needed.
 
 The immediate corrective release can complete without a paid experiment. The
 packages below are subsequent research decisions, not hidden release blockers.
-Reuse the improved A/B harness and existing benchmark/release record process.
+Reuse the existing benchmark/release record process. The A/B sweep harness
+(`scripts/ab_sweep_drawing_analyzer.py`) was retired after 1.8.0; it remains
+in git history at `6fdf01e` if a package below is ever run.
 
 **Ordering:** R-04's zero-call half is `scripts/measure_evidence_coverage.py`,
 which is implemented and runs first; its measured half precedes R-01 and R-02, because it bounds review quality
@@ -111,8 +113,7 @@ digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: five stage
 resolvers read `os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which
 binds at *import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none
 of them (docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a
-process boundary). `tests/test_ab_sweep.py` pins that the harness reports it
-honestly. The public `model=` parameter is another
+process boundary). The public `model=` parameter is another
 valid entry point.
 
 Measure digest transcription, digest-origin findings, downstream cross-QC
@@ -233,7 +234,7 @@ restructure the pipeline around the original brief's 27% claim.
 - Do not shrink the overview or lower output caps as an unmeasured cost fix.
 - Do not broadly rename defaults, remove unused compatibility APIs, split the
   GUI/report generators, or add a build system as incidental cleanup.
-- Do not replace existing A/B and benchmark tools with a parallel evaluation
+- Do not replace the existing benchmark tools with a parallel evaluation
   framework, or rebuild telemetry that already exists (per-model cost, the
   `confidence` tally).
 - Do not claim full artifact byte equality between cold and warm runs whose

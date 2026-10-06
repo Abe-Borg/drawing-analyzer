@@ -2429,8 +2429,7 @@ class RunUsage:
         complete-looking total that silently dropped real cache spend. That is
         the exact failure this predicate exists to prevent — "an unknown price
         means *no* dollar figure, never *a smaller* dollar figure". Found via a
-        review of the A/B harness's copy of this rule; the copy is gone, and the
-        harness now calls this.
+        review of the since-retired A/B harness's copy of this rule.
 
         **A zero-count tool entry is not usage.** The dict is truthy whenever it
         has a key, so ``{"web_search": 0}`` — what a citation run writes when

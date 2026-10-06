@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **The A/B sweep harness.** `scripts/ab_sweep_drawing_analyzer.py` and
+  `scripts/ab_findings_diff.py` were developer-only tools and are no longer
+  used. Their tests and documentation went with them. They remain in git
+  history at `6fdf01e`.
+
 ## [1.8.0] - 2026-10-05
 
 ### Added
