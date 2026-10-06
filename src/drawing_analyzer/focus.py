@@ -34,11 +34,10 @@ from .digest import (
     FOCUS_SECTION_HEADER,
     SheetDigest,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     stream_message,
+    transient_retry_wait,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -285,8 +284,7 @@ def generate_focus_report(
             resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, ship the digests anyway
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="focus"):
                 attempt += 1
                 continue
             return FocusReportResult(

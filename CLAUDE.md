@@ -170,6 +170,31 @@ map lives in `src/drawing_analyzer/__init__.py`.
   gets that list. `redact_for_display` is the same boundary without flattening
   or truncation, for host status/error text only — never digest prose (I-2) or
   model findings.
+- **Resource pressure** (`resource_pressure.py`): the per-run starvation record
+  (`ctx.resource_pressure`), rendered into run.log (`Starvation:` header line +
+  *Resource pressure* section), `run_manifest.json` (`resource_pressure`), the
+  report's run-record block and the GUI completion summary. The active
+  recorder is **thread-bound**: `tracked_run` (on `extract_drawing_context`)
+  binds the run's thread and registers the recorder as live; **every
+  `ThreadPoolExecutor` a run opens takes `**resource_pressure.worker_binding()`**
+  so its workers bind to the same run (two concurrent runs never see each
+  other's retries). `current()` resolves the thread's binding, else the lone
+  live recorder, else `None` — never a guess. **Every transient retry loop
+  goes through `digest.transient_retry_wait(exc, attempt, max_retries, sleep,
+  stage=…)`**, which records the wait or the give-up; never reintroduce a bare
+  `sleep(_retry_backoff_seconds(attempt))`. The upload, files-cleanup,
+  batch-results, batch-poll, batch-harvest and batch-resubmit loops call
+  `resource_pressure.note_api_retry` / `note_api_give_up` directly. Exhausted
+  agent budgets are
+  `note_budget_exhausted(stage, kind, count=…)`; a zero count records nothing.
+  The host sampler is a daemon thread on an `Event.wait` cadence
+  (`DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS`, `0` disables); its scheduling lag
+  is the CPU signal. Probes are stdlib + ctypes (no psutil, no PyMuPDF); a
+  metric that cannot be read is `unavailable`, never 0. Disk is reported by
+  label (`temp` / `work_dir` / `cache`), never by path. Stored API events and
+  journal incidents are bounded; the aggregates count everything. Advisory and
+  never fatal. Tests inject `probe=` / `interval=` and patch
+  `digest._retry_backoff_seconds` to 0 so a 429 fixture never sleeps.
 - **Digest path:** `tiling.py` (geometry) → `render.py` (raster) → `digest.py`
   or `batch_digest.py` (Message Batches + Files) → `digest_cache.py` (two-level
   content-keyed cache; a hit skips rendering and restores parsed findings).

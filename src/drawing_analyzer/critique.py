@@ -57,16 +57,15 @@ from .digest import (
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
     _get,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     stream_message,
     build_user_content,
     claims_from_cache,
     findings_from_cache,
     parse_findings_detailed,
     parse_numeric_claims,
+    transient_retry_wait,
 )
 from .digest_cache import critique_cache_key
 from .auditors.sheet_ids import normalize_sheet_id
@@ -1318,8 +1317,7 @@ def _critique_read(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="critique"):
                 attempt += 1
                 continue
             return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=_clean_error(exc))

@@ -6,6 +6,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Resource-starvation diagnostics.** Every run now records whether its
+  agents were starved while they worked: every transient API retry and
+  give-up in every stage (kind, status, backoff, `retry-after`, rate-limit
+  headers, request id), a host sampler (scheduling lag, process CPU and
+  memory, system memory and CPU, free disk by label, threads) and the agent
+  budgets that ran out (output caps, evidence rounds, finding and reference
+  caps, abandoned batch attempts). `run.log` carries a `Starvation:` verdict
+  and a *Resource pressure* section, `run_manifest.json` a `resource_pressure`
+  block, and the report's run record and the GUI summary the one-line verdict.
+  `DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS` sets the sampler cadence (`0`
+  disables it). No new dependency.
+
 ### Removed
 
 - **The A/B sweep harness.** `scripts/ab_sweep_drawing_analyzer.py` and

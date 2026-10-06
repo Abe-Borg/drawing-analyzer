@@ -53,6 +53,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -63,8 +64,8 @@ from .digest import (
     _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
+    transient_retry_wait,
 )
 from .models import (
     EvidenceArtifact,
@@ -774,8 +775,7 @@ def _verify_one(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="verification"):
                 attempt += 1
                 continue
             _log.warning("verify finding %s failed: %s", finding.id, _clean_error(exc))
@@ -1014,7 +1014,7 @@ def verify_findings(
     # the geometry it came from when its EvidenceArtifact is built.
     meta = {id(f): (sheet, rect, dpi) for (f, sheet, rect, dpi) in items}
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         in_flight: dict = {}
 
         def _collect_one() -> None:
@@ -1460,8 +1460,7 @@ def _call_prepared_cross(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="verification"):
                 attempt += 1
                 continue
             note = _clean_error(exc)
@@ -1593,7 +1592,7 @@ def verify_cross_findings(
     if misses_by_index and resolved_client is not None:
         fatal = threading.Event()
         failures = _PermanentFailures(fatal)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
             submitted: list = []
 
             def _collect_cross() -> None:

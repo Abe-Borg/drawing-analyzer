@@ -53,18 +53,18 @@ from .core.api_config import (
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .critique import _token_overlap
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     _validate_finding_item,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .html_report import classify_section, split_into_sections
 from .ledger import Ledger
@@ -603,8 +603,7 @@ def _structure_item(
                     _clean_error(exc),
                 )
                 continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="prose_harvest"):
                 attempt += 1
                 continue
             _log.warning("prose-harvest structuring call failed: %s", _clean_error(exc))
@@ -1118,7 +1117,7 @@ def harvest_prose(
         futures: dict[int, Any] = {}
         disabled_chains: set[tuple[str, int]] = set()
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             def _prime_chain(key: tuple[str, int]) -> None:
                 if key in disabled_chains:
                     return

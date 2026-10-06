@@ -1295,7 +1295,9 @@ carries two artifacts built from it (Phase 26A, DA-024):
   drift), a stage table (status, calls, items, duration) that **includes the
   digest**, per-family token/cost usage with derived totals — a stage that
   placed no call contributes no usage row at all — the
-  ledger/receipt/coverage accounting, prose
+  ledger/receipt/coverage accounting, the **resource-starvation check**
+  (a `Starvation:` header verdict plus a *Resource pressure* section — see
+  below), prose
   carry-through counts, the artifacts written, every run error, and the full
   event trace. UTF-8 + CRLF so Notepad reads it cleanly. This is per-run and
   ships in the export — distinct from the rotating `drawing_analyzer.log`
@@ -1303,6 +1305,7 @@ carries two artifacts built from it (Phase 26A, DA-024):
 - **`run_manifest.json`** — the machine-readable counterpart (`schema_version`
   1): final status, configuration, source inventory, typed stage results, the
   usage ledger with derived totals, prose/evidence/markup-coverage summaries,
+  the `resource_pressure` starvation record,
   sanitized errors, and the **sha256 + size of every artifact in the export**
   (`run.log` and `markup_manifest.json` included). Finalization is non-circular
   (§18.4): ordinary artifacts are written first, then `run.log`, then the
@@ -1335,6 +1338,59 @@ secret/path redaction. Digest prose deliberately does not: a sheet note reading
 `TOKEN: 12` at `grid C:4` is drawing content, and rewriting it to protect a
 credential that is not there would corrupt the review (I-2). Model findings are
 left alone for the same reason.
+
+### Was the run starved of resources?
+
+A slow or partial run raises one question before any other: were the agents
+starved while they worked? `run.log` and `run_manifest.json` answer it
+directly. Every run carries a **resource-pressure record**
+(`ctx.resource_pressure`, module `resource_pressure.py`) built from three legs:
+
+- **API capacity.** Every transient retry in every stage — digest, critique,
+  verification, investigation, identity, review plan, focus, synthesis,
+  cross-QC, prose harvest, citation, plus the Files-API upload and the batch
+  transport's results read, status polling, harvest polling and resubmission
+  — is recorded: stage, kind (`rate_limited` 429 / `overloaded`
+  529 / `unavailable` 503 / `server_error` / `timeout` / `connection`), HTTP
+  status, attempt, the backoff slept, the server's `retry-after`, the
+  `anthropic-ratelimit-*-remaining` headers when the error carried them, the
+  request id, and whether the loop finally **gave up**. Before this, every one
+  of those loops slept and continued silently, so a run that spent forty
+  minutes in rate-limit backoff looked like one that spent them reading.
+- **Host resources.** A daemon sampler ticks every 5 s
+  (`DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS`; `0` disables it) and records its
+  own *scheduling lag* — how late it woke, the direct sign that this process
+  could not get CPU, whatever the cause — plus process CPU time, resident and
+  peak memory, system memory load, system CPU busy, free disk at the run's
+  working locations (`temp`, `work_dir`, `cache` — by label, never by path)
+  and the thread count. Windows reads come from `psapi`/`kernel32` through
+  `ctypes`, Linux from `/proc`; a metric a platform cannot read is listed as
+  *unavailable*, never guessed. No new dependency.
+- **Agent budgets.** Allotments an agent exhausted: digests still cut off at
+  `max_tokens` after the raised-cap retry, verifier replies truncated at the
+  cap, investigations that hit the evidence-round cap or the per-run finding
+  cap, citation references beyond the per-run cap, and batch attempts the
+  stall watch or the time bound abandoned.
+
+The record derives **`starvation_status`** — `DETECTED` or `NOT_DETECTED` —
+from named signals, each carrying its evidence: `API_THROTTLED` (a give-up,
+three capacity answers, or 30 s+ spent in backoff), `CPU_STARVED` (two late
+ticks, or one lag of 10 s+), `MEMORY_PRESSURE` (system memory at 90 %+ load
+or under 512 MB available), `LOW_DISK` (under 1 GB free at a watched
+location) and `BUDGET_EXHAUSTED`. A couple of recovered retries over a long
+run are reported as counts but are not a verdict.
+
+Where it shows: `run.log` gets a `Starvation:` header line and a *Resource
+pressure (starvation check)* section; `run_manifest.json` a `resource_pressure`
+block (verdict, signals, API counts with the bounded event list, host
+aggregates, the budget list and the thresholds used); the HTML report's *Run
+record* block and the GUI completion summary each carry the one-line verdict;
+and the journal trace shows the events as they happened — `API_RETRY`,
+`API_GIVE_UP`, `RESOURCE_PRESSURE` (one per threshold breach, capped at 50),
+`BUDGET_EXHAUSTED` and the closing `RESOURCE_SUMMARY`. Aggregates count
+everything; only the listed events are bounded. The SDK's own in-client
+retries (two per request by default) happen beneath these loops and are
+visible only in the wire capture (`DRAWING_ANALYZER_DEBUG`).
 
 ## Citation check
 
@@ -1694,6 +1750,7 @@ quality decision.
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
+| `DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS` | `5` | Cadence of the host sampler behind the run's resource-starvation record (scheduling lag, CPU, memory, disk; see [Was the run starved of resources?](#was-the-run-starved-of-resources)). Clamped to 1–300; `0`/`off` disables the sampler, while API retries and exhausted agent budgets are still recorded. |
 | `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |
 | `DRAWING_ANALYZER_UPDATE_URL` | GitHub releases `latest.json` | Override the update-manifest URL (testing, or self-hosting a fork's releases). |
 | `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. Long base64 runs are elided with their size and each record is capped, so a sheet's ~3 MB of image data cannot rotate the log ring away — what stays is the request shape, which is what wire capture is for. |

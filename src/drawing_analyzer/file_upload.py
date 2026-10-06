@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator
 
 from .diagnostics import get_logger, summarize_exc
+from . import resource_pressure
 from .digest import (
     _error_status,
     _is_transient_error,
@@ -287,7 +288,9 @@ def iter_prefetched_sheets(
         if callable(close):
             close()
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheet-render") as executor:
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="sheet-render", **resource_pressure.worker_binding(),
+    ) as executor:
         future = executor.submit(_advance)
         try:
             while True:
@@ -434,11 +437,18 @@ def upload_sheet_images(
                         position + 1, total_images, len(image.png_bytes),
                         summarize_exc(exc),
                     )
+                    # A 503 "overloaded" wave on the Files API is capacity
+                    # starvation too; the run's resource record counts it.
+                    resource_pressure.note_api_retry(
+                        exc, stage="upload", attempt=attempt + 1, backoff_seconds=backoff,
+                    )
                     with lock:
                         _notify(True)
                     sleep(backoff)
                     attempt += 1
                     continue
+                if _is_transient_status_error(exc):
+                    resource_pressure.note_api_give_up(exc, stage="upload", attempts=attempt + 1)
                 # Permanent, or transient retries exhausted: pinpoint the exact
                 # image (overview vs which tile), its size, and the API status /
                 # request-id so the failure that doomed this sheet is fully
@@ -474,7 +484,7 @@ def upload_sheet_images(
     workers = _resolve_upload_workers(total_images, max_workers)
     by_position: dict[int, str] = {}
     error: Exception | None = None
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         futures = {
             executor.submit(_upload_one, pos, image, name): pos
             for pos, image, name in jobs
@@ -547,8 +557,15 @@ def delete_files(
                     delay = _retry_backoff_seconds(attempt)
                     _log.warning("files-api delete %s retry %d/%d in %.0fs: %s",
                                  fid, attempt + 1, max_retries, delay, summarize_exc(exc))
+                    resource_pressure.note_api_retry(
+                        exc, stage="files_cleanup", attempt=attempt + 1, backoff_seconds=delay,
+                    )
                     sleep(delay)
                     continue
+                if transient:
+                    resource_pressure.note_api_give_up(
+                        exc, stage="files_cleanup", attempts=attempt + 1,
+                    )
                 _log.warning("files-api delete failed; retained for reaper: %s | %s",
                              fid, summarize_exc(exc))
                 return False
@@ -560,7 +577,9 @@ def delete_files(
         return True
 
     workers = max(1, min(max_workers, DEFAULT_DELETE_WORKERS, len(ids)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="file-delete") as executor:
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="file-delete", **resource_pressure.worker_binding(),
+    ) as executor:
         results = list(executor.map(delete_one, ids))
     return [fid for fid, deleted in zip(ids, results) if deleted]
 

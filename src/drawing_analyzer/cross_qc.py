@@ -60,7 +60,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
-from . import tiling
+from . import resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -70,13 +70,12 @@ from .digest import (
     _coerce_refs,
     _resolve_tile,
     _get,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     parse_numeric_claims,
     scan_structured_blocks,
+    transient_retry_wait,
 )
 from .models import (
     EVIDENCE_NOT_MATCHED,
@@ -1054,8 +1053,7 @@ def _call(
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the run
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
+            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="cross_qc"):
                 attempt += 1
                 continue
             return None, 0, 0, _clean_error(exc)
@@ -1279,7 +1277,7 @@ def _reconcile_facts(
     if workers == 1:
         pair_results = [_run_pair(union) for union in pair_inputs]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             # ``map`` returns in input order even when requests finish out of
             # order, so finding/claim assembly remains deterministic.
             pair_results = list(pool.map(_run_pair, pair_inputs))
@@ -1642,7 +1640,7 @@ def cross_sheet_qc(
     if workers == 1:
         map_results = [_run_map(shard) for shard in shards]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as pool:
             # Deterministic input-order fold; only execution is parallel.
             map_results = list(pool.map(_run_map, shards))
 

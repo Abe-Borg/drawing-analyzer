@@ -30,7 +30,7 @@ from .core.api_config import (
 )
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
-from . import tiling
+from . import resource_pressure, tiling
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_TOKENS,
@@ -606,6 +606,12 @@ class DrawingContext:
     # cross-QC did not run, or ran on the whole-set (<=40) path, which performs
     # no host-side grounding — empty means "not measured", never "none dropped".
     cross_qc_discards: dict = field(default_factory=dict)
+    # The run's resource-starvation record (:mod:`drawing_analyzer.resource_pressure`):
+    # API throttling retries and give-ups, host CPU/memory/disk pressure sampled
+    # while the agents worked, and the budgets they exhausted. Rendered into
+    # run.log, run_manifest.json, the report's run record and the GUI summary.
+    # ``None`` only on a context built outside the pipeline.
+    resource_pressure: Any = None
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -909,7 +915,7 @@ def _digest_sheets_concurrent(
             specs_text=specs_text,
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         in_flight: set = set()
 
         def _collect_one() -> None:
@@ -1136,6 +1142,59 @@ def _api_environment_fingerprint() -> str:
         sdk_version = "unavailable"
     base_url = os.environ.get("ANTHROPIC_BASE_URL") or "default"
     return f"sdk=anthropic-{sdk_version} base_url={base_url}"
+
+
+def _resource_watch_paths(qc_work_dir: Path | None, cache: Any) -> dict:
+    """The directories whose free space the host sampler watches, by label.
+
+    ``work_dir`` is the run's evidence/markup directory when the caller gave
+    one; ``temp`` is where the QC stages otherwise create theirs lazily; and
+    ``cache`` is the digest cache's directory. Labels are all that reach the
+    record — the sampler reports bytes free per label, never a path.
+    """
+    import tempfile
+
+    paths: dict[str, Any] = {"temp": tempfile.gettempdir()}
+    if qc_work_dir is not None:
+        paths["work_dir"] = qc_work_dir
+    cache_path = getattr(cache, "path", None)
+    if cache_path:
+        try:
+            paths["cache"] = Path(cache_path).parent
+        except Exception:  # noqa: BLE001 - an odd cache object is not an error
+            pass
+    return paths
+
+
+def _note_digest_budgets(pressure: Any, sheets: list, run_usage: "RunUsage") -> None:
+    """Record the digest leg's exhausted budgets on the resource record.
+
+    Both transports mark a digest that is still cut off at ``max_tokens``
+    after its raised-cap retry as failed and refuse to cache it, so the
+    sheet's ``stop_reason`` is the one source for that count. An abandoned
+    batch attempt (stall watch, time bound) rides the usage ledger as a
+    non-billable ``ABANDONED_*`` record per sheet, grouped here by family.
+    """
+    try:
+        truncated = sum(
+            1 for s in sheets if getattr(s, "stop_reason", None) == "max_tokens"
+        )
+        pressure.note_budget_exhausted(
+            "digest", "output_cap", count=truncated,
+            detail="digest still cut off at max_tokens after the raised-cap retry",
+        )
+        abandoned: dict[str, int] = {}
+        for r in getattr(run_usage, "records", None) or []:
+            if str(getattr(r, "terminal_status", "")).startswith("ABANDONED"):
+                fam = str(getattr(r, "stage_family", "") or "batch")
+                abandoned[fam] = abandoned.get(fam, 0) + 1
+        for fam, count in sorted(abandoned.items()):
+            pressure.note_budget_exhausted(
+                fam, "batch_abandoned", count=count,
+                detail="batch attempt abandoned by the stall watch or the time bound",
+            )
+    except Exception:  # noqa: BLE001 - diagnostics never fail the run
+        pass
 
 
 def _journal_environment(
@@ -1724,7 +1783,7 @@ def _run_critique_stage(
                     return CritiqueResult(findings=[], requested_runs=runs, completed_runs=0, error=error)
             return critique_sheet_self_consistent(rendered, client=client, cache=cache, profiles=profiles)
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
             in_flight: dict = {}
 
             def _collect_one() -> None:
@@ -2154,6 +2213,10 @@ def _run_qc_stages(
             degradation = vres.degradation_note()
             if degradation:
                 verify_stage.warnings.append(degradation)
+            resource_pressure.note_budget_exhausted(
+                "verification", "output_cap", count=getattr(vres, "truncated", 0),
+                detail="verifier reply cut off at max_tokens (left UNCERTAIN)",
+            )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Verification: {exc}")
             primary_failed = True
@@ -2191,6 +2254,10 @@ def _run_qc_stages(
             degradation = cres.degradation_note("cross-verification")
             if degradation:
                 verify_stage.warnings.append(degradation)
+            resource_pressure.note_budget_exhausted(
+                "verification", "output_cap", count=getattr(cres, "truncated", 0),
+                detail="cross-sheet verifier reply cut off at max_tokens (left UNCERTAIN)",
+            )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Cross-sheet verification: {exc}")
             cross_failed = True
@@ -2314,6 +2381,14 @@ def _run_qc_stages(
                         )
                 investigate_stage.items_in = len(uncertain)
                 investigate_stage.items_out = ires.verified + ires.rejected
+                resource_pressure.note_budget_exhausted(
+                    "investigation", "evidence_rounds", count=getattr(ires, "budget_capped", 0),
+                    detail="investigation hit the per-finding evidence-round cap (left UNCERTAIN)",
+                )
+                resource_pressure.note_budget_exhausted(
+                    "investigation", "finding_cap", count=getattr(ires, "skipped_over_budget", 0),
+                    detail="UNCERTAIN findings beyond the per-run investigation budget",
+                )
                 if ires.skipped_over_budget:
                     # Name the budget: it now scales with the set, so "beyond the
                     # budget" alone leaves a reviewer unable to tell whether to
@@ -2421,6 +2496,10 @@ def _run_qc_stages(
                 citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
                 rejected_claims = int(getattr(cires, "skipped_rejected", 0) or 0)
                 capped_refs = int(getattr(cires, "skipped_over_budget", 0) or 0)
+                resource_pressure.note_budget_exhausted(
+                    "citation", "reference_cap", count=capped_refs,
+                    detail="normalized references beyond the per-run citation budget",
+                )
                 if rejected_claims:
                     citation_stage.warnings.append(
                         f"{rejected_claims} cited claim(s) left unchecked because "
@@ -2660,6 +2739,7 @@ def _tally_line(
 
 
 @_with_stage_executor_cleanup
+@resource_pressure.tracked_run
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -2928,6 +3008,14 @@ def extract_drawing_context(
         use_batch=use_batch,
         critique_use_batch=critique_use_batch,
     ))
+    # Resource-starvation record: the active recorder ``tracked_run`` opened
+    # for this call (a fresh one if the body is driven without the decorator).
+    # It mirrors API retries, host pressure and exhausted agent budgets into
+    # the journal, and the host sampler watches the locations the run writes
+    # to — by label only; no path leaves the record.
+    pressure = resource_pressure.current() or resource_pressure.ResourcePressure()
+    pressure.attach_journal(journal)
+    pressure.start_host_monitor(_resource_watch_paths(qc_work_dir, cache))
     journal.emit(
         "RUN_START",
         files=len(pdf_paths),
@@ -3018,6 +3106,7 @@ def extract_drawing_context(
             import shutil
 
             shutil.rmtree(qc_work_dir, ignore_errors=True)
+        pressure.finish()
         journal.emit("RUN_BLOCKED", level="ERROR", reason=block_reason)
         journal.finish("FAILED")
         return DrawingContext(
@@ -3028,6 +3117,7 @@ def extract_drawing_context(
             project_specifications=specs_text,
             run_journal=journal,
             input_inventory=inventory,
+            resource_pressure=pressure,
         )
 
     paths = inventory.accepted_paths
@@ -3076,6 +3166,7 @@ def extract_drawing_context(
             import shutil
 
             shutil.rmtree(qc_work_dir, ignore_errors=True)
+        pressure.finish()
         journal.emit(
             "RUN_END", level="ERROR", status="FAILED",
             reason="no readable PDF pages found in the selected files",
@@ -3090,6 +3181,7 @@ def extract_drawing_context(
             project_specifications=specs_text,
             run_journal=journal,
             input_inventory=inventory,
+            resource_pressure=pressure,
         )
 
     # Capture each sheet's lightweight text/geometry record (words + text layer,
@@ -3512,6 +3604,7 @@ def extract_drawing_context(
     if overlap_stages:
         stage_executor = ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="set-stage",
+            **resource_pressure.worker_binding(),
         )
         _register_stage_executor(stage_executor)
         if config.run_synthesis:
@@ -4144,6 +4237,16 @@ def extract_drawing_context(
     for err in errors:
         _log.warning("issue: %s", err)
 
+    # Agent budgets the digest leg exhausted (the QC stages note their own as
+    # they run): a digest still cut off at ``max_tokens`` after the raised-cap
+    # retry — both transports mark the sheet failed and refuse to cache it —
+    # and every batch attempt the stall watch or time bound abandoned, which
+    # the usage ledger carries as non-billable ``ABANDONED_*`` records.
+    _note_digest_budgets(pressure, sheets, run_usage)
+    # Resource-starvation verdict before the run closes, so RESOURCE_SUMMARY
+    # precedes USAGE_TOTALS / RUN_END in the trace and the final sample lands.
+    pressure.finish()
+
     # Close out the run journal (§18.1): the derived usage totals, then the
     # terminal status the header/footer of run.log lead with.
     cost = run_usage.total_estimated_cost
@@ -4213,6 +4316,7 @@ def extract_drawing_context(
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,
         cross_qc_discards=cross_qc_discards,
+        resource_pressure=pressure,
     )
 
 

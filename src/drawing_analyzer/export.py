@@ -557,6 +557,7 @@ def build_run_manifest(
     findings = list(getattr(ctx, "findings", None) or [])
     reference = list(getattr(ctx, "reference_findings", None) or [])
     usage = getattr(ctx, "run_usage", None)
+    pressure = getattr(ctx, "resource_pressure", None)
     config = getattr(ctx, "run_configuration", None)
     config_to_dict = getattr(config, "to_dict", None)
     try:
@@ -622,6 +623,16 @@ def build_run_manifest(
         # path. Absent/empty means the measurement was not taken (cross-QC did
         # not run, or ran on the whole-set path, which does no host grounding).
         "cross_qc_discards": dict(getattr(ctx, "cross_qc_discards", None) or {}),
+        # The resource-starvation record: API throttling retries/give-ups, host
+        # CPU/memory/disk pressure sampled during the run, exhausted agent
+        # budgets, and the verdict they support. Labels and counts only (disk
+        # by label, never path). Additive key — schema stays v1; ``None`` when
+        # no record was attached (a context built outside the pipeline).
+        "resource_pressure": (
+            _sanitize_json(pressure.to_dict(), roots)
+            if pressure is not None and hasattr(pressure, "to_dict")
+            else None
+        ),
         "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx, roots),
         "errors": [

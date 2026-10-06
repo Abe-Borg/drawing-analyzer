@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diagnostics
+from . import resource_pressure
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
 from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
@@ -47,11 +48,19 @@ def _read_with_retry(call: Callable[[], Any], *, sleep: Callable[[float], None])
                 "TransportError", "NetworkError", "ProtocolError", "TimeoutException",
                 "ReadError", "RemoteProtocolError",
             } for base in type(exc).__mro__)
-            if not transient or attempt == DEFAULT_DIGEST_MAX_RETRIES:
+            if not transient:
+                raise
+            if attempt == DEFAULT_DIGEST_MAX_RETRIES:
+                resource_pressure.note_api_give_up(
+                    exc, stage="batch_results", attempts=attempt + 1,
+                )
                 raise
             delay = _retry_backoff_seconds(attempt)
             _log.warning("batch read interrupted; retry %d/%d in %.0fs: %s",
                          attempt + 1, DEFAULT_DIGEST_MAX_RETRIES, delay, type(exc).__name__)
+            resource_pressure.note_api_retry(
+                exc, stage="batch_results", attempt=attempt + 1, backoff_seconds=delay,
+            )
             sleep(delay)
 
 

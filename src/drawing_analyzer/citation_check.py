@@ -85,18 +85,18 @@ from .core.api_config import (
     thinking_config_for,
     tools_with_cache,
 )
+from . import resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
     _clean_error,
     _get,
-    _is_transient_error,
     _message_text,
     _message_cache_usage,
     _message_usage,
-    _retry_backoff_seconds,
     _server_web_search_requests,
     _tolerant_json_object,
+    transient_retry_wait,
 )
 from .models import (
     Citation,
@@ -966,8 +966,7 @@ def _check_one(
                 resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise
-                if _is_transient_error(exc) and attempt < max_retries:
-                    sleep(_retry_backoff_seconds(attempt))
+                if transient_retry_wait(exc, attempt, max_retries, sleep, stage="citation"):
                     attempt += 1
                     continue
                 return _CheckOutcome(
@@ -1312,7 +1311,10 @@ def check_citations(
         return ref, rid, handled, outcome, None, key
 
     fresh_requests = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(_MAX_WORKERS, len(requests)))) as pool:
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(_MAX_WORKERS, len(requests))),
+        **resource_pressure.worker_binding(),
+    ) as pool:
         for ref, rid, handled, outcome, entry, key in pool.map(_run, probes):
             done += 1
             if entry is not None:

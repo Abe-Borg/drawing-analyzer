@@ -48,6 +48,9 @@ Module layout::
                       (artifact-backed coverage, DA-007; PyMuPDF importer 2 of 2)
     run_journal.py    per-run event journal -> sanitized run.log (secrets
                       redacted + paths scrubbed at emit time; DA-024)
+    resource_pressure.py  per-run resource-starvation record: API throttling
+                      retries, host CPU/memory/disk sampler, exhausted agent
+                      budgets -> verdict in run.log / run_manifest.json
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored
                       per-tile notes builders (no PyMuPDF import)
     export.py         folder export: findings.csv/json, sheet text, evidence,

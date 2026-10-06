@@ -68,6 +68,7 @@ from typing import Any, Callable, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.tokenizer import estimate_image_tokens_total
+from . import resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -771,17 +772,20 @@ def _poll_for_harvest(
     """
     started = time.monotonic()
     errors = 0
+    last_exc: Exception | None = None
     while True:
         try:
             batch = client.messages.batches.retrieve(batch_id)
             errors = 0
         except Exception as exc:  # noqa: BLE001 - advisory; the caller falls through
             errors += 1
+            last_exc = exc
             _log.warning(
                 "harvest poll of batch %s errored %d/%d: %s",
                 batch_id, errors, _HARVEST_MAX_POLL_ERRORS, summarize_exc(exc),
             )
             if errors >= _HARVEST_MAX_POLL_ERRORS:
+                resource_pressure.note_api_give_up(exc, stage="batch_harvest", attempts=errors)
                 return None
             batch = None
         if batch is not None:
@@ -791,7 +795,13 @@ def _poll_for_harvest(
         remaining = budget_seconds - (time.monotonic() - started)
         if remaining <= 0:
             return None
-        sleep(min(_HARVEST_POLL_INTERVAL_SECONDS, remaining))
+        delay = min(_HARVEST_POLL_INTERVAL_SECONDS, remaining)
+        if batch is None and last_exc is not None:
+            # The wait after a failed retrieve is a wait the API imposed.
+            resource_pressure.note_api_retry(
+                last_exc, stage="batch_harvest", attempt=errors, backoff_seconds=delay,
+            )
+        sleep(delay)
 
 
 @dataclass(frozen=True)
@@ -1071,7 +1081,11 @@ def _recover_via_batch_resubmit(
             )
             backoff = _retry_backoff_seconds(round_no - 1)
             if backoff >= max_elapsed_seconds - (time.monotonic() - started):
+                resource_pressure.note_api_give_up(exc, stage="batch_submit", attempts=round_no)
                 break
+            resource_pressure.note_api_retry(
+                exc, stage="batch_submit", attempt=round_no, backoff_seconds=backoff,
+            )
             sleep(backoff)
             continue
         retry_id = _get(mb, "id")
@@ -1710,8 +1724,18 @@ def _poll_until_terminal(
                 _log.error("batch %s poll failed repeatedly; giving up", batch_id)
                 if on_log is not None:
                     on_log(f"Drawing batch poll failed repeatedly: {exc}", level="error")
+                resource_pressure.note_api_give_up(
+                    exc, stage="batch_poll", attempts=consecutive_errors,
+                )
                 return "poll_failed"
-            sleep(min(DEFAULT_POLL_INTERVAL_SECONDS * (2**consecutive_errors), 300))
+            delay = min(DEFAULT_POLL_INTERVAL_SECONDS * (2**consecutive_errors), 300)
+            # A retrieve the API refused is a wait the run made; sustained 429
+            # / 503 answers here can burn the whole collection budget, so the
+            # resource record counts them like any stage retry.
+            resource_pressure.note_api_retry(
+                exc, stage="batch_poll", attempt=consecutive_errors, backoff_seconds=delay,
+            )
+            sleep(delay)
             continue
 
         counts = _get(batch, "request_counts")

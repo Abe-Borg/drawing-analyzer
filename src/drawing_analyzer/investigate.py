@@ -66,12 +66,11 @@ from .digest import (
     _clean_error,
     _error_status,
     _image_block,
-    _is_transient_error,
     _message_text,
     _message_usage,
-    _retry_backoff_seconds,
     _tolerant_json_object,
     stream_message,
+    transient_retry_wait,
 )
 from .models import Finding, Verification, source_page_key
 from .verify import (
@@ -999,8 +998,7 @@ def _investigate_one(
                 session_tools = kwargs["tools"]
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
-                if _is_transient_error(exc) and attempt < max_retries:
-                    sleep(_retry_backoff_seconds(attempt))
+                if transient_retry_wait(exc, attempt, max_retries, sleep, stage="investigation"):
                     attempt += 1
                     continue
                 out.note = _clean_error(exc)
