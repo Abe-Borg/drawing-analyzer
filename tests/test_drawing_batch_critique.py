@@ -480,7 +480,7 @@ def test_unexpected_loop_error_frees_orphaned_uploads_before_propagating():
             iter([_make_sheet(1), _make_sheet(2)]), client=client, cache=cache,
             model=OPUS, runs=2, total=2,
         )
-    assert client.files.deleted == client.files.uploaded_ids
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
     assert len(client.files.deleted) == IMAGES_PER_SHEET
 
 
