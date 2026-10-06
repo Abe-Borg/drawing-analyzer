@@ -79,6 +79,13 @@ def store(request, tmp_path):
     cache.close()
 
 
+# Delete-pool concurrency and retry policy do not depend on the journal backend;
+# the SQLite record/forget path is exercised by the store-parametrized reaper and
+# batch-cleanup tests below.
+memory_store_only = pytest.mark.parametrize("store", [False], ids=["memory"], indirect=True)
+
+
+@memory_store_only
 def test_parallel_delete_is_bounded_and_retries_each_file(store):
     ids = [f"file-{n}" for n in range(12)]
     for fid in ids:
@@ -111,6 +118,7 @@ def test_parallel_delete_is_bounded_and_retries_each_file(store):
     assert store.recorded_uploads() == []
 
 
+@memory_store_only
 def test_delete_cannot_exceed_worker_cap(store):
     barrier = threading.Barrier(file_upload.DEFAULT_DELETE_WORKERS)
     lock = threading.Lock()
@@ -133,6 +141,7 @@ def test_delete_cannot_exceed_worker_cap(store):
     assert peak == file_upload.DEFAULT_DELETE_WORKERS
 
 
+@memory_store_only
 @pytest.mark.parametrize("error", [StatusError(429), StatusError(529),
                                   ConnectionError("lost connection"), TimeoutError("timeout")])
 def test_delete_transient_retries_are_bounded_and_retained_for_next_startup(error, store):
@@ -153,7 +162,9 @@ def test_delete_transient_retries_are_bounded_and_retained_for_next_startup(erro
     assert store.recorded_uploads() == []
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404])
+# 401/403 take 400's path: neither 404 nor a transient status.
+@memory_store_only
+@pytest.mark.parametrize("status", [400, 404])
 def test_permanent_delete_errors_are_not_retried_and_404_forgets_ownership(status, store):
     store.record_uploaded_file("file", uploaded_at=OLD)
 

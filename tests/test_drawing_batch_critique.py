@@ -248,7 +248,12 @@ def _run(client, sheets, *, cache=None, runs=2, **collect_kw):
 # --------------------------------------------------------------------------- #
 
 
-def test_two_custom_ids_per_uncached_sheet():
+def _image_file_ids(req):
+    content = req["params"]["messages"][0]["content"]
+    return [b["source"]["file_id"] for b in content if b.get("type") == "image"]
+
+
+def test_two_sheet_batch_reuses_one_upload_per_sheet_and_releases_files():
     client = _FakeClient(_succeed)
     batch, _ = _run(client, [_make_sheet(1), _make_sheet(2)], runs=2)
 
@@ -256,11 +261,6 @@ def test_two_custom_ids_per_uncached_sheet():
     assert ids == ["sheet__0__r1", "sheet__0__r2", "sheet__1__r1", "sheet__1__r2"]
     # The batch was created once, on the stable (GA) Message Batches namespace.
     assert len(client.create_calls) == 1
-
-
-def test_one_upload_per_sheet_feeds_both_reads():
-    client = _FakeClient(_succeed)
-    _run(client, [_make_sheet(1), _make_sheet(2)], runs=2)
 
     # Each sheet is uploaded ONCE (not once per read): 2 sheets x 5 images.
     assert len(client.files.uploaded_ids) == 2 * IMAGES_PER_SHEET
@@ -272,15 +272,6 @@ def test_one_upload_per_sheet_feeds_both_reads():
     # Sheet 1's ids are disjoint from sheet 0's.
     assert not (set(r1_ids) & set(_image_file_ids(by_id["sheet__1__r1"])))
 
-
-def _image_file_ids(req):
-    content = req["params"]["messages"][0]["content"]
-    return [b["source"]["file_id"] for b in content if b.get("type") == "image"]
-
-
-def test_reads_reference_file_ids_not_base64():
-    client = _FakeClient(_succeed)
-    _run(client, [_make_sheet(1)], runs=2)
     for req in client.submitted:
         content = req["params"]["messages"][0]["content"]
         images = [b for b in content if b.get("type") == "image"]
@@ -292,6 +283,11 @@ def test_reads_reference_file_ids_not_base64():
         # (not the digest's) — proof the shared upload was built for the reviewer.
         texts = " ".join(b["text"] for b in content if b.get("type") == "text")
         assert "back-check" in texts.lower() and "findings" in texts.lower()
+
+    # DA-034: all uploaded files are deleted once both reads of every sheet are
+    # collected.
+    assert sorted(client.files.deleted) == sorted(batch.all_file_ids)
+    assert len(client.files.deleted) == 2 * IMAGES_PER_SHEET
 
 
 # --------------------------------------------------------------------------- #
@@ -394,14 +390,6 @@ def test_complete_result_is_cached_and_second_run_is_a_hit():
 # --------------------------------------------------------------------------- #
 # Files-API cleanup on every exit (DA-034)
 # --------------------------------------------------------------------------- #
-
-
-def test_cleanup_releases_all_files_after_terminal_collect():
-    client = _FakeClient(_succeed)
-    batch, _ = _run(client, [_make_sheet(1), _make_sheet(2)], runs=2)
-    # All uploaded files are deleted once both reads of every sheet are collected.
-    assert sorted(client.files.deleted) == sorted(batch.all_file_ids)
-    assert len(client.files.deleted) == 2 * IMAGES_PER_SHEET
 
 
 def test_submit_create_failure_is_nonfatal_deletes_files_and_degrades_batched():

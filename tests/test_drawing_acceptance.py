@@ -26,6 +26,11 @@ The Phase 10 script's steps and their in-code proxies:
    badges it.
 6. Windows: the findings CSV opens cleanly in Excel — UTF-8 BOM + CRLF.
 
+Steps 1, 2 and 6 are pinned by ``test_acceptance_fresh_run_*`` below. Steps
+3–5 are proved by the gauntlet (deterministic auditors, the warm/mutated runs,
+raster disclosure) together with ``test_drawing_reference_audit.py``,
+``test_drawing_render.py`` and ``test_drawing_html_report.py``.
+
 What genuinely needs a live key or a human viewer (the visual Revu spot-check,
 the real 8-sheet IFC set) is out of a hermetic suite's reach and is left to the
 manual script; everything mechanically checkable is pinned here.
@@ -39,19 +44,14 @@ import pytest
 
 pymupdf = pytest.importorskip("pymupdf")
 
-from drawing_analyzer import tiling  # noqa: E402
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.cross_qc import CROSS_QC_SYSTEM_PROMPT  # noqa: E402
-from drawing_analyzer.digest import (  # noqa: E402
-    DIGEST_SYSTEM_PROMPT,
-    _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
-)
+from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest_cache import DigestCache  # noqa: E402
 from drawing_analyzer.export import write_drawing_export  # noqa: E402
 from drawing_analyzer.html_report import build_html_report  # noqa: E402
 from drawing_analyzer.models import SheetRef  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
-from drawing_analyzer.render import render_sheet  # noqa: E402
 from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
@@ -86,22 +86,6 @@ def _vector_pdf(
         page.insert_text((72, y), line)
         y += 28
     page.insert_text((_PAGE_W - 150, _PAGE_H - 36), sheet_id)  # title-block id
-    doc.save(str(path))
-    doc.close()
-    return path
-
-
-def _raster_pdf(path: Path) -> Path:
-    """A sheet with graphics but **no text layer** (empty ``get_text('words')``).
-
-    Only shapes are drawn — no ``insert_text`` — so the page has zero words and
-    the pipeline treats it as scanned / pasted-raster (``is_raster``).
-    """
-    doc = pymupdf.open()
-    page = doc.new_page(width=_PAGE_W, height=_PAGE_H)
-    page.draw_rect(pymupdf.Rect(100, 100, 420, 320), fill=(0.20, 0.42, 0.78))
-    page.draw_line(pymupdf.Point(60, 60), pymupdf.Point(720, 540))
-    page.draw_circle(pymupdf.Point(560, 400), 90, fill=(0.85, 0.30, 0.22))
     doc.save(str(path))
     doc.close()
     return path
@@ -144,14 +128,12 @@ class _AcceptanceClient(BetaClientMixin):
 
     A digest whose sheet text mentions ``VAV-3`` (the seeded vector sheet)
     returns the seeded finding; any other sheet returns an empty findings
-    block. Records call counts and whether the raster placeholder was ever
-    presented, so tests can assert on the request the model actually received.
+    block. Records call counts.
     """
 
     def __init__(self, *, findings: list[dict], verdict: str = "CONFIRMED") -> None:
         self.digest_calls = 0
         self.verify_calls = 0
-        self.raster_placeholder_seen = False
         outer = self
 
         class _Msgs(StreamingMessagesMixin):
@@ -180,8 +162,6 @@ class _AcceptanceClient(BetaClientMixin):
                     )
                 if system.startswith(DIGEST_SYSTEM_PROMPT):
                     outer.digest_calls += 1
-                    if _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER in text:
-                        outer.raster_placeholder_seen = True
                     sheet_findings = findings if "VAV-3" in text else []
                     prose = (
                         "Sheet - Fire Protection - Plan\n"
@@ -287,12 +267,17 @@ def test_acceptance_fresh_run_produces_full_qc_deliverable(tmp_path):
     assert len(ctx.findings) == 1
     assert len(ctx.reference_findings) == 1
 
-    # 1c. Every VERIFIED finding has its evidence crop on disk.
+    # 1c. Every VERIFIED finding (anchored EXACT: its quote is on the sheet) has
+    # its evidence crop on disk. DA-016: evidence lives in a per-QC-ID directory
+    # with a request.json trail — not a flat <id>.png.
     verified = [f for f in ctx.all_findings if f.verification.status == "VERIFIED"]
     assert verified, "expected at least one verified finding"
     for f in verified:
-        assert f.verification.evidence_png.startswith("evidence/")
+        assert f.anchor.status == "EXACT" and f.anchor.rect_pdf is not None
+        assert f.verification.evidence_png.startswith(f"evidence/{f.qc_id}/")
         assert (work / f.verification.evidence_png).exists()
+        assert (work / "evidence" / f.qc_id / "request.json").exists()
+    assert client.verify_calls == 1     # the deterministic reference is never verified
 
     # 1d. report.html renders a findings table with the finding and its chip.
     html = build_html_report(ctx, source_names=names)
@@ -326,124 +311,6 @@ def test_acceptance_fresh_run_produces_full_qc_deliverable(tmp_path):
     csv_bytes = (export / "findings.csv").read_bytes()
     assert csv_bytes.startswith(b"\xef\xbb\xbf")   # UTF-8 BOM
     assert b"\r\n" in csv_bytes                     # CRLF
-
-
-# --------------------------------------------------------------------------- #
-# Step 3 — the reference audit flags a stale pointer with a closest-match hint
-# --------------------------------------------------------------------------- #
-
-
-def test_acceptance_reference_audit_flags_stale_reference(tmp_path):
-    demand, general = _build_set(tmp_path)
-    client = _AcceptanceClient(findings=[])   # deterministic audit needs no model
-    ctx = extract_drawing_context(
-        [demand, general], client=client, rows=2, cols=2, reference_audit=True,
-    )
-
-    stale = [f for f in ctx.reference_findings if "F-D-01-0" in f.text]
-    assert len(stale) == 1
-    f = stale[0]
-    assert f.category == "reference"
-    assert "not present in the provided set" in f.text
-    assert "closest in set: F-D-01-1" in f.text     # edit-distance suggestion
-    assert "does not exist" not in f.text.lower()    # never overclaims
-    # Free + trustworthy: exact anchor, deterministic, no API call.
-    assert f.anchor.status == "EXACT" and f.anchor.rect_pdf is not None
-    assert f.verification.status == "DETERMINISTIC"
-    assert client.digest_calls == 2 and client.verify_calls == 0
-
-
-# --------------------------------------------------------------------------- #
-# Step 4 — an unchanged re-run is served from cache: zero digest API, identical
-# --------------------------------------------------------------------------- #
-
-
-def test_acceptance_cached_rerun_freezes_digest_api_and_reproduces(tmp_path):
-    demand, general = _build_set(tmp_path)
-    client = _AcceptanceClient(findings=[_VAV_FINDING])
-    cache = DigestCache(None, persist=False)   # in-memory, hermetic
-
-    def _run(work: Path):
-        return extract_drawing_context(
-            [demand, general], client=client, rows=2, cols=2, cache=cache,
-            reference_audit=True, qc_markups=True, qc_work_dir=work,
-        )
-
-    first = _run(tmp_path / "qc1")
-    digests_after_first = client.digest_calls
-    assert digests_after_first == 2          # one vision call per sheet
-
-    second = _run(tmp_path / "qc2")
-    # The two-level cache serves both sheets pre-render: ZERO new digest calls.
-    assert client.digest_calls == digests_after_first
-    # Identical outputs: byte-identical prose and the same findings restored
-    # from cache (id, category, anchor, verdict all reproduced).
-    assert second.combined_text == first.combined_text
-    assert second.finding_count == first.finding_count
-
-    def _fingerprint(ctx):
-        return sorted(
-            (f.id, f.category, f.anchor.status, f.verification.status, f.text)
-            for f in ctx.all_findings
-        )
-
-    assert _fingerprint(second) == _fingerprint(first)
-    # Exact verification results are cached with the finding, source geometry,
-    # crop bytes, prompt, and model in the key.  The unchanged re-run therefore
-    # reproduces the verdict without another verifier call.
-    assert client.verify_calls == 1
-
-
-# --------------------------------------------------------------------------- #
-# Step 5 — a raster (empty-text-layer) sheet: 1992 px target, disclosed, badged
-# --------------------------------------------------------------------------- #
-
-
-def _render_first_page(path: Path, *, rows: int, cols: int):
-    doc = pymupdf.open(str(path))
-    try:
-        ref = SheetRef(
-            pdf_path=path, page_index=0, source_name=path.name,
-            page_count=doc.page_count,
-        )
-        return render_sheet(doc[0], ref, rows=rows, cols=cols)
-    finally:
-        doc.close()
-
-
-def test_acceptance_raster_sheet_target_disclosure_and_badge(tmp_path):
-    raster = _raster_pdf(tmp_path / "scan.pdf")
-    vector = _vector_pdf(tmp_path / "vec.pdf", sheet_id="M-101", body=["NOTE 1"])
-
-    # Renders at the higher raster target (1992 px) — a full 6x6 grid so the
-    # >20-image many-image regime is in force, where the target actually varies.
-    # A vector sheet at the same grid renders at the 1560 px default; the raster
-    # long edge is strictly larger.
-    r_sheet = _render_first_page(raster, rows=6, cols=6)
-    v_sheet = _render_first_page(vector, rows=6, cols=6)
-    assert r_sheet.is_raster is True
-    assert v_sheet.is_raster is False
-
-    def _long_edge(s):
-        return max(s.overview.width_px, s.overview.height_px)
-
-    assert abs(_long_edge(r_sheet) - tiling.TARGET_LONG_EDGE_PX_RASTER) <= 2
-    assert abs(_long_edge(v_sheet) - tiling.TARGET_LONG_EDGE_PX_DEFAULT) <= 2
-    assert _long_edge(r_sheet) > _long_edge(v_sheet)
-
-    # Through the pipeline: the prompt discloses the missing text layer, the
-    # geometry is flagged raster, and the report badges the sheet.
-    client = _AcceptanceClient(findings=[])
-    ctx = extract_drawing_context(
-        [raster], client=client, rows=2, cols=2, reference_audit=True,
-    )
-    assert client.raster_placeholder_seen is True
-    assert len(ctx.sheet_geometries) == 1
-    assert ctx.sheet_geometries[0].is_raster is True
-
-    html = build_html_report(ctx, source_names=["scan.pdf"])
-    assert "badge-raster" in html
-    assert ">Raster<" in html
 
 
 # =========================================================================== #
@@ -673,12 +540,16 @@ def test_gauntlet_investigation_escalates_the_uncertain_finding(oracle):
     first_text, first_images, first_tools = client.investigate_requests[0]
     assert first_tools and first_images
     assert "Concrete pad" in first_text
-    # The evidence trail carries the investigation's crops + its trace file.
+    # The evidence trail carries the investigation's crops + its trace file, all
+    # in the SAME per-finding directory with the leg numbering continued.
     assert len(v.evidence) >= 3            # verify crop + initial + tool crop
+    assert {a.relative_path.split("/")[1] for a in v.evidence} == {f6.qc_id}
+    assert [a.leg_index for a in v.evidence] == list(range(len(v.evidence)))
     assert (work / "evidence" / f6.qc_id / "investigation.json").exists()
     # One portable per-investigation usage record.
     recs = [r for r in ctx.run_usage.records if r.stage_family == "investigate"]
     assert [r.stage_instance for r in recs] == [f"investigate:{f6.qc_id}"]
+    assert recs[0].input_tokens > 0
     statuses = {s.stage: s.status for s in ctx.stage_results}
     assert statuses["investigation"] == "COMPLETE"
 
@@ -987,8 +858,8 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert ctx.configuration_kind == "NORMAL"
     assert ctx.coverage_status == "COMPLETE"
     statuses = {s.stage: s.status for s in ctx.stage_results}
-    for stage in ("identity", "critique", "cross_qc", "synthesis", "auditors",
-                  "prose_harvest", "edition_audit", "verification",
+    for stage in ("identity", "review_plan", "critique", "cross_qc", "synthesis",
+                  "auditors", "prose_harvest", "edition_audit", "verification",
                   "investigation", "citation", "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
     # Usage totals are the exact sum of the append-only ledger.

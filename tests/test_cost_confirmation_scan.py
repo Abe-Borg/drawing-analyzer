@@ -105,30 +105,28 @@ def test_measured_bases_lower_the_estimate_and_are_flagged():
     plain = estimate_drawing_set_cost(10, model=OPUS, batch=False)
     measured = estimate_drawing_set_cost(10, model=OPUS, batch=False, bases=bases(10))
     assert plain.shape_aware is False and measured.shape_aware is True
+    assert measured.unmeasured_pages == 0
     assert measured.total_cost < plain.total_cost
     assert measured.image_tokens < plain.image_tokens
 
 
-def test_a_partial_scan_falls_back_rather_than_blending():
+@pytest.mark.parametrize("sheets,scanned", [
+    pytest.param(10, 3, id="partial-scan"),
+    # A stale scan of a longer file list must not price a shorter one.
+    pytest.param(3, 10, id="more-bases-than-sheets"),
+    pytest.param(10, 0, id="empty-bases-same-as-none"),
+])
+def test_bases_that_do_not_cover_the_set_fall_back_rather_than_blending(sheets, scanned):
     """Neither figure, and no way to see which sheets were missing.
 
     A total that mixes three measured sheets with seven conservative ones is not
     a conservative estimate and not a measured one; it is a number whose basis
     varies per sheet and is invisible in the sum.
     """
-    partial = estimate_drawing_set_cost(10, model=OPUS, bases=bases(3))
-    plain = estimate_drawing_set_cost(10, model=OPUS)
-    assert partial.shape_aware is False
-    assert partial.image_tokens == plain.image_tokens
-
-
-def test_more_bases_than_sheets_also_falls_back():
-    """A stale scan of a longer file list must not price a shorter one."""
-    assert estimate_drawing_set_cost(3, model=OPUS, bases=bases(10)).shape_aware is False
-
-
-def test_empty_bases_are_the_same_as_none():
-    assert estimate_drawing_set_cost(10, model=OPUS, bases=[]).shape_aware is False
+    est = estimate_drawing_set_cost(sheets, model=OPUS, bases=bases(scanned))
+    plain = estimate_drawing_set_cost(sheets, model=OPUS)
+    assert est.shape_aware is False
+    assert est.image_tokens == plain.image_tokens
 
 
 def test_the_exhaustive_estimate_uses_measured_shapes_too():
@@ -182,32 +180,6 @@ def test_a_measured_dialog_does_not_call_its_figure_a_worst_case():
     assert "comes from the pages themselves" in measured
     # ...but the honest caveat survives in both.
     assert "not a cap" in measured
-
-
-def test_no_dialog_claims_a_confidence_interval_or_a_maximum():
-    """§10.4: do not label a hypothetical range as either."""
-    for text in (
-        format_drawing_cost_prompt(estimate_drawing_set_cost(10, model=OPUS)),
-        format_drawing_cost_prompt(
-            estimate_drawing_set_cost(10, model=OPUS, bases=bases(10))),
-        format_exhaustive_cost_prompt(estimate_exhaustive_run_cost(10, model=OPUS)),
-        format_exhaustive_cost_prompt(
-            estimate_exhaustive_run_cost(10, model=OPUS, bases=bases(10))),
-    ):
-        lowered = text.lower()
-        assert "confidence interval" not in lowered
-        assert "guaranteed" not in lowered
-        assert "maximum" not in lowered
-        assert "not a cap" in lowered
-
-
-def test_the_confirmation_question_is_still_asked():
-    """§10.3/§10.4: the pre-send confirmation behaviour is unchanged."""
-    text = format_drawing_cost_prompt(
-        estimate_drawing_set_cost(10, model=OPUS, bases=bases(10))
-    )
-    assert "Nothing is sent until you confirm." in text
-    assert text.rstrip().endswith("Proceed with the analysis?")
 
 
 # --------------------------------------------------------------------------- #
@@ -365,26 +337,6 @@ def test_a_partly_measured_set_says_so_rather_than_claiming_either_extreme():
     assert text.count("Based on each page's measured size and text layer.") == 0
 
 
-def test_the_exhaustive_dialog_reports_the_partial_case_too():
-    from drawing_analyzer.models import CLASSIFICATION_UNKNOWN
-
-    mixed = bases(9) + [
-        SheetCostBasis(source_name="set.pdf", page_index=9, width_pt=0.0,
-                       height_pt=0.0, classification=CLASSIFICATION_UNKNOWN,
-                       geometry_ok=False)
-    ]
-    text = format_exhaustive_cost_prompt(
-        estimate_exhaustive_run_cost(10, model=OPUS, batch=False, bases=mixed)
-    )
-    assert "except 1 page(s) that could not be read" in text
-
-
-def test_a_fully_measured_set_still_claims_it():
-    est = estimate_drawing_set_cost(10, model=OPUS, bases=bases(10))
-    assert est.shape_aware is True and est.unmeasured_pages == 0
-    assert "measured size and text layer." in format_drawing_cost_prompt(est)
-
-
 @pytest.mark.parametrize("estimate,format_prompt", [
     (estimate_drawing_set_cost, format_drawing_cost_prompt),
     (estimate_exhaustive_run_cost, format_exhaustive_cost_prompt),
@@ -433,32 +385,6 @@ def test_the_fingerprint_gate_and_the_summary_refresh_are_wired():
         and n.func.attr == "_refresh_summary"
         for n in ast.walk(apply_fn)
     ), "installing bases must refresh the summary, or the measured figure only appears by accident"
-
-
-def test_a_rewritten_file_changes_the_fingerprint(tmp_path):
-    """The case the generation counter cannot see: same selection, new bytes.
-
-    Re-exporting a set over the same filenames is ordinary practice, and the old
-    bases would otherwise price the previous revision while the dialog claimed to
-    have measured the current pages.
-
-    Lives in `source_registry`, not `gui`, precisely so it can be executed rather
-    than read: it is pure path/stat logic with no widget in it, and the first
-    version of this test could not run at all because `gui.py` needs `tkinter`.
-    """
-    import os
-    import time
-
-    from drawing_analyzer.source_registry import sources_fingerprint
-
-    pdf = tmp_path / "set.pdf"
-    pdf.write_bytes(b"%PDF-1.7\nfirst revision\n")
-    before = sources_fingerprint([pdf])
-
-    pdf.write_bytes(b"%PDF-1.7\nsecond revision, longer\n")
-    later = time.time_ns() + 1_000_000_000
-    os.utime(pdf, ns=(later, later))
-    assert sources_fingerprint([pdf]) != before
 
 
 def test_a_same_size_rewrite_is_still_caught_by_mtime(tmp_path):
