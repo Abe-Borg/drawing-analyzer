@@ -63,45 +63,39 @@ def _xml(tmp_path: Path, *, tests: int, skipped: int = 0, errors: int = 0,
 
 # --- the arithmetic ---------------------------------------------------------
 
-def test_all_skipped_counts_as_nothing_executed(script, tmp_path):
-    """The measured hole: 98 collected, 98 skipped, pytest exit 0."""
-    assert script.suite_counts(_xml(tmp_path, tests=98, skipped=98)) == (98, 0)
-
-
-def test_a_working_run_counts_every_test(script, tmp_path):
-    assert script.suite_counts(_xml(tmp_path, tests=98)) == (98, 98)
-
-
-def test_a_failure_counts_as_executed(script, tmp_path):
-    """A failing test ran and reported on the report — that is the evidence."""
-    assert script.suite_counts(_xml(tmp_path, tests=98, failures=3)) == (98, 98)
-
-
-def test_a_setup_error_does_not_count_as_executed(script, tmp_path):
-    """A collection/setup error never reached the body, so it is not execution."""
-    assert script.suite_counts(_xml(tmp_path, tests=98, errors=98)) == (98, 0)
-
-
-def test_counts_sum_across_multiple_testsuites(script, tmp_path):
-    path = tmp_path / "multi.xml"
-    path.write_text(
-        '<testsuites>'
-        '<testsuite name="a" tests="5" skipped="5" errors="0" failures="0"/>'
-        '<testsuite name="b" tests="7" skipped="0" errors="0" failures="0"/>'
-        "</testsuites>",
-        encoding="utf-8",
-    )
-    assert script.suite_counts(path) == (12, 7)
-
-
-def test_a_bare_testsuite_root_is_read_too(script, tmp_path):
-    """Older ``junit_family`` settings put ``<testsuite>`` at the root."""
-    path = tmp_path / "bare.xml"
-    path.write_text(
-        '<testsuite name="pytest" tests="30" skipped="0" errors="0" failures="0"/>',
-        encoding="utf-8",
-    )
-    assert script.suite_counts(path) == (30, 30)
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        # The measured hole: 98 collected, 98 skipped, pytest exit 0.
+        pytest.param(dict(tests=98, skipped=98), (98, 0), id="all-skipped"),
+        pytest.param(dict(tests=98), (98, 98), id="working-run"),
+        # A failing test ran and reported on the report — that is the evidence.
+        pytest.param(dict(tests=98, failures=3), (98, 98), id="failure-is-executed"),
+        # A collection/setup error never reached the body, so it is not execution.
+        pytest.param(dict(tests=98, errors=98), (98, 0), id="setup-error-is-not-executed"),
+        pytest.param(
+            '<testsuites>'
+            '<testsuite name="a" tests="5" skipped="5" errors="0" failures="0"/>'
+            '<testsuite name="b" tests="7" skipped="0" errors="0" failures="0"/>'
+            "</testsuites>",
+            (12, 7),
+            id="sums-across-testsuites",
+        ),
+        # Older ``junit_family`` settings put ``<testsuite>`` at the root.
+        pytest.param(
+            '<testsuite name="pytest" tests="30" skipped="0" errors="0" failures="0"/>',
+            (30, 30),
+            id="bare-testsuite-root",
+        ),
+    ],
+)
+def test_suite_counts(script, tmp_path, report, expected):
+    if isinstance(report, dict):
+        path = _xml(tmp_path, **report)
+    else:
+        path = tmp_path / "report.xml"
+        path.write_text(report, encoding="utf-8")
+    assert script.suite_counts(path) == expected
 
 
 # --- the gate ---------------------------------------------------------------

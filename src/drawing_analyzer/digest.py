@@ -67,11 +67,11 @@ DEFAULT_DIGEST_MAX_TOKENS = 64_000
 # a second copy is how two views of one rule come to disagree).
 #
 # Output is billed by actual tokens, so the extra headroom costs nothing unless
-# a sheet uses it. Both users of this ceiling stream their request — the
-# real-time retry through :func:`stream_message`, the batch direct-call rescue
-# through the same — so the non-streaming timeout guard (the SDK refuses a plain
-# ``create`` whose cap implies >10 minutes of output, a client-side ValueError
-# at roughly 21k) does not bind.
+# a sheet uses it. Neither user of this ceiling hits the non-streaming timeout
+# guard (the SDK refuses a plain ``create`` whose cap implies >10 minutes of
+# output, a client-side ValueError at roughly 21k): the real-time retry streams
+# through :func:`stream_message`, and the batch resubmission is a Batches API
+# item, which never streams.
 #
 # This MUST stay above ``DEFAULT_DIGEST_MAX_TOKENS``: a retry doubles the failed
 # cap and clamps to this value, so a ceiling at or below the starting cap would
@@ -713,8 +713,8 @@ class SheetDigest:
     # token counts on a cache hit are the originally-recorded usage; no new
     # tokens were billed.
     cached: bool = False
-    # True when this sheet was digested via a synchronous real-time *rescue* call
-    # after failing inside a Message Batch (:func:`batch_digest._rescue_failed_items_sync`)
+    # True when a batch run digested this sheet inline via a real-time call
+    # because its Files API upload failed (``batch_digest``'s inline fallback)
     # — it did NOT ride the Batches API, so it is billed at the full real-time rate,
     # not the 50% batch discount. The usage ledger prices it REAL_TIME (Phase 23B).
     rescued: bool = False
@@ -810,14 +810,12 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     ``get_final_message()`` returns the same ``Message`` shape ``create`` would
     have, so callers — and the ``_message_text`` / ``_message_usage`` readers,
     which filter on block ``type`` and therefore skip the thinking blocks that
-    now lead the content list — are unchanged. This mirrors the batch rescue
-    path in :mod:`drawing_analyzer.batch_digest`, which has streamed for exactly
-    this reason since the empty-at-``max_tokens`` retry started raising caps.
+    now lead the content list — are unchanged.
 
     Opus 5 requests additionally opt into the server-side refusal fallback,
     self-healing if the platform rejects it (:func:`call_with_refusal_fallback`)
     — a plain read of ``kwargs["model"]``, so every caller (digest, critique,
-    review plan, synthesis, focus, the batch rescue) gets it for free without
+    review plan, synthesis, focus, the batch inline fallback) gets it for free without
     touching its own request-building code.
     """
     return call_with_refusal_fallback(

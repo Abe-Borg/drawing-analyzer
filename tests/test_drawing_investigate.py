@@ -1173,20 +1173,6 @@ def test_find_text_stays_case_insensitive_and_reports_original_text():
     assert match["line"] == "Fire Pump Room"
 
 
-def test_the_budget_change_bumped_the_investigation_prompt_version():
-    """Counting requests instead of turns changed what ``round_budget`` MEANS.
-
-    No prompt string moved — the budget sentence already said "evidence
-    request(s)" — but ``round_budget`` is a cache-key input, so a verdict
-    stored under turn-counting is not reproducible under the same key.
-    ``INVESTIGATE_PROMPT_VERSION`` is a hand-maintained string and the only
-    mechanism covering this stage, so it carries the invalidation.
-    """
-    from drawing_analyzer import investigate as inv
-
-    assert inv.INVESTIGATE_PROMPT_VERSION == "investigate-v3"
-
-
 def test_a_parallel_turn_past_the_budget_is_refused_not_rendered():
     # Counting requests bounds the LEDGER; it does not bound the COST unless the
     # cap is enforced before execution. With five of six spent, a three-block

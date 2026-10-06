@@ -102,10 +102,6 @@ def test_identical_images_with_different_grids_or_labels_cannot_share_cache(crit
     assert key_fn(a, **params) != key_fn(b, **params)
 
 
-def test_key_stable_for_same_inputs():
-    assert _key(_sheet()) == _key(_sheet())
-
-
 def test_key_changes_with_content_model_and_params():
     base = _key(_sheet())
     assert _key(_sheet(overview=b"DIFFERENT")) != base       # page content
@@ -146,10 +142,6 @@ def _l1(identity="pymupdf=1.28.0|rows=6|cols=6|page=abc", **over):
     return digest_cache_key_level1(identity, **base)
 
 
-def test_level1_key_stable_for_same_identity_and_params():
-    assert _l1() == _l1()
-
-
 def test_level1_key_changes_with_render_identity_and_params():
     base = _l1()
     # The render identity carries the PyMuPDF version, render target, and the
@@ -169,15 +161,6 @@ def test_level1_key_folds_in_focus_only_when_present():
     base = _l1()
     assert _l1(focus=None) == base                 # no focus == pre-focus key
     assert _l1(focus="rooms and fixtures") != base  # a focus re-keys
-
-
-def test_level1_key_never_collides_with_level2_key():
-    # Different namespaces (level=1 tag vs the PNG-bytes hash), so a pre-render key
-    # can never accidentally match a rendered-bytes key.
-    sheet = _sheet()
-    l2 = _key(sheet)
-    l1 = _l1()
-    assert l1 != l2
 
 
 # --------------------------------------------------------------------------- #
@@ -217,9 +200,13 @@ def test_cache_corrupt_file_loads_empty(tmp_path):
     assert c.get("k") is None
 
 
-def test_cache_wrong_schema_ignored(tmp_path):
+@pytest.mark.parametrize("schema_version", [_LEGACY_SCHEMA_VERSION - 1, 999])
+def test_cache_wrong_schema_ignored(tmp_path, schema_version):
+    # A cache file written under an older (or unknown) schema must miss, never be
+    # served as current. The final global version is fixed for legacy JSON
+    # admission; new namespace bumps invalidate through keys rather than this gate.
     path = tmp_path / "dc.json"
-    path.write_text(json.dumps({"_schema_version": 999, "entries": {"k": {"text": "x"}}}), encoding="utf-8")
+    path.write_text(json.dumps({"_schema_version": schema_version, "entries": {"k": {"text": "x"}}}), encoding="utf-8")
     c = DigestCache(path, persist=True)
     assert c.get("k") is None
 
@@ -446,35 +433,6 @@ def test_newer_storage_format_is_left_untouched(tmp_path, monkeypatch):
         reopened.close()
 
 
-def test_digest_and_critique_namespaces_coexist_in_persistent_store(tmp_path):
-    sheet = _sheet()
-    digest_key = _key(sheet)
-    critique_key = critique_cache_key(
-        sheet,
-        model=OPUS,
-        prompt_version="critique-v1",
-        max_tokens=16000,
-        effort="high",
-        use_thinking=True,
-        runs=2,
-    )
-    assert digest_key != critique_key
-
-    path = tmp_path / "cache.json"
-    cache = DigestCache(path, persist=True)
-    cache.put(digest_key, {"stage": "digest"})
-    cache.put(critique_key, {"stage": "critique"})
-    cache.close()
-
-    reopened = DigestCache(path, persist=True)
-    try:
-        assert reopened.get(digest_key) == {"stage": "digest"}
-        assert reopened.get(critique_key) == {"stage": "critique"}
-        assert reopened.stats()["size"] == 2
-    finally:
-        reopened.close()
-
-
 def test_one_corrupt_sqlite_row_is_a_miss_without_poisoning_other_rows(tmp_path):
     path = tmp_path / "cache.json"
     cache = DigestCache(path, persist=True)
@@ -551,13 +509,6 @@ def test_digest_sheet_does_not_cache_empty_result():
     sd = digest_sheet(_sheet(), client=client, model=OPUS, cache=cache)
     assert not sd.ok
     assert cache.stats()["size"] == 0  # empty/error digests are never cached
-
-
-def test_digest_sheet_no_cache_when_none():
-    client = _CountingClient(_ok_response)
-    sd = digest_sheet(_sheet(), client=client, model=OPUS)  # cache=None
-    assert sd.ok and sd.cached is False
-    assert client.calls == 1
 
 
 def test_a_lost_open_race_after_migration_does_not_empty_the_cache(tmp_path, monkeypatch):

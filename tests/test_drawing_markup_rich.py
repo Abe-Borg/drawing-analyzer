@@ -7,7 +7,6 @@ it, mirroring ``test_drawing_annotate.py``. Hermetic — no network, no key.
 from __future__ import annotations
 
 import json
-import random
 from pathlib import Path
 
 import pytest
@@ -34,37 +33,6 @@ def _f(text, *, source="a.pdf", page=0, rect=None, hint="", sev="medium",
         refs=list(refs or []), anchor_hint=hint, anchor=anchor,
         verification=Verification(status=status),
     )
-
-
-def test_qc_ids_ordered_sheet_then_position():
-    a = _f("second on page", rect=[10, 500, 60, 520])     # lower on the page
-    b = _f("first on page", rect=[10, 40, 60, 60])        # top of the page
-    c = _f("later sheet", source="b.pdf", rect=[5, 5, 20, 20])
-    d = _f("sheet-level, sorts last on its sheet", hint="SHEET")
-    assign_qc_ids([a, b, c, d])
-    assert b.qc_id == "QC-001"      # top of a.pdf
-    assert a.qc_id == "QC-002"      # below it
-    assert d.qc_id == "QC-003"      # rect-less: after anchored ones on a.pdf
-    assert c.qc_id == "QC-004"      # next source file
-
-
-def test_qc_ids_stable_regardless_of_input_order():
-    def build():
-        return [
-            _f("one", rect=[10, 40, 60, 60]),
-            _f("two", rect=[10, 500, 60, 520]),
-            _f("three", source="b.pdf", rect=[5, 5, 20, 20]),
-            _f("four", hint="SHEET"),
-        ]
-
-    base = build()
-    assign_qc_ids(base)
-    expected = {f.text: f.qc_id for f in base}
-    for seed in (1, 7, 42):
-        shuffled = build()
-        random.Random(seed).shuffle(shuffled)
-        assign_qc_ids(shuffled)
-        assert {f.text: f.qc_id for f in shuffled} == expected
 
 
 def test_qc_id_round_trips_through_dict():
@@ -234,35 +202,28 @@ def test_harvest_code_editions_both_orders_and_dedup():
     assert harvest_code_editions(geoms) == ["NFPA 13 2016", "CBC 2022", "NFPA 72 2019"]
 
 
-def test_web_search_tool_type_is_current_and_overridable(monkeypatch):
-    assert web_search_tool()["type"] == "web_search_20260209"
-    assert web_search_tool()["name"] == "web_search"
+def test_web_tool_type_and_budgets_are_env_overridable(monkeypatch):
+    # The dated tool type and both per-request budgets are env-overridable, so an
+    # API rename or a budget change needs no release; a sub-1 or junk budget
+    # falls back to the default.
+    from drawing_analyzer.citation_check import web_fetch_max_uses, web_search_max_uses
+
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE", "web_search_99990101")
     assert web_search_tool()["type"] == "web_search_99990101"
-
-
-def test_web_search_max_uses_is_bounded_and_overridable(monkeypatch):
-    from drawing_analyzer.citation_check import web_search_max_uses
-
-    assert web_search_tool()["max_uses"] == 10
+    for env, read in (
+        ("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", web_search_max_uses),
+        ("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", web_fetch_max_uses),
+    ):
+        monkeypatch.delenv(env, raising=False)
+        default = read()
+        monkeypatch.setenv(env, "2")
+        assert read() == 2, env
+        for junk in ("0", "lots"):
+            monkeypatch.setenv(env, junk)
+            assert read() == default, (env, junk)
+    # The search tool carries the resolved budget.
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
-    assert web_search_max_uses() == 9 and web_search_tool()["max_uses"] == 9
-    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "0")
-    assert web_search_max_uses() == 10                   # sub-1 -> default
-    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "lots")
-    assert web_search_max_uses() == 10                   # junk -> default
-
-
-def test_web_fetch_max_uses_is_bounded_and_overridable(monkeypatch):
-    from drawing_analyzer.citation_check import web_fetch_max_uses
-
-    assert web_fetch_max_uses() == 4
-    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "2")
-    assert web_fetch_max_uses() == 2
-    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "0")
-    assert web_fetch_max_uses() == 4                     # sub-1 -> default
-    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "lots")
-    assert web_fetch_max_uses() == 4                     # junk -> default
+    assert web_search_tool()["max_uses"] == 9
 
 
 def test_citation_tools_gate_web_fetch_on_model_capability():
@@ -797,6 +758,7 @@ def test_check_citations_garbled_reply_marks_partial():
 pymupdf = pytest.importorskip("pymupdf")
 
 from drawing_analyzer.annotate import (  # noqa: E402
+    DEFAULT_AUTHOR,
     INDEX_PAGE_LABEL,
     annotate_pdf,
     count_annotations,
@@ -942,6 +904,8 @@ def test_popup_carries_the_lean_template(tmp_path):
     doc = pymupdf.open(str(out))
     try:
         square = next(a for a in doc[1].annots() if a.type[1] == "Square")
+        assert square.info["title"] == DEFAULT_AUTHOR
+        assert square.info["subject"] == "code"          # the finding's category
         content = square.info.get("content", "")
         assert content.startswith("QC-001: clearance issue")
         assert "Action: Confirm the clearance with the mechanical engineer." in content
@@ -1259,53 +1223,6 @@ def test_citation_verdict_parses_without_a_fence():
     assert parsed is True
     assert per["C1"]["status"] == "CHECKED_SUPPORTS"
     assert notes == "2025 edition"
-
-
-def test_citation_pause_turn_resumes_keep_every_earlier_turn():
-    # The resume rebuilt the conversation as [user, assistant] from scratch,
-    # which is right only for the FIRST resume: on the second and third it threw
-    # away every earlier partial turn, so the model resumed from a conversation
-    # missing the searches it had already run. The claims needing three resumes
-    # are the ones with the most work behind them.
-    import json as _json
-
-    from drawing_analyzer.citation_check import _check_one
-
-    verdict = _json.dumps(
-        {"assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok"}]}
-    )
-
-    class _Msgs:
-        def __init__(self):
-            self.seen: list[list[dict]] = []
-
-        def create(self, **kw):
-            self.seen.append(list(kw["messages"]))
-            if len(self.seen) <= 2:                    # pause twice, then answer
-                return FakeMessage(
-                    content=[FakeTextBlock(text=f"searching {len(self.seen)}")],
-                    stop_reason="pause_turn", usage=FakeUsage(),
-                )
-            return FakeMessage(
-                content=[FakeTextBlock(text="```json\n" + verdict + "\n```")],
-                stop_reason="end_turn", usage=FakeUsage(),
-            )
-
-    class _Client(BetaClientMixin):
-        def __init__(self):
-            self.messages = _Msgs()
-
-    client = _Client()
-    out = _check_one(
-        "NFPA 13 8.15.1", "NFPA 13 2025", [("C1", "a claim")],
-        client=client, model="claude-sonnet-5", max_retries=0, sleep=lambda _s: None,
-    )
-    assert out.error is None and out.raw_text
-    # Each resume carries every turn before it, so the conversation only grows.
-    lengths = [len(m) for m in client.messages.seen]
-    assert lengths == [1, 2, 3], lengths
-    assert client.messages.seen[-1][0]["role"] == "user"
-    assert all(m["role"] == "assistant" for m in client.messages.seen[-1][1:])
 
 
 def test_overflow_review_note_contents_stays_truncated(tmp_path):

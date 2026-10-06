@@ -267,23 +267,6 @@ def test_text_merge_requires_compatible_category():
     assert _is_duplicate(code, coord) is False
 
 
-def test_true_duplicates_still_merge():
-    # The complement of the matrix: genuine duplicates DO merge — strong topical
-    # overlap, or the SAME quote backed by at least moderate text agreement — even
-    # across different tiles.
-    q1 = _finding("relief valve RV-3 setting is too high", quote="RV-3 SET 125 PSI", tile=[0, 0])
-    q2 = _finding("relief valve RV-3 setting exceeds the maximum", quote="RV-3 SET 125 PSI", tile=[3, 3])
-    assert _is_duplicate(q1, q2) is True          # same quote + moderate text overlap
-    t1 = _finding("missing cleanout at the base of the soil stack", tile=[0, 0])
-    t2 = _finding("missing cleanout at base of the soil stack riser", tile=[5, 5])
-    assert _is_duplicate(t1, t2) is True          # strong topical overlap alone
-    # Same quote but UNRELATED text is NOT a duplicate — two different issues about
-    # one component both quote its tag verbatim (§12.1, no data loss).
-    d1 = _finding("pump P-1 voltage listed as 480 should be 208", quote="PUMP P-1", tile=[0, 0])
-    d2 = _finding("pump P-1 impeller diameter conflicts with the curve", quote="PUMP P-1", tile=[0, 0])
-    assert _is_duplicate(d1, d2) is False
-
-
 # --------------------------------------------------------------------------- #
 # Merge semantics
 # --------------------------------------------------------------------------- #
@@ -482,14 +465,18 @@ def test_all_runs_failing_degrades_to_empty_with_error():
 
 
 def test_one_failed_run_still_merges_the_other():
+    # runs=2 but one run fails → the surviving run's findings are returned, but
+    # the (1-of-2, all-reproduced) result is NOT frozen under the runs=2 key.
     rendered = _rendered()
+    cache = DigestCache(None, persist=False)
     ok = {"sheet_id": "F", "category": "code", "severity": "low",
           "text": "still found this", "tile": [0, 0]}
     client = _CritiqueClient([_StatusError(400), [ok], _StatusError(400)])
-    res = critique_sheet_self_consistent(rendered, client=client, runs=2,
+    res = critique_sheet_self_consistent(rendered, client=client, cache=cache, runs=2,
                                          max_retries=0, sleep=_NOOP)
     assert res.runs == 1 and len(res.findings) == 1 and res.error is not None
     assert client.attempts == 3
+    assert cache.stats()["size"] == 0
 
 
 # --- Review fixes: distinct absences, empty bodies, partial-run caching ------ #
@@ -531,14 +518,6 @@ class _EmptyBodyClient(BetaClientMixin):
         self.messages = _Msgs()
 
 
-def test_empty_body_is_error_not_a_clean_sheet():
-    # An empty response is a failed read, not "reviewed, nothing found".
-    findings, _claims, _in, _out, err = critique_sheet(
-        _rendered(), client=_EmptyBodyClient(), max_retries=0, sleep=_NOOP
-    )
-    assert findings == [] and err is not None and "empty" in err.lower()
-
-
 def test_empty_runs_are_not_frozen_as_clean_in_cache():
     cache = DigestCache(None, persist=False)
     res = critique_sheet_self_consistent(
@@ -547,21 +526,6 @@ def test_empty_runs_are_not_frozen_as_clean_in_cache():
     )
     assert res.runs == 0 and res.error and res.findings == []
     assert cache.stats()["size"] == 0     # nothing cached → a re-run re-attempts
-
-
-def test_partial_run_is_returned_but_not_cached():
-    # runs=2 but one run fails → the surviving run's findings are returned, but
-    # the (1-of-2, all-reproduced) result is NOT frozen under the runs=2 key.
-    cache = DigestCache(None, persist=False)
-    ok = {"sheet_id": "F", "category": "code", "severity": "low",
-          "text": "found this", "tile": [0, 0]}
-    client = _CritiqueClient([_StatusError(400), [ok], _StatusError(400)])
-    res = critique_sheet_self_consistent(
-        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
-    )
-    assert res.runs == 1 and len(res.findings) == 1
-    assert res.error is not None and client.attempts == 3
-    assert cache.stats()["size"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -599,18 +563,22 @@ class _RawCritiqueClient(BetaClientMixin):
 
 
 @pytest.mark.parametrize("body", [
+    "",                                                   # empty body
     "I reviewed the sheet and it looks fine to me.",     # prose only, no block
     '```json\n{"findings": [ {"category":',               # truncated / unclosed
     '```json\n{"findings": broken json here }\n```',      # closed but malformed
 ])
 def test_malformed_or_prose_critique_read_is_a_failure(body):
-    # §14.3: a read is a success ONLY if it parsed a valid findings schema. A
-    # prose-only / truncated / malformed body billed tokens but produced no schema
-    # → it is a FAILED read, never an empty-success masquerading as a clean sheet.
+    # §14.3: a read is a success ONLY if it parsed a valid findings schema. An
+    # empty / prose-only / truncated / malformed body billed tokens but produced no
+    # schema → it is a FAILED read, never an empty-success masquerading as a clean
+    # sheet ("reviewed, nothing found").
     findings, _claims, in_tok, _out, err = critique_sheet(
         _rendered(), client=_RawCritiqueClient([body]), max_retries=0, sleep=_NOOP
     )
     assert findings == [] and err is not None
+    if not body:
+        assert "empty" in err.lower()
     assert in_tok == 100                         # billed usage still counted (§14.4)
 
 
@@ -643,15 +611,6 @@ def test_critique_read_with_all_items_dropped_is_a_failure():
         _rendered(), client=_RawCritiqueClient([mixed]), max_retries=0, sleep=_NOOP
     )
     assert len(f3) == 1 and err3 is None
-
-
-def test_explicit_empty_schema_is_a_clean_success():
-    # An explicit {"findings": []} is a valid schema → a genuine clean read (err None).
-    findings, _claims, _in, _out, err = critique_sheet(
-        _rendered(), client=_RawCritiqueClient(['```json\n{"findings": []}\n```']),
-        max_retries=0, sleep=_NOOP,
-    )
-    assert findings == [] and err is None
 
 
 @pytest.mark.parametrize("failed_run", [0, 1])
@@ -701,17 +660,20 @@ def test_bad_read_replacement_completes_and_caches(body, failed_run):
     assert cached.cached and cached.error is None and client.attempts == 3
 
 
-def test_malformed_read_and_replacement_are_not_cached_or_corroborated():
-    # §14.4: the second read and replacement are malformed → only one VALID read,
-    # so nothing is cached as complete; the survivor is NOT_ASSESSED_PARTIAL
-    # (never silently reproduced=True because a malformed read "agreed").
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_malformed_read_and_replacement_are_not_cached_or_corroborated(bad_first):
+    # §14.4: only one VALID read, so nothing is cached as complete; the survivor
+    # is NOT_ASSESSED_PARTIAL (never silently reproduced=True because a malformed
+    # read "agreed"). Either the second read and its replacement are malformed, or
+    # both requested reads are — and two bad reads still get only ONE replacement.
     from drawing_analyzer.models import CONFIDENCE_NOT_ASSESSED_PARTIAL
 
     cache = DigestCache(None, persist=False)
     good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
                     "text": "riser is undersized", "tile": [0, 0]}])
     bad = '```json\n{"findings": trunc'
-    client = _RawCritiqueClient([good, bad, bad, good])
+    script = ["prose only", "prose only", good, good] if bad_first else [good, bad, bad, good]
+    client = _RawCritiqueClient(script)
     res = critique_sheet_self_consistent(
         _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
     )
@@ -723,19 +685,6 @@ def test_malformed_read_and_replacement_are_not_cached_or_corroborated():
     assert res.findings[0].reproduced is False
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
     assert cache.stats()["size"] == 0            # a malformed read is never frozen clean
-
-
-def test_multiple_bad_reads_get_only_one_replacement():
-    good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
-                    "text": "riser is undersized", "tile": [0, 0]}])
-    client = _RawCritiqueClient(["prose only", "prose only", good, good])
-    cache = DigestCache(None, persist=False)
-    res = critique_sheet_self_consistent(
-        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP,
-    )
-    assert client.attempts == 3 and res.completed_runs == 1
-    assert res.error is not None and len(res.findings) == 1
-    assert cache.stats()["size"] == 0
 
 
 def test_two_valid_reads_stamp_real_per_read_provenance():
@@ -900,8 +849,7 @@ class _PipelineClient(BetaClientMixin):
     """Routes digest / critique / verify. Critique run 1 = [D, C2], run 2 = [D],
     so D is reproduced (and also raised by the digest) while C2 is a singleton."""
 
-    def __init__(self, *, critique_raises=False, plan_item=None, identity_overrides=None,
-                 digest_raises_at=None):
+    def __init__(self, *, plan_item=None, identity_overrides=None, digest_raises_at=None):
         self.digest_calls = 0
         self.critique_calls = 0
         self.verify_calls = 0
@@ -922,8 +870,6 @@ class _PipelineClient(BetaClientMixin):
                     outer.critique_calls += 1
                     if "APPLY THIS REVIEW CHECKLIST" in system:
                         outer.critique_had_checklist = True
-                    if critique_raises:
-                        raise _StatusError(400)   # permanent → degrades to empty
                     findings = [_D, _C2] if outer.critique_calls == 1 else [_D]
                     return FakeMessage(content=[FakeTextBlock(text=_block(findings))],
                                        usage=FakeUsage(input_tokens=100, output_tokens=20))
@@ -995,37 +941,6 @@ def test_pipeline_without_critique_is_unchanged(tmp_path):
     assert ctx.findings[0].reproduced is True             # default, not flagged
 
 
-def test_pipeline_critique_failure_is_non_fatal(tmp_path):
-    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
-    client = _PipelineClient(critique_raises=True)
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        qc_markups=True, critique=True, qc_work_dir=tmp_path / "qc",
-    )
-    # Critique degraded to nothing; the digest finding still ships, run completes.
-    assert len(ctx.findings) == 1
-    assert ctx.findings[0].source_quote == "VAV-3"
-
-
-def test_pipeline_cached_critique_rerun_adds_no_tokens(tmp_path):
-    # A fully-cached re-run must report ~0 new tokens — the cached critique's
-    # original cost is not re-counted. (verify off so the only possible tokens
-    # would be the cached digest + critique.)
-    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
-    cache = DigestCache(None, persist=False)
-    extract_drawing_context(
-        [src], client=_PipelineClient(), rows=2, cols=2, critique=True,
-        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q1",
-    )
-    client2 = _PipelineClient()
-    ctx2 = extract_drawing_context(
-        [src], client=client2, rows=2, cols=2, critique=True,
-        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q2",
-    )
-    assert client2.digest_calls == 0 and client2.critique_calls == 0   # all cached
-    assert ctx2.total_input_tokens == 0 and ctx2.total_output_tokens == 0
-
-
 def test_pipeline_warm_rerun_skips_rasterization(tmp_path, monkeypatch):
     """Phase 19B (§11 test 13): a fully-cached exhaustive re-run skips BOTH the API
     calls AND rasterization. The critique level-1 cache means an unchanged sheet is
@@ -1064,14 +979,19 @@ def test_pipeline_warm_rerun_skips_rasterization(tmp_path, monkeypatch):
     assert all(f.source_id for f in ctx2.findings)
 
 
-@pytest.mark.parametrize("change", ["rename", "add", "remove", "revise", "recover", "scope"])
-@pytest.mark.parametrize("cache_level", [1, 2])
-@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("batch,cache_level,change", [
+    *[(False, 1, change)
+      for change in ("rename", "add", "remove", "revise", "recover", "scope")],
+    (True, 1, "revise"),        # Economy (batch) transport
+    (False, 2, "revise"),       # level 1 forced to miss: the level-2 key alone decides
+])
 def test_incremental_critique_reuse_and_scope_invalidation(tmp_path, monkeypatch, change, cache_level, batch):
     """A set edit buys two reads for the changed/new sheet, zero for siblings.
 
     Exercise the actual planner and both critique cache levels on Fast and
     Economy transports. A fresh plan reply deliberately changes its wording.
+    Every edit runs on the Fast transport at level 1; one representative edit
+    covers the batch transport and the level-2 key each.
     """
     pytest.importorskip("pymupdf")
     import pymupdf

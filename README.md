@@ -1641,7 +1641,7 @@ runs.
 Switching the review model invalidates the digest and critique caches once:
 their keys include the resolved model, so the first run with the new model
 rebuilds them and later runs reuse its entries. Model selection remains a
-quality decision for an A/B run.
+quality decision.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -1679,7 +1679,7 @@ quality decision for an A/B run.
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
 | `DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN` | request-derived (~112 min at 64k) | Maximum minutes to wait for an abandoned batch to settle before harvesting its completed items. Default: largest submitted `max_tokens` / 10 tokens per second + 5 minutes of cancellation grace, including raised retry caps. A positive finite override is floored at one minute; invalid values use the default. Harvest time is additional to the collection budget. Shorter overrides can cause duplicate billing if in-flight generation outlasts the wait. |
-| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches recovery will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
 | `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
@@ -2011,22 +2011,6 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   tiers of cross-sheet findings a previous run *kept*. It states plainly what it
   cannot see: the grounding **discard rate** is a property of what a model
   returned, and the survivors in an export are not a substitute for it.
-- **A/B a cost lever against quality (billable):**
-  `python scripts/ab_sweep_drawing_analyzer.py --pdf SET.pdf --variant NAME=VALUE`
-  runs one real set twice, cold on both arms, with one variable changed, and
-  reports cost against four signals that need no ground truth — the anchor-tier
-  mix, the verification mix, self-consistency, and (WP-03B) evidence trust per
-  grounded unit. `--estimate` prices both arms first and spends nothing.
-  Alongside the aggregates it writes a **finding-level** comparison: one compact
-  record per finding per arm, matched in three deterministic tiers — exact
-  (same identity *and* compatible critical signature), candidates for human
-  review, and explicitly unmatched or ambiguous. That is the only thing that
-  answers "is this the same set of findings?", because two arms can report the
-  same total, severity mix and anchor mix while sharing only two thirds of their
-  findings. A clean screen is **not** an approval, a large count drop is a
-  review requirement rather than proof that defects went unseen, and an arm that
-  failed or read fewer sheets is marked `NOT_COMPARABLE` so its lower total is
-  never presented as a saving. See `docs/PERFORMANCE_AND_COST_VALIDATION.md`.
 - **Benchmarks:** `python scripts/benchmark_drawing_analyzer.py --check`
   measures the §19.7 scenarios (cold/warm/mutated/exhaustive/corrupt-partial)
   on medians and enforces the mechanical gates (a warm run makes zero

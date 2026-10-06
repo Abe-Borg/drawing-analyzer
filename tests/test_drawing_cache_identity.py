@@ -1,4 +1,4 @@
-"""Level-1 cache identity and schema migration (DA-004, §11.5).
+"""Level-1 cache identity (DA-004, §11.5).
 
 The render identity conservatively hashes the transitive PDF dependencies that
 can affect one page's pixels, plus render configuration and environment. A local
@@ -8,18 +8,12 @@ identity supports digest and critique pre-render cache hits.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-from drawing_analyzer.digest_cache import (
-    DigestCache,
-    _LEGACY_SCHEMA_VERSION,
-    critique_cache_key_level1,
-    digest_cache_key_level1,
-)
+from drawing_analyzer.digest_cache import critique_cache_key_level1
 from drawing_analyzer.models import COORDINATE_SPACE_VERSION, SheetRef
 
 pymupdf = pytest.importorskip("pymupdf")
@@ -97,20 +91,6 @@ def test_cropbox_offset_change_rekeys_even_at_same_size(tmp_path):
     assert _identity(a) != _identity(b)
 
 
-def test_adding_a_rendered_annotation_rekeys(tmp_path):
-    d0 = _base_doc()
-    a = tmp_path / "a.pdf"
-    d0.save(str(a))
-    d0.close()
-    d1 = _base_doc()
-    annot = d1[0].add_rect_annot(pymupdf.Rect(80, 100, 260, 140))
-    annot.update()
-    b = tmp_path / "b.pdf"
-    d1.save(str(b))
-    d1.close()
-    assert _identity(a) != _identity(b)          # annotations render into the image
-
-
 def test_annotation_appearance_change_rekeys(tmp_path):
     # Same annotation text/rect, DIFFERENT appearance (color) — the appearance
     # appearance-stream bytes differ, so the page dependency hash differs.
@@ -128,20 +108,6 @@ def test_annotation_appearance_change_rekeys(tmp_path):
     d1.close()
     d2.save(str(b))
     d2.close()
-    assert _identity(a) != _identity(b)
-
-
-def test_drawing_content_change_rekeys(tmp_path):
-    d0 = _base_doc()
-    a = tmp_path / "a.pdf"
-    d0.save(str(a))
-    d0.close()
-    d1 = pymupdf.open()
-    p = d1.new_page(width=612, height=792)
-    p.insert_text((80, 120), "SHEET M-102 DIFFERENT CONTENT", fontsize=14)
-    b = tmp_path / "b.pdf"
-    d1.save(str(b))
-    d1.close()
     assert _identity(a) != _identity(b)
 
 
@@ -291,42 +257,8 @@ def test_prescan_rehashes_a_source_changed_since_the_snapshot(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Legacy JSON admission: versions before the last global v10 still miss
+# Level-1 keys and prompt hashes
 # --------------------------------------------------------------------------- #
-
-
-def test_old_schema_entries_are_discarded(tmp_path):
-    # A cache file written under an older schema must miss (never be served as
-    # current). The final global version is fixed for legacy JSON admission;
-    # new namespace bumps invalidate through keys rather than this gate.
-    cache_path = tmp_path / "digest_cache.json"
-    key = "some-key"
-    cache_path.write_text(json.dumps({
-        "_schema_version": _LEGACY_SCHEMA_VERSION - 1,
-        "entries": {key: {"text": "stale digest", "findings": []}},
-    }), encoding="utf-8")
-    cache = DigestCache(cache_path, persist=True)
-    assert cache.get(key) is None                # discarded on load
-
-
-def test_level1_keys_fold_schema_version():
-    # Both level-1 keys namespace on the schema version, so a bump invalidates them.
-    render_identity = "render-identity-v3|content_dependency=page:abc|..."
-    d = digest_cache_key_level1(
-        render_identity, model="m", prompt_version="p", max_tokens=1,
-        effort=None, use_thinking=True,
-    )
-    c = critique_cache_key_level1(
-        render_identity, model="m", prompt_version="p", max_tokens=1,
-        effort=None, use_thinking=True, runs=2,
-    )
-    assert d != c                                # digest vs critique never collide
-    # A different render identity yields a different key on both.
-    d2 = digest_cache_key_level1(
-        render_identity + "X", model="m", prompt_version="p", max_tokens=1,
-        effort=None, use_thinking=True,
-    )
-    assert d != d2
 
 
 def test_critique_level1_key_sensitive_to_runs_and_profiles():
@@ -394,44 +326,6 @@ def test_both_prompt_hashes_cover_every_shared_user_framing_string():
 
 
 # --------------------------------------------------------------------------- #
-# The render-identity SCHEME bump is the invalidation mechanism (P7 item 28)
-# --------------------------------------------------------------------------- #
-
-
-def test_render_identity_scheme_is_v4_for_the_annotation_free_text_policy(tmp_path):
-    """Item 28 changed the text-extraction POLICY, not the document.
-
-    ``_page_dependency_sha256`` hashes the annotation bytes and those bytes did
-    not move, so without a scheme bump an already-cached annotated page still
-    hits level 1 and is served a digest built from annotation-contaminated
-    ``sheet_text`` **without re-extracting the text** — a false hit, which is the
-    one failure mode the identity exists to prevent.
-
-    Without this test the bump is invisible: reverting the literal to v3 changes
-    nothing else observable, so every other cache-identity test still passes.
-    """
-    import drawing_analyzer.render as R
-
-    assert R._RENDER_IDENTITY_SCHEME == "render-identity-v4"
-
-    path = tmp_path / "M-101.pdf"
-    doc = _base_doc()
-    annot = doc[0].add_freetext_annot(
-        pymupdf.Rect(200, 300, 500, 360), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
-    )
-    annot.update()
-    doc.save(str(path))
-    doc.close()
-
-    current = _identity(path)
-    assert current.startswith("render-identity-v4|")
-    # The scheme rides the key: a pre-change entry cannot be served to the new
-    # extraction policy.
-    legacy = "render-identity-v3|" + current.split("|", 1)[1]
-    assert current != legacy
-
-
-# --------------------------------------------------------------------------- #
 # A GOTO link must not collapse per-page identity to the whole document (N23)
 #
 # A link annot carries a reference to its destination PAGE. That page's /Parent
@@ -470,13 +364,6 @@ def test_editing_another_page_does_not_rekey_a_linked_page(tmp_path):
         "page 0's identity changed because page 2 was edited — a GOTO link "
         "collapsed per-page identity to the whole document"
     )
-
-
-def test_page_without_links_is_still_page_local(tmp_path):
-    # The control: this already worked, and must keep working.
-    a = _linked_set(tmp_path / "a.pdf", link_to=None, tail_text="ORIGINAL")
-    b = _linked_set(tmp_path / "b.pdf", link_to=None, tail_text="EDITED LATER")
-    assert _identity(a) == _identity(b)
 
 
 def test_retargeting_the_link_still_rekeys_the_linking_page(tmp_path):

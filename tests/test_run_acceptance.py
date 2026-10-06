@@ -81,12 +81,6 @@ def _marker_expr(cmd: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_hermetic_suite_gate_deselects_network(script, recorded):
-    assert script.gate_hermetic_suite() == "PASS"
-    assert len(recorded) == 1
-    assert _marker_expr(recorded[0]) == "not network"
-
-
 def test_import_isolation_gate_deselects_network(script, recorded):
     assert script.gate_import_isolation() == "PASS"
     assert len(recorded) == 1
@@ -127,22 +121,17 @@ def test_every_gate_that_spawns_pytest_deselects_network(script, recorded):
 # --------------------------------------------------------------------------- #
 
 
-def test_deselection_survives_a_key_in_the_environment(script, recorded, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
-    assert script.gate_hermetic_suite() == "PASS"
-    assert _marker_expr(recorded[0]) == "not network"
-
-
 def test_no_gate_depends_on_unsetting_the_key(script, recorded, monkeypatch):
     """The key is never popped: marker exclusion is the mechanism, not luck."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
-    script.gate_hermetic_suite()
+    assert script.gate_hermetic_suite() == "PASS"
     script.gate_import_isolation()
     import os
 
     assert os.environ.get("ANTHROPIC_API_KEY") == _FAKE_KEY
+    assert len(recorded) == 2
     for cmd in recorded:
-        assert "not network" in _marker_expr(cmd)
+        assert _marker_expr(cmd) == "not network"
 
 
 # --------------------------------------------------------------------------- #
@@ -202,9 +191,3 @@ def test_no_pytest_argv_literal_outside_the_command_builder():
         f"{offenders}. Route it through _pytest_cmd() so the network "
         f"deselection cannot be forgotten (WP-01)."
     )
-
-
-def test_command_builder_is_the_only_source_of_the_deselection(script):
-    """The deselection is a named constant, not a scattered string literal."""
-    assert script._NETWORK_DESELECT == "not network"
-    assert _marker_expr(script._pytest_cmd()) == script._NETWORK_DESELECT

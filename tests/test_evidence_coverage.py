@@ -78,18 +78,15 @@ def _geom(*, words=(), text="", rows=6, cols=6, total=None) -> SheetGeometry:
 # --------------------------------------------------------------------------- #
 
 
-def test_textless_sheet_is_classified_textless():
-    assert classify_sheet(word_count=0, word_free_tiles=36, total_tiles=36) == "textless"
-
-
-def test_dense_vector_sheet_is_classified_vector():
-    assert classify_sheet(word_count=500, word_free_tiles=2, total_tiles=36) == "vector"
-
-
-def test_sheet_with_words_but_mostly_empty_tiles_is_hybrid():
-    """The case `is_raster` cannot see: words present, most of the page pixel-only."""
-    free = int(36 * HYBRID_WORD_FREE_TILE_FRACTION) + 1
-    assert classify_sheet(word_count=12, word_free_tiles=free, total_tiles=36) == "hybrid"
+@pytest.mark.parametrize("word_count, word_free_tiles, expected", [
+    (0, 36, "textless"),
+    (500, 2, "vector"),
+    # The case `is_raster` cannot see: words present, most of the page pixel-only.
+    (12, int(36 * HYBRID_WORD_FREE_TILE_FRACTION) + 1, "hybrid"),
+])
+def test_classify_sheet(word_count, word_free_tiles, expected):
+    assert classify_sheet(word_count=word_count, word_free_tiles=word_free_tiles,
+                          total_tiles=36) == expected
 
 
 def test_hybrid_is_not_reachable_via_is_raster():
@@ -262,19 +259,16 @@ def test_surviving_findings_roll_up_anchor_tiers(tmp_path):
     assert (out["with_source_quote"], out["without_source_quote"]) == (1, 1)
 
 
-def test_surviving_findings_are_labelled_as_not_a_discard_rate(tmp_path):
-    export = _export(tmp_path, [])
-    out = read_surviving_findings(export)
-    assert "not a discard rate" in out["note"].lower()
-
-
-def test_report_states_the_discard_rate_is_unmeasured():
+def test_report_states_the_discard_rate_is_unmeasured(tmp_path):
     """§7.3: the deliverable must label the tier and refuse the conflation."""
     report = summarize(scan_sheets([]), None, None)
     assert report["tier"].startswith("7.1")
     assert "discard_rate" in report["not_measured_here"]
     text = render_text(report)
     assert "not the discard rate" in text or "not measured here" in text.lower()
+    # The survivor roll-up carries the same label.
+    out = read_surviving_findings(_export(tmp_path, []))
+    assert "not a discard rate" in out["note"].lower()
 
 
 def test_missing_export_artifacts_degrade_cleanly(tmp_path):
@@ -313,23 +307,6 @@ def test_run_completeness_reads_the_real_manifest_shape(tmp_path):
     assert out["coverage_status"] == "COMPLETE"
     assert out["sheet_count"] == 44
     assert out["cross_qc_stage"]["calls_planned"] == 3
-
-
-def test_run_completeness_still_reads_a_flat_manifest(tmp_path):
-    """Fallback for a hand-built manifest; not the shipped shape."""
-    export = _export(tmp_path, [], manifest={
-        "qc_status": "COMPLETE", "coverage_status": "INCOMPLETE",
-    })
-    out = read_run_completeness(export)
-    assert out["qc_status"] == "COMPLETE"
-    assert out["coverage_status"] == "INCOMPLETE"
-
-
-def test_stage_entries_keyed_by_name_are_still_found(tmp_path):
-    export = _export(tmp_path, [], manifest={
-        "stages": [{"name": "cross_qc", "status": "COMPLETE"}],
-    })
-    assert read_run_completeness(export)["cross_qc_stage"]["status"] == "COMPLETE"
 
 
 # --------------------------------------------------------------------------- #
@@ -382,22 +359,14 @@ def test_discard_rate_is_unavailable_without_an_instrumented_run(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_a_corrupt_pdf_does_not_erase_earlier_good_scans(tmp_path):
+@pytest.mark.parametrize("bad_first", [False, True], ids=["bad_last", "bad_first"])
+def test_a_corrupt_pdf_does_not_erase_the_good_scan(tmp_path, bad_first):
     """The regression: `list()` over the whole generator lost every page."""
     good = _pdf(tmp_path, "good.pdf", text="FP-101 GENERAL NOTES")
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"not a pdf at all")
-    cov = scan_sheets([good, bad])
+    cov = scan_sheets([bad, good] if bad_first else [good, bad])
     assert len(cov.sheets) == 1, "the readable source must survive"
-    assert any("bad.pdf" in e for e in cov.unreadable_sources)
-
-
-def test_a_corrupt_pdf_listed_first_still_leaves_the_good_one(tmp_path):
-    bad = tmp_path / "bad.pdf"
-    bad.write_bytes(b"not a pdf at all")
-    good = _pdf(tmp_path, "good.pdf", text="FP-102 PLAN")
-    cov = scan_sheets([bad, good])
-    assert len(cov.sheets) == 1
     assert any("bad.pdf" in e for e in cov.unreadable_sources)
 
 

@@ -205,6 +205,8 @@ def test_large_sheet_cache_keys_and_images_unchanged(shape, raster):
     legacy = render.sheet_render_identity(page, rows=6, cols=6, **kw)
     adaptive = render.sheet_render_identity(page, **kw)
     assert adaptive == legacy
+    # v4 is the annotation-free text-extraction policy; reverting the scheme
+    # literal would let an annotated page hit level 1 with contaminated text.
     assert adaptive.startswith("render-identity-v4|")
     assert _DIGEST_SCHEMA_VERSION == 10  # Existing E/E1 cache entries remain admissible.
     params = dict(model="claude-opus-5", prompt_version="unchanged",
@@ -313,13 +315,14 @@ def test_prescan_reports_one_infeasible_page_and_continues_without_rendering(tmp
     assert "DPI floor" in str(exc)
 
 
-@pytest.mark.parametrize("raster", [False, True])
+# The raster/vector split of the infeasible page is a prescan concern, covered
+# above; the stages' handling of the reported page error does not depend on it.
 @pytest.mark.parametrize("batch", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 def test_infeasible_page_keeps_digest_and_critique_partial_while_other_pages_complete(
-    tmp_path, monkeypatch, raster, batch, cached,
+    tmp_path, monkeypatch, batch, cached,
 ):
-    paths = _pdf_with_infeasible_page(tmp_path, raster=raster)
+    paths = _pdf_with_infeasible_page(tmp_path, raster=False)
     cache = DigestCache(tmp_path / "cache.json") if cached else None
     scripts = [SheetScript(token=f"(page {i}/3)", prose=f"Sheet H-10{i} - Plan")
                for i in (1, 3)]

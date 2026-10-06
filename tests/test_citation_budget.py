@@ -103,16 +103,21 @@ def test_edition_aliases_use_one_budget_slot_and_keep_another_ref_eligible(monke
     assert [f.citations[0].reference for f in findings] == refs
 
 
-def test_edition_alias_warm_run_reuses_one_verdict_cache_entry():
+@pytest.mark.parametrize("first_ref, second_ref", [
+    pytest.param("NFPA 13-2016 §8.15.1", "NFPA 13 (2016) Section 8.15.1", id="edition-alias"),
+    pytest.param("NFPA 13 §8.15.1", "nfpa 13 Section 8.15.1", id="cosmetic-variant"),
+])
+def test_warm_run_reuses_one_normalized_verdict_cache_entry(first_ref, second_ref):
     cache = DigestCache(None, persist=False)
-    first = _finding("NFPA 13-2016 §8.15.1")
+    first = _finding(first_ref)
     citation.check_citations([first], [], client=_Client(), cache=cache)
-    second = _finding("NFPA 13 (2016) Section 8.15.1")
+    second = _finding(second_ref)
     client = _Client()
     result = citation.check_citations([second], [], client=client, cache=cache)
     assert result.cached_requests == 1 and result.requests == 0
     assert client.calls == [] and cache.stats()["size"] == 1
     assert second.citations[0].reference == second.refs[0]
+    assert second.citation.status == "CHECKED_SUPPORTS"
 
 
 def test_variants_share_claim_assessment_and_keep_original_display():
@@ -129,19 +134,6 @@ def test_variants_share_claim_assessment_and_keep_original_display():
         assert len(finding.citations) == 1
         assert finding.citations[0].reference == ref
         assert finding.refs[0] == ref
-
-
-def test_variant_warm_run_reuses_normalized_verdict_cache():
-    cache = DigestCache(None, persist=False)
-    first = _finding("NFPA 13 §8.15.1")
-    citation.check_citations([first], [], client=_Client(), cache=cache)
-    second = _finding("nfpa 13 Section 8.15.1")
-    client = _Client()
-    result = citation.check_citations([second], [], client=client, cache=cache)
-    assert result.cached_requests == 1 and result.requests == 0
-    assert client.calls == []
-    assert second.citations[0].reference == second.refs[0]
-    assert second.citation.status == "CHECKED_SUPPORTS"
 
 
 def test_all_rejected_claims_skip_before_cache_and_client(monkeypatch):

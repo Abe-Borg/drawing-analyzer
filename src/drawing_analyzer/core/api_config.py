@@ -1360,9 +1360,9 @@ def extract_cache_diagnostics(message) -> dict | None:
 # Message Batches API, which is how the standard review path submits its bulk
 # of Opus 5 traffic (Phase 23A) — so this only ever applies where a caller
 # already uses the synchronous/streaming transport: the inline Files-API-outage
-# fallback and the direct-call batch rescue (:mod:`drawing_analyzer.batch_digest`,
-# via :func:`drawing_analyzer.digest.stream_message`), verification escalation,
-# and the investigation loop.
+# fallback (:mod:`drawing_analyzer.batch_digest`, via
+# :func:`drawing_analyzer.digest.stream_message`), verification escalation, and
+# the investigation loop.
 REFUSAL_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"

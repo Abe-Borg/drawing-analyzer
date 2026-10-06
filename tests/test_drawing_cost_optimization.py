@@ -200,23 +200,22 @@ def test_selfconsistency_result_carries_cache_tokens():
 # --------------------------------------------------------------------------- #
 
 
-def test_resolve_use_batch_explicit_wins(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", "1")
+@pytest.mark.parametrize("env,explicit,expected", [
     # An explicit choice always beats the env opt-in, in both directions.
-    assert _resolve_use_batch(False) is False
-    assert _resolve_use_batch(True) is True
-
-
-def test_resolve_use_batch_env_opt_in(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", "1")
-    assert _resolve_use_batch(None) is True
-    monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", "off")
-    assert _resolve_use_batch(None) is False
-
-
-def test_resolve_use_batch_default_realtime(monkeypatch):
-    monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
-    assert _resolve_use_batch(None) is False
+    ("1", False, False),
+    ("1", True, True),
+    # Env opt-in applies only when the caller left it unset.
+    ("1", None, True),
+    ("off", None, False),
+    # Default is real-time.
+    (None, None, False),
+])
+def test_resolve_use_batch_explicit_then_env_then_realtime(monkeypatch, env, explicit, expected):
+    if env is None:
+        monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
+    else:
+        monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", env)
+    assert _resolve_use_batch(explicit) is expected
 
 
 def test_independent_transport_pairs_have_stable_mode_names():

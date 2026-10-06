@@ -266,7 +266,7 @@ CRITIQUE_PROMPT_VERSION = hashlib.sha256(
 # verbatim-quote rule, the 40-finding cap, the whole claims contract and its
 # never-compute prohibition — has exactly one author. A second hand-maintained
 # copy of this text is the drift this codebase has already paid for once (see
-# ``critical_signature`` and the A/B harness), and the failure would be quiet:
+# ``critical_signature``), and the failure would be quiet:
 # two prompts that agree today and disagree after the next edit, with the cache
 # key unable to tell which one produced a stored critique.
 _STRUCTURED_FENCE_SENTENCE = (
@@ -757,11 +757,11 @@ def _leg_targets(f: Finding) -> frozenset:
 def critical_signature(f: Finding) -> dict:
     """The critical attributes §12.1 refuses to merge across, as plain data.
 
-    Extracted so the *rule* below and any out-of-process consumer (the A/B
-    harness's finding-level comparison, WP-06 §11.2) share one implementation.
-    A second copy of a signature rule is the failure mode this codebase has
-    already paid for once: the harness reimplemented
-    ``RunUsage.is_billable_but_unpriced`` and the two drifted within a commit.
+    Extracted so the *rule* below and any out-of-process consumer share one
+    implementation. A second copy of a signature rule is the failure mode this
+    codebase has already paid for once: the since-retired A/B harness
+    reimplemented ``RunUsage.is_billable_but_unpriced`` and the two drifted
+    within a commit.
 
     Values are sorted lists, not sets, so the record is JSON-serializable and
     byte-stable across runs (I-7).

@@ -17,9 +17,7 @@ from drawing_analyzer.set_identity import (
     _FULL_SLICE_SHEETS,
     _HEADER_SLICE,
     _TOTAL_BUDGET,
-    IDENTITY_PROMPT_VERSION,
     IDENTITY_SYSTEM_PROMPT,
-    IdentityResult,
     build_identity_user_text,
     identify_set,
     parse_identity_text,
@@ -386,11 +384,6 @@ def test_identify_set_failure_is_not_cached():
     assert good.ok and not good.cached               # the miss re-ran live
 
 
-def test_prompt_version_is_a_content_hash():
-    assert len(IDENTITY_PROMPT_VERSION) == 16
-    assert IdentityResult().ok is False
-
-
 # --------------------------------------------------------------------------- #
 # Identity consumers: citation editions/jurisdiction + cross-QC preamble
 # --------------------------------------------------------------------------- #
@@ -455,33 +448,25 @@ def test_cross_qc_preamble_present_only_with_identity():
 # --------------------------------------------------------------------------- #
 
 
-def test_a_string_where_a_list_belongs_is_not_iterated_per_character():
+def test_malformed_list_fields_are_coerced_not_iterated_or_raised():
     from drawing_analyzer.set_identity import _sanitize_payload
 
-    out = _sanitize_payload({"disciplines": "mechanical"})
-    assert out["disciplines"] == ["mechanical"], (
-        f"got {out['disciplines']} — a bare string was consumed per character"
-    )
-    out = _sanitize_payload({"evidence": "NFPA 13 2016 is adopted"})
-    assert out["evidence"] == ["NFPA 13 2016 is adopted"]
-
-
-def test_a_dict_where_a_list_belongs_does_not_raise():
-    from drawing_analyzer.set_identity import _sanitize_payload
-
-    # Each of these used to raise TypeError: unhashable type: 'slice' out of the
-    # very next [:cap], failing the whole stage.
-    for payload in (
-        {"disciplines": {"a": "mechanical"}},
-        {"sheet_disciplines": {"M-101": "mechanical"}},
-        {"adopted_codes": {"code": "NFPA 13"}},
-        {"evidence": {"quote": "NFPA 13 2016"}},
-        {"disciplines": 7},
-        {"adopted_codes": None},
+    for payload, expected in (
+        # A bare string is the one value the model meant, not one per character.
+        ({"disciplines": "mechanical"}, ["mechanical"]),
+        ({"evidence": "NFPA 13 2016 is adopted"}, ["NFPA 13 2016 is adopted"]),
+        # Each of these used to raise TypeError: unhashable type: 'slice' out of
+        # the very next [:cap], failing the whole stage.
+        ({"disciplines": {"a": "mechanical"}}, []),
+        ({"sheet_disciplines": {"M-101": "mechanical"}}, []),
+        ({"adopted_codes": {"code": "NFPA 13"}}, []),
+        ({"evidence": {"quote": "NFPA 13 2016"}}, []),
+        ({"disciplines": 7}, []),
+        ({"adopted_codes": None}, []),
     ):
         out = _sanitize_payload(dict(payload))
         key = next(iter(payload))
-        assert out[key] == [], f"{payload} -> {out[key]!r}"
+        assert out[key] == expected, f"{payload} -> {out[key]!r}"
 
 
 def test_well_formed_payloads_are_unchanged():

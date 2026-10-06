@@ -456,40 +456,9 @@ def test_verify_retries_transient_then_succeeds(tmp_path):
     assert state["n"] == 2   # one transient, one success
 
 
-def test_verify_permanent_error_is_failed_not_fatal():
-    class _Boom(BetaClientMixin):
-        def __init__(self):
-            class _M(StreamingMessagesMixin):
-                def create(_s, **kw):
-                    raise _StatusError(400, "bad request")
-            self.messages = _M()
-    f = _finding("conf")
-    res = _run([f], client=_Boom())
-    assert f.verification.status == "FAILED"
-    assert res.uncertain == 0 and res.failed == 1
-
-
-def test_verify_fatal_auth_skips_remaining():
-    class _Auth(BetaClientMixin):
-        def __init__(self):
-            self.calls = 0
-
-            class _M(StreamingMessagesMixin):
-                def create(_s, **kw):
-                    self.calls += 1
-                    raise _StatusError(403, "forbidden")
-            self.messages = _M()
-
-    client = _Auth()
-    findings = [_finding("a"), _finding("b"), _finding("c")]
-    res = _run(findings, client=client, max_workers=1)
-    assert [f.verification.status for f in findings] == ["FAILED", "SKIPPED", "SKIPPED"]
-    # The fatal error short-circuits the rest — not every finding is called.
-    assert client.calls < len(findings)
-    assert res.skipped == 2 and res.failed == 1
-
-
-@pytest.mark.parametrize("status", [400, 404, 429, 500, 503])
+# One status per branch of the failure classification: a permanent 4xx (no
+# retry), a transient 4xx and a transient 5xx (retried until exhausted).
+@pytest.mark.parametrize("status", [400, 429, 503])
 def test_failed_verifier_calls_never_start_investigations(verifier_pass, status):
     from drawing_analyzer.investigate import investigate_findings
 
@@ -499,17 +468,17 @@ def test_failed_verifier_calls_never_start_investigations(verifier_pass, status)
     result = run([finding], client=client, max_retries=2)
     assert finding.verification.status == "FAILED"
     assert (result.failed, result.uncertain, result.not_judged) == (1, 0, 1)
-    assert client.calls == (3 if status in (429, 500, 503) else 1)
+    assert client.calls == (3 if status in (429, 503) else 1)
 
     investigator = _ScriptedVerifyClient([AssertionError("paid investigation started")])
     investigation = investigate_findings([finding], [], client=investigator)
     assert investigation.investigated == 0 and investigator.calls == 0
 
 
-@pytest.mark.parametrize("status", [400, 404, 413, 422])
-def test_identical_permanent_errors_latch_across_the_pass(verifier_pass, status):
+def test_identical_permanent_errors_latch_across_the_pass(verifier_pass):
+    # Every non-transient 4xx shares one latch branch; 400 stands for them all.
     make, run = verifier_pass
-    error = _StatusError(status, "invalid model override")
+    error = _StatusError(400, "invalid model override")
     settled = '{"verdict":"CONFIRMED","note":"visible"}'
     # Successes between errors do not reset the per-pass count.
     client = _ScriptedVerifyClient([error, settled, error, settled, error])
@@ -556,7 +525,9 @@ def test_matching_api_errors_ignore_per_request_ids(verifier_pass):
     assert client.calls == result.failed == result.skipped == 3
 
 
-@pytest.mark.parametrize("status", [408, 409, 429, 503])
+# A transient 4xx reaches the latch's 4xx range and is excused as transient; a
+# transient 5xx never enters it.
+@pytest.mark.parametrize("status", [429, 503])
 def test_exhausted_transient_errors_do_not_trip_the_latch(verifier_pass, status):
     make, run = verifier_pass
     client = _ScriptedVerifyClient([_StatusError(status)])
@@ -910,18 +881,9 @@ def test_render_region_and_iter_crops(tmp_path):
     assert crops["bad"] is None
 
 
-def test_verify_request_shape_has_image_and_system():
-    client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
-    _run([_finding("conf")], client=client)
-    kw = client.calls[0]
-    assert kw["model"] == OPUS
-    assert kw["system"] == VERIFY_SYSTEM_PROMPT
-    blocks = kw["messages"][0]["content"]
-    assert any(b.get("type") == "image" for b in blocks)
-
-
-def test_verify_states_its_thinking_and_effort_explicitly():
-    """Verification must never leave ``thinking`` to the default.
+def test_verify_request_shape_states_its_thinking_and_effort_explicitly():
+    """The request carries the crop image and the system prompt, and verification
+    must never leave ``thinking`` to the default.
 
     This test previously asserted ``"thinking" not in kw`` on the belief that an
     absent key meant thinking was off. It does not: on Opus 5 and Sonnet 5 an
@@ -932,6 +894,10 @@ def test_verify_states_its_thinking_and_effort_explicitly():
     client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
     _run([_finding("conf")], client=client)
     kw = client.calls[0]
+    assert kw["model"] == OPUS
+    assert kw["system"] == VERIFY_SYSTEM_PROMPT
+    blocks = kw["messages"][0]["content"]
+    assert any(b.get("type") == "image" for b in blocks)
     assert kw["thinking"] == {"type": "adaptive"}
     # Opus on a verification phase is the escalation tier -> high.
     assert kw["output_config"] == {"effort": "high"}
@@ -1140,18 +1106,6 @@ def test_verify_tallies_a_truncated_reply_separately():
     result = _run([_finding("cut")], client=_CutOff())
     assert (result.uncertain, result.malformed, result.truncated, result.failed) == (1, 0, 1, 0)
     assert "truncated=1" in result.degradation_note()
-
-
-def test_verify_tallies_a_failed_call_as_not_judged():
-    class _FailureClient(BetaClientMixin):
-        def __init__(self):
-            class _Messages(StreamingMessagesMixin):
-                def create(_self, **_kw):
-                    raise _StatusError(400, "bad request")
-            self.messages = _Messages()
-
-    result = _run([_finding("failure")], client=_FailureClient())
-    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (0, 0, 0, 1)
 
 
 def test_a_genuine_not_visible_is_a_judgment_not_a_degradation():

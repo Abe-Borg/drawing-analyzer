@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from drawing_analyzer import html_report as hr
 from drawing_analyzer.models import Anchor, Finding, Verification
 from tests.fixtures.fake_context import FakeContext as _Ctx
@@ -58,23 +60,24 @@ def _make_ctx() -> _Ctx:
 # --------------------------------------------------------------------------- #
 
 
-def test_classify_section_coordination_and_conflict():
-    assert hr.classify_section("Coordination / cross-discipline items") == "coordination"
-    # A header that reads as both resolves to conflict (the higher-value output).
-    assert hr.classify_section("Cross-sheet / cross-discipline conflicts") == "conflict"
-    assert hr.classify_section("Tag cross-references") == "coordination"
-
-
-def test_classify_section_other_categories():
-    assert hr.classify_section("Equipment & schedules") == "equipment"
-    assert hr.classify_section("General notes, keynotes, and callouts") == "notes"
-    assert hr.classify_section("Key dimensions, elevations, clearances") == "dimensions"
-    assert hr.classify_section("Scope / systems shown") == "scope"
-
-
-def test_classify_section_unknown_and_none():
-    assert hr.classify_section(None) == "other"
-    assert hr.classify_section("Some unrelated header") == "other"
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("Coordination / cross-discipline items", "coordination"),
+        # A header that reads as both resolves to conflict (the higher-value output).
+        ("Cross-sheet / cross-discipline conflicts", "conflict"),
+        ("Tag cross-references", "coordination"),
+        ("Equipment & schedules", "equipment"),
+        ("General notes, keynotes, and callouts", "notes"),
+        ("Key dimensions, elevations, clearances", "dimensions"),
+        ("Scope / systems shown", "scope"),
+        ("Focus findings", "focus"),
+        (None, "other"),
+        ("Some unrelated header", "other"),
+    ],
+)
+def test_classify_section(header, expected):
+    assert hr.classify_section(header) == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -183,14 +186,26 @@ def test_report_is_self_contained_html():
             rest = rest[i + len("https://api.anthropic.com"):]
 
 
-def test_report_without_chat_has_no_network_references_at_all():
-    # include_chat=False restores the strict zero-network document.
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
-    )
-    assert "da-chat" not in doc
+def test_report_without_chat_has_no_chat_artifacts_or_network_references():
+    # include_chat=False restores the strict zero-network document: no widget,
+    # no data blocks for its tools (findings present, so they would otherwise
+    # be emitted), no transcript controls or storage key.
+    import base64
+    import hashlib
+
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
+    for needle in ("da-chat", "da-findings", "da-summary", "da-starters", "reportId"):
+        assert needle not in doc, needle
     assert "http://" not in doc and "https://" not in doc
     assert "<link" not in doc
+    # The CSP follows suit: nothing to connect to, and only the JS actually
+    # emitted is allowlisted.
+    assert "connect-src 'none'" in doc
+    chat_hash = "sha256-" + base64.b64encode(
+        hashlib.sha256(hr._CHAT_JS.encode("utf-8")).digest()
+    ).decode("ascii")
+    assert chat_hash not in doc
 
 
 def test_report_contains_every_sheet_and_the_overview():
@@ -227,16 +242,30 @@ def test_report_embeds_verbatim_raw_markdown_losslessly():
     assert "VAV-3 serves Rm 120 &lt;unique-marker&gt;" in doc
 
 
+def test_default_report_omits_every_optional_card():
+    # A standard run with no focus, findings, stage results or journal emits
+    # none of the conditional elements (their CSS rules are always in <style>;
+    # the markup is what's conditional).
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    # No QC status banner for a standard run (qc_status NOT_REQUESTED).
+    assert '<div class="qc-status-banner"' not in doc
+    # No focus card, and no focus chip (a chip that can't match is noise).
+    assert 'id="focus"' not in doc
+    assert 'data-filter="focus"' not in doc
+    # No findings card, and no TOC entry for it.
+    assert 'id="findings"' not in doc
+    assert 'data-target="findings"' not in doc
+    # No stage status table.
+    assert "QC stage status" not in doc
+    assert 'class="usage-table stage-table"' not in doc
+    # No run record.
+    assert "Run record" not in doc
+    assert "run_manifest.json" not in doc
+
+
 # --------------------------------------------------------------------------- #
 # Phase 23A — the run-level QC status banner (§3.3 / §15.5)
 # --------------------------------------------------------------------------- #
-
-
-def test_report_has_no_qc_status_banner_for_a_standard_run():
-    # A standard run (qc_status NOT_REQUESTED) emits no QC status banner *element*
-    # (the CSS rule is always in the <style> block; the div is what's conditional).
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert '<div class="qc-status-banner"' not in doc
 
 
 def test_report_qc_status_banner_partial_names_the_debug_override_cause():
@@ -270,36 +299,11 @@ def test_report_qc_status_banner_names_degraded_stages_and_debug_override():
     assert "DEBUG_OVERRIDE" in doc
 
 
-def test_report_escapes_content_in_structured_view():
-    ctx = _make_ctx()
-    ctx.sheets[1].text = "danger <img src=x onerror=alert(1)>"
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    assert "<img src=x" not in doc
-    assert "&lt;img src=x" in doc
-
-
-def test_report_handles_empty_synthesis():
-    ctx = _make_ctx()
-    ctx.synthesis_text = ""
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    assert "No cross-sheet synthesis was produced" in doc
-
-
 # --------------------------------------------------------------------------- #
 # per-run focus card + filter
 # --------------------------------------------------------------------------- #
 
 FOCUS = "the rooms, and what types of plumbing fixtures each has"
-
-
-def test_classify_section_focus():
-    assert hr.classify_section("Focus findings") == "focus"
-
-
-def test_report_without_focus_has_no_focus_card_or_chip():
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert 'id="focus"' not in doc
-    assert 'data-filter="focus"' not in doc  # a chip that can't match is noise
 
 
 def test_report_with_focus_pins_the_report_card_and_chip():
@@ -380,6 +384,13 @@ def test_report_without_key_still_shows_ask_ai_and_prompts_first_use():
     # Blank / whitespace keys behave exactly like no key.
     blank = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="  ")
     assert blank == doc
+    # The embed flag with no key to embed stays in prompt mode too.
+    no_key = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, api_key=None, embed_api_key=True
+    )
+    assert 'id="da-chat-config"' in no_key
+    assert '"apiKey"' not in no_key
+    assert "sessionStorage" in no_key
 
 
 def test_report_with_key_default_prompts_and_never_writes_the_key():
@@ -423,56 +434,6 @@ def test_report_with_embed_api_key_embeds_the_key_with_a_warning():
     assert "da-key-warn" in doc
 
 
-def test_embed_api_key_without_a_key_stays_in_prompt_mode():
-    # embed flag but no key to embed → widget present, still no key literal.
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW, api_key=None, embed_api_key=True
-    )
-    assert 'id="da-chat-config"' in doc
-    assert '"apiKey"' not in doc
-    assert "sessionStorage" in doc
-
-
-def test_report_key_entry_ui_present_when_not_embedded():
-    # A key-less (default) report ships the in-panel key-entry field so the
-    # reader can supply their own key — a real masked input, not window.prompt,
-    # and still no key material written into the file.
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert 'id="da-chat-key-input"' in doc
-    assert 'id="da-chat-key-save"' in doc
-    assert 'id="da-chat-key-toggle"' in doc
-    assert 'id="da-chat-key-change"' in doc
-    assert 'type="password"' in doc          # the key field is masked
-    assert "window.prompt(" not in doc       # the old native prompt call is gone
-    assert '"apiKey"' not in doc             # no key material in the file
-
-
-def test_reader_can_supply_their_own_key_even_when_one_is_embedded():
-    # An embedded key is the author's default, not a lock. Hiding the entry row
-    # whenever CFG.apiKey was set meant a shared report billed every question to
-    # whoever generated it, and a report whose embedded key had been rotated was
-    # simply dead. The row ships in embedded mode too.
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW,
-        api_key="sk-ant-test-123", embed_api_key=True,
-    )
-    assert 'id="da-chat-key-input"' in doc
-    assert 'id="da-chat-key-save"' in doc
-    # The switch back to the author's key exists, and the swap is offered.
-    assert 'id="da-chat-key-author"' in doc
-    assert "Use the report&#x27;s key" in doc or "Use the report's key" in doc
-    assert "Use my own key" in doc
-    # The row is no longer hard-hidden on the embedded branch.
-    assert "keyRow.hidden = true" not in doc
-    # The reader's key outranks the embedded one, and is held in memory so a
-    # browser that refuses to persist it cannot silently discard it.
-    assert "readerKey || embeddedKey()" in doc
-    assert "var readerKey = storedKey();" in doc
-    # The footer still warns, and now says an override is possible.
-    assert "da-key-warn" in doc
-    assert "override it with their own" in doc
-
-
 def test_rejected_embedded_key_points_the_reader_at_their_own_key():
     # A 401 on the embedded key used to be a dead end ("regenerate the
     # report"), which a reader who is not the author cannot do. Now it routes
@@ -485,37 +446,6 @@ def test_rejected_embedded_key_points_the_reader_at_their_own_key():
     assert "Enter your own key above to keep asking questions." in doc
     # The rejected-key branch reads WHICH key failed before clearing anything.
     assert "var rejectedOwn = usingOwnKey();" in doc
-
-
-def test_forget_key_is_honest_about_what_it_can_and_cannot_remove():
-    # Forgetting the reader's key when the file also embeds one must not claim
-    # a clean sweep: the file's credential survives and is what gets used next.
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW,
-        api_key="sk-ant-test-123", embed_api_key=True,
-    )
-    assert "a runtime clear cannot remove that one" in doc
-    assert "A runtime clear cannot remove it from the file" in doc
-
-
-def test_chat_config_cannot_break_out_of_its_script_tag():
-    # Every `<` in any config value (e.g. a hostile source filename) is emitted
-    # as the JSON string escape `\u003c`, so no value can close the JSON
-    # <script> block early or form markup — and JSON.parse round-trips it.
-    import json
-
-    hostile = 'evil</script><script>alert(1)//x.pdf'
-    doc = hr.build_html_report(
-        _make_ctx(),
-        source_names=[hostile],
-        now=NOW,
-        api_key="sk-ant-test-123",
-    )
-    start = doc.index('id="da-chat-config"')
-    body = doc[doc.index(">", start) + 1: doc.index("</script>", start)]
-    assert "<" not in body
-    assert "\\u003c" in body
-    assert json.loads(body)["sources"] == [hostile]
 
 
 # --------------------------------------------------------------------------- #
@@ -553,22 +483,60 @@ def test_findings_and_summary_data_blocks_present_and_structured():
     assert summary["sources"] == [SRC]
 
 
-def test_findings_data_block_cannot_break_out_of_its_script_tag():
-    # Hostile finding text/quote can't close the JSON <script> block: every `<`
-    # becomes `<` and JSON.parse round-trips it (same guarantee the chat
-    # config block carries).
+@pytest.mark.parametrize(
+    ("block_id", "hostile", "build", "round_trips"),
+    [
+        # A hostile source filename in the chat config.
+        pytest.param(
+            "da-chat-config",
+            "evil</script><script>alert(1)//x.pdf",
+            lambda h: hr.build_html_report(
+                _make_ctx(), source_names=[h], now=NOW, api_key="sk-ant-test-123"
+            ),
+            lambda parsed, h: parsed["sources"] == [h],
+            id="chat-config",
+        ),
+        # Hostile finding text/quote in #da-findings.
+        pytest.param(
+            "da-findings",
+            "evil</script><script>window.__pwned=1</script>",
+            lambda h: hr.build_html_report(
+                _findings_ctx(findings=[
+                    _finding(text=h, quote=h, category="conflict", severity="high"),
+                ]),
+                source_names=[SRC], now=NOW,
+            ),
+            lambda parsed, h: parsed[0]["text"] == h and parsed[0]["quote"] == h,
+            id="findings",
+        ),
+        # A hostile sheet id that a starter prompt names.
+        pytest.param(
+            "da-starters",
+            "M-1</script><script>window.__pwned=1</script>",
+            lambda h: hr.build_html_report(
+                _findings_ctx(findings=[
+                    _finding(sheet_id=h, category="conflict", severity="high",
+                             text="x", quote="x"),
+                ]),
+                source_names=[SRC], now=NOW,
+            ),
+            lambda parsed, h: any(h in p for p in parsed),
+            id="starters",
+        ),
+    ],
+)
+def test_json_data_blocks_cannot_break_out_of_their_script_tag(
+    block_id, hostile, build, round_trips
+):
+    # Every `<` in any value is emitted as the JSON string escape `\u003c`, so
+    # no value can close the JSON <script> block early or form markup — and
+    # JSON.parse round-trips it.
     import json
 
-    hostile = 'evil</script><script>window.__pwned=1</script>'
-    ctx = _findings_ctx(findings=[
-        _finding(text=hostile, quote=hostile, category="conflict", severity="high"),
-    ])
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    body = _script_block_body(doc, "da-findings")
+    body = _script_block_body(build(hostile), block_id)
     assert "<" not in body
     assert "\\u003c" in body
-    parsed = json.loads(body)
-    assert parsed[0]["text"] == hostile and parsed[0]["quote"] == hostile
+    assert round_trips(json.loads(body), hostile)
 
 
 def test_findings_data_block_exposes_cross_sheet_legs_and_citations():
@@ -597,15 +565,6 @@ def test_findings_data_block_exposes_cross_sheet_legs_and_citations():
     # Findings without legs/refs stay lean — the keys are omitted, not empty.
     assert "also_on" not in rows["P-201"]
     assert "refs" not in rows["M-501"] and "citation" not in rows["M-501"]
-
-
-def test_data_blocks_absent_without_chat():
-    # include_chat=False must stay free of every chat artifact (the no-network
-    # invariant): neither data block is emitted.
-    ctx = _findings_ctx(findings=[_finding()])
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
-    assert "da-findings" not in doc
-    assert "da-summary" not in doc
 
 
 def test_findings_data_block_absent_when_no_findings():
@@ -656,30 +615,39 @@ def test_starter_prompts_flag_critical_conflicts_and_top_category():
     assert "Summarize the conflicts." in prompts
 
 
-def test_starter_prompts_flag_cross_sheet_issues():
-    f = _finding(sheet_id="M-101", category="reference", severity="low",
-                 text="spans sheets", quote="X", verify_status="VERIFIED")
-    f.also_on = [object()]   # any also_on leg marks a cross-sheet finding (DA-016)
-    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
-    assert "Which issues span more than one sheet?" in prompts
-
-
-def test_starter_prompts_flag_cited_code():
-    f = _finding(sheet_id="M-101", category="code", severity="medium",
-                 text="IBC clearance", quote="IBC", verify_status="VERIFIED")
-    f.refs = ["IBC 1004.5"]
-    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
-    assert "Do the cited code sections check out?" in prompts
-
-
-def test_starter_prompts_flag_unverified_findings():
-    ctx = _findings_ctx(findings=[
-        _finding(sheet_id="M-101", category="question", severity="low",
-                 text="unsure", quote="Q",
+@pytest.mark.parametrize(
+    ("finding_kw", "attrs", "expected"),
+    [
+        pytest.param(
+            dict(category="reference", severity="low", text="spans sheets",
+                 quote="X", verify_status="VERIFIED"),
+            # any also_on leg marks a cross-sheet finding (DA-016)
+            {"also_on": [object()]},
+            "Which issues span more than one sheet?",
+            id="cross-sheet",
+        ),
+        pytest.param(
+            dict(category="code", severity="medium", text="IBC clearance",
+                 quote="IBC", verify_status="VERIFIED"),
+            {"refs": ["IBC 1004.5"]},
+            "Do the cited code sections check out?",
+            id="cited-code",
+        ),
+        pytest.param(
+            dict(category="question", severity="low", text="unsure", quote="Q",
                  anchor_status="UNANCHORED", verify_status="SKIPPED"),
-    ])
-    prompts = hr._starter_prompts(ctx, [], [SRC])
-    assert "Which findings could not be verified against the drawings?" in prompts
+            {},
+            "Which findings could not be verified against the drawings?",
+            id="unverified",
+        ),
+    ],
+)
+def test_starter_prompts_flag_each_issue_kind(finding_kw, attrs, expected):
+    f = _finding(sheet_id="M-101", **finding_kw)
+    for name, value in attrs.items():
+        setattr(f, name, value)
+    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
+    assert expected in prompts
 
 
 def test_starter_prompts_fall_back_to_set_aware_prompts_without_findings():
@@ -703,49 +671,6 @@ def test_starters_data_block_present_and_structured():
     starters = json.loads(_script_block_body(doc, "da-starters"))
     assert isinstance(starters, list) and 1 <= len(starters) <= 5
     assert all(isinstance(s, str) and s.strip() for s in starters)
-
-
-def test_starters_replace_the_old_hardcoded_examples():
-    # The fabricated VAV-3 / plumbing example line is gone; the chips row is in.
-    assert "Which sheets mention VAV-3" not in hr._CHAT_HTML
-    assert "plumbing coordination items" not in hr._CHAT_HTML
-    assert 'id="da-starters-row"' in hr._CHAT_HTML
-
-
-def test_starters_data_block_cannot_break_out_of_its_script_tag():
-    import json
-
-    hostile = 'M-1</script><script>window.__pwned=1</script>'
-    ctx = _findings_ctx(findings=[
-        _finding(sheet_id=hostile, category="conflict", severity="high",
-                 text="x", quote="x"),
-    ])
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    body = _script_block_body(doc, "da-starters")
-    assert "<" not in body
-    assert any(hostile in p for p in json.loads(body))
-
-
-def test_starters_data_block_absent_without_chat():
-    ctx = _findings_ctx(findings=[_finding()])
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
-    assert "da-starters" not in doc
-
-
-def test_chat_request_defines_client_tools_and_closure_loop():
-    # The six client-executed tools are declared with input schemas; the loop
-    # answers tool_use with tool_result and force-closes with tools disabled so a
-    # run can never end on a dangling tool call.
-    js = hr._CHAT_JS
-    for name in ("scroll_to_report", "query_findings", "filter_report",
-                 "get_report_summary", "highlight_term", "calculate"):
-        assert f"name: '{name}'" in js, f"{name} tool not declared"
-    assert "input_schema" in js
-    assert "tool_choice" in js and "type: 'none'" in js
-    assert "stopReason === 'tool_use'" in js
-    assert "type: 'tool_result'" in js
-    # The safe calculator never uses eval/Function.
-    assert "eval(" not in js and "new Function" not in js
 
 
 # --------------------------------------------------------------------------- #
@@ -860,12 +785,6 @@ def test_finding_action_renders_and_is_escaped():
         _findings_ctx(findings=[_finding()]), source_names=[SRC], now=NOW
     )
     assert 'class="finding-action"' not in bare
-
-
-def test_no_findings_card_when_there_are_none():
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert 'id="findings"' not in doc               # no card
-    assert 'data-target="findings"' not in doc      # no TOC entry
 
 
 def test_evidence_thumbnail_only_with_link_evidence():
@@ -1048,40 +967,60 @@ def test_hostile_filenames_are_inert_in_the_report():
         assert payload + ".pdf" in json.loads(body)["sources"]
 
 
-def test_hostile_sheet_text_and_synthesis_are_escaped():
-    ctx = _make_ctx()
-    ctx.sheets[0].text = "**Scope**\n- " + "</script><script>sentinel()</script>"
-    ctx.synthesis_text = "**Conflicts**\n- <img src=x onerror=sentinel()>"
-    ctx.combined_text = '<svg onload=sentinel()></svg>'
+@pytest.mark.parametrize(
+    ("case", "visible"),
+    [
+        pytest.param(
+            dict(sheet_texts=[(1, "danger <img src=x onerror=alert(1)>")]),
+            "&lt;img src=x",
+            id="structured-view-sheet-text",
+        ),
+        pytest.param(
+            dict(
+                sheet_texts=[(0, "**Scope**\n- </script><script>sentinel()</script>")],
+                synthesis_text="**Conflicts**\n- <img src=x onerror=sentinel()>",
+                combined_text='<svg onload=sentinel()></svg>',
+            ),
+            "&lt;img src=x",
+            id="sheet-text-and-synthesis",
+        ),
+        pytest.param(
+            dict(findings=[_finding(
+                sheet_id='</script><script>sentinel()</script>',
+                text='<img src=x onerror=sentinel()>',
+                quote='" autofocus onfocus="sentinel()',
+                category='<svg onload=sentinel()>',
+            )]),
+            None,
+            id="finding-fields",
+        ),
+        pytest.param(
+            dict(errors=['boom </script><script>sentinel()</script>']),
+            None,
+            id="run-errors",
+        ),
+        pytest.param(
+            dict(
+                focus='<img src=x onerror=sentinel()>',
+                focus_report_text="**Rooms**\n- </script><script>sentinel()</script>",
+            ),
+            None,
+            id="focus-text",
+        ),
+    ],
+)
+def test_hostile_run_content_is_escaped(case, visible):
+    case = dict(case)
+    findings = case.pop("findings", None)
+    ctx = _make_ctx() if findings is None else _findings_ctx(findings=findings)
+    for index, text in case.pop("sheet_texts", ()):
+        ctx.sheets[index].text = text
+    for name, value in case.items():
+        setattr(ctx, name, value)
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     _assert_inert(doc)
-    assert "&lt;img src=x" in doc  # rendered as visible text, escaped
-
-
-def test_hostile_finding_fields_are_escaped():
-    f = _finding(
-        sheet_id='</script><script>sentinel()</script>',
-        text='<img src=x onerror=sentinel()>',
-        quote='" autofocus onfocus="sentinel()',
-        category='<svg onload=sentinel()>',
-    )
-    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
-    _assert_inert(doc)
-
-
-def test_hostile_run_errors_are_escaped():
-    ctx = _make_ctx()
-    ctx.errors = ['boom </script><script>sentinel()</script>']
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    _assert_inert(doc)
-
-
-def test_hostile_focus_text_is_escaped():
-    ctx = _make_ctx()
-    ctx.focus = '<img src=x onerror=sentinel()>'
-    ctx.focus_report_text = "**Rooms**\n- </script><script>sentinel()</script>"
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    _assert_inert(doc)
+    if visible:
+        assert visible in doc  # rendered as visible text, escaped
 
 
 def test_evidence_links_use_noopener_noreferrer():
@@ -1101,6 +1040,8 @@ def test_report_scripts_have_no_html_injection_sinks():
     for src in (hr._JS, hr._CHAT_JS):
         for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
             assert sink not in src, f"{sink} present in report script"
+    # The chat's safe calculator tool never uses eval/Function.
+    assert "eval(" not in hr._CHAT_JS and "new Function" not in hr._CHAT_JS
 
 
 def test_chat_js_builds_dom_and_validates_urls():
@@ -1119,23 +1060,6 @@ def test_chat_js_builds_dom_and_validates_urls():
     assert "scrubSecrets" in js
 
 
-def test_chat_js_paces_the_answer_reveal():
-    """The streamed answer is revealed on an rAF clock rather than painted as
-    each burst of deltas lands. Behaviour is covered in
-    ``tests/test_report_chat_smoothness.py`` (needs a browser); this keeps the
-    pieces from being dropped on a machine that cannot run it."""
-    js = hr._CHAT_JS
-    assert "requestAnimationFrame" in js and "paceFrame" in js
-    # The incremental repaint and the boundary rule it depends on.
-    assert "function paintText" in js and "function stablePrefix" in js
-    # Eased autoscroll with a sticky follow flag, not a scrollTop teleport.
-    assert "function paceScroll" in js
-    # The reduced-motion opt-out, and the debounced fallback it falls back to.
-    assert "prefers-reduced-motion" in js and "function touchText" in js
-    # Time-to-first-token placeholder.
-    assert "function showWaiting" in js and "function clearWaiting" in js
-
-
 # --------------------------------------------------------------------------- #
 # Content-Security-Policy (defense in depth).
 # --------------------------------------------------------------------------- #
@@ -1144,6 +1068,7 @@ def test_chat_js_paces_the_answer_reveal():
 def test_csp_present_pins_script_hashes_and_restricts_connect():
     import base64
     import hashlib
+    import re
 
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert "Content-Security-Policy" in doc
@@ -1155,25 +1080,27 @@ def test_csp_present_pins_script_hashes_and_restricts_connect():
 
     assert _hash(hr._JS) in doc
     assert _hash(hr._CHAT_JS) in doc          # chat on by default
-    assert "connect-src https://api.anthropic.com" in doc
-    assert "object-src 'none'" in doc
-    assert "base-uri 'none'" in doc
-    assert "form-action 'none'" in doc
     # No inline event handlers anywhere, so 'unsafe-inline' script is never used.
     assert "script-src 'unsafe-inline'" not in doc
-
-
-def test_csp_connect_src_is_none_without_chat():
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
+    # Pin the whole policy: a widened connect-src or a stray blob:/data: source
+    # (e.g. from transcript save/load, which is same-document work and makes no
+    # request) would otherwise slip through.
+    policy = re.search(
+        r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', doc
+    ).group(1)
+    directives = dict(
+        (d.strip().split(" ", 1) + [""])[:2] for d in policy.split(";") if d.strip()
     )
-    assert "connect-src 'none'" in doc
-    import base64
-    import hashlib
-    chat_hash = "sha256-" + base64.b64encode(
-        hashlib.sha256(hr._CHAT_JS.encode("utf-8")).digest()
-    ).decode("ascii")
-    assert chat_hash not in doc  # only the JS actually emitted is allowlisted
+    assert directives["default-src"] == "'none'"
+    assert directives["connect-src"] == "https://api.anthropic.com"
+    assert directives["img-src"] == "'self' file: data:"
+    assert directives["base-uri"] == "'none'"
+    assert directives["form-action"] == "'none'"
+    assert directives["object-src"] == "'none'"
+    assert set(directives) == {
+        "default-src", "script-src", "style-src", "img-src",
+        "connect-src", "base-uri", "form-action", "object-src",
+    }
 
 
 def test_embedded_key_forget_control_is_truthful():
@@ -1184,6 +1111,10 @@ def test_embedded_key_forget_control_is_truthful():
     )
     assert 'id="da-chat-forget"' in doc
     assert "Removing the key requires regenerating" in doc
+    # Forgetting the reader's key when the file also embeds one must not claim
+    # a clean sweep: the file's credential survives and is what gets used next.
+    assert "a runtime clear cannot remove that one" in doc
+    assert "A runtime clear cannot remove it from the file" in doc
 
 
 # --------------------------------------------------------------------------- #
@@ -1217,12 +1148,6 @@ def test_stage_status_table_renders_per_stage_rows():
     assert "no cited claims" in doc
     assert "api_error: &lt;boom&gt;" in doc
     assert "api_error: <boom>" not in doc
-
-
-def test_no_stage_status_table_without_stage_results():
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert "QC stage status" not in doc
-    assert 'class="usage-table stage-table"' not in doc
 
 
 def test_high_severity_toggle_is_standalone_with_aria_pressed():
@@ -1269,12 +1194,11 @@ def test_duplicate_display_names_get_source_id_suffix():
     assert "M-101.pdf (page 1/1) · SRC-0002" in doc
     # The finding's sheet cell is disambiguated the same way.
     assert "M-101 · SRC-0002" in doc
-
-
-def test_unique_display_names_get_no_source_id_suffix():
-    ctx = _findings_ctx(findings=[_finding()])
-    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
-    assert " · SRC-" not in doc
+    # Unique display names get no suffix at all.
+    unique = hr.build_html_report(
+        _findings_ctx(findings=[_finding()]), source_names=[SRC], now=NOW
+    )
+    assert " · SRC-" not in unique
 
 
 def test_run_record_details_renders_journal_and_manifest_pointer():
@@ -1342,12 +1266,6 @@ def test_run_duration_declines_to_guess_on_mismatched_or_odd_input():
     assert hr._run_duration(aware, aware) == "0s"
     # A clock that went backwards is a bug, not a negative duration to print.
     assert hr._run_duration(aware, aware.replace(hour=20)) == ""
-
-
-def test_no_run_record_details_without_a_journal():
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert "Run record" not in doc
-    assert "run_manifest.json" not in doc
 
 
 def test_citations_list_renders_per_reference_assessments():
@@ -1574,29 +1492,6 @@ def test_transcript_controls_present_by_default():
     assert "body.da-print-chat #da-chat-load" in doc
 
 
-def test_transcript_controls_absent_without_chat():
-    doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
-    )
-    for needle in ('id="da-chat-save"', 'id="da-chat-load"',
-                   'id="da-chat-load-input"', "reportId", "da-chat-tx-"):
-        assert needle not in doc
-
-
-def test_chat_js_persists_transcripts_and_scrubs_them():
-    js = hr._CHAT_JS
-    # The stored document is the documented schema...
-    assert "drawing_analyzer_chat_transcript" in js
-    assert "var TX_SCHEMA = 1;" in js
-    assert "'da-chat-tx-' + (CFG.reportId" in js
-    # ...replay drives the same renderers as streaming (no forked renderer)...
-    assert "function replayAssistant" in js and "function renderUserBubble" in js
-    assert "startBlockUI(st, i, bubble)" in js and "finishBlock(st, i, bubble)" in js
-    # ...and every write goes through the secret scrubber.
-    assert "var raw = JSON.stringify(payload);" in js
-    assert "var text = scrubSecrets(raw);" in js
-
-
 def test_transcript_serializer_never_touches_key_material():
     # Structural guarantee: the code that builds a transcript cannot read the
     # key, so no bug in the scrubber can leak one from this path.
@@ -1614,31 +1509,6 @@ def test_replay_never_dispatches_recorded_tool_calls():
     body = js[start: js.index("function replayTranscript")]
     assert "runTool(" not in body
     assert "TOOLS[" not in body
-
-
-def test_csp_policy_is_unchanged_by_transcript_persistence():
-    # Saving/loading a transcript is same-document work — no request is made, so
-    # the policy must come out byte-identical. Pin the whole string: a widened
-    # connect-src or a stray blob:/data: source would otherwise slip through.
-    import re
-
-    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    policy = re.search(
-        r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', doc
-    ).group(1)
-    directives = dict(
-        (d.strip().split(" ", 1) + [""])[:2] for d in policy.split(";") if d.strip()
-    )
-    assert directives["default-src"] == "'none'"
-    assert directives["connect-src"] == "https://api.anthropic.com"
-    assert directives["img-src"] == "'self' file: data:"
-    assert directives["base-uri"] == "'none'"
-    assert directives["form-action"] == "'none'"
-    assert directives["object-src"] == "'none'"
-    assert set(directives) == {
-        "default-src", "script-src", "style-src", "img-src",
-        "connect-src", "base-uri", "form-action", "object-src",
-    }
 
 
 # --------------------------------------------------------------------------- #

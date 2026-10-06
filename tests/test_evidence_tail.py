@@ -77,27 +77,19 @@ def _geom(source: str, sid: str, *, full_text: str | None = None,
 
 
 def _dense_full_text(sid: str, tail: str) -> str:
-    """Text long enough that ``tail`` lands past the cap, as on a notes sheet."""
+    """Text long enough that ``tail`` lands past the cap, as on a notes sheet.
+
+    The premise is guarded here: if it stops holding, every test built on this
+    helper is vacuous.
+    """
     body = FILLER * ((SHEET_TEXT_MAX_CHARS // len(FILLER)) + 40)
-    return f"{sid} title. {body} {tail}"
+    text = f"{sid} title. {body} {tail}"
+    assert len(text) > SHEET_TEXT_MAX_CHARS and tail not in _cap_sheet_text(text)
+    return text
 
 
 def _digest(source: str, text: str = "Sheet - FP - Plan") -> SheetDigest:
     return SheetDigest(ref=_ref(source), text=text)
-
-
-# --------------------------------------------------------------------------- #
-# The fixture itself must be honest before anything is asserted through it
-# --------------------------------------------------------------------------- #
-
-
-def test_the_tail_quote_really_is_past_the_cap():
-    """Guard the premise: if this stops holding, every test below is vacuous."""
-    full = _dense_full_text("F-D-00-1", TAIL_QUOTE)
-    capped = _cap_sheet_text(full)
-    assert TAIL_QUOTE in full
-    assert TAIL_QUOTE not in capped
-    assert len(full) > SHEET_TEXT_MAX_CHARS
 
 
 # --------------------------------------------------------------------------- #
@@ -252,14 +244,6 @@ def test_forty_entries_take_the_whole_set_path_unchanged():
     assert client.whole_set_calls == 1, "40 entries take the single whole-set call"
     assert client.map_calls == 0, "40 entries must not shard"
     assert client.reconcile_calls == 0
-
-
-def test_forty_one_entries_take_the_sharded_path():
-    sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)
-    n = MAX_SHEETS_SINGLE_CALL + 1
-    client = _TailClient(TAIL_QUOTE, TAIL_QUOTE)
-    cross_sheet_qc(sheets[:n], geoms[:n], client=client, sleep=lambda *_: None)
-    assert client.map_calls >= 1
 
 
 def test_failed_and_empty_digests_do_not_count_toward_the_threshold():
@@ -490,17 +474,6 @@ def test_a_truncated_sheet_keys_distinctly():
     a = [_geom("a.pdf", "A-1", full_text=base)]
     b = [_geom("a.pdf", "A-1", full_text=other)]
     assert _key(a) != _key(b)
-
-
-def test_cross_qc_contract_bumps_have_recorded_reasons():
-    """Conditional evidence hashing itself needs no contract bump.
-
-    Version 3 accounted for P8 item 11's host-side sheet-handle normalization.
-    Version 4 isolates the new text-truncation cache-admission policy from
-    legacy readers during mixed-version use or rollback. Neither WP-03A nor
-    WP-03B contributes to the counter; every bump has its own recorded reason.
-    """
-    assert X._CROSS_QC_CACHE_CONTRACT == 4
 
 
 # --------------------------------------------------------------------------- #

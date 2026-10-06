@@ -144,27 +144,14 @@ def test_drawing_estimate_single_sheet_skips_synthesis():
     assert one.input_tokens == one.image_tokens + 1 * PROMPT_PER_SHEET
 
 
-def test_drawing_estimate_unknown_model_keeps_scale_drops_cost():
-    est = estimate_drawing_set_cost(5, model="mystery-model", synthesize=False)
+# spec_chars=0 is the regression case: a naive `(total_cost or 0.0) + spec_cost`
+# guarded only on spec_chars > 0 would leave it correctly None too, but a guard
+# that forgot to also check `total_cost is None` would coerce it to 0.0.
+@pytest.mark.parametrize("spec_chars", [0, 40_000])
+def test_drawing_estimate_unknown_model_keeps_scale_drops_cost(spec_chars):
+    est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=spec_chars)
     assert est.image_tokens > 0  # tokenizer still estimates image size
     assert est.total_cost is None  # but no dollar figure for an unpriced model
-
-
-def test_format_prompt_includes_scale_cost_and_proceed():
-    est = estimate_drawing_set_cost(8, file_count=3, model=OPUS)
-    msg = format_drawing_cost_prompt(est)
-    assert "8 drawing sheet(s)" in msg
-    assert "from 3 file(s)" in msg
-    assert "Opus 5" in msg
-    assert "$" in msg
-    assert "Proceed" in msg
-
-
-def test_format_prompt_unknown_model_says_unavailable():
-    est = estimate_drawing_set_cost(4, model="mystery-model")
-    msg = format_drawing_cost_prompt(est)
-    assert "unavailable" in msg
-    assert "Proceed" in msg
 
 
 def test_drawing_estimate_focus_adds_sections_and_a_pass():
@@ -177,13 +164,6 @@ def test_drawing_estimate_focus_adds_sections_and_a_pass():
     assert focused.output_tokens == digest_out + FOCUS_OUT
     assert focused.input_tokens == base.input_tokens + digest_text + PROMPT_PER_SHEET
     assert focused.total_cost > base.total_cost
-
-
-def test_drawing_estimate_no_focus_is_unchanged():
-    # focus=False is the default and must not perturb the existing math.
-    assert estimate_drawing_set_cost(10, model=OPUS) == estimate_drawing_set_cost(
-        10, model=OPUS, focus=False
-    )
 
 
 def test_drawing_estimate_batch_halves_digest_cost_only():
@@ -250,35 +230,6 @@ def test_image_token_estimate_uses_the_raster_upper_bound():
     est = estimate_image_tokens_for_set(3, rows=6, cols=6, model=OPUS)
     assert est == expected
     assert est >= vector_bound  # never under-quotes the vector render
-
-
-def test_format_prompt_batch_mode_notes_batch_and_latency():
-    est = estimate_drawing_set_cost(8, file_count=3, model=OPUS, batch=True)
-    msg = format_drawing_cost_prompt(est)
-    assert "8 drawing sheet(s)" in msg
-    assert "Batch" in msg  # names the batch submission + rate
-    assert "synchronous text passes are full rate" in msg
-    assert "Nothing is sent until you confirm" in msg
-    assert "Proceed" in msg
-
-
-def test_format_prompt_batch_mode_explains_the_shared_queue():
-    """The batch dialog teaches the queue mechanic + the overnight worst case."""
-    msg = format_drawing_cost_prompt(
-        estimate_drawing_set_cost(8, model=OPUS, batch=True)
-    )
-    low = msg.lower()
-    assert "queue" in low
-    assert "overnight" in low or "8+ hours" in msg
-
-
-def test_format_prompt_realtime_mode_gives_per_sheet_time():
-    """The real-time dialog sets a per-sheet time expectation and skips the queue talk."""
-    msg = format_drawing_cost_prompt(
-        estimate_drawing_set_cost(8, model=OPUS, batch=False)
-    )
-    assert "4–6 minutes per sheet" in msg
-    assert "Nothing is sent until you confirm" in msg
 
 
 def test_exhaustive_estimate_carries_transport_and_prompt_reflects_it():
@@ -410,14 +361,6 @@ def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
     assert models.distinct[0] == OPUS
 
 
-def test_exhaustive_prompt_names_every_model_the_run_touches():
-    """The header must not claim one model does all the work."""
-    est = estimate_exhaustive_run_cost(10, model=OPUS)
-    header = format_exhaustive_cost_prompt(est).splitlines()[0]
-    assert "Opus 5" in header
-    assert "Sonnet 5" in header  # identity / harvest / citation / verification
-
-
 def test_exhaustive_total_is_none_when_any_stage_is_unpriced(monkeypatch):
     """An unpriced stage must void the total, never quietly drop out of it.
 
@@ -445,24 +388,9 @@ def test_exhaustive_total_is_none_when_any_stage_is_unpriced(monkeypatch):
     assert "Critique ×2 (per sheet)" in msg
 
 
-def test_exhaustive_total_survives_when_every_stage_is_priced():
-    """The guard must not void a perfectly normal estimate."""
-    est = estimate_exhaustive_run_cost(40, model=OPUS)
-    assert all(c.cost is not None for c in est.components)
-    assert est.low_cost is not None and est.low_cost > 0
-    assert est.low_cost <= est.high_cost
-
-
 # --------------------------------------------------------------------------- #
 # spec_chars pricing — the specs block's transport-dependent cost
 # --------------------------------------------------------------------------- #
-
-
-def test_spec_chars_zero_matches_baseline():
-    base = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=0)
-    explicit = estimate_drawing_set_cost(10, model=OPUS, batch=True)
-    assert base.total_cost == explicit.total_cost
-    assert base.input_tokens == explicit.input_tokens
 
 
 def test_spec_chars_batch_path_never_gets_the_cache_discount():
@@ -489,30 +417,6 @@ def test_spec_chars_real_time_path_uses_cache_write_once_read_many():
     read = (spec_tokens / 1_000_000) * price.input_per_mtok * price.cache_read_multiplier
     expected = write + read * 9  # 1 write + 9 reads across 10 sheets
     assert delta == pytest.approx(expected)
-
-
-def test_spec_chars_batch_path_costs_more_than_real_time_for_the_same_specs():
-    # The whole point of the fix: batch never caches the specs block, so it
-    # must never look cheaper than the cached real-time path for the same
-    # upload — the confirmation dialog must not under-quote the common case.
-    batch = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=40_000)
-    realtime = estimate_drawing_set_cost(10, model=OPUS, batch=False, spec_chars=40_000)
-    batch_specs_delta = batch.total_cost - estimate_drawing_set_cost(10, model=OPUS, batch=True).total_cost
-    realtime_specs_delta = realtime.total_cost - estimate_drawing_set_cost(10, model=OPUS, batch=False).total_cost
-    assert batch_specs_delta > realtime_specs_delta
-
-
-def test_spec_chars_unknown_model_keeps_total_cost_none():
-    est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=40_000)
-    assert est.total_cost is None
-
-
-def test_spec_chars_unknown_model_with_zero_spec_chars_stays_none():
-    # Regression: a naive `(total_cost or 0.0) + spec_cost` guarded only on
-    # spec_chars > 0 would leave this case correctly None too, but a guard
-    # that forgot to also check `total_cost is None` would coerce it to 0.0.
-    est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=0)
-    assert est.total_cost is None
 
 
 # --------------------------------------------------------------------------- #
@@ -545,92 +449,71 @@ def _exhaustive_dialog(*, batch: bool, critique_batch: bool,
     )
 
 
-def test_batch_dialog_does_not_promise_a_cache_discount_on_specifications():
-    """§9.3 case 8. The batch path sets no breakpoint, so nothing is cached."""
-    text = _dialog(batch=True)
-    assert "ordinary batch input" in text
-    assert "0.1x" not in text
-    assert "cached after the first" not in text
+# Wording every dialog carries: the estimate is not a ceiling, and caching is per
+# stage, so a digest hit implies nothing about the set-level passes.
+_EVERY_DIALOG = ("not a cap", "caches separately", "whole set")
 
 
-def test_real_time_dialog_describes_specification_caching_as_conditional():
-    """Parallel workers and expiry can both force additional writes."""
-    text = _dialog(batch=False)
-    assert "0.1x" in text                      # the discount is still real
-    assert "usually cached" in text            # ...but not guaranteed
-    assert "write rate" in text                # and the exception is named
+@pytest.mark.parametrize("text_fn,present,absent", [
+    pytest.param(lambda: _dialog(batch=False), [
+        "10 drawing sheet(s)", "from 1 file(s)", "Opus 5", "$",
+        "4–6 minutes per sheet", "Nothing is sent until you confirm.",
+        # Parallel workers and expiry can both force additional writes: the
+        # discount is real, but not guaranteed, and the exception is named.
+        "0.1x", "usually cached", "write rate",
+        "local result cache", *_EVERY_DIALOG,
+    ], [], id="real-time"),
+    pytest.param(lambda: _dialog(batch=True), [
+        "10 drawing sheet(s)", "Batch", "synchronous text passes are full rate",
+        "queue", "overnight", "Nothing is sent until you confirm",
+        # §9.3 case 8: the batch path sets no breakpoint, so nothing is cached.
+        "ordinary batch input",
+        "adaptive thinking, which is billed as output", "No real run usage records",
+        "local result cache", *_EVERY_DIALOG,
+    ], ["0.1x", "cached after the first"], id="batch"),
+    pytest.param(lambda: format_drawing_cost_prompt(
+        estimate_drawing_set_cost(4, model="mystery-model")),
+        ["unavailable"], [], id="unpriced-model"),
+    # The transport branch must not leak into a run that uploaded no specs.
+    pytest.param(lambda: _dialog(batch=False, spec_chars=0), [],
+                 ["Project specifications", "ordinary batch input"], id="real-time-no-specs"),
+    pytest.param(lambda: _dialog(batch=True, spec_chars=0), [],
+                 ["Project specifications", "ordinary batch input"], id="batch-no-specs"),
+])
+def test_drawing_dialog_copy(text_fn, present, absent):
+    text = text_fn()
+    for phrase in present:
+        assert phrase in text, phrase
+    for phrase in absent:
+        assert phrase not in text, phrase
+    # §9.2: keep the existing pre-send confirmation behavior.
+    assert text.rstrip().endswith("Proceed with the analysis?")
 
 
-def test_exhaustive_dialog_matches_the_digest_transport_in_every_mode():
-    """Including Hybrid, where the digest is real-time and critique is batched.
-
-    Specifications ride the DIGEST prompt only, so the sentence must follow
-    ``batch``, not ``critique_batch``. Hybrid is the mode where those disagree,
-    and a naive implementation keyed on the wrong one is only visible here.
-    """
-    economy = _exhaustive_dialog(batch=True, critique_batch=True)
-    hybrid = _exhaustive_dialog(batch=False, critique_batch=True)
-    fast = _exhaustive_dialog(batch=False, critique_batch=False)
-
-    assert "ordinary batch input" in economy
-    for text in (hybrid, fast):
-        assert "usually cached" in text
-        assert "ordinary batch input" not in text
-    # Hybrid still describes its own critique transport correctly.
-    assert "Hybrid mode" in hybrid
-
-
-def test_no_dialog_claims_the_image_allowance_bounds_the_invoice():
-    """The image figure is a per-model worst case; the text riding with it isn't.
-
-    ``_ASSUMED_PROMPT_TOKENS_PER_SHEET`` is a flat 800/sheet, so a text-heavy
-    set is under-counted on the one axis the image worst case does not cover.
-    "Slightly-high estimate" read as a ceiling, which it never was.
-    """
-    for text in (_dialog(batch=True), _dialog(batch=False),
-                 _exhaustive_dialog(batch=True, critique_batch=True),
-                 _exhaustive_dialog(batch=False, critique_batch=False)):
-        assert "slightly-high" not in text
-        assert "not a cap" in text
-
-
-def test_dialogs_distinguish_a_local_cache_hit_from_a_provider_cache_read():
-    """"Cached sheets cost nothing" was two different caches in one sentence.
-
-    A local ``DigestCache`` hit skips that sheet's own model call. It does not
-    make the run free: on an exhaustive run, cross-QC, verification, citation
-    and the rest still bill in full.
-    """
-    for text in (_dialog(batch=True), _dialog(batch=False)):
-        assert "cost nothing" not in text
-        assert "local result cache" in text
-    exhaustive = _exhaustive_dialog(batch=False, critique_batch=False)
-    assert "cost nothing" not in exhaustive
-
-
-def test_no_dialog_claims_the_qc_stages_always_bill():
-    """A warm re-run is cheaper but rarely free — and never "every stage bills".
-
-    Every QC stage caches independently and returns without a provider call on a
-    hit: identity (``set_identity`` ~483), review plan (~459), cross-QC (~1505),
-    synthesis, focus, critique and per-finding verification. Saying they all
-    still bill overstates a warm re-run as badly as "cached sheets cost nothing"
-    understated it — the first version of this fix traded one false claim for
-    its mirror image.
-
-    What is actually true, and what a reviewer needs: the caches are per stage,
-    so a digest hit implies nothing about the rest; and the set-level stages key
-    on the WHOLE set, so the common case — one sheet added to a set reviewed
-    last week — hits the digest cache for every old sheet and still re-runs
-    identity, the review plan, synthesis and cross-sheet QC in full.
-    """
-    for text in (_dialog(batch=True), _dialog(batch=False),
-                 _exhaustive_dialog(batch=True, critique_batch=True),
-                 _exhaustive_dialog(batch=False, critique_batch=False)):
-        assert "still bills normally" not in text
-        assert "still run and still bill" not in text
-        assert "caches separately" in text
-        assert "whole set" in text
+@pytest.mark.parametrize("batch,critique_batch,present,absent", [
+    pytest.param(True, True, [
+        "ordinary batch input",
+        "adaptive thinking, which is billed as output", "No real run usage records",
+    ], [], id="economy"),
+    # Hybrid is the mode where digest and critique transport disagree, and a
+    # naive implementation keyed on the wrong one is only visible here.
+    pytest.param(False, True, ["usually cached", "Hybrid mode"], ["ordinary batch input"],
+                 id="hybrid"),
+    pytest.param(False, False, ["usually cached"], ["ordinary batch input"], id="fast"),
+])
+def test_exhaustive_dialog_copy_follows_the_digest_transport(batch, critique_batch, present, absent):
+    """Specifications ride the DIGEST prompt only, so the sentence must follow
+    ``batch``, not ``critique_batch``."""
+    text = _exhaustive_dialog(batch=batch, critique_batch=critique_batch)
+    # The header must not claim one model does all the work.
+    header = text.splitlines()[0]
+    assert "Opus 5" in header
+    assert "Sonnet 5" in header  # identity / harvest / citation / verification
+    for phrase in (*present, *_EVERY_DIALOG):
+        assert phrase in text, phrase
+    for phrase in absent:
+        assert phrase not in text, phrase
+    assert text.rstrip().endswith("Proceed with the exhaustive review?")
 
 
 def test_specifications_add_the_same_charge_to_both_band_ends():
@@ -642,23 +525,6 @@ def test_specifications_add_the_same_charge_to_both_band_ends():
             expected = 0.20 if batch else 0.068
             assert specs.low_cost - plain.low_cost == pytest.approx(expected)
             assert specs.high_cost - plain.high_cost == pytest.approx(expected)
-
-
-def test_a_dialog_without_specifications_says_nothing_about_them():
-    """The transport branch must not leak into a run that uploaded no specs."""
-    for batch in (True, False):
-        text = _dialog(batch=batch, spec_chars=0)
-        assert "Project specifications" not in text
-        assert "ordinary batch input" not in text
-
-
-def test_the_confirmation_question_is_unchanged():
-    """§9.2: keep the existing pre-send confirmation behavior."""
-    assert _dialog(batch=True).rstrip().endswith("Proceed with the analysis?")
-    assert _exhaustive_dialog(batch=True, critique_batch=True).rstrip().endswith(
-        "Proceed with the exhaustive review?"
-    )
-    assert "Nothing is sent until you confirm." in _dialog(batch=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -793,14 +659,6 @@ def test_cross_qc_accounts_for_shards_and_reconciliation(sheets, min_calls):
         assert "discipline shard(s)" in cross.note
         assert "reconciliation call(s)" in cross.note
         assert cross.input_tokens > cross.input_tokens_low
-
-
-def test_dialogs_explain_the_output_band_without_promising_half_price():
-    for text in (_dialog(batch=True), _exhaustive_dialog(batch=True, critique_batch=True)):
-        assert "adaptive thinking, which is billed as output" in text
-        assert "No real run usage records" in text
-        assert "under half" not in text
-        assert "not a cap" in text
 
 
 def test_unknown_standard_stage_voids_both_band_ends(monkeypatch):

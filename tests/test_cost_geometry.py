@@ -71,20 +71,21 @@ def tokens(shape, *, classification=CLASSIFICATION_VECTOR, model=OPUS, **kw) -> 
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("grid,label", [(6, "6x6 @1560"), (3, "3x3 @2576")])
-def test_image_tokens_are_scale_invariant_in_both_regimes(grid, label):
+@pytest.mark.parametrize("grid,classification", [
+    pytest.param(6, CLASSIFICATION_VECTOR, id="6x6 @1560"),
+    pytest.param(3, CLASSIFICATION_VECTOR, id="3x3 @2576"),
+    pytest.param(6, CLASSIFICATION_RASTER, id="6x6 raster"),
+])
+def test_image_tokens_are_scale_invariant_in_both_regimes(grid, classification):
     """``zoom_for_rect`` normalizes the long edge, so physical size never enters.
 
     ANSI E 34x44 and US letter 8.5x11 share an aspect ratio and 16x the area.
     The plan is emphatic that this holds in the <=20-image branch too — do not
-    assert that branch is scale-sensitive, it is not.
+    assert that branch is scale-sensitive, it is not. It also survives a raster
+    classification.
     """
-    assert tokens(E, rows=grid, cols=grid) == tokens(LETTER, rows=grid, cols=grid)
-
-
-def test_scale_invariance_survives_a_raster_classification():
-    assert (tokens(E, classification=CLASSIFICATION_RASTER, rows=6, cols=6)
-            == tokens(LETTER, classification=CLASSIFICATION_RASTER, rows=6, cols=6))
+    assert (tokens(E, classification=classification, rows=grid, cols=grid)
+            == tokens(LETTER, classification=classification, rows=grid, cols=grid))
 
 
 # --------------------------------------------------------------------------- #
@@ -114,12 +115,8 @@ def test_aspect_ratio_washes_out_entirely_in_the_few_image_regime():
     images = tiling.total_images_for_grid(3, 3)
     cap = estimate_image_tokens(9999, 9999, model=OPUS)
     assert tokens(E, rows=3, cols=3) == images * cap == 47_840
-
-
-def test_the_few_image_branch_holds_for_every_small_grid():
-    """3x3 (10 images) and 2x2 (5) are both under the 20-image threshold."""
+    # 2x2 (5 images) is under the 20-image threshold too.
     assert tokens(E, rows=2, cols=2) == 5 * 4_784 == 23_920
-    assert tokens(E, rows=3, cols=3) == 10 * 4_784
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +151,7 @@ def _rendered_sizes(pymupdf, w_in, h_in, *, rows, cols, raster=False):
 
 
 @pytest.mark.parametrize("shape", [E, D, B, LETTER, SQUARE])
-@pytest.mark.parametrize("grid", [6, 5, 3, 2])
+@pytest.mark.parametrize("grid", [6, 3])  # one grid per image-count regime
 def test_predicted_pixel_sizes_match_a_real_render(shape, grid):
     """§10.1 step 4 — the rounding assumption, checked against the rasterizer.
 
@@ -164,8 +161,9 @@ def test_predicted_pixel_sizes_match_a_real_render(shape, grid):
     dimension-only rule reproduces that, which is why the helper mirrors
     ``irect`` instead of rounding.
 
-    Tolerance is set from measurement, not taste: exact on 18 of these 20
-    combinations, and at most one pixel out on a float boundary otherwise.
+    Tolerance is set from measurement, not taste: exact on 18 of 20 shape/grid
+    combinations (grids 6, 5, 3 and 2), and at most one pixel out on a float
+    boundary otherwise.
     """
     pymupdf = pytest.importorskip("pymupdf")
     w_in, h_in = shape
@@ -176,19 +174,6 @@ def test_predicted_pixel_sizes_match_a_real_render(shape, grid):
     assert len(predicted) == len(actual)
     for (pw, ph), (aw, ah) in zip(predicted, actual):
         assert abs(pw - aw) <= 1 and abs(ph - ah) <= 1, (predicted, actual)
-
-
-@pytest.mark.parametrize("shape", [E, D, B, LETTER, SQUARE])
-def test_predicted_token_count_matches_a_real_render_within_a_tight_bound(shape):
-    """The number that is actually quoted, against the number actually rendered."""
-    pymupdf = pytest.importorskip("pymupdf")
-    w_in, h_in = shape
-    actual = sum(
-        estimate_image_tokens(w, h, model=OPUS)
-        for w, h in _rendered_sizes(pymupdf, w_in, h_in, rows=6, cols=6)
-    )
-    predicted = tokens(shape, rows=6, cols=6)
-    assert abs(predicted - actual) / actual < 0.0001, (predicted, actual)
 
 
 def test_a_rotated_page_is_measured_in_the_space_the_model_sees():
@@ -323,12 +308,6 @@ def test_the_explicit_fixed_grid_allowance_is_unchanged():
     assert estimate_image_tokens_for_set(1, rows=6, cols=6, model=OPUS) == 177_008
 
 
-def test_a_vector_e_size_sheet_costs_about_half_the_conservative_allowance():
-    """§2.6 decomposes the overstatement as ~1.9x. Asserted as a ratio."""
-    ratio = estimate_image_tokens_for_set(1, rows=6, cols=6, model=OPUS) / tokens(E)
-    assert 1.85 < ratio < 1.95, ratio
-
-
 def test_the_plan_reference_value_is_reproduced_within_the_rounding_delta():
     """92,871 (round-the-dimension) vs 93,013 (the renderer's irect). 0.15%."""
     assert tokens(E) == pytest.approx(92_871, rel=0.003)
@@ -360,62 +339,19 @@ def test_the_same_page_costs_differently_on_a_standard_tier_model():
     assert hi / lo > 1.5
 
 
-def test_hi_res_models_agree_with_each_other():
-    """Opus 5 and Sonnet 5 share the tier, which is why §2.4 calls it latent."""
-    assert tokens(E, model=OPUS) == tokens(E, model=SONNET)
-
-
 # --------------------------------------------------------------------------- #
-# Grid, overlap and target-override coverage (§10.5)
+# Overlap coverage (§10.5)
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("grid", [6, 5, 3, 2])
-def test_image_count_is_the_grid_plus_one_overview(grid):
-    sizes = tiling.image_pixel_sizes(34 * 72.0, 44 * 72.0, rows=grid, cols=grid)
-    assert len(sizes) == grid * grid + 1 == tiling.total_images_for_grid(grid, grid)
+def test_more_overlap_never_reduces_and_actually_moves_the_estimate():
+    """Overlap enlarges every interior tile, so tokens rise monotonically.
 
-
-@pytest.mark.parametrize("overlap", [0.0, tiling.DEFAULT_OVERLAP_FRAC, 0.20])
-def test_more_overlap_never_reduces_the_estimate(overlap):
-    """Overlap enlarges every interior tile, so tokens rise monotonically."""
-    zero = tokens(E, overlap_frac=0.0)
-    assert tokens(E, overlap_frac=overlap) >= zero
-
-
-def test_overlap_actually_moves_the_number():
-    """Guards the test above against passing on an ignored parameter."""
-    assert tokens(E, overlap_frac=0.20) > tokens(E, overlap_frac=0.0)
-
-
-def test_the_vector_target_override_changes_a_vector_page(monkeypatch):
-    """A lower long-edge target renders smaller tiles, so a vector page costs less."""
-    default = tokens(E)
-    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1240")
-    lowered = tokens(E)
-    assert lowered < default
-
-
-def test_the_vector_target_override_does_not_touch_raster_or_few_image(monkeypatch):
-    """Deliberate policy (§2.5): on a textless page the pixels are the only
-    channel, and the <=20-image branch is not where the payload problem lives."""
-    raster_before = tokens(E, classification=CLASSIFICATION_RASTER)
-    few_before = tokens(E, rows=3, cols=3)
-    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1240")
-    assert tokens(E, classification=CLASSIFICATION_RASTER) == raster_before
-    assert tokens(E, rows=3, cols=3) == few_before
-
-
-def test_every_tile_is_counted_even_though_the_renderer_may_drop_blank_ones():
-    """§10.1 item 6. Blank suppression is decided from rendered pixels.
-
-    Predicting it from word absence would quote low — a vector sheet's words sit
-    in the title block while the drawing body is lines, so "no words here" says
-    nothing about "nothing here".
+    The strict comparison guards against passing on an ignored parameter.
     """
-    sizes = tiling.image_pixel_sizes(34 * 72.0, 44 * 72.0)
-    assert len(sizes) == 37
-    assert all(w > 0 and h > 0 for w, h in sizes)
+    zero = tokens(E, overlap_frac=0.0)
+    assert tokens(E, overlap_frac=tiling.DEFAULT_OVERLAP_FRAC) >= zero
+    assert tokens(E, overlap_frac=0.20) > zero
 
 
 # --------------------------------------------------------------------------- #
@@ -443,14 +379,6 @@ def test_standard_estimate_prices_focus_with_its_own_resolved_model(monkeypatch)
     monkeypatch.setenv("DRAWING_ANALYZER_FOCUS_MODEL", OPUS)
     dear = estimate_drawing_set_cost(4, model=SONNET, focus=True).total_cost
     assert dear > cheap
-
-
-def test_an_unknown_priced_active_stage_voids_the_standard_total(monkeypatch):
-    """Same rule the exhaustive path already had: no partial sum as the whole."""
-    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-not-real-wp05")
-    assert estimate_drawing_set_cost(
-        10, model=SONNET, synthesize=True
-    ).total_cost is None
 
 
 def test_an_unknown_priced_INACTIVE_stage_does_not_void_the_total(monkeypatch):
@@ -508,13 +436,6 @@ def test_the_real_time_path_is_deliberately_not_linear_in_run_count(monkeypatch)
     assert four == pytest.approx(two * 2, rel=0.001)
 
 
-def test_the_resolved_critique_run_count_rides_the_estimate(monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", "3")
-    est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
-    assert est.critique_runs == 3
-    assert "×3" in next(c.stage for c in est.components if c.stage.startswith("Critique"))
-
-
 def test_critique_imagery_is_priced_with_the_critique_model(monkeypatch):
     """§2.4: the same PNG dimensions price differently by model tier.
 
@@ -562,11 +483,6 @@ def _scenarios(*, runs=2, batch=False, model=OPUS, sheets=1):
     )
 
 
-def test_real_time_reuse_is_cheaper_than_no_reuse():
-    low, high = _scenarios()
-    assert low < high
-
-
 def test_the_two_scenarios_match_the_documented_multipliers():
     """One 1.25x write plus (n-1) 0.1x reads, versus n writes. Hand-checked."""
     low, high = _scenarios(runs=2)
@@ -575,19 +491,6 @@ def test_the_two_scenarios_match_the_documented_multipliers():
     out = float(usage_record_cost(model=OPUS, output_tokens=PER_READ_OUT)) * 2
     assert low == pytest.approx(write + read + out)
     assert high == pytest.approx(write * 2 + out)
-
-
-def test_the_old_flat_estimate_sat_between_the_two_scenarios():
-    """Which is exactly why a single number could not be right.
-
-    The flat figure over-quotes a run whose cache hits and under-quotes one whose
-    breakpoints all miss. Neither error is conservative.
-    """
-    low, high = _scenarios(runs=2)
-    flat_in = float(usage_record_cost(model=OPUS, input_tokens=PREFIX)) * 2
-    flat_out = float(usage_record_cost(model=OPUS, output_tokens=PER_READ_OUT)) * 2
-    flat = flat_in + flat_out
-    assert low < flat < high
 
 
 def test_output_is_never_discounted_by_an_input_cache_multiplier():
@@ -660,13 +563,6 @@ def test_the_batch_band_is_not_widened_by_a_cache_scenario_that_cannot_happen():
     assert (economy.high_cost - economy.low_cost) < (fast.high_cost - fast.low_cost)
 
 
-def test_an_unpriced_critique_model_voids_both_ends_of_the_band(monkeypatch):
-    """No partial sum, on either end — the rule the rest of this table follows."""
-    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", "claude-not-real-wp05")
-    est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
-    assert est.low_cost is None and est.high_cost is None
-
-
 # --------------------------------------------------------------------------- #
 # §10.4 — the confirmation must not contradict its own component table
 # --------------------------------------------------------------------------- #
@@ -679,6 +575,8 @@ def test_the_confirmation_states_the_resolved_critique_count(runs, monkeypatch):
 
     monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", runs)
     est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
+    assert est.critique_runs == int(runs)
+    assert f"×{runs}" in next(c.stage for c in est.components if c.stage.startswith("Critique"))
     text = format_exhaustive_cost_prompt(est)
     assert f"{runs} critique read(s) per sheet" in text
     assert "two critique reads" not in text

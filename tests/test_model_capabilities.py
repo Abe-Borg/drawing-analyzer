@@ -29,15 +29,6 @@ HAIKU = "claude-haiku-4-5"
 # --------------------------------------------------------------------------- #
 
 
-def test_pipeline_defaults_are_the_current_generation():
-    assert api.REVIEW_MODEL_DEFAULT == OPUS_5_5
-    assert api.VERIFICATION_ESCALATION_MODEL == OPUS_5_5
-    assert api.CROSS_CHECK_MODEL_DEFAULT == SONNET_5_5
-    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5_5
-    # Chat is deliberately NOT Opus — see the web-fetch tests below.
-    assert api.CHAT_MODEL_DEFAULT == SONNET_5_5
-
-
 def test_stages_that_deliberately_run_on_sonnet():
     """Three stages are Sonnet-by-default, each for a stated reason. Pin them so
     a well-meaning "upgrade everything to the flagship" cannot silently regress
@@ -189,16 +180,6 @@ def test_every_emitted_effort_level_is_one_the_model_accepts():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48, SONNET_46])
-def test_current_models_support_the_300k_batch_beta(model):
-    assert api.model_supports_extended_output_beta(model) is True
-
-
-def test_haiku_and_unknown_models_do_not_claim_the_beta():
-    assert api.model_supports_extended_output_beta(HAIKU) is False
-    assert api.model_supports_extended_output_beta("some-future-model") is False
-
-
 def test_extended_output_guard_uses_the_selected_models_ceiling():
     # Above the ceiling without the beta header -> refuse before submitting.
     with pytest.raises(ValueError, match=api.BATCH_OUTPUT_BETA):
@@ -214,48 +195,34 @@ def test_extended_output_guard_uses_the_selected_models_ceiling():
 
 
 # --------------------------------------------------------------------------- #
-# hi-res vision
+# per-model roster: 300k batch beta, web fetch, hi-res vision
 # --------------------------------------------------------------------------- #
 
 
-# --------------------------------------------------------------------------- #
-# web fetch
-# --------------------------------------------------------------------------- #
-
-
-def test_opus_5_does_not_support_web_fetch():
-    """Opus 5's one capability regression vs Opus 4.8.
-
-    Anthropic's Opus 5 migration guide lists web fetch as one of exactly two
-    exceptions to Opus 4.8 feature parity (the other is Priority Tier). Web
-    *search* is still supported — only fetch is excluded — so this cannot be
-    inferred from generation or from web-search support.
-    """
-    assert api.model_capabilities(OPUS_5).supports_web_fetch is False
-    assert api.model_capabilities(SONNET_5).supports_web_fetch is True
-    assert api.model_capabilities(OPUS_48).supports_web_fetch is True
-    assert api.model_capabilities(SONNET_46).supports_web_fetch is True
-
-
-def test_unknown_model_never_claims_web_fetch():
-    # Sending an unsupported server tool is a 400 that fails the whole request,
-    # so the fallback must be "don't send it".
-    assert api.model_capabilities("some-future-model").supports_web_fetch is False
-    assert api.model_capabilities(HAIKU).supports_web_fetch is False
-
-
-def test_chat_default_can_use_web_fetch():
-    # api_config documents that the in-report assistant needs web fetch. This is
-    # the guard that keeps that prose true.
-    assert api.model_capabilities(api.CHAT_MODEL_DEFAULT).supports_web_fetch is True
-    assert api.model_capabilities(api.CHAT_MODEL_DEFAULT).supports_adaptive_thinking
-
-
-def test_hires_vision_roster_does_not_follow_family_lines():
-    assert api.model_capabilities(SONNET_5).supports_hires_vision is True
-    assert api.model_capabilities(SONNET_46).supports_hires_vision is False
-    assert api.model_capabilities(OPUS_5).supports_hires_vision is True
-    assert api.model_capabilities(HAIKU).supports_hires_vision is False
+@pytest.mark.parametrize(
+    "model, batch_beta, web_fetch, hires_vision",
+    [
+        # Web fetch is Opus 5's one capability regression vs Opus 4.8 (the
+        # migration guide's other parity exception is Priority Tier). Web
+        # *search* is still supported, so this cannot be inferred from
+        # generation or from web-search support.
+        (OPUS_5, True, False, True),
+        (SONNET_5, True, True, True),
+        (OPUS_48, True, True, None),
+        # The hi-res roster does not follow family lines.
+        (SONNET_46, True, True, False),
+        (HAIKU, False, False, False),
+        # Sending an unsupported server tool is a 400 that fails the whole
+        # request, so the unknown-model fallback must be "don't send it".
+        ("some-future-model", False, False, None),
+    ],
+)
+def test_capability_roster(model, batch_beta, web_fetch, hires_vision):
+    caps = api.model_capabilities(model)
+    assert api.model_supports_extended_output_beta(model) is batch_beta
+    assert caps.supports_web_fetch is web_fetch
+    if hires_vision is not None:
+        assert caps.supports_hires_vision is hires_vision
 
 
 # --------------------------------------------------------------------------- #

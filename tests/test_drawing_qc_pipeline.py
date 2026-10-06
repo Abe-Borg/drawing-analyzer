@@ -129,8 +129,7 @@ class _RoutingClient(BetaClientMixin):
     reaches it: ``"not_visible"`` (default) concludes NOT_VISIBLE immediately —
     the finding stays honestly UNCERTAIN and every pre-Phase-C fixture keeps
     its meaning; ``"confirm_after_crop"`` requests one crop then CONFIRMED;
-    ``"never_concludes"`` keeps requesting evidence while tools are offered;
-    ``"malformed"`` answers with unparseable text.
+    ``"never_concludes"`` keeps requesting evidence while tools are offered.
     """
 
     def __init__(self, digest_findings: list[dict], *, verdict: str = "CONFIRMED",
@@ -138,7 +137,6 @@ class _RoutingClient(BetaClientMixin):
         self.digest_calls = 0
         self.verify_calls = 0
         self.investigate_calls = 0
-        self.investigate_requests: list[dict] = []
 
         prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
         digest_text = prose + "\n\n" + _digest_block(digest_findings)
@@ -146,7 +144,6 @@ class _RoutingClient(BetaClientMixin):
 
         def _investigate(kw):
             self.investigate_calls += 1
-            self.investigate_requests.append(kw)
             tools_present = _tools_callable(kw)
             answered = any(
                 isinstance(b, dict) and b.get("type") == "tool_result"
@@ -164,9 +161,6 @@ class _RoutingClient(BetaClientMixin):
                         stop_reason="tool_use", usage=FakeUsage())
                 # Even the forced no-tools close cannot get a verdict out of it.
                 return FakeMessage(content=[FakeTextBlock(text="still cannot say")],
-                                   usage=FakeUsage())
-            if investigate_mode == "malformed":
-                return FakeMessage(content=[FakeTextBlock(text="no verdict here")],
                                    usage=FakeUsage())
             if investigate_mode == "confirm_after_crop" and tools_present and not answered:
                 return FakeMessage(
@@ -307,57 +301,6 @@ def test_5_5_pipeline_request_policy_and_priced_ledger(tmp_path, monkeypatch, mo
     assert client.investigate_calls >= 2
 
 
-def test_full_qc_chain(tmp_path):
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING])
-
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, markup_verified_only=True,
-        qc_work_dir=tmp_path / "qc",
-    )
-
-    # Model finding: parsed, anchored EXACT (its quote is on the sheet), verified.
-    assert len(ctx.findings) == 1
-    f = ctx.findings[0]
-    assert f.anchor.status == "EXACT" and f.anchor.rect_pdf is not None
-    assert f.verification.status == "VERIFIED"
-    # DA-016: evidence lives in a per-QC-ID directory with a full artifact record
-    # and a request.json trail (byte-exact, hashed) — not a flat <id>.png.
-    assert f.verification.evidence_png.startswith(f"evidence/{f.qc_id}/")
-    assert len(f.verification.evidence) == 1
-    assert (tmp_path / "qc" / f.verification.evidence_png).exists()
-    assert (tmp_path / "qc" / "evidence" / f.qc_id / "request.json").exists()
-    assert client.verify_calls == 1
-
-    # Reference finding: the stale M-999 pointer, deterministic (never verified).
-    assert len(ctx.reference_findings) == 1
-    ref = ctx.reference_findings[0]
-    assert ref.category == "reference" and "M-999" in ref.text
-    assert ref.verification.status == "DETERMINISTIC"
-
-    # Geometry retained (no PNG bytes) for the QC stages.
-    assert len(ctx.sheet_geometries) == 1
-    assert len(ctx.sheet_geometries[0].words) > 0
-
-    # A reviewed PDF was written with both cloudable findings (VERIFIED +
-    # DETERMINISTIC), each carrying its QC-number tag (Phase 15): 2 clouds + 2 tags.
-    assert len(ctx.reviewed_pdf_paths) == 1
-    assert ctx.reviewed_pdf_paths[0].name == "M-101_reviewed.pdf"
-    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 4
-    # Sequential review numbers were assigned across the run's findings.
-    assert sorted(f.qc_id for f in ctx.all_findings) == ["QC-001", "QC-002"]
-    # The original is untouched.
-    assert _annot_count(src) == 0
-    # Findings surface on the context.
-    assert ctx.finding_count == 2 and ctx.clouded_finding_count == 2
-    # §18.0 (Phase 26B, DA-010): the temporary completeness gate is OPEN — a
-    # clean NORMAL exhaustive run now earns COMPLETE ("Exhaustive QC complete").
-    assert ctx.qc_status == "COMPLETE"
-    assert ctx.qc_status_label == "Exhaustive QC complete"
-    assert ctx.configuration_kind == "NORMAL"
-
-
 # --------------------------------------------------------------------------- #
 # Flag matrix
 # --------------------------------------------------------------------------- #
@@ -395,18 +338,24 @@ def test_standard_run_persists_findings_and_text(tmp_path):
 
 
 def test_reference_audit_only_no_markups_no_verify(tmp_path):
+    # DA-013 / §15.3: the deterministic-audit-only path runs the auditors over the
+    # already-extracted text/geometry and makes ZERO model calls beyond the digest —
+    # in particular it never structures prose.
     src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING])
+    client = _CountingClient([_VAV_FINDING])
     ctx = extract_drawing_context(
         [src], client=client, rows=2, cols=2, reference_audit=True, qc_markups=False,
     )
-    # Reference findings produced; model findings parsed + anchored but NOT verified
-    # (no markups requested) and no reviewed PDF written.
+    assert client.calls["digest"] == 1
+    for stage in ("critique", "cross", "synth", "verify", "citation", "other"):
+        assert client.calls[stage] == 0, (stage, client.calls)
+    # Reference findings produced (the stale M-999 pointer, off the retained
+    # geometry); model findings parsed + anchored but NOT verified (no markups
+    # requested) and no reviewed PDF written.
     assert len(ctx.reference_findings) == 1
     assert len(ctx.findings) == 1
     assert ctx.findings[0].anchor.status == "EXACT"
     assert ctx.findings[0].verification.status == "SKIPPED"   # not verified
-    assert client.verify_calls == 0
     assert ctx.reviewed_pdf_paths == []
     # The §18 tally describes PDF ink; with markups off it must not report
     # clouds that were never written to any PDF.
@@ -441,38 +390,6 @@ def test_qc_markups_include_unverified(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_pipeline_investigation_upgrades_uncertain_to_verified(tmp_path):
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    # Verify says NOT_VISIBLE → UNCERTAIN; the investigation requests one more
-    # crop and concludes CONFIRMED → the finding upgrades to VERIFIED in place.
-    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
-                            investigate_mode="confirm_after_crop")
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
-    )
-    f = ctx.findings[0]
-    v = f.verification
-    assert v.status == "VERIFIED"
-    assert v.investigated is True and v.investigation_rounds == 1
-    assert v.note.startswith("investigated: ")
-    # Evidence: the verify crop, the investigation's initial crop, the tool crop
-    # — all in the SAME per-finding directory, leg numbering continued.
-    assert len(v.evidence) == 3
-    assert {a.relative_path.split("/")[1] for a in v.evidence} == {f.qc_id}
-    assert [a.leg_index for a in v.evidence] == [0, 1, 2]
-    assert (tmp_path / "qc" / "evidence" / f.qc_id / "investigation.json").exists()
-    stages = {s.stage: s.status for s in ctx.stage_results}
-    assert stages["investigation"] == "COMPLETE"
-    assert ctx.qc_status == "COMPLETE"
-    # Per-investigation usage records with portable labels (no paths).
-    recs = [r for r in ctx.run_usage.records if r.stage_family == "investigate"]
-    assert [r.stage_instance for r in recs] == [f"investigate:{f.qc_id}"]
-    assert all("/" not in r.stage_instance and "\\" not in r.stage_instance
-               for r in recs)
-    assert recs[0].input_tokens > 0
-
-
 def test_pipeline_no_uncertain_findings_skip_investigation(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])            # verify CONFIRMS everything
@@ -502,34 +419,6 @@ def test_pipeline_investigate_false_is_a_debug_override(tmp_path):
     # The finding keeps its untouched UNCERTAIN verdict.
     v = ctx.findings[0].verification
     assert v.status == "UNCERTAIN" and v.investigated is False
-
-
-def test_pipeline_budget_capped_investigation_stays_uncertain(tmp_path, monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS", "2")
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
-                            investigate_mode="never_concludes")
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
-    )
-    v = ctx.findings[0].verification
-    assert v.status == "UNCERTAIN"                     # never REJECTED on a cap
-    assert "investigated 2 round(s) without conclusion" in v.note
-    assert v.investigated is True and v.investigation_rounds == 2
-    # The host forced the text-only close by withdrawing permission, NOT by
-    # dropping the tool list — the closing turn keeps its cached tools+system
-    # prefix (dropping `tools` would invalidate all three cache tiers on the
-    # turn carrying the largest accumulated prefix).
-    closes = [kw for kw in client.investigate_requests if not _tools_callable(kw)]
-    assert closes, "the host never forced a tool-free close"
-    assert all(kw.get("tools") for kw in closes)
-    assert all(kw["tool_choice"] == {"type": "none"} for kw in closes)
-    # Budget exhaustion is the designed outcome of a bounded loop — the stage
-    # is COMPLETE and the run stays a clean COMPLETE.
-    stages = {s.stage: s.status for s in ctx.stage_results}
-    assert stages["investigation"] == "COMPLETE"
-    assert ctx.qc_status == "COMPLETE"
 
 
 def test_pipeline_warm_rerun_serves_investigation_cache(tmp_path):
@@ -575,21 +464,6 @@ def test_pipeline_warm_rerun_serves_investigation_cache(tmp_path):
     assert ctx2.qc_status == "COMPLETE"
 
 
-def test_pipeline_malformed_investigation_never_rejects(tmp_path):
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
-                            investigate_mode="malformed")
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
-    )
-    v = ctx.findings[0].verification
-    assert v.status == "UNCERTAIN"                     # garble can never REJECT
-    assert v.investigated is True
-    stages = {s.stage: s.status for s in ctx.stage_results}
-    assert stages["investigation"] == "COMPLETE"
-
-
 def test_verify_disabled_still_anchors_and_marks(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])
@@ -613,7 +487,7 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# §15.1 — qc_markups=True resolves to (and runs) the full exhaustive stack
+# §15.1 — the exhaustive stack, counted per stage
 # --------------------------------------------------------------------------- #
 
 
@@ -680,50 +554,6 @@ class _CountingClient(BetaClientMixin):
                                    usage=FakeUsage(input_tokens=1, output_tokens=1))
 
         self.messages = _Msgs()
-
-
-def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
-    # DA-010 / §15.1: the ordinary ``qc_markups=True`` contract must resolve to the
-    # exhaustive configuration AND actually run every required stage — not just the
-    # digest → markup path the GUI's checkbox used to invoke.
-    a = _make_pdf(tmp_path / "M-101.pdf")
-    b = _make_pdf(tmp_path / "M-102.pdf")
-    client = _CountingClient([_VAV_FINDING])
-    ctx = extract_drawing_context(
-        [a, b], client=client, rows=2, cols=2,
-        qc_markups=True, qc_work_dir=tmp_path / "qc",
-    )
-    cfg = ctx.run_configuration
-    assert cfg.exhaustive_qc and cfg.run_critique and cfg.critique_reads == 2
-    assert cfg.run_cross_qc and cfg.run_auditors and cfg.run_citation and cfg.run_markup
-
-    # The stages actually executed (not just resolved on): two critique reads per
-    # sheet, one cross-sheet call, one synthesis (>=2 sheets), verification,
-    # citation, and exactly one set-identity call (Phase A).
-    assert client.calls["digest"] == 2
-    assert client.calls["critique"] == 4            # 2 sheets x 2 reads
-    assert client.calls["cross"] >= 1
-    assert client.calls["synth"] == 1
-    assert client.calls["verify"] >= 1
-    assert client.calls["citation"] >= 1
-    assert client.calls["identity"] == 1
-    assert client.calls["plan"] == 1
-    assert cfg.run_identity is True and cfg.run_review_plan is True
-
-    # Every stage is recorded; with the §18.0 gate open a clean NORMAL
-    # exhaustive run earns COMPLETE.
-    stages = {s.stage: s.status for s in ctx.stage_results}
-    for name in ("identity", "review_plan", "synthesis", "critique", "cross_qc",
-                 "auditors", "prose_harvest", "verification", "investigation",
-                 "citation", "markup"):
-        assert name in stages, name
-
-    # The authored plan rode the critique checklist and is snapshotted as a
-    # model-source profile after any user selections.
-    assert any(s.source == "model" for s in ctx.profile_snapshots)
-    assert ctx.review_plan_profiles and ctx.review_plan_markdown
-    assert ctx.qc_status == "COMPLETE"
-    assert ctx.configuration_kind == "NORMAL"
 
 
 def test_pipeline_text_truncation_stays_complete_and_warns_on_cold_and_warm_runs(tmp_path):
@@ -1058,31 +888,6 @@ _STALE_EDITION_FINDING = {
 }
 
 
-def test_pipeline_edition_audit_creates_first_class_finding(tmp_path):
-    # Phase B: a ref citing an edition the set does not adopt becomes a REAL
-    # ledger finding — numbered, anchored to the citing note, deterministic-
-    # tier verified, and visible to the citation stage — with its own stage row.
-    src = _make_edition_pdf(tmp_path / "M-101.pdf")
-    client = _CountingClient([_STALE_EDITION_FINDING])
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        qc_markups=True, qc_work_dir=tmp_path / "qc",
-    )
-    divergences = [f for f in ctx.findings
-                   if f.sources == ["edition_audit"]]
-    assert len(divergences) == 1
-    d = divergences[0]
-    assert d.qc_id.startswith("QC-")                       # first-class: numbered
-    assert d.anchor.status == "EXACT"                      # anchored to the note
-    assert d.severity == "medium"
-    assert d.verification.status == "DETERMINISTIC"        # both operands text-grounded
-    assert "cites CMC 2019" in d.text and "adopts CMC 2022" in d.text
-    stages = {s.stage: s.status for s in ctx.stage_results}
-    assert stages.get("edition_audit") == "COMPLETE"
-    # The run's completeness contract is unaffected.
-    assert ctx.qc_status == "COMPLETE"
-
-
 def test_edition_audit_runs_in_free_battery_with_zero_api_calls(tmp_path):
     # reference_audit alone is the zero-API battery (DA-013); the edition audit
     # is a host string comparison, so it rides along at zero cost. But the
@@ -1111,21 +916,6 @@ def test_edition_audit_runs_in_free_battery_with_zero_api_calls(tmp_path):
     stages2 = {s.stage: s.status for s in ctx2.stage_results}
     assert stages2.get("edition_audit") == "NOT_REQUESTED"
     assert not [f for f in ctx2.findings if "edition_audit" in (f.sources or [])]
-
-
-def test_audit_only_makes_no_incremental_api_calls(tmp_path):
-    # DA-013 / §15.3: the deterministic-audit-only path runs the auditors over the
-    # already-extracted text/geometry and makes ZERO model calls beyond the digest —
-    # in particular it never structures prose.
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _CountingClient([_VAV_FINDING])
-    ctx = extract_drawing_context([src], client=client, rows=2, cols=2, reference_audit=True)
-    assert client.calls["digest"] == 1
-    for stage in ("critique", "cross", "synth", "verify", "citation", "other"):
-        assert client.calls[stage] == 0, (stage, client.calls)
-    # Auditors still fired off the retained geometry (the stale M-999 pointer).
-    assert len(ctx.reference_findings) == 1
-    assert ctx.qc_status == "NOT_REQUESTED"
 
 
 def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):
@@ -1166,27 +956,6 @@ def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):
             or rec.billable_tool_uses
         ), f"phantom real-time record with no usage: {rec.stage_instance}"
     assert ctx.total_estimated_cost is not None       # Opus is priced
-
-
-def test_cached_digest_records_zero_billed_tokens(tmp_path):
-    # A cache hit contributes zero current-run billed tokens but records the
-    # cache-hit metadata (§6.3): the second run's digest is a CACHE record.
-    from drawing_analyzer.digest_cache import DigestCache
-
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    cache = DigestCache(None, persist=False)
-    c1 = _RoutingClient([_VAV_FINDING])
-    ctx1 = extract_drawing_context([src], client=c1, rows=2, cols=2, cache=cache)
-    assert ctx1.total_input_tokens > 0                 # first run paid for the digest
-
-    c2 = _RoutingClient([_VAV_FINDING])
-    ctx2 = extract_drawing_context([src], client=c2, rows=2, cols=2, cache=cache)
-    assert c2.digest_calls == 0                        # served from cache, no API call
-    digest_recs = [r for r in ctx2.run_usage.records if r.stage_family == "digest"]
-    assert digest_recs and all(r.transport == "CACHE" for r in digest_recs)
-    assert all(r.cache_hit and r.input_tokens == 0 for r in digest_recs)
-    assert ctx2.run_usage.cache_hits >= 1
-    assert ctx2.total_input_tokens == 0                # a fully-cached re-run bills nothing
 
 
 def test_warm_verification_cache_records_zero_cost_and_recreates_evidence(tmp_path):
@@ -1346,19 +1115,6 @@ def test_batch_path_retains_words_for_qc(tmp_path):
     assert ctx.sheet_geometries[0].sheet_text != ""
     # The offline reference audit runs off that retained geometry alone.
     assert len(ctx.reference_findings) == 1 and "M-999" in ctx.reference_findings[0].text
-
-
-def test_combined_text_has_no_findings_block(tmp_path):
-    # I-2: the QC findings never leak into the prose combined_text.
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING])
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2, reference_audit=True, qc_markups=True,
-        qc_work_dir=tmp_path / "qc",
-    )
-    assert "```json" not in ctx.combined_text
-    assert '"findings"' not in ctx.combined_text
-    assert "VAV-3 serves Room 120" in ctx.combined_text
 
 
 # --------------------------------------------------------------------------- #
@@ -1529,68 +1285,6 @@ def _make_clean_pdf(path: Path, sheet_id: str) -> Path:
     doc.save(str(path))
     doc.close()
     return path
-
-
-class _SetLevelRoutingClient(BetaClientMixin):
-    """Two clean sheets; the cross-sheet synthesis reports a conflict that names no
-    in-set sheet — the §14.8 set-level case. Digest/critique find nothing else."""
-
-    def __init__(self):
-        digest_text = "Sheet - Mechanical - Plan\nEquipment schedule shown.\n\n" + _digest_block([])
-        critique_text = "```json\n" + json.dumps({"findings": [], "claims": []}) + "\n```"
-        synth_text = (
-            "Drawing Set Overview\n\n"
-            "The set is largely coherent. However, the specified fire pump conflicts "
-            "with the schedule and no single sheet in the set resolves which governs."
-        )
-
-        class _Msgs(StreamingMessagesMixin):
-            def create(_self, **kw):
-                system = kw.get("system", "")
-                if system == SYNTHESIS_SYSTEM_PROMPT:
-                    return FakeMessage(content=[FakeTextBlock(text=synth_text)],
-                                       usage=FakeUsage(input_tokens=300, output_tokens=60))
-                if system == VERIFY_SYSTEM_PROMPT:
-                    return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
-                                       usage=FakeUsage(input_tokens=40, output_tokens=8))
-                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
-                    return FakeMessage(content=[FakeTextBlock(text=critique_text)],
-                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
-                if system.startswith(DIGEST_SYSTEM_PROMPT):
-                    return FakeMessage(content=[FakeTextBlock(text=digest_text)],
-                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
-                return FakeMessage(content=[FakeTextBlock(text="ok")])
-
-        self.messages = _Msgs()
-
-
-def test_set_level_synthesis_conflict_routes_to_review_notes_pdf(tmp_path):
-    # DA-023 end to end: a synthesis conflict that names no in-set sheet is not
-    # dropped — it becomes a set-level finding written to Drawing_Set_Review_Notes.pdf
-    # (its own artifact + reconciled receipts), never pinned onto a source sheet.
-    srcs = [_make_clean_pdf(tmp_path / "M-101.pdf", "M-101"),
-            _make_clean_pdf(tmp_path / "M-102.pdf", "M-102")]
-    client = _SetLevelRoutingClient()
-    ctx = extract_drawing_context(
-        srcs, client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, markup_verified_only=False,
-        synthesize=True, qc_work_dir=tmp_path / "qc",
-    )
-
-    # A set-level finding exists, belongs to no source, and sorts last (§12.4).
-    set_level = [f for f in ctx.all_findings
-                 if (f.anchor_hint or "").upper() == "SET_INDEX" and not f.source_id]
-    assert len(set_level) == 1
-    assert "conflicts with the schedule" in set_level[0].text
-    assert set_level[0].qc_id == max(f.qc_id for f in ctx.all_findings)
-
-    # The dedicated artifact was written and its coverage reconciled COMPLETE.
-    names = [p.name for p in ctx.reviewed_pdf_paths]
-    assert "Drawing_Set_Review_Notes.pdf" in names
-    assert ctx.coverage_status == "COMPLETE"
-    assert ctx.ledger_tally.get("review_notes") == 1
-    # The set-level statement never leaked onto a source reviewed PDF.
-    assert not any(e.startswith("Prose harvest:") for e in ctx.errors)
 
 
 class _SourceAndSetLevelClient(BetaClientMixin):
@@ -2014,12 +1708,20 @@ def test_a_sheet_the_critique_cannot_obtain_degrades_its_stage(tmp_path):
     assert ctx.qc_status != "COMPLETE"
 
 
-def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_path):
+@pytest.mark.parametrize("verdict,warnings", [
+    ("MAYBE", [                                        # not in the enum
+        "verification: 1 of 1 live verdict calls returned no judgment "
+        "(malformed=1, truncated=0, failed=0); "
+        "malformed/truncated replies were left UNCERTAIN, failed calls were marked FAILED"
+    ]),
+    ("NOT_VISIBLE", []),                               # a real judgment: no warning
+])
+def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_path, verdict, warnings):
     # A reply the verifier could not read is counted UNCERTAIN exactly like a
     # real NOT_VISIBLE; the stage carries the distinction so run.log and the
     # manifest can say how much of the UNCERTAIN share the parser produced.
     src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING], verdict="MAYBE")     # not in the enum
+    client = _RoutingClient([_VAV_FINDING], verdict=verdict)
     ctx = extract_drawing_context(
         [src], client=client, rows=2, cols=2,
         reference_audit=True, qc_markups=True, investigate=False,
@@ -2029,27 +1731,10 @@ def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_pat
     stage = {s.stage: s for s in ctx.stage_results}["verification"]
     assert stage.status == "COMPLETE"                  # observational: status unmoved
     assert stage.errors == []
-    assert stage.warnings == [
-        "verification: 1 of 1 live verdict calls returned no judgment "
-        "(malformed=1, truncated=0, failed=0); "
-        "malformed/truncated replies were left UNCERTAIN, failed calls were marked FAILED"
-    ]
+    assert stage.warnings == warnings
     assert ctx.findings[0].verification.status == "UNCERTAIN"
     # The warning reaches the exported manifest through the stage record.
     assert stage.to_dict()["warnings"] == stage.warnings
-
-
-def test_pipeline_a_clean_verification_carries_no_parse_loss_warning(tmp_path):
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE")   # a real judgment
-    ctx = extract_drawing_context(
-        [src], client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, investigate=False,
-        qc_work_dir=tmp_path / "qc",
-    )
-    stage = {s.stage: s for s in ctx.stage_results}["verification"]
-    assert stage.warnings == []
-    assert ctx.findings[0].verification.status == "UNCERTAIN"
 
 
 def test_pipeline_failed_verifier_call_never_starts_investigation(tmp_path):

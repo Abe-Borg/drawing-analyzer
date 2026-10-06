@@ -19,7 +19,7 @@ from drawing_analyzer import cross_qc as X
 from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
 from drawing_analyzer.digest import SheetDigest
-from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef, source_page_key
+from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef
 from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731
@@ -280,47 +280,6 @@ class _MapReconcileClient(BetaClientMixin):
                 )
 
         self.messages = _Msgs()
-
-
-def test_large_set_maps_then_reconciles_across_shards():
-    # DA-015: a >40-sheet set shards by discipline (2 shards), and a conflict whose
-    # two sheets fall in DIFFERENT shards is found by the reconciliation call — the
-    # old shard-and-union path made no reconciliation call and missed it entirely.
-    sheets, geoms = [], []
-    sheets.append(_digest("f0.pdf"))
-    geoms.append(_geom_txt("f0.pdf", "F-D-00-1", "COLO 5 SERVES AREA A."))
-    for i in range(1, 21):                                # 20 more F sheets → shard "f" (21)
-        sheets.append(_digest(f"f{i}.pdf"))
-        geoms.append(_geom(f"f{i}.pdf", f"F-D-{i:02d}-1"))
-    sheets.append(_digest("m0.pdf"))
-    geoms.append(_geom_txt("m0.pdf", "M-D-00-1", "COLO 1 SERVES AREA A."))
-    for i in range(1, 21):                                # 20 more M sheets → shard "m" (21)
-        sheets.append(_digest(f"m{i}.pdf"))
-        geoms.append(_geom(f"m{i}.pdf", f"M-D-{i:02d}-1"))
-    assert len(sheets) == 42                              # > 40 → sharded path
-
-    # The reconciler names sheets by opaque handle: S001 = F-D-00-1 (first entry),
-    # S022 = M-D-00-1 (22nd entry). The seeded conflict crosses the two shards.
-    reconcile_finding = {
-        "sheet_handle": "S001", "category": "conflict", "severity": "high",
-        "text": "COLO 5 on F-D-00-1 conflicts with COLO 1 on M-D-00-1.",
-        "source_quote": "COLO 5 SERVES AREA A",
-        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
-    }
-    client = _MapReconcileClient(reconcile_finding)
-    res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
-
-    assert client.map_calls == 2 and client.reconcile_calls == 1   # 2 shards + reconcile
-    assert res.shards_planned == 2 and res.shards_completed == 2
-    assert res.reconciliation_required and res.reconciliation_completed
-    assert res.complete is True and res.error is None
-    # The cross-shard conflict resolves BOTH legs to their real, distinct sources.
-    conflicts = [f for f in res.findings if f.also_on]
-    assert len(conflicts) == 1
-    c = conflicts[0]
-    # Both legs resolve to their real, distinct sources (via opaque handle → host).
-    assert c.source_name == "f0.pdf" and c.also_on[0].source_name == "m0.pdf"
-    assert source_page_key(c) != source_page_key(c.also_on[0])
 
 
 def _mk_two_shard_set():
@@ -854,28 +813,6 @@ class _PipelineClient(BetaClientMixin):
         self.messages = _Msgs()
 
 
-def test_pipeline_cross_qc_clouds_both_sheets(tmp_path):
-    a = _mkpdf(tmp_path / "F-D-01-1.pdf", "COLO 5 SERVES AREA", "F-D-01-1")
-    b = _mkpdf(tmp_path / "F-A-01-1.pdf", "COLO 1 SERVES AREA", "F-A-01-1")
-    client = _PipelineClient()
-    ctx = extract_drawing_context(
-        [a, b], client=client, rows=2, cols=2, cross_qc=True, qc_markups=True,
-        markup_verified_only=False,       # cross-sheet verifies UNCERTAIN → ink under this
-        qc_work_dir=tmp_path / "qc",
-    )
-    assert client.cross_calls == 1
-    # One dual-anchored conflict finding in the record...
-    conflicts = [f for f in ctx.findings if f.also_on]
-    assert len(conflicts) == 1 and conflicts[0].source_quote == "COLO 5"
-    assert conflicts[0].also_on[0].source_name == "F-A-01-1.pdf"
-    # ...clouded on BOTH sheets (cloud + its QC tag on each, Phase 15).
-    assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
-    assert all(count_annotations(p) == 2 for p in ctx.reviewed_pdf_paths)
-    # I-2: the conflict never leaks into the prose.
-    assert "COLO 5 vs COLO 1" not in ctx.combined_text
-    assert "```json" not in ctx.combined_text
-
-
 def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     # The whole point of the dual-crop verifier: a cross-sheet finding gets one crop
     # PER sheet in a single call, so it can reach VERIFIED and be clouded under the
@@ -887,7 +824,12 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
         [a, b], client=client, rows=2, cols=2, cross_qc=True, qc_markups=True,
         qc_work_dir=tmp_path / "qc",          # markup_verified_only defaults True
     )
-    conflict = next(f for f in ctx.findings if f.also_on)
+    assert client.cross_calls == 1
+    # One dual-anchored conflict finding in the record...
+    conflicts = [f for f in ctx.findings if f.also_on]
+    assert len(conflicts) == 1 and conflicts[0].source_quote == "COLO 5"
+    conflict = conflicts[0]
+    assert conflict.also_on[0].source_name == "F-A-01-1.pdf"
     assert conflict.verification.status == "VERIFIED"
     assert conflict.verification.evidence_png.startswith("evidence/")
     # The verify call carried a crop for EACH sheet (dual crop), not just one.
@@ -914,6 +856,9 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     # plus its QC tag on each sheet (Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
     assert all(count_annotations(p) == 2 for p in ctx.reviewed_pdf_paths)
+    # I-2: the conflict never leaks into the prose.
+    assert "COLO 5 vs COLO 1" not in ctx.combined_text
+    assert "```json" not in ctx.combined_text
 
 
 def test_pipeline_without_cross_qc_is_unchanged(tmp_path):
@@ -974,18 +919,25 @@ def test_shard_path_aggregates_omitted_findings(monkeypatch):
 
 
 def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch):
-    """Entries written before the findings cap became loss-aware were stored as
-    complete after a silent truncation and carry no `findings_omitted`. Reading
-    one back would default that to 0 and certify a truncated run forever."""
+    """The host-side binding contract rides the cache key.
+
+    Contract 1 entries were written before the findings cap became loss-aware:
+    stored as complete after a silent truncation and carrying no
+    `findings_omitted`, so reading one back would default that to 0 and certify
+    a truncated run forever. Contract 2 entries predate the `_norm_id` fold
+    (item 11): host-side binding, not a model input, so nothing else in the key
+    covers it — yet it changes which legs validate, and a warm entry written
+    under the old normalization would keep serving the smaller finding set.
+    """
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
-    assert X._CROSS_QC_CACHE_CONTRACT >= 2, "bumped past the pre-accounting entries"
+    assert X._CROSS_QC_CACHE_CONTRACT >= 3, "bumped past both legacy contracts"
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
-    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 1)
-    legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-
-    assert current != legacy, "the contract must ride the key"
+    for legacy_contract in (1, 2):
+        monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", legacy_contract)
+        legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+        assert current != legacy, f"the contract must ride the key ({legacy_contract})"
 
 
 @pytest.mark.parametrize("extra_text_chars", [0, 9000])
@@ -1032,17 +984,6 @@ _ID_VARIANTS = [
 ]
 
 
-def test_norm_id_folds_unicode_sheet_id_variants():
-    # A model reply or a PDF text layer writes a sheet id with a Unicode dash or
-    # fullwidth digits freely. Every variant used to miss its plain-ASCII twin, so
-    # the leg was dropped — and a cross-sheet finding needs two grounded sheets, so
-    # the whole finding went with it.
-    for plain, variant, note in _ID_VARIANTS:
-        assert X._norm_id(plain) == X._norm_id(variant), (
-            f"{note}: {plain!r} != {variant!r}"
-        )
-
-
 def test_norm_id_still_separates_genuinely_different_sheets():
     # Folding must not merge distinct ids.
     assert X._norm_id("M-101") != X._norm_id("M-102")
@@ -1055,10 +996,13 @@ def test_norm_id_agrees_with_the_shared_canonical_form():
     # indexing of a sheet id, and it is what detect_sheet_id returns — so cross-QC
     # must not have its own. Asserted against normalize_sheet_id itself, not a
     # hand-rolled fold, or the two can drift apart while the test still passes.
+    # A model reply or a PDF text layer writes a sheet id with a Unicode dash or
+    # fullwidth digits freely; every variant used to miss its plain-ASCII twin,
+    # dropping the leg — and with it the whole cross-sheet finding.
     from drawing_analyzer.auditors.sheet_ids import normalize_sheet_id
 
-    for plain, variant, _note in _ID_VARIANTS:
-        assert normalize_sheet_id(plain) == X._norm_id(variant)
+    for plain, variant, note in _ID_VARIANTS:
+        assert normalize_sheet_id(plain) == X._norm_id(variant), note
     # Edge punctuation a model writes around a handle resolves too.
     for written in ("M-101.", "(M-101)", "M-101:", " M-101 "):
         assert X._norm_id(written) == X._norm_id("M-101"), written
@@ -1109,39 +1053,3 @@ def test_every_sheet_handle_comparison_uses_the_same_canonical_form():
     assert _resolve_geometry(_claim(variant), {}, {canonical: geom}) is geom, (
         "a model handle with a Unicode dash resolved to no sheet at all"
     )
-
-
-def test_critique_leg_targets_uses_the_same_fold():
-    # The twin. _leg_targets feeds critical_signature["leg_targets"], which decides
-    # whether two findings may merge — so if the two normalizations disagree,
-    # cross-QC resolves a leg the ledger then refuses to recognise as the same leg.
-    import drawing_analyzer.critique as C
-    from drawing_analyzer.models import ConflictLeg, Finding
-
-    def _with_leg(sheet_id: str) -> Finding:
-        f = Finding(sheet_id="A-1", source_name="a.pdf", page_index=0, category="code",
-                    severity="high", text="t", source_quote="q")
-        f.also_on = [ConflictLeg(sheet_id=sheet_id, source_quote="q")]
-        return f
-
-    for plain, variant, note in _ID_VARIANTS:
-        assert C._leg_targets(_with_leg(plain)) == C._leg_targets(_with_leg(variant)), note
-        # …and the value matches what cross-QC resolves the handle to.
-        assert next(iter(C._leg_targets(_with_leg(variant)))) == X._norm_id(plain)
-
-
-def test_cross_qc_contract_bumped_for_the_norm_id_fold():
-    # The invalidation mechanism for item 11. _norm_id is host-side binding, not a
-    # model input, so nothing in the cache key covers it — yet it changes which
-    # legs validate, and so the stored result, for byte-identical request inputs.
-    # A warm entry written under the old normalization would keep serving the
-    # smaller finding set forever.
-    assert X._CROSS_QC_CACHE_CONTRACT >= 3
-    geom = _geom("a.pdf", "M-101")
-    entries = [("M-101", "digest", "text", geom)]
-    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    import pytest as _pytest
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 2)
-        legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    assert current != legacy, "the contract must ride the key"

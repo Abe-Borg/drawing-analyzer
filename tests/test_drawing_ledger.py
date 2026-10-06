@@ -272,6 +272,13 @@ def test_harvest_five_prose_items_three_matched_two_structured():
     assert {s for e in stragglers for s in e.sources} <= {
         "digest_prose_coordination", "digest_prose_conflict"
     }
+    # §14.9: every enumerated prose item reaches a ledger entry — the expected id
+    # set equals the accounted id set, nothing is missing, and every enumerated id
+    # is attached to exactly one ledger entry.
+    assert res.missing == 0 and res.complete is True
+    assert set(res.expected_ids) == set(res.accounted_ids)
+    attached = [pid for e in ledger.entries for pid in e.prose_item_ids]
+    assert sorted(attached) == sorted(res.expected_ids)
 
 
 def test_harvest_structuring_failure_degrades_to_sheet_entry():
@@ -531,8 +538,11 @@ def test_focus_items_harvested_only_behind_the_toggle():
         "**Focus findings**\n- Room 120 has two floor sinks near the east wall area."
     )
     off = Ledger()
-    harvest_prose(off, [digest], [_Geom()], client=None, sleep=lambda *_: None)
+    res_off = harvest_prose(off, [digest], [_Geom()], client=None, sleep=lambda *_: None)
     assert len(off) == 0                           # default OFF: focus is not QC
+    # §14.9: the items present but not harvested are counted as an explicit
+    # intentional exclusion, not silently ignored.
+    assert res_off.excluded_focus == 1 and res_off.items == 0
 
     on = Ledger()
     res = harvest_prose(
@@ -592,32 +602,6 @@ def test_synthesis_sheet_id_matching_is_boundary_aware():
 # --------------------------------------------------------------------------- #
 # Phase 22 — prose-item id reconciliation (§14.6/§14.9) and set-level (§14.8)
 # --------------------------------------------------------------------------- #
-
-
-def test_harvest_reconciles_every_enumerated_item():
-    # §14.9: every enumerated prose item must reach a ledger entry — the expected
-    # id set equals the accounted id set and nothing is missing.
-    ledger = Ledger()
-    ledger.add([
-        _f("Penetration at grid C-4 must be sleeved by structural", cat="coordination"),
-        _f("FP riser shares a chase with the plumbing vent; verify the access panel",
-           cat="coordination"),
-        _f("Note 7 says relief at 175 psi but the schedule row shows 165 psi", cat="conflict"),
-    ], "digest_json")
-    client = _structuring_client([
-        _finding_block("Fire pump equipment pad is shown by another discipline."),
-        _finding_block("Riser diagram shows a check valve the plan never draws."),
-    ])
-    res = harvest_prose(
-        ledger, [_Digest(_FIVE_ITEM_DIGEST)],
-        [_Geom(sheet_text="CHECK VALVE AT RISER", words=[_titleblock_word("F-D-01-1")])],
-        client=client, sleep=lambda *_: None,
-    )
-    assert res.items == 5 and res.missing == 0 and res.complete is True
-    assert set(res.expected_ids) == set(res.accounted_ids)
-    # Every enumerated id is attached to exactly one ledger entry.
-    attached = [pid for e in ledger.entries for pid in e.prose_item_ids]
-    assert sorted(attached) == sorted(res.expected_ids)
 
 
 def test_harvest_per_item_failure_is_isolated_and_recovered():
@@ -688,16 +672,6 @@ def test_harvest_unresolvable_synthesis_conflict_becomes_set_level():
     e = ledger.entries[0]
     assert e.anchor_hint == "SET_INDEX" and e.source_id == "" and e.page_index == -1
     assert e.prose_item_ids and "conflicts with the schedule" in e.text
-
-
-def test_focus_off_counts_intentional_exclusion():
-    # §14.9: focus items present but not harvested (toggle off) are counted as an
-    # explicit intentional exclusion, not silently ignored.
-    digest = _Digest(
-        "**Focus findings**\n- Room 120 has two floor sinks near the east wall area."
-    )
-    res = harvest_prose(Ledger(), [digest], [_Geom()], client=None, sleep=lambda *_: None)
-    assert res.excluded_focus == 1 and res.items == 0
 
 
 def test_identical_note_on_two_pages_of_one_source_stays_two_items():

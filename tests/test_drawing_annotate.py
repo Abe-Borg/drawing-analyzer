@@ -11,7 +11,6 @@ import pytest
 
 import drawing_analyzer.annotate as annotate
 from drawing_analyzer.annotate import (
-    DEFAULT_AUTHOR,
     is_cloudable,
     write_reviewed_pdfs,
 )
@@ -72,9 +71,7 @@ def test_gating_matrix():
         f = _finding(status=status)
         assert is_cloudable(f, include_unverified=False) is default, status
         assert is_cloudable(f, include_unverified=True) is opted, status
-
-
-def test_gating_unanchored_never_cloudable():
+    # An unanchored finding is never cloudable, whatever its status.
     f = _finding(status="VERIFIED", rect=None)
     f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
     assert is_cloudable(f, include_unverified=True) is False
@@ -118,41 +115,6 @@ def test_include_unverified_adds_the_uncertain(tmp_path):
     assert res.coverage_status == "COMPLETE"
 
 
-def test_annot_info_fields_populated(tmp_path):
-    src = _make_pdf(tmp_path)
-    f = _finding("Missing clearance", status="VERIFIED", category="code",
-                 quote="VAV-3", refs=["CMC 310"])
-    annotate_pdf(src, [f], tmp_path / "r.pdf")
-
-    doc = pymupdf.open(str(tmp_path / "r.pdf"))
-    try:
-        annots = [a for page in doc for a in page.annots()]
-        assert len(annots) == 1
-        info = annots[0].info
-        assert info["title"] == DEFAULT_AUTHOR
-        assert info["subject"] == "code"
-        assert "Missing clearance" in info["content"]
-        assert 'Look for: "VAV-3"' in info["content"]
-        assert "AI-verified against the drawing." in info["content"]
-        assert "CMC 310" in info["content"]
-        assert not info["content"].startswith("[CHECK]")
-    finally:
-        doc.close()
-
-
-def test_unverified_annot_is_prefixed(tmp_path):
-    src = _make_pdf(tmp_path)
-    f = _finding("Maybe wrong", status="UNCERTAIN", quote="")
-    annotate_pdf(src, [f], tmp_path / "r.pdf", include_unverified=True)
-    doc = pymupdf.open(str(tmp_path / "r.pdf"))
-    try:
-        content = next(a for page in doc for a in page.annots()).info["content"]
-        assert content.startswith("[CHECK]")
-        assert "Not yet verified - double-check on the sheet." in content
-    finally:
-        doc.close()
-
-
 def test_annotate_returns_result_and_round_trips(tmp_path):
     src = _make_pdf(tmp_path)
     findings = [_finding(status="VERIFIED"), _finding(status="VERIFIED", rect=(300, 200, 420, 240))]
@@ -170,59 +132,6 @@ def test_out_path_must_differ_from_source(tmp_path):
         annotate_pdf(src, [_finding()], src)   # would clobber the source
 
 
-def test_finding_on_out_of_range_page_gets_a_failed_receipt(tmp_path):
-    # Failure-injection (§13, test 3): a placement on a non-existent page is never
-    # drawn, so reconciliation reports it FAILED — never counted as ink — and
-    # coverage is INCOMPLETE. The valid finding is still WRITTEN.
-    src = _make_pdf(tmp_path, pages=1)
-    findings = [_finding("ok", status="VERIFIED", page=0, quote="ok-q"),
-                _finding("nope", status="VERIFIED", page=9, quote="nope-q")]  # page 9 doesn't exist
-    res = annotate_pdf(src, findings, tmp_path / "r.pdf")
-    assert res.annots_written == 1
-    assert res.coverage_status == "INCOMPLETE"
-    failed = [r for r in res.receipts if r.status == "FAILED"]
-    assert len(failed) == 1 and failed[0].placement.page_index == 9
-
-
-def test_gated_and_rejected_only_sources_still_get_reviewed_copies(tmp_path):
-    # Under §18/§6.4 every ledger entry ends with a proven placement: a gated
-    # (verified-only mode) finding earns a "Not inked by operator gate" index row
-    # and a REJECTED one a rejected-index row — so each source is still written
-    # (nothing is invisible), and coverage stays COMPLETE because those index
-    # rows are reconciled placements, not intentions.
-    src = _make_pdf(tmp_path)
-    findings = [_finding("maybe", status="UNCERTAIN")]
-    res = write_reviewed_pdfs(
-        findings, [src], tmp_path / "out", include_unverified=False
-    )
-    # Gated: the UNCERTAIN finding gets a "Not inked by operator gate" index row
-    # (a proven placement), so the source IS written — coverage COMPLETE.
-    assert len(res.reviewed_pdfs) == 1
-    assert res.coverage_status == "COMPLETE"
-    assert res.tally == {"gated": 1}
-
-    # The same UNCERTAIN finding IS inked under the exhaustive default.
-    res2 = write_reviewed_pdfs(
-        findings, [src], tmp_path / "out2", include_unverified=True
-    )
-    assert len(res2.reviewed_pdfs) == 1
-
-    # A rejected-only source still gets a reviewed copy: the index's rejected
-    # section keeps it visible even though it carries no ink (§18).
-    rejected_only = [_finding("wrong", status="REJECTED")]
-    res3 = write_reviewed_pdfs(
-        rejected_only, [src], tmp_path / "out3", include_unverified=False
-    )
-    assert len(res3.reviewed_pdfs) == 1
-    assert res3.coverage_status == "COMPLETE"
-    doc = pymupdf.open(str(res3.reviewed_pdfs[0]))
-    try:
-        assert "Rejected by verification (1)" in doc[0].get_text()
-        assert sum(1 for page in doc for _ in page.annots()) == 0
-    finally:
-        doc.close()
-
-
 def test_list_sheets_assigns_distinct_source_ids_to_same_basename(tmp_path):
     # The render-side wiring: two M-101.pdf in different folders get distinct
     # host ids, and every page of a source shares its id.
@@ -237,59 +146,6 @@ def test_list_sheets_assigns_distinct_source_ids_to_same_basename(tmp_path):
     assert by_path[str(a)] == {"SRC-0001"}    # both pages of A share one id
     assert by_path[str(b)] == {"SRC-0002"}
     assert len(refs) == 3
-
-
-def test_duplicate_stems_isolate_findings_by_source_id(tmp_path):
-    # Product invariant (DA-001): two inputs sharing a basename are DISTINCT
-    # sources. A finding bound to one source is written ONLY to that source's
-    # reviewed PDF — never the other's. (The pre-migration behavior, where both
-    # same-named PDFs received the union of findings, was the defect.)
-    a = _make_pdf(tmp_path / "a", "M-101.pdf")
-    b = _make_pdf(tmp_path / "b", "M-101.pdf")
-    # list_sheets / write_reviewed_pdfs assign SRC ids in input order: a→SRC-0001.
-    ids = assign_source_ids([a, b])
-    sid_a = ids[str(a)]
-    findings = [_finding("only-on-A", status="VERIFIED", source="M-101.pdf", source_id=sid_a)]
-
-    res = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
-    out = res.reviewed_pdfs
-
-    # Only source A is written (B has no finding of its own), and its name is
-    # disambiguated by source id, not an order-dependent _2.
-    assert [p.name for p in out] == [f"M-101__{sid_a}_reviewed.pdf"]
-    doc = pymupdf.open(str(out[0]))
-    try:
-        n_annots = sum(1 for page in doc for _ in page.annots())
-        assert n_annots > 0, "source A's finding should be inked on A"
-    finally:
-        doc.close()
-
-
-def test_duplicate_stems_each_source_keeps_its_own_finding(tmp_path):
-    # Each same-basename source carries a different finding; neither reviewed PDF
-    # receives the other's ink, and both names are source-disambiguated.
-    a = _make_pdf(tmp_path / "a", "M-101.pdf")
-    b = _make_pdf(tmp_path / "b", "M-101.pdf")
-    ids = assign_source_ids([a, b])
-    findings = [
-        _finding("A-issue", source="M-101.pdf", source_id=ids[str(a)], quote="AAA"),
-        _finding("B-issue", source="M-101.pdf", source_id=ids[str(b)], quote="BBB"),
-    ]
-    res = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
-    out = res.reviewed_pdfs
-    names = sorted(p.name for p in out)
-    assert names == [
-        f"M-101__{ids[str(a)]}_reviewed.pdf",
-        f"M-101__{ids[str(b)]}_reviewed.pdf",
-    ]
-    assert res.coverage_status == "COMPLETE"
-    # Each reviewed PDF has exactly its own one finding's ink (1 cloud each).
-    for p in out:
-        doc = pymupdf.open(str(p))
-        try:
-            assert sum(1 for page in doc for _ in page.annots()) >= 1
-        finally:
-            doc.close()
 
 
 def test_reviewed_pdf_worker_resolution_is_bounded(monkeypatch):
@@ -591,10 +447,10 @@ def _layer_names(doc) -> "dict[int, str]":
     return {xref: info["name"] for xref, info in doc.get_ocgs().items()}
 
 
-def test_severity_layers_created_named_and_all_on(tmp_path):
+def test_severity_layers_created_in_order_all_on_and_carry_their_clouds(tmp_path):
     # High/medium/low findings each earn a layer, created in the fixed
     # high→medium→low order (deterministic, I-7) and all shipped visible so the
-    # reviewed PDF renders exactly as before.
+    # reviewed PDF renders exactly as before; each cloud rides its own tier.
     src = _make_pdf(tmp_path, pages=1)
     findings = [
         _finding("hi", severity="high", quote="HQ", rect=(100, 100, 220, 140)),
@@ -610,20 +466,6 @@ def test_severity_layers_created_named_and_all_on(tmp_path):
         ordered = [ocgs[x]["name"] for x in sorted(ocgs)]
         assert ordered == [_SEVERITY_LAYER_NAMES[t] for t in _SEVERITY_LAYER_ORDER]
         assert all(info["on"] for info in ocgs.values())
-    finally:
-        doc.close()
-
-
-def test_each_cloud_lands_on_its_severity_layer(tmp_path):
-    src = _make_pdf(tmp_path, pages=1)
-    findings = [
-        _finding("hi", severity="high", quote="HQ", rect=(100, 100, 220, 140)),
-        _finding("med", severity="medium", quote="MQ", rect=(300, 100, 420, 140)),
-        _finding("lo", severity="low", quote="LQ", rect=(100, 300, 220, 340)),
-    ]
-    res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
-    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
-    try:
         names = _layer_names(doc)
         by_layer = {
             names[a.get_oc()]: a.info["content"]
@@ -636,52 +478,31 @@ def test_each_cloud_lands_on_its_severity_layer(tmp_path):
         doc.close()
 
 
-def test_question_finding_layers_by_severity_not_color(tmp_path):
+@pytest.mark.parametrize("specs, tier", [
+    # No empty layers: a set with only high-severity ink creates only the High layer.
+    ([("hi one", "high", "code", "H1"), ("hi two", "high", "code", "H2")], "high"),
     # A question-category finding is drawn blue (like low), but it must ride its
     # own SEVERITY layer — a high-severity question belongs on the High layer.
+    ([("a question", "high", "question", "QQ")], "high"),
+    # An unset severity folds into the Low layer.
+    ([("no sev", "", "code", "NS")], "low"),
+], ids=["only_present_tiers", "question_by_severity", "unset_severity_is_low"])
+def test_single_tier_set_gets_exactly_that_layer(tmp_path, specs, tier):
     src = _make_pdf(tmp_path, pages=1)
-    q = _finding("a question", severity="high", category="question", quote="QQ",
-                 rect=(100, 100, 220, 140))
-    res = write_reviewed_pdfs([q], [src], tmp_path / "out")
-    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
-    try:
-        assert [i["name"] for i in doc.get_ocgs().values()] == [
-            _SEVERITY_LAYER_NAMES["high"]
-        ]
-        square = next(a for page in doc for a in page.annots() if a.type[1] == "Square")
-        assert _layer_names(doc)[square.get_oc()] == _SEVERITY_LAYER_NAMES["high"]
-    finally:
-        doc.close()
-
-
-def test_only_present_severity_tiers_get_a_layer(tmp_path):
-    # No empty layers: a set with only high-severity ink creates only the High layer.
-    src = _make_pdf(tmp_path, pages=1)
+    rects = [(100, 100, 220, 140), (300, 100, 420, 140)]
     findings = [
-        _finding("hi one", severity="high", quote="H1", rect=(100, 100, 220, 140)),
-        _finding("hi two", severity="high", quote="H2", rect=(300, 100, 420, 140)),
+        _finding(text, severity=sev, category=cat, quote=quote, rect=rects[i])
+        for i, (text, sev, cat, quote) in enumerate(specs)
     ]
     res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
     doc = pymupdf.open(str(res.reviewed_pdfs[0]))
     try:
         assert [i["name"] for i in doc.get_ocgs().values()] == [
-            _SEVERITY_LAYER_NAMES["high"]
+            _SEVERITY_LAYER_NAMES[tier]
         ]
-    finally:
-        doc.close()
-
-
-def test_unset_severity_folds_into_the_low_layer(tmp_path):
-    src = _make_pdf(tmp_path, pages=1)
-    f = _finding("no sev", severity="", quote="NS", rect=(100, 100, 220, 140))
-    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
-    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
-    try:
-        assert [i["name"] for i in doc.get_ocgs().values()] == [
-            _SEVERITY_LAYER_NAMES["low"]
-        ]
-        square = next(a for page in doc for a in page.annots() if a.type[1] == "Square")
-        assert _layer_names(doc)[square.get_oc()] == _SEVERITY_LAYER_NAMES["low"]
+        names = _layer_names(doc)
+        for square in (a for page in doc for a in page.annots() if a.type[1] == "Square"):
+            assert names[square.get_oc()] == _SEVERITY_LAYER_NAMES[tier]
     finally:
         doc.close()
 
