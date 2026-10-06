@@ -271,10 +271,9 @@ def _close_stage_executor(executor: ThreadPoolExecutor) -> None:
 def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
     """The billing transport for one digest record (§15.6).
 
-    A cache hit bills nothing (``CACHE``). A sheet that failed inside a Message
-    Batch and was rescued by a synchronous real-time call — or inlined when the
-    Files API 404'd — did NOT ride the Batches API, so it is billed at the full
-    real-time rate even on a ``use_batch`` run. Everything else follows the run's
+    A cache hit bills nothing (``CACHE``). A sheet inlined when the Files API
+    404'd did NOT ride the Batches API, so it is billed at the full real-time
+    rate even on a ``use_batch`` run. Everything else follows the run's
     transport: ``BATCH`` when batched, else ``REAL_TIME``.
     """
     if cached:
@@ -978,7 +977,6 @@ def _digest_sheets_via_batch(
     sheet), so the QC stages survive the upload.
     """
     from .batch_digest import (
-        RECOVERY_BATCH,
         collect_drawing_batch,
         submit_drawing_batch,
     )
@@ -1033,8 +1031,7 @@ def _digest_sheets_via_batch(
     # for the full 4h bound and returned nothing): the stuck batch is canceled
     # and every sheet recovered instead of the run coming back empty.
     #
-    # ``recovery_transport=RECOVERY_BATCH``: recovery ALWAYS stays on the batch
-    # transport. An unresolved sheet (per-item failure, or a stalled/sick batch)
+    # Recovery ALWAYS stays on the batch transport. An unresolved sheet (per-item failure, or a stalled/sick batch)
     # is resubmitted as a fresh batch — bounded rounds, each with its own stall
     # watch — so it keeps the 50% batch discount and the run never silently
     # degrades to full-rate real-time calls. When the rounds/budget are spent,
@@ -1049,7 +1046,6 @@ def _digest_sheets_via_batch(
         on_log=on_log,
         cleanup_in_background=True,
         retry_failed_items=True,
-        recovery_transport=RECOVERY_BATCH,
         reusable_upload_sink=reusable_upload_sink,
     )
 
@@ -3342,7 +3338,7 @@ def extract_drawing_context(
         if usage_attempts and not cached:
             # Batch recovery can produce more than one billable response for a
             # sheet (for example, an empty max_tokens response followed by a
-            # raised-cap retry, possibly ending in a real-time rescue). Preserve
+            # raised-cap retry). Preserve
             # each response as its own record so Batch and real-time rates are
             # applied independently. The runtime-only metadata is deliberately
             # absent on cache hits and never enters cache serialization.

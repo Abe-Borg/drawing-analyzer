@@ -22,7 +22,6 @@ from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.file_upload import upload_sheet_images
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import (
-    BetaClientMixin,
     FinalMessageStream,
     FakeBatchResult,
     FakeBatchResultEnvelope,
@@ -55,34 +54,10 @@ class _Obj:
         self.__dict__.update(kw)
 
 
-def _rescue_params(model: str) -> dict:
-    """Minimal request params shaped like a real batch item's: they must carry
-    a ``file_id``-referenced image block so the fake's ``messages.stream``
-    dispatcher (see :func:`_references_file_id`) recognizes a direct-call
-    rescue rather than the inline-base64 fallback."""
-    return {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "file", "file_id": "file_0"}}
-                ],
-            }
-        ],
-    }
-
-
-def _without_fallback_keys(params: dict) -> dict:
-    """Drop the Opus 5 refusal-fallback keys ``stream_message`` attaches, so a
-    rescue call's params can be compared against the original request body."""
-    return {k: v for k, v in params.items() if k not in ("betas", "fallbacks")}
-
-
 def _references_file_id(kwargs: dict) -> bool:
     """True when a ``messages.create``/``.stream`` call carries a ``file_id``-
-    referenced image block (the batch/rescue transport), as opposed to inline
-    base64 (the real-time/inline-fallback transport)."""
+    referenced image block (the batch transport), as opposed to inline base64
+    (the real-time/inline-fallback transport)."""
     for message in kwargs.get("messages", []):
         for block in message.get("content", []) or []:
             if not isinstance(block, dict):
@@ -186,20 +161,20 @@ class _FakeClient:
         status="ended",
         reverse_results=False,
         inline_responder=None,
-        rescue_responder=None,
     ):
         self.responder = responder
         self.status = status
         self.reverse_results = reverse_results
         self.inline_responder = inline_responder or _inline_ok
-        self.rescue_responder = rescue_responder or _rescue_ok
         self.create_calls: list[dict] = []
         self.retrieve_calls: list[str] = []
         self.cancel_calls: list[str] = []
         self.submitted: list[dict] = []
         # Synchronous ``messages.create`` calls (the inline-base64 fallback path).
         self.messages_create_calls: list[dict] = []
-        # Streamed ``beta.messages.stream`` calls (the direct-call rescue).
+        # Real-time calls that reference uploaded ``file_id``s. Recovery must
+        # never issue one (it stays on the batch transport), so tests assert
+        # this stays empty.
         self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
@@ -224,17 +199,15 @@ class _FakeClient:
     def _messages_stream(self, *, betas=None, **kwargs):
         """Dispatch ``client.messages.stream(...)`` by what the call carries.
 
-        Both the direct-call rescue (batch item params, ``file_id``-referenced
-        images) and the inline-base64 fallback (:func:`digest_sheet`, via
-        :func:`drawing_analyzer.digest.stream_message`) now go through this one
-        stable method — the Files-API beta namespace they used to split across
-        is gone. The fake tells them apart the same way the two transports
-        actually differ: a rescue call's content still references an uploaded
-        ``file_id``; an inline call embeds base64 image bytes instead.
+        The inline-base64 fallback (:func:`digest_sheet`, via
+        :func:`drawing_analyzer.digest.stream_message`) is the only legitimate
+        caller. A call whose content references an uploaded ``file_id`` would be
+        a full-rate real-time call on batch uploads; it is recorded in
+        ``rescue_calls`` so the recovery tests can assert it never happens.
         """
         if _references_file_id(kwargs):
             self.rescue_calls.append({"betas": betas, "params": kwargs})
-            return _FakeStreamManager(self.rescue_responder, kwargs)
+            return _FakeStreamManager(_rescue_ok, kwargs)
         return FinalMessageStream(self._messages_create(**kwargs))
 
 
@@ -289,11 +262,10 @@ def _inline_ok(_kwargs):
 
 
 def _rescue_ok(_kwargs):
-    """Default ``beta.messages.stream`` final message for the direct-call rescue.
+    """Final message for a real-time call on uploaded ``file_id``s.
 
-    The batch-backend outage fallback re-issues a still-failed batch item as
-    one streamed call on the same params/file_ids; this returns a non-empty
-    digest so the rescued sheet resolves OK.
+    Recovery must never issue one; if a regression does, the call still
+    resolves (so the test fails on its ``rescue_calls`` assertion, not here).
     """
     return FakeMessage(
         content=[FakeTextBlock(text="rescued digest body")],
@@ -1252,132 +1224,9 @@ def _always_errored(req):
     )
 
 
-def test_collect_rescues_batch_backend_outage_via_direct_calls():
-    # The incident this guards: EVERY item failed with `api_error: Internal
-    # Server Error` while the same run's uploads had all just succeeded — the
-    # batch backend was the sick component, and the run ended 0/8 (a real run
-    # also watched a follow-up batch fail identically, wasting ~10 minutes).
-    # A batch whose every item fails retryably server-side therefore skips
-    # the doomed follow-up round entirely and digests via synchronous
-    # streamed beta.messages.stream calls carrying the byte-same params (and
-    # the Files-API beta, since they reference file_ids), with the uploaded
-    # files deleted only after the rescue.
-    client = _FakeClient(_always_errored)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert all(d.ok for d in digests)
-    assert len(client.create_calls) == 1  # systemic failure: no doomed follow-up
-    # Byte-same content as the original batch item, plus the Opus 5
-    # refusal-fallback params ``stream_message`` attaches on top.
-    assert [_without_fallback_keys(c["params"]) for c in client.rescue_calls] == [
-        r["params"] for r in client.create_calls[0]["requests"]
-    ]
-    assert all(
-        c["params"].get("fallbacks") == "default" for c in client.rescue_calls
-    )
-    # The rescued digests carry the direct calls' usage, and the files were
-    # still released exactly once, after the rescue.
-    assert all(d.input_tokens == 90 and d.output_tokens == 25 for d in digests)
-    # Rescued via synchronous real-time calls — flagged so the usage ledger bills
-    # them at full rate, not the 50% batch discount (Phase 23B).
-    assert all(d.rescued for d in digests)
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
-def test_rescue_failure_keeps_the_batch_error():
-    # A sheet that fails in both batch rounds AND whose direct call fails
-    # permanently ends with its clean batch error — no infinite retry loop, no
-    # third batch, exactly one direct attempt (a permanent error is not
-    # re-issued).
-    def rescue_responder(_kwargs):
-        raise RuntimeError("still broken")
-
-    def responder(req):
-        if req["custom_id"] == "sheet__0":
-            return _always_errored(req)
-        return _succeed(req)
-
-    client = _FakeClient(responder, rescue_responder=rescue_responder)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert not digests[0].ok and "Internal Server Error" in digests[0].error
-    assert digests[1].ok
-    assert len(client.create_calls) == 2
-    assert len(client.rescue_calls) == 1  # only the failed sheet, no retry loop
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
-def test_rescue_retries_transient_error_then_succeeds():
-    # The rescue call itself rides out a transient blip (the same 429/5xx
-    # policy as the real-time digest) instead of abandoning the sheet.
-    state = {"n": 0}
-
-    def rescue_responder(kwargs):
-        state["n"] += 1
-        if state["n"] == 1:
-            raise _Transient503("Overloaded")
-        return _rescue_ok(kwargs)
-
-    slept: list[float] = []
-    client = _FakeClient(_always_errored, rescue_responder=rescue_responder)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=slept.append, retry_failed_items=True
-    )
-
-    assert digests[0].ok
-    assert len(client.rescue_calls) == 2  # first attempt + one retry
-    assert slept  # backed off between the attempts
-
-
-def test_rescue_skipped_when_followup_rejects_permanently():
-    # Round 1: retryable api_error. Round 2: invalid_request_error — a
-    # permanent request rejection a direct call would only repeat. No direct
-    # call is made and the fresher (permanent) error stands.
-    bad = type(
-        "FakeError", (), {"message": "prompt too long", "type": "invalid_request_error"}
-    )()
-    state = {"round": 0}
-
-    def responder(req):
-        if req["custom_id"] != "sheet__0":
-            return _succeed(req)
-        state["round"] += 1
-        if state["round"] == 1:
-            return _always_errored(req)
-        return FakeBatchResult(
-            custom_id="sheet__0",
-            result=FakeBatchResultEnvelope(type="errored", error=bad),
-        )
-
-    client = _FakeClient(responder)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert not digests[0].ok and "prompt too long" in digests[0].error
-    assert digests[1].ok
-    assert client.rescue_calls == []
-
-
-def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
-    # Empty-at-max_tokens in BOTH rounds: the follow-up already ran at 2x, so
-    # the direct rescue must double from the follow-up's cap (4x, bounded by
+def test_resubmission_raises_the_cap_again_after_two_empty_max_tokens_rounds():
+    # Empty-at-max_tokens in the primary batch AND the first resubmission: the
+    # second resubmission must double from the first one's cap (4x, bounded by
     # the ceiling) instead of re-proposing the cap that just came back empty.
     #
     # The starting cap is pinned explicitly rather than inherited from
@@ -1386,6 +1235,8 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
     # ceiling, so the default would silently stop exercising the second round.
     # The no-headroom case has its own test below.
     def responder(req):
+        if len(client.create_calls) >= 3:
+            return _succeed(req)
         return FakeBatchResult(
             custom_id=req["custom_id"],
             result=FakeBatchResultEnvelope(
@@ -1403,18 +1254,17 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True
     )
 
-    assert digests[0].ok  # the direct call landed the digest
-    base = client.create_calls[0]["requests"][0]["params"]["max_tokens"]
-    followup = client.create_calls[1]["requests"][0]["params"]["max_tokens"]
-    rescued = client.rescue_calls[0]["params"]["max_tokens"]
-    assert followup == min(base * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
-    assert rescued == min(followup * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
-    assert rescued > followup
+    assert digests[0].ok  # the second resubmission landed the digest
+    base, first, second = (
+        c["requests"][0]["params"]["max_tokens"] for c in client.create_calls
+    )
+    assert first == min(base * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+    assert second == min(first * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+    assert second > first
+    assert client.rescue_calls == []
     attempts = digests[0].usage_attempts
     assert [a.attempt_number for a in attempts] == [1, 2, 3]
-    assert [a.transport for a in attempts] == ["BATCH", "BATCH", "REAL_TIME"]
-    assert sum(a.input_tokens for a in attempts) == 290
-    assert sum(a.output_tokens for a in attempts) == 125
+    assert [a.transport for a in attempts] == ["BATCH", "BATCH", "BATCH"]
 
 
 def test_empty_at_max_tokens_stops_retrying_once_the_ceiling_is_reached():
@@ -1442,196 +1292,6 @@ def test_empty_at_max_tokens_stops_retrying_once_the_ceiling_is_reached():
     raised = _item_retry_params(slot, result, empty, params=below)
     assert raised is not None
     assert raised["max_tokens"] == batch_digest.MAX_TOKENS_RETRY_CEILING
-
-
-def test_followup_submit_failure_falls_back_to_direct_calls():
-    # The batch backend rejecting even the follow-up submit is the strongest
-    # signal that batch processing is the sick component: recovery must skip
-    # straight to the direct calls instead of giving up. (Mixed results — one
-    # ok, one api_error — so the follow-up round is genuinely attempted
-    # rather than short-circuited by the all-items-failed fast path.)
-    class _SecondCreateFails(_FakeBatches):
-        def __init__(self, client):
-            super().__init__(client)
-            self.creates = 0
-
-        def create(self, *, requests, betas=None):
-            self.creates += 1
-            if self.creates >= 2:
-                raise RuntimeError("batch backend down")
-            return super().create(requests=requests, betas=betas)
-
-    def responder(req):
-        return _always_errored(req) if req["custom_id"] == "sheet__0" else _succeed(req)
-
-    client = _FakeClient(responder)
-    batches = _SecondCreateFails(client)
-    client.beta.messages.batches = batches
-    client.messages.batches = batches
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert all(d.ok for d in digests)
-    assert batches.creates == 2  # the follow-up round was attempted and rejected
-    assert len(client.rescue_calls) == 1
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
-def test_followup_poll_failure_falls_back_to_direct_calls():
-    # Ten consecutive retrieve failures on the FOLLOW-UP batch are themselves
-    # a batch-backend-sick signal: its results are unreachable whether or not
-    # it is still running, so the direct rescue must still recover the sheets.
-    # The cancel is attempted but fails on the same dark endpoint, so the
-    # uploaded files stay retained (the remote batch may still be running and
-    # referencing them) — only the digests are rescued. (Mixed results so the
-    # follow-up round is genuinely submitted rather than short-circuited by
-    # the all-items-failed fast path.)
-    class _FollowupDark(_FakeBatches):
-        def retrieve(self, batch_id):
-            if len(self._c.create_calls) >= 2:
-                raise RuntimeError("batches.retrieve down")
-            return super().retrieve(batch_id)
-
-        def cancel(self, batch_id):
-            raise RuntimeError("batches.cancel down")
-
-    def responder(req):
-        return _always_errored(req) if req["custom_id"] == "sheet__0" else _succeed(req)
-
-    client = _FakeClient(responder)
-    batches = _FollowupDark(client)
-    client.beta.messages.batches = batches
-    client.messages.batches = batches
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert all(d.ok for d in digests)
-    assert len(client.rescue_calls) == 1
-    assert client.files.deleted == []  # retained for the unreachable batch
-
-
-def test_rescue_covers_items_missing_from_the_followup_results():
-    # The follow-up round returns NO envelope for the item. Its first-round
-    # error was retryable (that is why it was resubmitted), so the direct
-    # rescue still gets a shot at it. (Mixed results so the follow-up round
-    # actually runs instead of the all-items-failed fast path.)
-    class _DropsRetryResults(_FakeBatches):
-        def results(self, batch_id):
-            # Primary round serves normally; the follow-up round yields nothing.
-            if len(self._c.create_calls) >= 2:
-                return iter(())
-            return super().results(batch_id)
-
-    def responder(req):
-        return _always_errored(req) if req["custom_id"] == "sheet__0" else _succeed(req)
-
-    client = _FakeClient(responder)
-    batches = _DropsRetryResults(client)
-    client.beta.messages.batches = batches
-    client.messages.batches = batches
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
-    )
-
-    assert all(d.ok for d in digests)
-    assert len(client.create_calls) == 2  # the follow-up round did run
-    assert len(client.rescue_calls) == 1
-
-
-def test_rescued_digest_is_cached(tmp_path):
-    # A rescued digest is written to the cache under the SAME key the batch
-    # digest would have used, so a later run is served from cache.
-    cache = DigestCache(tmp_path / "cache.json")
-    client = _FakeClient(_always_errored)
-    batch = submit_drawing_batch(
-        iter([_make_sheet(3)]), client=client, model=OPUS, cache=cache, total=1
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, cache=cache, sleep=NOSLEEP, retry_failed_items=True
-    )
-    assert digests[0].ok and not digests[0].cached
-
-    # Re-run: served from cache — no upload, no batch, no rescue call.
-    client2 = _FakeClient(_succeed)
-    _, second = _run_batch(client2, [_make_sheet(3)], cache=cache)
-    assert second[0].ok and second[0].cached
-    assert client2.create_calls == [] and client2.rescue_calls == []
-    assert client2.files.uploaded_ids == []
-
-
-def test_rescue_respects_exhausted_budget():
-    # With no collection budget left the rescue attempts nothing: the batch
-    # errors stand and no direct call is made.
-    client = _FakeClient(_succeed)
-    ref = _make_sheet(0).ref
-    slot = batch_digest._Slot(
-        index=0, ref=ref, image_estimate=5, custom_id="sheet__0",
-        params=_rescue_params(OPUS),
-    )
-    failed = batch_digest.SheetDigest(
-        ref=ref, text="", error="api_error: Internal Server Error"
-    )
-    results: list = [failed]
-
-    recovered = batch_digest._rescue_failed_items_sync(
-        [(slot, slot.params)], results,
-        client=client, cache=None, sleep=NOSLEEP, max_elapsed_seconds=0.0,
-    )
-
-    assert recovered == 0
-    assert results[0] is failed
-    assert client.rescue_calls == []
-
-
-def test_rescue_stops_instead_of_sleeping_past_the_budget():
-    # A transient error whose backoff would overrun the remaining collection
-    # budget must NOT be slept through: the failing sheet keeps its batch
-    # error, no backoff sleep happens, and the remaining sheets are not
-    # attempted — the collect bound outranks the retry policy.
-    def rescue_responder(_kwargs):
-        raise _Transient503("Overloaded")
-
-    client = _FakeClient(_succeed, rescue_responder=rescue_responder)
-    ref0, ref1 = _make_sheet(0).ref, _make_sheet(1).ref
-    slots = [
-        batch_digest._Slot(
-            index=i, ref=ref, image_estimate=5, custom_id=f"sheet__{i}",
-            params=_rescue_params(OPUS),
-        )
-        for i, ref in enumerate([ref0, ref1])
-    ]
-    failed = [
-        batch_digest.SheetDigest(
-            ref=s.ref, text="", error="api_error: Internal Server Error"
-        )
-        for s in slots
-    ]
-    results: list = list(failed)
-    slept: list[float] = []
-
-    recovered = batch_digest._rescue_failed_items_sync(
-        [(s, s.params) for s in slots], results,
-        client=client, cache=None, sleep=slept.append,
-        # Tiny but non-zero: the first attempt is allowed, but the 2s backoff
-        # after its transient failure exceeds what is left.
-        max_elapsed_seconds=1.0,
-    )
-
-    assert recovered == 0
-    assert slept == []  # never slept past the bound
-    assert len(client.rescue_calls) == 1  # sheet 0 attempted once; sheet 1 never
-    assert results[0] is failed[0] and results[1] is failed[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -1759,44 +1419,15 @@ def _install_batches(client, batches):
     client.messages.batches = batches
 
 
-def test_detached_batch_is_canceled_and_rescued_directly(monkeypatch):
-    # THE incident: a batch sits `in_progress` until the elapsed bound and the
-    # run previously came back 0/N — every sheet "not collected" — despite
-    # every upload and request in hand being valid. With recovery enabled the
-    # poll holds back a rescue reserve, the never-ending batch is canceled,
-    # and every sheet is digested via direct streamed calls on the same
-    # still-uploaded file_ids; the files are then released.
-    clock = {"t": 0.0}
-    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
-    client = _FakeClient(_succeed)
-    _install_batches(client, _NeverEndingBatches(client, clock, tick=200.0))
-
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        max_elapsed_seconds=1000,  # reserve=250 → the poll detaches past 750
-    )
-
-    assert all(d.ok for d in digests)
-    assert client.cancel_calls == ["batch_abc"]
-    assert len(client.rescue_calls) == 2
-    # The rescued digests carry the direct calls' usage, and the canceled
-    # batch's files were released.
-    assert all(d.input_tokens == 90 and d.output_tokens == 25 for d in digests)
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
 def test_zero_progress_batch_stalls_before_the_elapsed_bound(monkeypatch):
     # A batch with NO per-item progress for the stall window is presumed
     # stuck (both real stuck batches showed zero completions from submit to
     # the 4h bound). The poll gives up EARLY — well before the elapsed bound —
-    # cancels the batch, and the direct rescue completes the run.
+    # cancels the batch, and a fresh batch completes the run.
     clock = {"t": 0.0}
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
     client = _FakeClient(_succeed)
-    _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+    _install_batches(client, _StallFirstThenBatchOk(client, clock, tick=600.0))
     polls_at_cancel = []
     original_cancel = client.messages.batches.cancel
 
@@ -1817,12 +1448,11 @@ def test_zero_progress_batch_stalls_before_the_elapsed_bound(monkeypatch):
     )
 
     assert digests[0].ok
-    assert client.cancel_calls == ["batch_abc"]
+    assert client.cancel_calls == ["batch_1"]
     # Gave up at the FIRST-watch stall window (25 min of frozen counts), NOT
     # the elapsed bound: 4 polls × 600s = 30 min, a fraction of the
     # ~98k-second budget. Count at cancellation so later harvest polls do not
-    # obscure when the stall watch fired. The harvest now waits for a full
-    # generation envelope, but this never-ending batch still goes to rescue.
+    # obscure when the stall watch fired.
     assert polls_at_cancel == [4]
     assert len(client.retrieve_calls) > polls_at_cancel[0]
     assert clock["t"] < 10_000
@@ -1922,13 +1552,12 @@ def test_stall_window_env_override_is_floored_at_one_minute(monkeypatch):
     assert batch_digest._stall_timeout_seconds(first_watch=True) == 60.0
 
 
-def test_primary_poll_failure_rescues_directly_and_retains_files():
-    # Repeated retrieve failures on the PRIMARY batch previously marked every
-    # sheet "not collected" and gave up. The direct rescue must still recover
-    # the run — the Messages API can be healthy while the batches endpoints
-    # are dark (exactly the shape of a real outage where identical direct
-    # calls succeeded 8/8). The cancel fails on the same dark endpoint, so
-    # the uploaded files stay retained for the maybe-still-running batch.
+def test_primary_poll_failure_never_drops_to_realtime_and_retains_files():
+    # Repeated retrieve failures on the PRIMARY batch: even though the Messages
+    # API may be healthy while the batches endpoints are dark, recovery never
+    # issues a full-rate real-time call. The sheet keeps a retriable error, and
+    # the cancel fails on the same dark endpoint, so the uploaded files stay
+    # retained for the maybe-still-running batch.
     class _DarkBatches(_FakeBatches):
         def retrieve(self, batch_id):
             raise RuntimeError("batches.retrieve down")
@@ -1945,50 +1574,18 @@ def test_primary_poll_failure_rescues_directly_and_retains_files():
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True
     )
 
-    assert digests[0].ok
-    assert len(client.rescue_calls) == 1
+    assert not digests[0].ok
+    assert client.rescue_calls == []
     assert client.files.deleted == []  # cancel failed → batch may still be running
 
 
-def test_stuck_batch_rescue_shortfall_keeps_clear_errors(monkeypatch):
-    # When the rescue budget runs out before every sheet is reached, the
-    # unreached sheets keep the "not collected" error — now naming the
-    # canceled batch — and the files are still released (the cancel landed,
-    # so nothing references them anymore).
-    clock = {"t": 0.0}
-    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
-    client = _FakeClient(_succeed)
-    _install_batches(client, _NeverEndingBatches(client, clock, tick=400.0))
-
-    def slow_rescue(kwargs):
-        clock["t"] += 300.0  # each direct call burns fake time
-        return _rescue_ok(kwargs)
-
-    client.rescue_responder = slow_rescue
-    batch = submit_drawing_batch(
-        iter([_make_sheet(i) for i in range(3)]), client=client, model=OPUS, total=3
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        # reserve=250 → poll detaches past 750 (t=800 after 2 polls); the
-        # ~200s left allow one 300s rescue call, then the budget is spent.
-        max_elapsed_seconds=1000,
-    )
-
-    assert digests[0].ok  # rescued before the budget ran out
-    assert not digests[1].ok and not digests[2].ok
-    assert "was canceled" in digests[1].error
-    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
-
-
 # --------------------------------------------------------------------------- #
-# Batch-resubmit recovery transport (RECOVERY_BATCH — what the pipeline uses)
+# Batch-resubmit recovery
 #
-# The pipeline passes ``recovery_transport=RECOVERY_BATCH`` so a sick/stuck
-# batch is retried AS A BATCH (50% discount kept) rather than dropping to
-# full-rate real-time calls. These pin that: no ``beta.messages.stream`` (the
-# direct rescue) is ever issued, no digest is flagged ``rescued``, and a fresh
-# batch is submitted for the unresolved sheets.
+# A sick/stuck batch is retried AS A BATCH (50% discount kept) rather than
+# dropping to full-rate real-time calls. These pin that: no real-time call on
+# the uploaded files is ever issued, no digest is flagged ``rescued``, and a
+# fresh batch is submitted for the unresolved sheets.
 # --------------------------------------------------------------------------- #
 
 
@@ -2034,8 +1631,8 @@ class _StallFirstThenBatchOk(_FakeBatches):
 
 
 def test_stalled_batch_recovers_via_fresh_batch_not_realtime(monkeypatch):
-    # The user's incident: the primary batch stalls, and under RECOVERY_BATCH
-    # the run must NOT drop to real-time. The stuck batch is canceled and its
+    # The user's incident: the primary batch stalls, and the run must NOT drop
+    # to real-time. The stuck batch is canceled and its
     # sheets resubmitted as a fresh batch (kept at the 50% discount).
     clock = {"t": 0.0}
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
@@ -2048,7 +1645,6 @@ def test_stalled_batch_recovers_via_fresh_batch_not_realtime(monkeypatch):
     logs: list[tuple[str, str]] = []
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
         on_log=lambda msg, level="info": logs.append((level, msg)),
     )
@@ -2080,7 +1676,6 @@ def test_recovered_run_names_the_batch_that_served_the_digests(monkeypatch, capl
     with caplog.at_level("INFO", logger=diagnostics.LOGGER_NAME):
         collect_drawing_batch(
             batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-            recovery_transport=batch_digest.RECOVERY_BATCH,
             max_elapsed_seconds=100_000,
         )
 
@@ -2107,7 +1702,6 @@ def test_abandoned_batch_leaves_a_nonbillable_attempt_on_every_sheet(monkeypatch
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2127,8 +1721,8 @@ def test_abandoned_batch_leaves_a_nonbillable_attempt_on_every_sheet(monkeypatch
 
 def test_batch_backend_outage_recovers_via_fresh_batch_not_realtime():
     # Every item of a TERMINAL batch failed server-side (the Batches backend
-    # erroring). Under RECOVERY_BATCH the items are resubmitted as a fresh
-    # batch — never handed to the full-rate direct-call rescue.
+    # erroring). The items are resubmitted as a fresh batch — never sent as
+    # full-rate real-time calls.
     client = _FakeClient(
         _flaky_then_ok(
             {
@@ -2146,7 +1740,6 @@ def test_batch_backend_outage_recovers_via_fresh_batch_not_realtime():
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
     )
 
     assert all(d.ok for d in digests)
@@ -2171,7 +1764,6 @@ def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2208,7 +1800,6 @@ def test_batch_recovery_survives_a_results_read_failure(monkeypatch):
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2467,7 +2058,6 @@ def test_abandoned_recovery_rounds_survive_on_a_sheet_recovery_never_resolves(
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2646,10 +2236,7 @@ class _SlowCancelWithInFlightItems(_StallThenSettleWithCompletedItems):
         yield from super().results(batch_id)
 
 
-@pytest.mark.parametrize(
-    "transport", [batch_digest.RECOVERY_BATCH, batch_digest.RECOVERY_DIRECT],
-)
-def test_stall_cancel_waits_twelve_minutes_for_inflight_digests(monkeypatch, transport):
+def test_stall_cancel_waits_twelve_minutes_for_inflight_digests(monkeypatch):
     clock = {"t": 0.0}
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
 
@@ -2667,7 +2254,7 @@ def test_stall_cancel_waits_twelve_minutes_for_inflight_digests(monkeypatch, tra
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=sleep, retry_failed_items=True,
-        recovery_transport=transport, max_elapsed_seconds=3000,
+        max_elapsed_seconds=3000,
     )
 
     assert backend.results_read_at is not None
@@ -2675,12 +2262,8 @@ def test_stall_cancel_waits_twelve_minutes_for_inflight_digests(monkeypatch, tra
     assert all(d.ok for d in digests)
     assert [s.served_by for s in batch.slots[:2]] == ["batch_1", "batch_1"]
     assert all(len(d.usage_attempts) == 1 for d in digests[:2])
-    if transport == batch_digest.RECOVERY_BATCH:
-        assert _resubmitted_ids(client)[1:] == [["sheet__2"]]
-        assert not client.rescue_calls
-    else:
-        assert len(client.create_calls) == 1
-        assert len(client.rescue_calls) == 1
+    assert _resubmitted_ids(client)[1:] == [["sheet__2"]]
+    assert not client.rescue_calls
 
 
 def test_resubmission_harvest_uses_its_raised_token_cap(monkeypatch):
@@ -2782,7 +2365,6 @@ def test_stalled_batch_harvests_completed_sheets_before_resubmitting(monkeypatch
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2812,7 +2394,6 @@ def test_harvest_that_cannot_settle_still_resubmits_everything(monkeypatch):
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2820,12 +2401,12 @@ def test_harvest_that_cannot_settle_still_resubmits_everything(monkeypatch):
     assert _resubmitted_ids(client)[1:] == [["sheet__0", "sheet__1", "sheet__2"]]
 
 
-def test_harvest_does_not_spend_the_rescue_budget(monkeypatch):
-    # The harvest competes with the rescue for the same seconds exactly on the
+def test_harvest_does_not_spend_the_resubmission_budget(monkeypatch):
+    # The harvest competes with recovery for the same seconds exactly on the
     # detached path, where the budget is spent by definition. Charging it to the
-    # collection budget turned a 3/3 direct rescue into 0/3 — trading re-billing
-    # for lost sheets. Its cost is added back to the collect's start mark, so the
-    # rescue keeps the budget it had.
+    # collection budget turned a 3/3 recovery into 0/3 — trading re-billing for
+    # lost sheets. Its cost is added back to the collect's start mark, so the
+    # resubmission keeps the budget it had.
     clock = {"t": 0.0}
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
     client = _FakeClient(_succeed)
@@ -2842,9 +2423,10 @@ def test_harvest_does_not_spend_the_rescue_budget(monkeypatch):
         max_elapsed_seconds=1000,  # reserve=250 → the poll detaches past 750
     )
 
-    # Both sheets are rescued, exactly as they were before the harvest existed.
+    # Both sheets are resubmitted, exactly as they were before the harvest existed.
     assert all(d.ok for d in digests)
-    assert len(client.rescue_calls) == 2
+    assert _resubmitted_ids(client)[1:] == [["sheet__0", "sheet__1"]]
+    assert client.rescue_calls == []
 
 
 def test_harvested_item_with_no_usable_digest_is_rescued_and_still_billed(monkeypatch):
@@ -2884,7 +2466,6 @@ def test_harvested_item_with_no_usable_digest_is_rescued_and_still_billed(monkey
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2927,7 +2508,6 @@ def test_a_sheet_the_batch_never_answered_still_gets_its_abandoned_marker(
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=100_000,
     )
 
@@ -2992,144 +2572,6 @@ def test_stalled_resubmission_also_harvests_its_completed_sheets(monkeypatch):
     assert recovered >= 1
     assert results[0] is not None and results[0].error is None
     assert _resubmitted_ids(client)[1] == ["sheet__1"]
-
-
-class _PrimaryOkThenFollowUpStalls(_FakeBatches):
-    """Primary batch ends with one retryable failure; the follow-up then stalls.
-
-    The RECOVERY_DIRECT shape of the same defect, and the costliest: whatever
-    the follow-up batch finished before stalling was already billed at the batch
-    rate, and the direct rescue would digest it again at FULL real-time rate.
-    """
-
-    def __init__(self, client, clock, tick, follow_up_done):
-        super().__init__(client)
-        self._clock, self._tick = clock, tick
-        self._follow_up_done = set(follow_up_done)
-        self._n = 0
-        self._follow_up: str | None = None
-        self._canceled: set[str] = set()
-
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
-        self._c.submitted = list(requests)
-        self._n += 1
-        bid = f"batch_{self._n}"
-        if self._n == 2:
-            self._follow_up = bid
-        return _Obj(id=bid)
-
-    def retrieve(self, batch_id):
-        self._c.retrieve_calls.append(batch_id)
-        n = len(self._c.submitted)
-        if batch_id == self._follow_up and batch_id not in self._canceled:
-            self._clock["t"] += self._tick
-            return _Obj(processing_status="in_progress", request_counts=_Obj(
-                succeeded=len(self._follow_up_done), errored=0, canceled=0,
-                expired=0, processing=n - len(self._follow_up_done)))
-        return _Obj(processing_status="ended", request_counts=_Obj(
-            succeeded=n, errored=0, canceled=0, expired=0, processing=0))
-
-    def cancel(self, batch_id):
-        self._c.cancel_calls.append(batch_id)
-        self._canceled.add(batch_id)
-        return _Obj(id=batch_id, processing_status="canceling")
-
-    def results(self, batch_id):
-        if batch_id == self._follow_up:
-            for req in self._c.submitted:
-                if req["custom_id"] in self._follow_up_done:
-                    yield self._c.responder(req)
-            return
-        for req in self._c.submitted:
-            yield self._c.responder(req)
-
-
-def test_stalled_followup_batch_harvests_before_the_fullrate_rescue(monkeypatch):
-    # Site three of DA-035, and the most expensive: a follow-up batch that
-    # stalls handed EVERY retry item to the direct-call rescue, so a sheet it
-    # had already finished (and been billed for at the batch rate) was digested
-    # a second time at full real-time rate.
-    clock = {"t": 0.0}
-    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
-    client = _FakeClient(
-        _flaky_then_ok({
-            "sheet__0": batch_errored_result(
-                "sheet__0", error_message="Internal Server Error"),
-            "sheet__1": batch_errored_result(
-                "sheet__1", error_message="Internal Server Error"),
-        })
-    )
-    _install_batches(client, _PrimaryOkThenFollowUpStalls(
-        client, clock, tick=600.0, follow_up_done={"sheet__0"},
-    ))
-
-    batch = submit_drawing_batch(
-        iter([_make_sheet(i) for i in range(3)]), client=client, model=OPUS, total=3
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        max_elapsed_seconds=100_000,
-    )
-
-    assert all(d.ok for d in digests)
-    # sheet__0 was finished by the stalled follow-up batch, so ONLY sheet__1
-    # may reach the full-rate direct rescue.
-    assert len(client.rescue_calls) == 1
-    assert batch.slots[0].served_by == "batch_2"
-
-
-def test_followup_harvest_waits_for_its_raised_token_cap(monkeypatch):
-    clock = {"t": 0.0}
-    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
-
-    def sleep(seconds):
-        clock["t"] += seconds
-
-    class _SlowFollowupCancel(_PrimaryOkThenFollowUpStalls):
-        def cancel(self, batch_id):
-            self.cancel_started = clock["t"]
-            return super().cancel(batch_id)
-
-        def retrieve(self, batch_id):
-            if batch_id in self._canceled and clock["t"] - self.cancel_started < 120 * 60:
-                return _Obj(
-                    processing_status="canceling", request_counts=_Obj(processing=2),
-                )
-            return super().retrieve(batch_id)
-
-        def results(self, batch_id):
-            if batch_id == self._follow_up:
-                assert clock["t"] - self.cancel_started == 120 * 60
-            yield from super().results(batch_id)
-
-    empty_at_cap = _Obj(
-        custom_id="sheet__0",
-        result=_Obj(type="succeeded", message=FakeMessage(
-            content=[FakeTextBlock(text="")], stop_reason="max_tokens",
-        )),
-    )
-    client = _FakeClient(_flaky_then_ok({
-        "sheet__0": empty_at_cap,
-        "sheet__1": batch_errored_result("sheet__1", error_message="Internal Server Error"),
-    }))
-    _install_batches(client, _SlowFollowupCancel(
-        client, clock, tick=600.0, follow_up_done={"sheet__0"},
-    ))
-    batch = submit_drawing_batch(
-        iter([_make_sheet(i) for i in range(3)]), client=client, model=OPUS,
-        total=3, max_tokens=64_000,
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=sleep, retry_failed_items=True,
-        max_elapsed_seconds=5000,
-    )
-
-    assert all(d.ok for d in digests)
-    assert client.create_calls[1]["requests"][0]["params"]["max_tokens"] == 128_000
-    assert batch.slots[0].params["max_tokens"] == 64_000
-    assert batch.slots[0].served_by == "batch_2"
-    assert len(client.rescue_calls) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -3278,7 +2720,6 @@ def test_moving_detached_batch_is_cancelled_so_its_sheets_can_be_harvested(monke
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        recovery_transport=batch_digest.RECOVERY_BATCH,
         max_elapsed_seconds=1000,
     )
 
@@ -3308,22 +2749,3 @@ def test_moving_detach_is_named_as_such_in_the_sheet_error(monkeypatch):
     assert not any(f"({batch_digest.DETACHED})" in (d.error or "") for d in digests)
 
 
-def test_frozen_detached_batch_is_still_cancelled_and_recovered(monkeypatch):
-    # The other half of the split: a batch that completed NOTHING after the
-    # first poll keeps today's cancel-and-recover treatment.
-    clock = {"t": 0.0}
-    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
-    client = _FakeClient(_succeed)
-    _install_batches(client, _NeverEndingBatches(client, clock, tick=200.0))
-
-    batch = submit_drawing_batch(
-        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
-    )
-    digests = collect_drawing_batch(
-        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
-        max_elapsed_seconds=1000,
-    )
-
-    assert all(d.ok for d in digests)
-    assert client.cancel_calls == ["batch_abc"]
-    assert len(client.rescue_calls) == 2

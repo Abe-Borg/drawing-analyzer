@@ -314,9 +314,8 @@ def test_batch_stage_exception_preserves_cached_sheets(tmp_path, monkeypatch):
     assert any("retry next run" in error for error in ctx.errors)
 
 
-@pytest.mark.parametrize("transport", [batch_digest.RECOVERY_DIRECT, batch_digest.RECOVERY_BATCH])
 @pytest.mark.parametrize("fail_once", [True, False])
-def test_followup_and_resubmission_reads_retry_without_another_paid_round(transport, fail_once, monkeypatch):
+def test_resubmission_reads_retry_without_another_paid_round(fail_once, monkeypatch):
     # The primary's empty reply is billed; the retry's valid result must survive
     # an interrupted download without resubmitting it or losing prior usage.
     empty = FakeBatchResult(custom_id="sheet__0", result=FakeBatchResultEnvelope(
@@ -341,7 +340,7 @@ def test_followup_and_resubmission_reads_retry_without_another_paid_round(transp
     monkeypatch.setattr(client.messages.batches, "results", results)
     digests = batch_digest.collect_drawing_batch(
         batch, client=client, cache=cache, sleep=NOSLEEP,
-        retry_failed_items=True, recovery_transport=transport,
+        retry_failed_items=True,
     )
     assert len(client.create_calls) == 2
     assert client.rescue_calls == []
@@ -387,7 +386,7 @@ def test_harvest_collection_failure_defers_instead_of_resubmitting(monkeypatch):
     monkeypatch.setattr(batch_digest, "_poll_until_terminal", lambda *a, **k: "stalled")
     digests = batch_digest.collect_drawing_batch(
         batch, client=client, cache=cache, sleep=NOSLEEP,
-        retry_failed_items=True, recovery_transport=batch_digest.RECOVERY_BATCH,
+        retry_failed_items=True,
     )
     assert len(client.create_calls) == 1 and client.rescue_calls == []
     assert "retry next run" in digests[0].error
@@ -459,9 +458,8 @@ def test_receipt_write_failure_cancels_before_releasing_uploads(stage, cancellat
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids if cancellation == "ended" else [])
 
 
-@pytest.mark.parametrize("transport", [batch_digest.RECOVERY_DIRECT, batch_digest.RECOVERY_BATCH])
 @pytest.mark.parametrize("confirmed", [True, False])
-def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(transport, confirmed, monkeypatch):
+def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(confirmed, monkeypatch):
     empty = FakeBatchResult(custom_id="sheet__0", result=FakeBatchResultEnvelope(
         type="succeeded", message=FakeMessage(content=[], stop_reason="max_tokens"),
     ))
@@ -482,7 +480,7 @@ def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(transp
                             SimpleNamespace(processing_status="canceling"))
     digests = batch_digest.collect_drawing_batch(
         batch, client=client, cache=cache, sleep=NOSLEEP, cleanup_in_background=False,
-        retry_failed_items=True, recovery_transport=transport,
+        retry_failed_items=True,
     )
     assert len(client.create_calls) == 2 and len(client.cancel_calls) == 1
     assert client.rescue_calls == []

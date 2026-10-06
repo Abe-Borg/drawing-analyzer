@@ -12,6 +12,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `scripts/ab_findings_diff.py` were developer-only tools and are no longer
   used. Their tests and documentation went with them. They remain in git
   history at `6fdf01e`.
+- **The full-rate real-time batch rescue.** `collect_drawing_batch` no longer
+  takes `recovery_transport`; `retry_failed_items=True` always recovers by
+  resubmitting fresh batches, which is what the pipeline already did. The
+  `RECOVERY_DIRECT` / `RECOVERY_BATCH` constants and the direct-call rescue
+  (`_rescue_failed_items_sync`) are gone. The inline real-time fallback for a
+  failed Files API upload is unchanged.
 
 ## [1.8.0] - 2026-10-05
 

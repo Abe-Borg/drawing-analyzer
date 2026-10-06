@@ -34,8 +34,8 @@ identical. Missing or already-claimed manifests use the historical render/upload
 path.
 
 Additive & non-fatal (I-3): the critique is optional QC, so — unlike the digest,
-whose loss zeroes a run and which therefore carries an elaborate follow-up-batch
-+ direct-call rescue — this collector keeps things simple. A per-read failure
+whose loss zeroes a run and which therefore carries bounded batch resubmission
+— this collector keeps things simple. A per-read failure
 just fails that read (the surviving read still merges, honestly marked
 ``NOT_ASSESSED_PARTIAL``); a batch that never terminates degrades the affected
 sheets' critique to an empty result with a clear error. The standard digest
@@ -578,7 +578,7 @@ def collect_critique_batch(
         # ``_poll_until_terminal`` counts only *completed* items, so it treats an
         # hour with nothing finished as ``"stalled"``. That early give-up is only
         # safe when the caller can recover the sheets another way — the digest pairs
-        # it with a direct-call rescue. The critique has no rescue: a give-up would
+        # it with batch resubmission. The critique has no such recovery: a give-up would
         # cancel the batch and lose those sheets' critique. A small or image-heavy
         # critique batch can legitimately sit with zero completed items for over an
         # hour while every read is still processing, so tripping a stall watch here

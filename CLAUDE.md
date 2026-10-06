@@ -181,26 +181,24 @@ map lives in `src/drawing_analyzer/__init__.py`.
   after a transport switch. If a receipt write fails after acceptance, request
   cancellation and confirm a terminal status before releasing the uploads;
   unconfirmed cancellation retains them and stops further paid recovery rounds.
-  With `recovery_transport=RECOVERY_BATCH`, cancel a stalled batch and resubmit
-  unresolved sheets (`_recover_via_batch_resubmit`). Never silently drop to
-  full-rate real-time; when the rounds or budget are spent, unreached sheets
-  keep a retriable batch error. Every site that abandons a batch harvests it
-  first (`_harvest_abandoned_batch`): `results()` is filled only from a
-  terminal read, so harvest between cancel and the rescue list, **successes
-  only**, and park billed empty attempts (`_park_usage_attempts`). Harvest time
-  is additional — add it back to the caller's start mark. A batch that will not
-  settle within the bound harvests nothing. The collection bound is **24h**
-  (`DEFAULT_BATCH_MAX_ELAPSED_HOURS`), overridable via
-  `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`, resolved at call time from a
-  `None` default. `DETACHED_MOVING` vs `DETACHED` is diagnostic only. The
-  full-rate rescue (`_rescue_failed_items_sync`, `RECOVERY_DIRECT`) is for
-  direct callers and tests. Stall watch is tiered (`_stall_timeout_seconds`):
-  25 min primary, 60 min on every resubmission;
-  `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` overrides both. Heartbeat every
-  5 minutes. An abandoned batch appends a non-billable `DigestUsageAttempt`
-  (`billable=False`, `terminal_status="ABANDONED_*"`, zero tokens) per sheet,
-  so usage sees every attempt while the image-token estimate still counts only
-  response-bearing ones. Each slot records `served_by`.
+  `retry_failed_items` cancels a stalled batch and resubmits unresolved sheets
+  (`_recover_via_batch_resubmit`); there is no real-time recovery path. Never
+  silently drop to full-rate real-time; when the rounds or budget are spent,
+  unreached sheets keep a retriable batch error. Every site that abandons a
+  batch harvests it first (`_harvest_abandoned_batch`): `results()` is filled
+  only from a terminal read, so harvest between cancel and the resubmission
+  list, **successes only**, and park billed empty attempts
+  (`_park_usage_attempts`). Harvest time is additional — add it back to the
+  caller's start mark. A batch that will not settle within the bound harvests
+  nothing. The collection bound is **24h** (`DEFAULT_BATCH_MAX_ELAPSED_HOURS`),
+  overridable via `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`, resolved at call
+  time from a `None` default. `DETACHED_MOVING` vs `DETACHED` is diagnostic
+  only. Stall watch is tiered (`_stall_timeout_seconds`): 25 min primary, 60 min
+  on every resubmission; `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` overrides
+  both. Heartbeat every 5 minutes. An abandoned batch appends a non-billable
+  `DigestUsageAttempt` (`billable=False`, `terminal_status="ABANDONED_*"`, zero
+  tokens) per sheet, so usage sees every attempt while the image-token estimate
+  still counts only response-bearing ones. Each slot records `served_by`.
 - **Text extraction** (`render.py`): sheet text comes from
   `page.get_displaylist(annots=False)` via `TextPage.extractWORDS()`
   (`_page_text_and_view_words`, `_page_word_count`, `_page_text_and_word_count`).
