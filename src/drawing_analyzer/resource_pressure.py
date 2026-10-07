@@ -79,6 +79,7 @@ from email.utils import parsedate_to_datetime
 from functools import wraps
 from typing import Any, Callable
 
+from . import cancellation
 from .diagnostics import get_logger, request_id_of, status_of
 
 _log = get_logger()
@@ -1351,6 +1352,13 @@ def bind_thread(pressure: ResourcePressure | None) -> ResourcePressure | None:
     return previous
 
 
+def _bind_worker(
+    pressure: ResourcePressure | None, token: "cancellation.CancelToken | None",
+) -> None:
+    bind_thread(pressure)
+    cancellation.bind_thread(token)
+
+
 def worker_binding() -> dict[str, Any]:
     """``ThreadPoolExecutor`` kwargs that bind each worker to the caller's run.
 
@@ -1358,8 +1366,13 @@ def worker_binding() -> dict[str, Any]:
     **worker_binding())``. The initializer runs once per worker thread and
     gives it the recorder the creating thread resolves to *now*, so retries
     on those workers land on their own run even when another run is live.
+    It binds the run's kill switch (:mod:`~drawing_analyzer.cancellation`)
+    the same way, so a stop reaches that run's workers and no one else's.
     """
-    return {"initializer": bind_thread, "initargs": (current(),)}
+    return {
+        "initializer": _bind_worker,
+        "initargs": (current(), cancellation.current()),
+    }
 
 
 def activate(pressure: ResourcePressure) -> ResourcePressure | None:

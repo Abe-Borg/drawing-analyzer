@@ -390,7 +390,12 @@ def _to_dict(obj: Any) -> Any:
 
 
 class FinalMessageStream:
-    """Context-manager stand-in for the SDK's streaming response object."""
+    """Context-manager stand-in for the SDK's streaming response object.
+
+    Iterable like the SDK's ``MessageStream``: a run with a kill switch bound
+    reads the stream event by event (``core.api_config._dispatch_messages``).
+    The fake carries no events — the whole message is already final.
+    """
 
     def __init__(self, message: Any) -> None:
         self._message = message
@@ -400,6 +405,9 @@ class FinalMessageStream:
 
     def __exit__(self, *exc_info: Any) -> bool:
         return False
+
+    def __iter__(self) -> Any:
+        return iter(())
 
     def get_final_message(self) -> Any:
         return self._message

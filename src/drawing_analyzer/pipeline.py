@@ -31,7 +31,7 @@ from .core.api_config import (
 from .core.request_usage import RequestUsage
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
-from . import resource_pressure, tiling
+from . import cancellation, resource_pressure, tiling
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_TOKENS,
@@ -240,17 +240,25 @@ def _prune_stale_work_dirs(keep: "Path | None" = None) -> int:
 
 
 def _with_stage_executor_cleanup(fn):
-    """Guarantee per-run background executors cannot outlive any return/raise."""
+    """Guarantee per-run background executors cannot outlive any return/raise.
+
+    A stopped run drops the stages that have not started yet instead of
+    waiting for them to start and be refused one by one.
+    """
     @wraps(fn)
     def _wrapped(*args, **kwargs):
         parent = getattr(_stage_executor_state, "executors", None)
         active: list[ThreadPoolExecutor] = []
         _stage_executor_state.executors = active
+        stopped = False
         try:
             return fn(*args, **kwargs)
+        except cancellation.RunCancelled:
+            stopped = True
+            raise
         finally:
             for executor in reversed(active):
-                executor.shutdown(wait=True)
+                executor.shutdown(wait=True, cancel_futures=stopped)
             _stage_executor_state.executors = parent
 
     return _wrapped
@@ -267,6 +275,40 @@ def _close_stage_executor(executor: ThreadPoolExecutor) -> None:
     if active is not None and executor in active:
         active.remove(executor)
     executor.shutdown(wait=True)
+
+
+def _release_unclaimed_uploads(
+    client: Any, reusable_uploads: list, *, on_log: Any, cache: Any,
+) -> None:
+    """Delete the retained digest uploads no critique batch adopted.
+
+    The digest batch that uploaded them is terminal, so nothing else needs
+    them. Adopted manifests return no IDs, so every remote file has one and
+    only one cleanup owner, and a second call finds the list empty.
+    """
+    if not reusable_uploads:
+        return
+    try:
+        cleanup_client = client
+        if cleanup_client is None:
+            from .client import get_client as _get_client
+
+            cleanup_client = _get_client()
+        unclaimed_ids = [
+            file_id
+            for reusable in reusable_uploads
+            for file_id in reusable.release_ids()
+        ]
+        if unclaimed_ids:
+            from .batch_digest import _release_uploaded_files
+
+            _release_uploaded_files(
+                cleanup_client, unclaimed_ids,
+                in_background=True, on_log=on_log, cache=cache,
+            )
+    except Exception as cleanup_exc:  # noqa: BLE001 - cleanup is additive
+        _log.warning("retained digest-upload cleanup failed: %s", cleanup_exc)
+    reusable_uploads.clear()
 
 
 def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
@@ -973,6 +1015,7 @@ def _digest_sheets_concurrent(
                 tile_sink=tile_sink, render_sink=render_sink, journal=journal,
             )
         ):
+            cancellation.check()
             in_flight.add(executor.submit(_run, index, rendered))
             while len(in_flight) >= workers:
                 _collect_one()
@@ -1061,6 +1104,7 @@ def _digest_sheets_via_batch(
         specs_text=specs_text,
         level1_keys=level1_keys,
         recovery_state=recovery_state,
+        on_log=on_log,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -1787,7 +1831,7 @@ def _run_critique_stage(
             _rendered_for_critique(),
             client=client, cache=cache, model=model, runs=runs, profiles=profiles,
             progress=progress, total=miss_total, on_status=on_status,
-            recovery_state=recovery_state,
+            recovery_state=recovery_state, on_log=on_log,
             level1_keys={
                 rk: critique_cache_key_level1(
                     identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
@@ -1839,6 +1883,7 @@ def _run_critique_stage(
                     _ingest_miss(res, ref)
 
             for rendered in _rendered_for_critique():
+                cancellation.check()
                 in_flight[executor.submit(
                     _critique_rendered, rendered,
                 )] = rendered.ref
@@ -2194,6 +2239,9 @@ def _run_qc_stages(
 
     all_findings = entries
 
+    # A stop is honored at each paid stage's start (and inside it, at the
+    # request gate) — see :mod:`~drawing_analyzer.cancellation`.
+    cancellation.check()
     # Verify the model entries (deterministic auditor entries are skipped by the
     # verifier). Only when markups are requested — clouds are what demand trust.
     verify_stage = StageResult(
@@ -2350,6 +2398,7 @@ def _run_qc_stages(
         verify_stage.status = "SKIPPED_VALID"
     _finish_stage(stage_results, journal, verify_stage)
 
+    cancellation.check()
     # Investigation (Phase C): escalate UNCERTAIN verification verdicts through
     # the agentic evidence loop. Only ever UPDATES finding.verification in place
     # (legal post-seal, exactly like verify and citation); a budget-capped
@@ -2464,6 +2513,7 @@ def _run_qc_stages(
         investigate_stage.status = "SKIPPED_VALID"
     _finish_stage(stage_results, journal, investigate_stage)
 
+    cancellation.check()
     # Citation check (Phase 15): severity-first, capped normalized code refs,
     # judged against the editions the set adopts (harvested from the text
     # layers). Verdicts attach to the findings and ride the popup/CSV/report; a
@@ -2572,6 +2622,9 @@ def _run_qc_stages(
                 _log.warning("citation check failed: %s", exc)
     _finish_stage(stage_results, journal, citation_stage)
 
+    # The last stop point: once markup writing starts, the run finishes — its
+    # paid work is all done, and stopping then would only discard it.
+    cancellation.check()
     reviewed_pdf_paths: list[Path] = []
     mutated_sources: list[str] = []
     mutated_ids: set[str] = set()
@@ -2783,6 +2836,7 @@ def _tally_line(
 
 @_with_stage_executor_cleanup
 @resource_pressure.tracked_run
+@cancellation.bound_run
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -2823,6 +2877,7 @@ def extract_drawing_context(
     save_tile_artifacts: bool | None = None,
     qc_work_dir: Path | None = None,
     confirm_large_set: bool = False,
+    cancel: "cancellation.CancelToken | None" = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -2960,6 +3015,17 @@ def extract_drawing_context(
     **off** — §18 supersedes the old default). The run-end coverage tally lands
     on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line`` (markup runs only —
     without ``qc_markups`` there is no PDF ink to account for).
+
+    ``cancel`` (a :class:`~drawing_analyzer.cancellation.CancelToken`) is the
+    run's kill switch, on every transport. Cancelling it refuses every new
+    paid request, abandons streamed responses at their next event, cancels the
+    run's open Message Batches at once, and wakes every poll and backoff wait;
+    this call then raises
+    :class:`~drawing_analyzer.cancellation.RunCancelled` instead of returning.
+    With a cache (the GUI always uses one), paid work that finished stays
+    there, and an open batch keeps its receipt either way, so the next run
+    collects whatever it finished before the cancel landed. The last stop point is the start of markup writing: by then every
+    paid request is done, so a later stop lets the run finish.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -3255,6 +3321,9 @@ def extract_drawing_context(
         recovery_error = (f"batch recovery store unavailable ({type(exc).__name__}); "
                           "restore the recovery store and retry next run")
 
+    # A stop is honored at every paid request, wait, and stage start (see
+    # :mod:`~drawing_analyzer.cancellation`); this one skips the prescan.
+    cancellation.check()
     # Recognize unchanged sheets before rendering. Uncached batch runs also
     # compute level-1 keys for their receipts; they never probe ordinary entries.
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
@@ -3353,6 +3422,13 @@ def extract_drawing_context(
     reusable_uploads = (
         [] if config.run_critique and use_batch and critique_use_batch else None
     )
+    if reusable_uploads is not None:
+        # The critique stage releases what it does not adopt; a stop before it
+        # starts would skip that, so the release also runs on the way out.
+        # ``client`` is read at call time: a later stage may resolve it.
+        cancellation.on_stop(lambda: _release_unclaimed_uploads(
+            client, reusable_uploads, on_log=on_log, cache=cache,
+        ))
     if config.run_critique and not use_batch:
         try:
             from .render_spool import RenderedSheetSpool
@@ -3619,6 +3695,7 @@ def extract_drawing_context(
             )[:5]
         )
     _finish_stage(stage_results, journal, digest_stage)
+    cancellation.check()
 
     # Independent text-only set stages can spend their network latency behind
     # identity → planning → critique. Their results are deliberately *not*
@@ -3910,6 +3987,7 @@ def extract_drawing_context(
             profile_stage.status = "COMPLETE"
     _finish_stage(stage_results, journal, profile_stage)
 
+    cancellation.check()
     critique_stage = StageResult(stage="critique", expected=config.run_critique)
     if config.run_critique:
         if progress is not None:
@@ -3969,31 +4047,9 @@ def extract_drawing_context(
             if reusable_uploads:
                 # Cache hits, grid mismatches, and any sheet not reached after
                 # an additive critique failure still belong to the pipeline.
-                # Adopted manifests return no IDs, so every remote file has one
-                # and only one cleanup owner.
-                try:
-                    cleanup_client = client
-                    if cleanup_client is None:
-                        from .client import get_client as _get_client
-
-                        cleanup_client = _get_client()
-                    unclaimed_ids = [
-                        file_id
-                        for reusable in reusable_uploads
-                        for file_id in reusable.release_ids()
-                    ]
-                    if unclaimed_ids:
-                        from .batch_digest import _release_uploaded_files
-
-                        _release_uploaded_files(
-                            cleanup_client, unclaimed_ids,
-                            in_background=True, on_log=on_log, cache=cache,
-                        )
-                except Exception as cleanup_exc:  # noqa: BLE001 - stage is additive
-                    _log.warning(
-                        "retained digest-upload cleanup failed: %s", cleanup_exc,
-                    )
-                reusable_uploads.clear()
+                _release_unclaimed_uploads(
+                    client, reusable_uploads, on_log=on_log, cache=cache,
+                )
     _finish_stage(stage_results, journal, critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the
@@ -4248,6 +4304,7 @@ def extract_drawing_context(
     # (§15.2): a standard run only ingests + anchors the digest findings for free;
     # what else runs is read from ``config``. Additive and non-fatal; the prose
     # deliverables above are never modified (I-2).
+    cancellation.check()
     qc = _run_qc_stages(
         sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
         config=config, run_usage=run_usage,

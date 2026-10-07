@@ -37,6 +37,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from .. import cancellation
+
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1503,8 +1505,21 @@ def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method:
 
 
 def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
+    """The one Messages request every real-time stage sends — and the kill
+    switch's gate (:mod:`~drawing_analyzer.cancellation`).
+
+    A stopped run sends nothing: :class:`~drawing_analyzer.cancellation.RunCancelled`
+    is raised before the request. A streamed response is read event by event
+    while a stop is possible, so a stop abandons it at the next event; leaving
+    the ``with`` closes the connection and the server stops generating.
+    """
     namespace = messages_namespace(client, kwargs)
+    cancellation.check()
     if method == "create":
         return namespace.create(**kwargs)
     with namespace.stream(**kwargs) as stream:
+        token = cancellation.current()
+        if token is not None:
+            for _event in stream:
+                token.raise_if_cancelled()
         return stream.get_final_message()

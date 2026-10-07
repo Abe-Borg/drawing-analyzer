@@ -33,6 +33,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block, and the report's run record and the GUI summary the one-line verdict.
   `DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS` sets the sampler cadence (`0`
   disables it). No new dependency.
+- **A kill switch for a run in flight, in every processing mode.** The GUI's
+  red **Stop** button (and `extract_drawing_context(cancel=CancelToken())` for
+  library callers) stops a run immediately on Economy, Hybrid and Fast alike:
+  nothing new is sent (every real-time request, batch submission and Files
+  upload is refused), streamed requests in flight are abandoned at their next
+  event, every Message Batch the run has open is canceled at once from a
+  background thread, and poll and backoff waits wake immediately. The call
+  raises `RunCancelled` (a `BaseException`, so the non-fatal stage guards
+  cannot swallow it). Finished work stays in the cache and a canceled batch
+  keeps its receipt, so the next run collects anything it finished first; a
+  batch whose cancel is refused is named in the activity log for the Console.
+  Each batch id is now logged to the activity log when it is submitted.
+
+### Changed
+
+- **Quitting mid-analysis stops the run first.** The worker threads die with
+  the process, but a submitted Message Batch used to keep running — and
+  billing — after the window closed. Closing during an analysis now pulls the
+  kill switch and closes once the stop settles (at most 30 seconds); a second
+  close request closes at once.
 
 ### Removed
 

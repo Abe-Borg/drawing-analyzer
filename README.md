@@ -130,7 +130,11 @@ Closing the window while a run is in flight **asks first**, and names which job 
 would discard: the worker threads are daemons and the export happens after the
 analysis returns, so a stray click on the X used to throw away an hour of work and
 the API spend behind it with no prompt at all (the help, focus and update windows
-each already confirmed on close). An idle window still closes immediately. Two
+each already confirmed on close). Quitting mid-analysis **stops the run first**
+(the same kill switch as **Stop**, below) and closes once the stop has settled —
+at most 30 seconds — because the worker dying with the process used to leave a
+remote Message Batch running, and billing, after the window was gone. A second
+click on the X closes at once. An idle window still closes immediately. Two
 other silent failures are gone with it: `pip install drawing-analyzer` without the
 `gui` extra now reports the missing toolkit in a dialog naming the fix instead of
 producing no window and no message — the launcher is a console-less Windows
@@ -155,6 +159,39 @@ looking like the click did nothing.
 > `sheet_text/` / the raw Markdown / `run_manifest.json`, and the library API
 > (`write_drawing_export`, `write_findings_csv`, `build_html_report`) produces all
 > of it. Either button can be brought back later just by re-adding it in `gui.py`.
+
+#### Stopping a run (the kill switch)
+
+**Stop** (the red button beside *Analyze Drawings*) is live for as long as an
+analysis runs, in **every processing mode** — Economy, Hybrid and Fast. After a
+one-click confirmation it:
+
+- **sends nothing new** — every real-time request, Message Batch submission and
+  Files-API upload is refused from that moment
+  (`core.api_config._dispatch_messages` is the single gate every real-time stage
+  goes through);
+- **abandons streamed requests in flight** (digest, critique, synthesis, focus,
+  review plan, investigation) at their next streamed event, which closes the
+  connection so the model stops generating;
+- **cancels every Message Batch the run has open, at once** — from a background
+  thread, wherever the run happens to be — and says so in the activity log
+  (`Canceled remote batch msgbatch_…`). A cancel the API refuses on a batch that
+  may still be running is reported in red with the batch id, so you can cancel it
+  from the Batches page of the Anthropic Console. Each batch id is also logged when
+  it is submitted;
+- **wakes every poll and backoff wait** immediately, so a run queued for hours
+  stops in seconds, not at its next 2-minute poll.
+
+What it cannot do: a short, non-streamed request already in flight (verification,
+citation check, cross-sheet QC, set identity, prose harvest) runs to completion,
+and requests already made are billed. Nothing paid is thrown away: every sheet
+that finished is in the cache, so re-running the same files reuses it at no cost,
+and a canceled batch keeps its receipt, so the **next run collects** whatever the
+batch finished before the cancel landed (Anthropic finishes, and bills, items that
+were already generating when a batch is canceled). Uploads a stopped batch
+submission never sent are deleted immediately. A stop that arrives after the
+run's last paid request — once markup writing has begun — lets the run finish,
+and the log says so.
 
 Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the rooms,
 and what types of plumbing fixtures each has"*. You always get the standard
@@ -268,7 +305,9 @@ GUI) makes a large set easy to navigate:
 ```python
 from pathlib import Path
 from drawing_analyzer import extract_drawing_context
+from drawing_analyzer.cancellation import CancelToken
 
+token = CancelToken()   # token.cancel() from any thread stops the run (optional)
 ctx = extract_drawing_context(
     [Path("M-101.pdf"), Path("P-201.pdf")],
     use_batch=True,     # Message Batches API (≈50% cheaper)
@@ -289,6 +328,7 @@ ctx = extract_drawing_context(
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
     #   synthesize=False, identity=False, review_plan=False,
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
+    cancel=token,                     # optional kill switch (see below)
 )
 print(ctx.combined_text)
 print(ctx.qc_status)            # NOT_REQUESTED | COMPLETE | PARTIAL | FAILED (§3.3)
@@ -305,6 +345,14 @@ print(ctx.finding_count, "findings,", ctx.clouded_finding_count, "clouded")
 for pdf in ctx.reviewed_pdf_paths:   # the *_reviewed.pdf files (qc_markups only)
     print("marked-up:", pdf)
 ```
+
+The kill switch is a `drawing_analyzer.cancellation.CancelToken`. Call
+`token.cancel()` from any thread and the run stops exactly as the GUI's **Stop** does, on every transport;
+`extract_drawing_context` then raises `RunCancelled` instead of returning.
+`RunCancelled` derives from `BaseException` (like `asyncio.CancelledError`) so
+the stages' non-fatal `except Exception` guards cannot swallow it; catch it by
+name. `token.wait_for_remote_cancels(timeout)` waits for the stop's remote batch
+cancels to be sent, which matters if the process is about to exit.
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
@@ -430,6 +478,10 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   The uploaded files are released on every exit — a fully-collected batch, a
   confirmed cancel, or an unexpected collection error (best-effort cancel, then
   release); a batch this run can't cancel keeps its files to expire server-side.
+  A user **Stop** cancels the open batch at once and keeps both its files and its
+  receipt: the canceled batch can still finish (and bill) items that were already
+  generating, and the next run collects them, then releases the files (see
+  [Stopping a run](#stopping-a-run-the-kill-switch)).
 - **Hybrid mode** uses real-time digests (`use_batch=False`) and Batch critique
   (`critique_use_batch=True`). Standard analysis therefore starts immediately;
   exhaustive QC can still wait for its two critique reads in the shared queue.
