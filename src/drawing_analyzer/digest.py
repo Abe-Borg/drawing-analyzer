@@ -29,7 +29,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.tokenizer import estimate_image_tokens_total
-from . import resource_pressure
+from . import cancellation, resource_pressure
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
 from .models import (
@@ -236,7 +236,9 @@ def transient_retry_wait(
     spent its wall-clock in rate-limit backoff left no trace of it.
 
     ``attempt`` is the 0-based count of retries already taken; ``sleep`` is
-    injectable so tests never wait. Recording never raises into the loop.
+    injectable so tests never wait. Recording never raises into the loop. A
+    stopped run (:mod:`~drawing_analyzer.cancellation`) wakes from the backoff
+    and raises ``RunCancelled`` instead of retrying.
     """
     if not _is_transient_error(exc):
         return False
@@ -247,7 +249,7 @@ def transient_retry_wait(
     resource_pressure.note_api_retry(
         exc, stage=stage, attempt=attempt + 1, backoff_seconds=backoff
     )
-    sleep(backoff)
+    cancellation.pause(backoff, sleep)
     return True
 
 

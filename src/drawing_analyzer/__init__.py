@@ -51,6 +51,8 @@ Module layout::
     resource_pressure.py  per-run resource-starvation record: API throttling
                       retries, host CPU/memory/disk sampler, exhausted agent
                       budgets -> verdict in run.log / run_manifest.json
+    cancellation.py   the run kill switch: CancelToken / RunCancelled, the
+                      per-thread binding, remote batch cancels on a stop
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored
                       per-tile notes builders (no PyMuPDF import)
     export.py         folder export: findings.csv/json, sheet text, evidence,
@@ -66,6 +68,7 @@ see the README's Licensing section before adding an import elsewhere.
 """
 from __future__ import annotations
 
+from .cancellation import CancelToken, RunCancelled
 from .digest import SheetDigest
 from .models import (
     AdoptedCode,
@@ -87,6 +90,7 @@ __version__ = "1.8.0"
 
 __all__ = [
     "AdoptedCode",
+    "CancelToken",
     "DrawingContext",
     "SetIdentity",
     "SheetDigest",
@@ -96,6 +100,7 @@ __all__ = [
     "UsageRecord",
     "resolve_run_configuration",
     "roll_up_qc_status",
+    "RunCancelled",
     "extract_drawing_context",
     "estimate_image_tokens_for_set",
     "__version__",

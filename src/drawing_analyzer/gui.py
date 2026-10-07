@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -76,6 +77,7 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
     _CTkDnDRoot = ctk.CTk
 
 from . import __version__, diagnostics
+from .cancellation import CancelToken, RunCancelled
 from .core import updates
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import (
@@ -282,6 +284,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx: DrawingContext | None = None
         self._busy = False
         self._export_busy = False
+        # The running analysis's kill switch (Stop button, and quitting mid-run);
+        # None while no analysis runs. See drawing_analyzer.cancellation.
+        self._run_cancel: CancelToken | None = None
+        self._quitting = False
         # Uploaded project specifications (optional) — see spec_documents.py.
         # Distinct from "Per-run focus" below: this is ground-truth reference
         # material, extracted once at upload time (not a live textbox).
@@ -723,6 +729,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             command=self._on_process,
         )
         self.analyze_btn.pack(side="right", padx=(0, 8))
+        # The kill switch: live only while an analysis runs, on every
+        # processing mode. See _on_stop.
+        self.stop_btn = ctk.CTkButton(
+            row, text="Stop", width=80, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            fg_color=COLORS["error"], hover_color=COLORS["critical"],
+            state="disabled", command=self._on_stop,
+        )
+        self.stop_btn.pack(side="right", padx=(0, 8))
 
         # Progress
         self.progress_label = ctk.CTkLabel(
@@ -1854,7 +1869,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         self._busy = True
         self._ctx = None
+        self._run_cancel = CancelToken()
         self.analyze_btn.configure(state="disabled", text="Analyzing…")
+        self.stop_btn.configure(state="normal", text="Stop")
         self.clear_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
@@ -1912,7 +1929,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             target=self._worker,
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
-                  use_batch, critique_use_batch, save_tiles),
+                  use_batch, critique_use_batch, save_tiles, self._run_cancel),
             daemon=True,
         ).start()
 
@@ -1929,6 +1946,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         use_batch: bool = True,
         critique_use_batch: bool | None = None,
         save_tiles: bool = False,
+        cancel: CancelToken | None = None,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -1949,7 +1967,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 ink_rejected=ink_rejected,
                 profiles=profiles or None,
                 save_tile_artifacts=save_tiles,
+                cancel=cancel,
             )
+        except RunCancelled:
+            # The user's Stop (or quitting mid-run). A BaseException, so it is
+            # caught by name: ``except Exception`` would leave the UI busy forever.
+            self.after(0, self._on_cancelled)
+            return
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
             _log.exception("Analysis worker failed")
             self.after(0, lambda e=exc: self._on_error(str(e)))
@@ -2021,9 +2045,76 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if sec is not None:
             sec.refresh()
 
+    def _on_stop(self) -> None:
+        """The kill switch: stop the running analysis, on any processing mode.
+
+        Nothing new is sent after this, streamed requests in flight are
+        abandoned, and every Message Batch the run has open is canceled at once
+        from a background thread (see :mod:`drawing_analyzer.cancellation`).
+        """
+        token = self._run_cancel
+        if token is None or token.cancelled or not self._busy:
+            return
+        try:
+            confirmed = messagebox.askyesno(
+                "Stop this run?",
+                "Stop the analysis now?\n\n"
+                "Nothing new is sent. Remote batches are canceled and requests "
+                "in flight are abandoned. Requests already made are still "
+                "billed.\n\n"
+                "Sheets that already finished stay in the cache, so re-running "
+                "the same files reuses them at no cost.",
+                icon="warning",
+                parent=self,
+            )
+        except Exception:  # noqa: BLE001 - a broken dialog must not disable the kill switch
+            confirmed = True
+        if confirmed:
+            self._request_stop()
+
+    def _request_stop(self) -> None:
+        token = self._run_cancel
+        if token is None or token.cancelled:
+            return
+        token.cancel()
+        self.stop_btn.configure(state="disabled", text="Stopping…")
+        self._log(
+            "Stop requested — nothing new will be sent; canceling remote batches "
+            "and abandoning requests in flight…",
+            level="warning",
+        )
+        self._set_progress_text("Stopping…", color=COLORS["warning"])
+
+    def _end_run_controls(self) -> bool:
+        """Reset the kill switch after a run ends; ``True`` if a stop was requested."""
+        token, self._run_cancel = self._run_cancel, None
+        self.stop_btn.configure(state="disabled", text="Stop")
+        return token is not None and token.cancelled
+
+    def _on_cancelled(self) -> None:
+        self._busy = False
+        self._end_run_controls()
+        self.analyze_btn.configure(state="normal", text="Analyze Drawings")
+        self.clear_btn.configure(state="normal")
+        self._set_focus_editable(True)
+        self.upload_specs_btn.configure(state="normal")
+        self._log(
+            "Run stopped. Nothing further will be sent. Sheets that finished are "
+            "in the cache — re-running the same files reuses them at no cost, and "
+            "the next run collects anything a canceled batch finished first.",
+            level="warning",
+        )
+        self._set_progress_text("Stopped.", color=COLORS["warning"])
+
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
         self._ctx = ctx
+        if self._end_run_controls():
+            self._log(
+                "The stop arrived after the run's last paid request, so the run "
+                "finished; its results are below.",
+                level="warning",
+            )
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
@@ -2234,6 +2325,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_error(self, message: str) -> None:
         self._busy = False
+        self._end_run_controls()
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
@@ -2930,13 +3022,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         returns, so closing mid-run destroys a paid run's results with nothing on
         disk. A quiet window closes immediately — this is a guard, not a
         ceremony.
+
+        Quitting mid-analysis pulls the kill switch first: a daemon worker dies
+        with the process, but a remote Message Batch would keep running — and
+        billing — after the window closed (see :meth:`_stop_then_quit`). A
+        second close request while that stop settles closes at once.
         """
+        if self._quitting:
+            self.destroy()
+            return
         busy = _describe_busy(bool(self._busy), bool(self._export_busy))
+        stops_run = bool(self._busy) and self._run_cancel is not None
         if busy:
+            consequence = (
+                "Quitting stops the run first: nothing new is sent, remote "
+                "batches are canceled, and requests in flight are abandoned. "
+                if stops_run else ""
+            )
             try:
                 keep_open = not messagebox.askyesno(
                     "Quit Drawing Analyzer?",
                     f"{busy}\n\n"
+                    f"{consequence}"
                     "Quitting now discards it — nothing has been exported yet, "
                     "and the API calls already made are still billed.\n\n"
                     "Quit anyway?",
@@ -2948,7 +3055,40 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 keep_open = False
             if keep_open:
                 return
+            if stops_run:
+                self._stop_then_quit()
+                return
         self.destroy()
+
+    def _stop_then_quit(self) -> None:
+        """Stop the run, then close once the stop has settled (or the grace ends).
+
+        Settled means the worker has unwound — so a batch whose submit was in
+        flight at the stop has been canceled on its way out — and the stop's
+        remote batch cancels have been sent. The wait is bounded: the window
+        never hangs on a slow network.
+        """
+        token = self._run_cancel
+        self._quitting = True
+        self._request_stop()
+        self._set_progress_text("Stopping the run before quitting…", color=COLORS["warning"])
+        deadline = time.monotonic() + QUIT_STOP_GRACE_SECONDS
+
+        def _poll() -> None:
+            settled = not self._busy and (
+                token is None or token.wait_for_remote_cancels(0)
+            )
+            if settled or time.monotonic() >= deadline:
+                if not settled:
+                    diagnostics.get_logger().warning(
+                        "quit: the stop did not settle within %ss; closing anyway",
+                        QUIT_STOP_GRACE_SECONDS,
+                    )
+                self.destroy()
+                return
+            self.after(100, _poll)
+
+        _poll()
 
     def _on_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
         """Tk callback error hook (N32).
@@ -2983,6 +3123,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
         except Exception:  # noqa: BLE001 - no display / window already gone
             pass
+
+
+# How long quitting mid-run waits for the stop to settle (worker unwound,
+# remote batch cancels sent) before closing anyway.
+QUIT_STOP_GRACE_SECONDS = 30.0
 
 
 def _describe_busy(analysis: bool, export: bool) -> str:

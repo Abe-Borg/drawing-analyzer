@@ -195,6 +195,24 @@ map lives in `src/drawing_analyzer/__init__.py`.
   journal incidents are bounded; the aggregates count everything. Advisory and
   never fatal. Tests inject `probe=` / `interval=` and patch
   `digest._retry_backoff_seconds` to 0 so a 429 fixture never sleeps.
+- **Kill switch** (`cancellation.py`): `extract_drawing_context(cancel=CancelToken)`
+  (the GUI's **Stop**, and quitting mid-run). `RunCancelled` is a
+  **BaseException** so the I-3 `except Exception` guards cannot swallow a stop;
+  code that must clean up on a stop catches it by name. The token is
+  thread-bound like the resource recorder (`bound_run` on the run thread;
+  `resource_pressure.worker_binding()` binds it too) with **no lone-live
+  fallback** — an unbound thread is never stopped. Gates: every real-time
+  request goes through `core.api_config._dispatch_messages` (`check()` before
+  sending; a bound run reads the stream event by event and raises at the next
+  event — fake streams must be iterable), every batch through
+  `batch_digest._create_batch` (check, then `track_remote_batch` so `cancel()`
+  cancels it from a daemon thread; a batch accepted after the stop is canceled
+  at once), Files uploads per image. Spending waits use `cancellation.pause`
+  (`transient_retry_wait`, batch polls, harvest, resubmit backoff); cleanup
+  waits (`_read_with_retry`, deletes, `_cancel_unrecorded_batch`) never do.
+  Forget a tracked batch when it settles (terminal poll, accepted cancel). A
+  stopped batch keeps its receipt and files; a stopped submit deletes its
+  uploads. Stage starts `check()` up to markup writing, the last stop point.
 - **Digest path:** `tiling.py` (geometry) → `render.py` (raster) → `digest.py`
   or `batch_digest.py` (Message Batches + Files) → `digest_cache.py` (two-level
   content-keyed cache; a hit skips rendering and restores parsed findings).
@@ -257,7 +275,9 @@ map lives in `src/drawing_analyzer/__init__.py`.
   the frozen build is windowed). The guarded `customtkinter` import reports
   through a stdlib `messagebox` and raises **ImportError**, not `SystemExit`
   (`app_entry.py --selfcheck` catches `Exception`). `WM_DELETE_WINDOW` →
-  `_on_close_request` (workers are daemons; export runs after analysis returns).
+  `_on_close_request` (workers are daemons; export runs after analysis returns);
+  mid-analysis it stops the run and closes once the stop settles
+  (`QUIT_STOP_GRACE_SECONDS`). `_worker` catches `RunCancelled` by name.
   `report_callback_exception` → `_on_callback_exception`. Both reporters swallow
   every failure of their own channels.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator
 
 from .diagnostics import get_logger, summarize_exc
-from . import resource_pressure
+from . import cancellation, resource_pressure
 from .digest import (
     _error_status,
     _is_transient_error,
@@ -413,6 +413,11 @@ def upload_sheet_images(
         while True:
             if aborted.is_set():
                 return position, None
+            if cancellation.is_cancelled():
+                # A stopped run uploads nothing more; the loop below deletes
+                # what this sheet already uploaded, as for any failed sheet.
+                aborted.set()
+                raise cancellation.RunCancelled()
             try:
                 uploaded = client.files.upload(
                     file=(name, image.png_bytes, "image/png")
@@ -444,7 +449,11 @@ def upload_sheet_images(
                     )
                     with lock:
                         _notify(True)
-                    sleep(backoff)
+                    try:
+                        cancellation.pause(backoff, sleep)
+                    except cancellation.RunCancelled:
+                        aborted.set()
+                        raise
                     attempt += 1
                     continue
                 if _is_transient_status_error(exc):
@@ -483,7 +492,7 @@ def upload_sheet_images(
     _log.debug("uploading %d image(s) for sheet=%s", total_images, label)
     workers = _resolve_upload_workers(total_images, max_workers)
     by_position: dict[int, str] = {}
-    error: Exception | None = None
+    error: BaseException | None = None
     with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
         futures = {
             executor.submit(_upload_one, pos, image, name): pos
@@ -494,7 +503,8 @@ def upload_sheet_images(
                 pos, fid = future.result()
                 if fid is not None:
                     by_position[pos] = fid
-            except Exception as exc:  # noqa: BLE001 - first failure fails the sheet
+            # A stop fails the sheet like any error: its uploads are deleted below.
+            except (Exception, cancellation.RunCancelled) as exc:  # noqa: BLE001 - first failure fails the sheet
                 if error is None:
                     error = exc
 
