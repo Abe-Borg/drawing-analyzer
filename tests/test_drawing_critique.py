@@ -525,6 +525,9 @@ def test_empty_runs_are_not_frozen_as_clean_in_cache():
         max_retries=0, sleep=_NOOP,
     )
     assert res.runs == 0 and res.error and res.findings == []
+    assert len(res.request_usage) == 3  # two failed reads plus their replacement
+    assert all(usage.input_tokens == 500 for usage in res.request_usage)
+    assert [usage.parse_success for usage in res.request_usage] == [False, False, False]
     assert cache.stats()["size"] == 0     # nothing cached → a re-run re-attempts
 
 
@@ -650,6 +653,13 @@ def test_bad_read_replacement_completes_and_caches(body, failed_run):
     # identical image prefix/checklist rather than breaking the warm prompt cache.
     assert (res.input_tokens, res.output_tokens) == (300, 60)
     assert (res.cache_write_tokens, res.cache_read_tokens) == (900, 1400)
+    assert len(res.request_usage) == 3
+    assert [usage.input_tokens for usage in res.request_usage] == [100, 100, 100]
+    assert [usage.parse_success for usage in res.request_usage] == [
+        failed_run != 0, failed_run != 1, True,
+    ]
+    assert sum(usage.cache_write_tokens for usage in res.request_usage) == 900
+    assert sum(usage.cache_read_tokens for usage in res.request_usage) == 1400
     assert client.captured[0] == client.captured[1] == client.captured[2]
     assert client.captured[2]["messages"][0]["content"][-1]["cache_control"] == {
         "type": "ephemeral",
@@ -658,6 +668,38 @@ def test_bad_read_replacement_completes_and_caches(body, failed_run):
         rendered, client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP,
     )
     assert cached.cached and cached.error is None and client.attempts == 3
+    assert cached.request_usage == []  # content cache hits incur no new requests
+
+
+def test_critique_preserves_each_request_size_and_response_id():
+    from drawing_analyzer.critique import outcome_from_message, result_from_outcomes
+
+    # Combining these reads would incorrectly price the short read above 100k.
+    # Cache tokens still belong to the individual response that reported them.
+    messages = [
+        {
+            "id": "msg_small", "content": [{"type": "text", "text": _block([])}],
+            "usage": {"input_tokens": 60_000, "output_tokens": 80},
+        },
+        FakeMessage(
+            id="msg_large", content=[FakeTextBlock(text="malformed response")],
+            usage=FakeUsage(input_tokens=99_000, output_tokens=50,
+                            cache_read_input_tokens=2_000),
+        ),
+    ]
+    outcomes = [
+        outcome_from_message(message, run_id=f"critique_{i}", ref=_rendered().ref)
+        for i, message in enumerate(messages, 1)
+    ]
+    result = result_from_outcomes(outcomes, requested_runs=2)
+
+    assert result.completed_runs == 1 and result.error
+    assert result.input_tokens == 159_000
+    assert [usage.request_id for usage in result.request_usage] == ["msg_small", "msg_large"]
+    assert [usage.input_tokens for usage in result.request_usage] == [60_000, 99_000]
+    assert result.request_usage[1].cache_read_tokens == 2_000
+    assert [usage.parse_success for usage in result.request_usage] == [True, False]
+    assert all(outcome.request_usage.parse_success is None for outcome in outcomes)
 
 
 @pytest.mark.parametrize("bad_first", [False, True])
@@ -1070,7 +1112,7 @@ def test_incremental_critique_reuse_and_scope_invalidation(tmp_path, monkeypatch
                       == profiles_cache_fragment(first.review_plan_profiles))
     assert same_checklist == (change != "scope")
     records = [r for r in second.run_usage.records if r.stage_family == "critique"]
-    assert sum(not r.cache_hit for r in records) == expected_new
+    assert sum(not r.cache_hit for r in records) == 2 * expected_new
     assert all(r.estimated_cost == 0 for r in records if r.cache_hit)
     plan_record = next(r for r in second.run_usage.records if r.stage_family == "review_plan")
     assert plan_record.cache_hit == (change != "scope")

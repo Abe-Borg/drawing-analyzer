@@ -66,6 +66,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Iterable
 
+from .core.request_usage import RequestUsage
+
 from .core.api_config import (
     CITATION_OUTPUT_CAP,
     MODEL_SONNET_5_5,
@@ -877,6 +879,7 @@ class _CheckOutcome:
     # ``error`` (the request failed) and from an unparseable body (the model
     # answered badly): here it did not finish answering at all.
     truncated: bool = False
+    request_usage: tuple[RequestUsage, ...] = ()
 
 
 def _resume_messages_with_cache(messages: list[dict]) -> list[dict]:
@@ -938,6 +941,7 @@ def _check_one(
     total_in = total_out = 0
     total_cache_read = total_cache_write = 0
     searches: int | None = None
+    request_usage: list[RequestUsage] = []
 
     for _resume in range(_MAX_PAUSE_RESUMES + 1):
         kwargs: dict[str, Any] = {
@@ -974,8 +978,10 @@ def _check_one(
                     cache_read_tokens=total_cache_read,
                     cache_write_tokens=total_cache_write,
                     web_search_requests=searches, error=_clean_error(exc),
+                    request_usage=tuple(request_usage),
                 )
         in_tok, out_tok = _message_usage(resp)
+        request_usage.append(RequestUsage.from_message(resp))
         total_in += in_tok
         total_out += out_tok
         cr_tok, cw_tok = _message_cache_usage(resp)
@@ -1011,6 +1017,7 @@ def _check_one(
             # words it uses when the model simply did not answer. Naming the
             # truncation keeps a cap problem from reading as a model problem.
             truncated=(stop == "max_tokens"),
+            request_usage=tuple(request_usage),
         )
 
     return _CheckOutcome(
@@ -1019,6 +1026,7 @@ def _check_one(
         cache_write_tokens=total_cache_write,
         web_search_requests=searches,
         error="check did not finish (still paused)",
+        request_usage=tuple(request_usage),
     )
 
 
@@ -1065,6 +1073,7 @@ class CitationCheckResult:
     partial: bool = False
     assessments: list[CitationAssessment] = field(default_factory=list)
     by_ref: dict = field(default_factory=dict)   # ref -> dominant Citation (compat)
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
 
 def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation | None:
@@ -1359,6 +1368,7 @@ def check_citations(
                 continue
             fresh_requests += 1
             result.input_tokens += outcome.input_tokens
+            result.request_usage.extend(outcome.request_usage)
             result.output_tokens += outcome.output_tokens
             result.cache_read_tokens += outcome.cache_read_tokens
             result.cache_write_tokens += outcome.cache_write_tokens

@@ -80,6 +80,7 @@ from .stage_cache import (
     put_stage_cache_entry,
     stage_cache_key,
 )
+from .core.request_usage import RequestUsage
 
 _log = get_logger()
 
@@ -709,6 +710,7 @@ class _CallResult(NamedTuple):
     structured: bool
     #: One of the ``DEGRADE_*`` kinds when no verdict was settled, else None.
     degrade: str | None
+    request_usage: RequestUsage | None = None
 
 
 def _failed_call(
@@ -795,6 +797,7 @@ def _verify_one(
         valid_model_verdict,
         send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        RequestUsage.from_message(resp),
     )
 
 
@@ -816,6 +819,7 @@ class VerifyResult:
         "verified", "rejected", "uncertain", "skipped",
         "malformed", "truncated", "failed",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+        "request_usage",
     )
 
     def __init__(self) -> None:
@@ -831,6 +835,7 @@ class VerifyResult:
         self.cache_hits = 0
         self.cache_misses = 0
         self.api_calls = 0
+        self.request_usage: list[RequestUsage] = []
 
     def _count(self, status: str) -> None:
         attr = {
@@ -1039,6 +1044,8 @@ def verify_findings(
                 result._count(res.verification.status)
                 result.input_tokens += res.input_tokens
                 result.output_tokens += res.output_tokens
+                if res.request_usage is not None:
+                    result.request_usage.append(res.request_usage)
                 done += 1
                 if progress is not None:
                     progress(done, total, f"Verifying finding {done}/{total}")
@@ -1478,6 +1485,7 @@ def _call_prepared_cross(
     return _CallResult(
         v, in_tok, out_tok, valid_model_verdict, send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        RequestUsage.from_message(resp),
     )
 
 
@@ -1600,6 +1608,8 @@ def verify_cross_findings(
                 try:
                     res: _CallResult = future.result()
                     outcomes[index] = (res.verification, res.input_tokens, res.output_tokens)
+                    if res.request_usage is not None:
+                        result.request_usage.append(res.request_usage)
                     result._count_degrade(res.degrade)
                     if res.cacheable:
                         # Under the key of the contract actually sent.

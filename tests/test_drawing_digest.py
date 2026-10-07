@@ -656,6 +656,29 @@ def test_a_recovered_truncation_bills_both_attempts():
     sd = digest_sheet(_make_sheet(), client=client, model=OPUS)
     assert len(client.messages.calls) == 2
     assert (sd.input_tokens, sd.output_tokens) == (200, 40)   # both attempts
+    assert [(r.input_tokens, r.output_tokens) for r in sd.request_usage] == [
+        (100, 20), (100, 20),
+    ]
+    # Recovery succeeded, but the paid first response still failed to finish.
+    # Both the normal ledger and the Batch inline-rescue path must retain that.
+    from drawing_analyzer.batch_digest import _attach_usage_attempt
+    from drawing_analyzer.models import RunUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    usage = RunUsage()
+    _record_usage(
+        usage, family="digest", instance="digest:SRC-0001:p0", model=OPUS,
+        input_tokens=sd.input_tokens, output_tokens=sd.output_tokens,
+        request_usage=sd.request_usage,
+    )
+    assert [(r.parse_success, r.terminal_status) for r in usage.records] == [
+        (False, "FAILED"), (True, "COMPLETE"),
+    ]
+    assert usage.total_input_tokens == 200 and usage.total_output_tokens == 40
+    _attach_usage_attempt(sd, transport="REAL_TIME", attempt_number=1)
+    assert [(r.parse_success, r.terminal_status) for r in sd.usage_attempts] == [
+        (False, "FAILED"), (True, "COMPLETE"),
+    ]
 
 
 def test_a_failed_retry_keeps_the_truncated_first_read():

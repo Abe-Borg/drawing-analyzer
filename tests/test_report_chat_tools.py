@@ -1948,7 +1948,7 @@ def test_default_model_still_gets_thinking_and_web_search(page, tmp_path):
     assert any(t.get("name") == "web_search" for t in req["tools"])
 
 
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
 def test_5_5_chat_preserves_empty_thinking_and_append_only_prefix(page, tmp_path, monkeypatch, model):
     monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", model)
     first = _sse([
@@ -1988,7 +1988,10 @@ def test_5_5_chat_preserves_empty_thinking_and_append_only_prefix(page, tmp_path
         assert req["model"] == model
         assert req["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert req["output_config"]["effort"] == "high"
-        assert req["fallbacks"] == "default"
+        if model == "claude-haiku-5-5":
+            assert "fallbacks" not in req
+        else:
+            assert req["fallbacks"] == "default"
         assert {t.get("type") for t in req["tools"]} >= {"web_search_20260209", "web_fetch_20260209"}
         assert req.get("tool_choice", {"type": "auto"})["type"] in {"auto", "none"}
     # Durable replay keeps the full signed prefix too.
@@ -2055,6 +2058,110 @@ def test_opus_5_5_chat_cache_read_cost(page, tmp_path, monkeypatch):
     _load(page, _chat_doc(), tmp_path, queue=[stream])
     _ask(page, "question")
     assert "est. $0.20" in page.locator("#da-chat-usage").text_content()
+
+
+def _priced_text_turn(input_tokens, *, cache_read=0, cache_write=0, output_totals=(100_000,), final_usage=None):
+    """A complete answer with realistic cumulative stream usage snapshots."""
+    frames = [
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": input_tokens, "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+    ]
+    frames.extend(
+        {"type": "message_delta", "delta": {}, "usage": {"output_tokens": count}}
+        for count in output_totals
+    )
+    frames.append({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                   "usage": final_usage or {}})
+    return _sse(frames)
+
+
+def test_haiku_chat_prices_each_message_without_repricing_session_tokens(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-5-5")
+    _load(page, _chat_doc(), tmp_path, queue=[
+        _priced_text_turn(100_000),
+        _priced_text_turn(100_001, output_totals=(50_000, 100_000, 75_000, 100_000)),
+        _priced_text_turn(100_000),
+    ])
+    # Exactly 100k uses base rates; the next request uses 5x rates for its whole
+    # prompt and answer. Repeated cumulative output snapshots never bill twice.
+    _ask(page, "short prompt")
+    assert "est. $0.06" in page.locator("#da-chat-usage").text_content()
+    _ask(page, "long prompt")
+    assert "est. $0.36" in page.locator("#da-chat-usage").text_content()
+    # Returning below the threshold must not reprice previous messages, even
+    # though the session's summed prompt tokens now greatly exceed 100k.
+    _ask(page, "short again")
+    text = page.locator("#da-chat-usage").text_content()
+    assert "300k in" in text and "300k out" in text
+    assert "est. $0.42" in text
+
+
+def test_haiku_chat_final_server_tool_usage_reprices_the_current_message(page, tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-5-5")
+    _load(page, _chat_doc(), tmp_path, queue=[
+        _priced_text_turn(100_000),
+        _priced_text_turn(99_000, output_totals=(50_000, 100_000),
+                          final_usage={"input_tokens": 101_000, "output_tokens": 100_000}),
+    ])
+    _ask(page, "short prompt")
+    _ask(page, "prompt that grew after server tools")
+    text = page.locator("#da-chat-usage").text_content()
+    assert "201k in" in text and "200k out" in text
+    assert "est. $0.36" in text
+    # The revised input is also the authoritative context occupancy, rather
+    # than the smaller prompt originally reported at message_start.
+    assert "20% used" in page.locator("#da-chat-context-text").text_content()
+
+
+@pytest.mark.parametrize("crossing_leg", ["read", "write"])
+def test_haiku_chat_cached_prompt_selects_tier_and_preserves_write_band(
+    page, tmp_path, monkeypatch, crossing_leg,
+):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-5-5")
+    read, write = 69_000, 30_000
+    _load(page, _chat_doc(), tmp_path, queue=[
+        _priced_text_turn(1_000, cache_read=read, cache_write=write),
+        _priced_text_turn(1_000, cache_read=read + (crossing_leg == "read"),
+                          cache_write=write + (crossing_leg == "write")),
+    ])
+    _ask(page, "cached short prompt")
+    assert "est. $0.05-0.06" in page.locator("#da-chat-usage").text_content()
+    _ask(page, "cached long prompt")
+    # Both cache legs count toward the tier, and the multiplier also applies to
+    # their discounted read / TTL-dependent write rates, plus all output tokens.
+    assert "est. $0.33-0.34" in page.locator("#da-chat-usage").text_content()
+
+
+@pytest.mark.parametrize("reset", ["new_chat", "load"])
+def test_haiku_chat_replacing_thread_resets_accumulated_dollars(page, tmp_path, monkeypatch, reset):
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-5-5")
+    _load(page, _chat_doc(), tmp_path, queue=[
+        _priced_text_turn(100_001), _priced_text_turn(100_000),
+    ])
+    _ask(page, "long prompt")
+    assert "est. $0.30" in page.locator("#da-chat-usage").text_content()
+    if reset == "new_chat":
+        page.click("#da-chat-clear")
+    else:
+        saved = _stored(page)
+        assert saved is not None
+        page.on("dialog", lambda d: d.accept())
+        page.set_input_files(
+            "#da-chat-load-input",
+            files=[{"name": "chat.json", "mimeType": "application/json",
+                    "buffer": json.dumps(saved).encode()}],
+        )
+        page.wait_for_function(
+            "() => document.getElementById('da-chat-msgs').textContent"
+            ".includes('Conversation loaded')", timeout=5000,
+        )
+    assert page.locator("#da-chat-usage").evaluate("el => el.hidden") is True
+    _ask(page, "short prompt")
+    assert "est. $0.06" in page.locator("#da-chat-usage").text_content()
 
 
 def test_5_5_chat_fallback_rejection_retries_with_the_same_prefix(page, tmp_path, monkeypatch):

@@ -1024,9 +1024,9 @@ def test_pipeline_prices_investigation_prompt_cache_tokens(tmp_path):
         record for record in context.run_usage.records
         if record.stage_family == "investigate" and record.transport == "REAL_TIME"
     ]
-    assert len(records) == 1
+    assert len(records) == 2
     assert records[0].cache_write_tokens == 900
-    assert records[0].cache_read_tokens == 700
+    assert records[1].cache_read_tokens == 700
     assert context.run_usage.total_cache_write_tokens >= 900
     assert context.run_usage.total_cache_read_tokens >= 700
 

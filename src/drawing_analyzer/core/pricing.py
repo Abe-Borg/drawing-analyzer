@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-10-05. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-10-07. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,7 +20,7 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-10-05"
+PRICING_EFFECTIVE_DATE = "2026-10-07"
 
 # Batch API bills at half of standard, per Anthropic's published pricing. The
 # caching multipliers below stack with it (Anthropic pricing, "These multipliers
@@ -76,6 +76,16 @@ class ModelPrice:
     # Cache-read rate as a multiple of base input. Opus 5.5 reads at 0.05x
     # ($0.20 on $4); every other model in the table reads at 0.10x.
     cache_read_multiplier: float = CACHE_READ_MULTIPLIER
+    # Applied to all token rates when one request's full prompt exceeds the
+    # threshold. Cached reads/writes count toward the prompt, output does not.
+    long_context_threshold: int | None = None
+    long_context_multiplier: float = 1.0
+
+    def multiplier_for_prompt(self, prompt_tokens: int) -> float:
+        """Token-rate multiplier for one request's complete prompt."""
+        if self.long_context_threshold is not None and prompt_tokens > self.long_context_threshold:
+            return self.long_context_multiplier
+        return 1.0
 
 
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
@@ -95,10 +105,14 @@ class ModelPrice:
 # estimate more than it used to — the 50% over-statement the hedge caused was
 # correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
-    # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-05).
-    # Both 5.5 models read at $0.20/MTok, with different base input rates.
+    # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-07).
+    # Opus/Sonnet 5.5 read at $0.20/MTok, with different base input rates.
     "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
     "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5"),
+    "claude-haiku-5-5": ModelPrice(
+        0.10, 0.50, "Haiku 5.5", long_context_threshold=100_000,
+        long_context_multiplier=5.0,
+    ),
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
@@ -144,16 +158,22 @@ def estimate_request_cost(
     *,
     model: str,
     batch: bool = False,
+    prompt_tokens: int | None = None,
 ) -> float | None:
     """Estimated USD cost of a request, or ``None`` if the model is unknown.
 
     Image/vision input counts as ordinary input tokens, so callers fold image
     tokens into ``input_tokens``. ``batch=True`` applies the 50% Batch discount.
+    ``prompt_tokens`` overrides the tier-selection count when these tokens are
+    only one part of a request (for example, its uncached input). Otherwise the
+    complete prompt is ``input_tokens``. Never pass aggregate stage/run counts.
     """
     price = price_for(model)
     if price is None:
         return None
-    factor = BATCH_DISCOUNT if batch else 1.0
+    factor = (BATCH_DISCOUNT if batch else 1.0) * price.multiplier_for_prompt(
+        input_tokens if prompt_tokens is None else prompt_tokens
+    )
     cost = (
         (input_tokens / 1_000_000) * price.input_per_mtok
         + (output_tokens / 1_000_000) * price.output_per_mtok
@@ -171,6 +191,7 @@ def usage_record_cost(
     billable_tool_uses: "dict | None" = None,
     batch: bool = False,
     cache_write_ttl: str | None = None,
+    prompt_tokens: int | None = None,
 ) -> "Decimal | None":
     """USD cost of one usage record, priced by its own rate class (§6.3 / §15.7).
 
@@ -188,6 +209,10 @@ def usage_record_cost(
     (1.25x). Defaulting to the 5-minute rate keeps every existing caller correct
     — the digest and critique breakpoints emit a plain ``{"type": "ephemeral"}``
     — while letting the ``api_config`` 1-hour path price itself honestly.
+
+    Long-context tiers use the sum of ordinary input, cached reads and cached
+    writes for this request. ``prompt_tokens`` can supply that complete count
+    when costing only part of the request; output never selects the tier.
     """
     price = price_for(model)
     tool_uses = billable_tool_uses or {}
@@ -195,7 +220,13 @@ def usage_record_cost(
     if price is None:
         # No token price for this model — but a known tool charge is still real.
         return tool_cost if tool_cost > 0 else None
-    factor = Decimal(str(BATCH_DISCOUNT)) if batch else Decimal("1")
+    full_prompt = (
+        input_tokens + cache_read_tokens + cache_write_tokens
+        if prompt_tokens is None else prompt_tokens
+    )
+    factor = Decimal(str(price.multiplier_for_prompt(full_prompt)))
+    if batch:
+        factor *= Decimal(str(BATCH_DISCOUNT))
     inp = Decimal(str(price.input_per_mtok))
     out = Decimal(str(price.output_per_mtok))
     million = Decimal("1000000")

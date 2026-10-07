@@ -235,6 +235,7 @@ def test_cache_read_write_and_web_search_pricing():
     ("claude-opus-5-5", "0.20", "5", "8"),
     ("claude-opus-5-5-fast", "0.20", "5", "8"),
     ("claude-sonnet-5-5", "0.20", "2.5", "4"),
+    ("claude-haiku-5-5", "0.05", "0.625", "1"),  # 1M prompt uses 5x tier
     ("claude-opus-5", "0.50", "6.25", "10"),
 ])
 @pytest.mark.parametrize("batch", [False, True])
@@ -255,6 +256,45 @@ def test_usage_ledger_prices_opus_5_5_cache_reads_at_five_percent():
                   transport="BATCH", cache_read_tokens=1_000_000)
     assert [r.estimated_cost for r in ru.records] == [Decimal("0.20"), Decimal("0.10")]
     assert ru.total_estimated_cost == Decimal("0.30")
+
+
+@pytest.mark.parametrize("input_tokens,cache_read_tokens,cache_write_tokens,expected", [
+    (100_000, 0, 0, "0.011"),
+    (100_001, 0, 0, "0.0550005"),
+    (1, 99_999, 0, "0.00200009"),
+    (2, 99_999, 0, "0.01000095"),
+    (50_000, 25_000, 25_000, "0.009375"),
+    (50_001, 25_000, 25_000, "0.0468755"),
+])
+@pytest.mark.parametrize("batch", [False, True])
+def test_haiku_usage_tier_counts_ordinary_and_cached_prompt_tokens(
+    input_tokens, cache_read_tokens, cache_write_tokens, expected, batch,
+):
+    # All input classes and output take the request's tier. Tool charges keep
+    # their own rate even when long-context and Batch modifiers stack.
+    assert usage_record_cost(
+        model="claude-haiku-5-5", input_tokens=input_tokens, output_tokens=2_000,
+        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        billable_tool_uses={"web_search": 2}, batch=batch,
+    ) == Decimal(expected) * (Decimal("0.5") if batch else 1) + Decimal("0.02")
+
+
+def test_haiku_usage_ledger_sums_short_and_long_requests_without_repricing_totals():
+    from drawing_analyzer.pipeline import _record_usage
+
+    usage = RunUsage()
+    for index, (tokens, transport) in enumerate([
+        (60_000, "REAL_TIME"), (60_000, "REAL_TIME"), (140_000, "BATCH"),
+    ]):
+        _record_usage(
+            usage, family="digest", instance=f"digest:{index}", model="claude-haiku-5-5",
+            input_tokens=tokens, output_tokens=2_000, transport=transport,
+        )
+    assert usage.total_input_tokens == 260_000
+    assert [r.estimated_cost for r in usage.records] == [
+        Decimal("0.007"), Decimal("0.007"), Decimal("0.0375"),
+    ]
+    assert usage.total_estimated_cost == Decimal("0.0515")
 
 
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():

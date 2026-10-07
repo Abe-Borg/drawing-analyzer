@@ -59,6 +59,7 @@ from .core.api_config import (
     system_prompt_with_cache,
     tools_with_cache,
 )
+from .core.request_usage import RequestUsage
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -67,7 +68,6 @@ from .digest import (
     _error_status,
     _image_block,
     _message_text,
-    _message_usage,
     _tolerant_json_object,
     stream_message,
     transient_retry_wait,
@@ -813,6 +813,7 @@ class _InvestigationOutcome:
     fatal: bool = False
     note: str = ""
     tool_trace: list = field(default_factory=list)
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
 
 def _build_initial_content(
@@ -1007,14 +1008,12 @@ def _investigate_one(
                 out.tool_trace = executor.tool_trace
                 return out
 
-        tin, tout = _message_usage(resp)
-        usage = _get(resp, "usage")
-        cache_read = int(_get(usage, "cache_read_input_tokens", 0) or 0)
-        cache_write = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
-        out.input_tokens += tin
-        out.output_tokens += tout
-        out.cache_read_tokens += cache_read
-        out.cache_write_tokens += cache_write
+        usage = RequestUsage.from_message(resp)
+        out.request_usage.append(usage)
+        out.input_tokens += usage.input_tokens
+        out.output_tokens += usage.output_tokens
+        out.cache_read_tokens += usage.cache_read_tokens
+        out.cache_write_tokens += usage.cache_write_tokens
         stop = str(getattr(resp, "stop_reason", "") or "")
         content = list(getattr(resp, "content", None) or [])
 
@@ -1309,6 +1308,7 @@ class InvestigationRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cached: bool = False
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
 
 @dataclass
@@ -1476,6 +1476,7 @@ def investigate_findings(
             output_tokens=outcome.output_tokens,
             cache_read_tokens=outcome.cache_read_tokens,
             cache_write_tokens=outcome.cache_write_tokens,
+            request_usage=list(outcome.request_usage),
         )
         result.per_finding.append(record)
         if outcome.outcome == "concluded":

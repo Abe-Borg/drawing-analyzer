@@ -92,9 +92,22 @@ def test_estimate_request_cost_unknown_model_is_none():
     assert estimate_request_cost(1_000, 1_000, model="nope") is None
 
 
+@pytest.mark.parametrize("input_tokens,output_tokens,expected", [
+    (100_000, 2_000, 0.011),
+    (100_001, 2_000, 0.0550005),
+    (1_000, 128_000, 0.0641),  # output size never selects the tier
+])
+@pytest.mark.parametrize("batch", [False, True])
+def test_haiku_request_tier_prices_all_tokens_at_the_prompt_boundary(input_tokens, output_tokens, expected, batch):
+    assert estimate_request_cost(
+        input_tokens, output_tokens, model="claude-haiku-5-5-20261007", batch=batch,
+    ) == pytest.approx(expected * (0.5 if batch else 1))
+
+
 @pytest.mark.parametrize("model,reuse,no_reuse", [
     ("claude-opus-5-5", 5.20, 10.00),
     ("claude-sonnet-5-5", 2.70, 5.00),
+    ("claude-haiku-5-5", 0.675, 1.25),
     ("claude-opus-5", 6.75, 12.50),
 ])
 def test_estimator_uses_each_models_cache_read_rate(model, reuse, no_reuse):
@@ -109,6 +122,25 @@ def test_estimator_uses_each_models_cache_read_rate(model, reuse, no_reuse):
     )
     assert tokens == 2_000_000
     assert spec_cost == pytest.approx(reuse)
+
+
+@pytest.mark.parametrize("prefix,expected_reuse,expected_misses,expected_batch", [
+    (100_000, 0.0155, 0.027, 0.011),
+    (100_001, 0.077500675, 0.13500125, 0.0550005),
+])
+def test_haiku_critique_output_and_cache_use_the_complete_request_tier(
+    prefix, expected_reuse, expected_misses, expected_batch,
+):
+    from drawing_analyzer.cost import _critique_prefix_costs
+
+    assert _critique_prefix_costs(
+        prefix_tokens=prefix, output_tokens=2_000, sheet_count=4, runs=2,
+        model="claude-haiku-5-5", batch=False,
+    ) == pytest.approx((expected_reuse * 4, expected_misses * 4))
+    assert _critique_prefix_costs(
+        prefix_tokens=prefix, output_tokens=2_000, sheet_count=4, runs=2,
+        model="claude-haiku-5-5", batch=True,
+    ) == pytest.approx((expected_batch * 4, expected_batch * 4))
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +174,60 @@ def test_drawing_estimate_single_sheet_skips_synthesis():
     one = estimate_drawing_set_cost(1, model=OPUS, synthesize=True)
     assert one.output_tokens == 1 * OUT_PER_SHEET  # no synthesis component
     assert one.input_tokens == one.image_tokens + 1 * PROMPT_PER_SHEET
+
+
+@pytest.mark.parametrize("sheet_inputs,spec_tokens", [
+    ([60_000, 60_000], 0),  # sum exceeds threshold; neither request does
+    ([60_000, 140_000], 0),  # averaging must not hide a long request
+    ([99_999, 100_000, 100_001], 0),
+    ([96_000, 96_000], 4_000),  # complete prompt equals the threshold
+    ([96_000, 96_000], 4_001),  # cached specifications push both over it
+])
+@pytest.mark.parametrize("batch", [False, True])
+def test_digest_previews_choose_tiers_per_complete_sheet_request(monkeypatch, sheet_inputs, spec_tokens, batch):
+    from drawing_analyzer import cost as cost_module
+
+    monkeypatch.setattr(cost_module, "_image_token_requests_for", lambda *args, **kwargs: (
+        tuple(tokens - PROMPT_PER_SHEET for tokens in sheet_inputs), True, 0,
+    ))
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", "claude-haiku-5-5")
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", "2")
+    standard = estimate_drawing_set_cost(
+        len(sheet_inputs), model="claude-haiku-5-5", batch=batch,
+        synthesize=False, spec_chars=spec_tokens * 4,
+    )
+    exhaustive = estimate_exhaustive_run_cost(
+        len(sheet_inputs), model="claude-haiku-5-5", batch=batch, spec_chars=spec_tokens * 4,
+    )
+    digest = next(c for c in exhaustive.components if c.stage == "Digest")
+    for estimate in (standard, digest):
+        for low in (False, True):
+            output_per_sheet = (
+                estimate.output_tokens_low if low else estimate.output_tokens
+            ) // len(sheet_inputs)
+            expected = 0
+            for index, tokens in enumerate(sheet_inputs):
+                tier = 5 if tokens + spec_tokens > 100_000 else 1
+                cache_multiplier = 1 if batch else (1.25 if index == 0 else 0.1)
+                expected += tier * (
+                    (tokens + spec_tokens * cache_multiplier) * 0.1
+                    + output_per_sheet * 0.5
+                ) / 1_000_000 * (0.5 if batch else 1)
+            actual = estimate.low_cost if low else (
+                estimate.total_cost if hasattr(estimate, "total_cost") else estimate.cost
+            )
+            assert actual == pytest.approx(expected)
+    critique = next(c for c in exhaustive.components if c.stage.startswith("Critique"))
+    for low in (False, True):
+        output_per_read = (critique.output_tokens_low if low else critique.output_tokens) // (2 * len(sheet_inputs))
+        prefix_multiplier = 2 if batch else (1.35 if low else 2.5)
+        expected = sum(
+            (5 if tokens > 100_000 else 1)
+            * (tokens * prefix_multiplier * 0.1 + 2 * output_per_read * 0.5)
+            / 1_000_000 * (0.5 if batch else 1)
+            for tokens in sheet_inputs
+        )
+        assert (critique.low_cost if low else critique.cost) == pytest.approx(expected)
 
 
 # spec_chars=0 is the regression case: a naive `(total_cost or 0.0) + spec_cost`
@@ -273,35 +359,38 @@ def test_exhaustive_legacy_transport_argument_still_controls_both_reads():
     assert fast.critique_batch is False
 
 
-def test_exhaustive_estimate_prices_actual_verification_model():
-    sonnet = "claude-sonnet-5"
+@pytest.mark.parametrize("model,label", [("claude-sonnet-5", "Sonnet 5"), ("claude-haiku-5-5", "Haiku 5.5")])
+def test_exhaustive_estimate_prices_actual_verification_model(model, label):
     est = estimate_exhaustive_run_cost(
-        10, model=OPUS, verification_model=sonnet
+        10, model=OPUS, verification_model=model
     )
     verify = {c.stage: c for c in est.components}["Verification"]
-    expected = estimate_request_cost(
-        verify.input_tokens, verify.output_tokens, model=sonnet, batch=False
+    expected = 200 * estimate_request_cost(
+        1_500, 1_400, model=model, batch=False
     )
     assert verify.cost == pytest.approx(expected)
-    assert "Sonnet 5" in verify.note
+    assert label in verify.note
 
 
-def test_citation_estimate_uses_runtime_ref_cap_and_clause_fetch_limit(monkeypatch):
+@pytest.mark.parametrize("refs", [3, 30])
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-haiku-5-5"])
+def test_citation_estimate_uses_runtime_ref_cap_and_clause_fetch_limit(monkeypatch, refs, model):
     from drawing_analyzer.citation_check import citation_tools
     from drawing_analyzer.core.pricing import WEB_SEARCH_COST_PER_USE
 
-    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", "3")
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MODEL", model)
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_MAX_REFS", str(refs))
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "1")
     est = estimate_exhaustive_run_cost(100)
     row = next(c for c in est.components if c.stage == "Citation checks")
     fetch = next(t for t in citation_tools(est.stage_models.citation) if t["name"] == "web_fetch")
     assert fetch["max_content_tokens"] == 4_000
-    assert row.input_tokens == 3 * (2_000 + 4_000)
-    assert row.output_tokens == 3 * 1_400
-    expected = estimate_request_cost(row.input_tokens, row.output_tokens,
-                                    model=est.stage_models.citation, batch=False)
-    assert row.cost == pytest.approx(expected + 3 * float(WEB_SEARCH_COST_PER_USE))
-    assert "3 eligible normalized ref(s), per-run cap 3" in row.note
+    assert row.input_tokens == refs * (2_000 + 4_000)
+    assert row.output_tokens == refs * 1_400
+    # Each reference uses a short request, even when the stage exceeds 100k.
+    expected = refs * estimate_request_cost(6_000, 1_400, model=model, batch=False)
+    assert row.cost == pytest.approx(expected + refs * float(WEB_SEARCH_COST_PER_USE))
+    assert f"{refs} eligible normalized ref(s), per-run cap {refs}" in row.note
     assert "1 searches/ref" in row.note
     assert "4,000 tokens" in row.note
     assert "claim chunks/resumes can cost more" in row.note
@@ -629,14 +718,21 @@ def test_findings_band_includes_recorded_standard_volume_and_exhaustive_growth()
     assert "8–20 findings per sheet" in format_exhaustive_cost_prompt(est)
 
 
-def test_investigation_prices_six_evidence_requests_and_the_closing_call(monkeypatch):
+@pytest.mark.parametrize("investigation_model", [OPUS, "claude-haiku-5-5"])
+def test_investigation_prices_six_evidence_requests_and_the_closing_call(monkeypatch, investigation_model):
     monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", "1")
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", investigation_model)
     est = estimate_exhaustive_run_cost(39, model=OPUS)
     inv = next(c for c in est.components if c.stage == "Investigation")
     assert inv.output_tokens_low == 4 * 1_500
     assert inv.output_tokens == 7 * 16_000
     assert inv.input_tokens_low == 4 * 6_000
     assert inv.input_tokens == 7 * 6_000 + 21 * (4_000 + 16_000)
+    if investigation_model == "claude-haiku-5-5":
+        # The first five prompts are 6k..86k; only the 106k and 126k closing
+        # prompts use the higher tier. Their output takes that tier too.
+        assert inv.cost == pytest.approx(0.259)
+        assert inv.low_cost == pytest.approx(0.0054)
     assert "6 evidence requests + closing verdict" in inv.note
 
 
@@ -650,8 +746,10 @@ def test_investigation_honors_round_budget_and_resolved_model(monkeypatch):
     assert inv.cost == pytest.approx(estimate_request_cost(inv.input_tokens, inv.output_tokens, model="claude-sonnet-5"))
 
 
+@pytest.mark.parametrize("cross_model", [OPUS, "claude-haiku-5-5"])
 @pytest.mark.parametrize("sheets,min_calls", [(40, 1), (41, 3), (81, 4)])
-def test_cross_qc_accounts_for_shards_and_reconciliation(sheets, min_calls):
+def test_cross_qc_accounts_for_shards_and_reconciliation(monkeypatch, sheets, min_calls, cross_model):
+    monkeypatch.setenv("DRAWING_ANALYZER_CROSS_QC_MODEL", cross_model)
     cross = next(c for c in estimate_exhaustive_run_cost(sheets, model=OPUS).components if c.stage == "Cross-sheet QC")
     assert cross.output_tokens_low == min_calls * 2_000
     assert cross.output_tokens >= min_calls * 16_000
@@ -659,6 +757,15 @@ def test_cross_qc_accounts_for_shards_and_reconciliation(sheets, min_calls):
         assert "discipline shard(s)" in cross.note
         assert "reconciliation call(s)" in cross.note
         assert cross.input_tokens > cross.input_tokens_low
+    if cross_model == "claude-haiku-5-5":
+        if sheets == 40:
+            # One 120.8k prompt is long; its entire output costs 5x too.
+            assert cross.cost == pytest.approx(0.1004)
+        if sheets == 41:
+            # High: 41 short 3.8k maps + 36 short 62.03k reconciliations.
+            # Low: one long 120.8k map, a short 3.8k tail and a 14.03k reconcile.
+            assert cross.cost == pytest.approx(0.854888)
+            assert cross.low_cost == pytest.approx(0.069183)
 
 
 def test_unknown_standard_stage_voids_both_band_ends(monkeypatch):

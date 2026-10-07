@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from drawing_analyzer.digest_cache import DigestCache
+from drawing_analyzer.core.request_usage import RequestUsage
 from drawing_analyzer.models import (
     Anchor,
     ConflictLeg,
@@ -165,6 +166,31 @@ def _run(findings, sheets=None, **kw):
     return verify_findings(findings, sheets or [_sheet()], model=OPUS, **kw)
 
 
+@pytest.mark.parametrize("verdict", ['{"verdict":"CONFIRMED"}', ""])
+def test_verify_retains_billed_requests_with_prompt_cache(verifier_pass, verdict):
+    make, run = verifier_pass
+    client = _FakeClient({}, default=verdict)
+    create = client.messages.create
+
+    def cached_response(**kwargs):
+        response = create(**kwargs)
+        response.usage = {
+            "input_tokens": 60_000, "output_tokens": 10,
+            "cache_read_input_tokens": 20_000,
+            "cache_creation_input_tokens": 10_000,
+        }
+        response.id = "msg_cached"
+        return response
+
+    client.messages.create = cached_response
+    result = run([make("one"), make("two")], client=client, max_workers=2)
+
+    assert result.input_tokens == 120_000 and result.output_tokens == 20
+    assert result.request_usage == [
+        RequestUsage(60_000, 10, 20_000, 10_000, "msg_cached", stop_reason="end_turn")
+    ] * 2
+
+
 # --------------------------------------------------------------------------- #
 # parse_verdict
 # --------------------------------------------------------------------------- #
@@ -288,6 +314,7 @@ def test_verify_cache_cold_then_warm_recreates_exact_evidence(tmp_path):
     assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
     assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
     assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert warm.request_usage == []
     assert warm_client.calls == []
     assert (warm_finding.verification.status, warm_finding.verification.note) == (
         cold_finding.verification.status,
@@ -535,6 +562,7 @@ def test_exhausted_transient_errors_do_not_trip_the_latch(verifier_pass, status)
     result = run(findings, client=client, max_workers=1, max_retries=2)
     assert client.calls == 15 and result.api_calls == 5
     assert (result.failed, result.skipped, result.uncertain) == (5, 0, 0)
+    assert result.request_usage == []
 
 
 def test_permanent_failure_latch_bounds_concurrent_calls(verifier_pass):
@@ -805,6 +833,7 @@ def test_cross_verify_cache_replays_ordered_leg_evidence(monkeypatch, tmp_path):
     assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
     assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
     assert warm_client.calls == [] and warm.input_tokens == warm.output_tokens == 0
+    assert warm.request_usage == []
     assert [a.request_order for a in warm_finding.verification.evidence] == [1, 2]
     assert [a.sha256 for a in warm_finding.verification.evidence] == [
         a.sha256 for a in cold_finding.verification.evidence

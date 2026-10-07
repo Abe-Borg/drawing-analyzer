@@ -2911,7 +2911,9 @@ def _chat_bootstrap_html(
         "contextWindow": caps.context_window,
         "rates": (
             {"in": price.input_per_mtok, "out": price.output_per_mtok,
-             "cacheRead": price.cache_read_multiplier}
+             "cacheRead": price.cache_read_multiplier,
+             "longContextThreshold": price.long_context_threshold,
+             "longContextMultiplier": price.long_context_multiplier}
             if price
             else None
         ),
@@ -3680,6 +3682,11 @@ _CHAT_JS = r"""
   // ledger or its manifest — this counter is the only cost signal that exists
   // here.
   var sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+  // Price each message at its own prompt tier. Applying one tier to accumulated
+  // tokens would reprice earlier short prompts after a later long request, or
+  // charge a premium merely because many short requests sum past the threshold.
+  // The two totals retain the 5-minute/1-hour cache-write uncertainty band.
+  var sessionCost = {lo: 0, hi: 0};
 
   // Context-window occupancy, which is a DIFFERENT quantity from the totals
   // above: `sessionUsage` accumulates forever (it is spend), while this is a
@@ -3687,8 +3694,8 @@ _CHAT_JS = r"""
   // `prompt` is the last round's whole prompt — input + BOTH cache legs, because
   // cached tokens still occupy the window, they are merely billed at a discount
   // — and `output` is that round's answer, which the transcript carries into the
-  // next request. Rounds within one turn only grow, so the newest message_start
-  // is both the latest and the largest, and assignment (not accumulation) is
+  // next request. Usage updates describe the newest round, including any prompt
+  // growth reported after server tools, and assignment (not accumulation) is
   // what keeps this a snapshot.
   var contextUsage = {prompt: 0, output: 0};
 
@@ -4313,12 +4320,7 @@ _CHAT_JS = r"""
       fmtTokens(sessionUsage.output) + ' out'
     ];
     if(CFG.rates && CFG.rates.in && CFG.rates.out){
-      var base = (sessionUsage.input / 1e6) * CFG.rates.in
-        + (sessionUsage.output / 1e6) * CFG.rates.out
-        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in
-          * (CFG.rates.cacheRead == null ? 0.1 : CFG.rates.cacheRead);
-      var lo = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 1.25;
-      var hi = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 2;
+      var lo = sessionCost.lo, hi = sessionCost.hi;
       var span = (lo.toFixed(2) === hi.toFixed(2))
         ? '$' + lo.toFixed(2)
         : '$' + lo.toFixed(2) + '-' + hi.toFixed(2);
@@ -4340,6 +4342,7 @@ _CHAT_JS = r"""
     history = [];
     displays = [];
     sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    sessionCost = {lo: 0, hi: 0};
     contextUsage = {prompt: 0, output: 0};   // the emptied thread occupies nothing
     renderUsage();             // back to hidden — the counter belongs to the thread
     dropStoredTranscript();    // "New chat" is the eraser — the stored copy goes too
@@ -4904,10 +4907,11 @@ _CHAT_JS = r"""
       }
       var st = {
         buf: '', blocks: [], partial: {}, stopReason: null,
-        // Output tokens already folded into sessionUsage for THIS message. See
-        // the message_delta branch: that event reports a cumulative total, so the
-        // running figure is what makes summing across rounds correct.
-        outputCounted: 0,
+        // Usage and cost already folded into session totals for THIS message.
+        // Final usage may revise the input/cache counts after server tools, so
+        // accountMessageUsage adjusts this message without repricing prior ones.
+        usage: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+        cost: {lo: 0, hi: 0},
         els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
         // paced reveal (see "smooth reveal"): shown = characters on screen,
         // closed = content_block_stop seen, done = finishBlock has run, head =
@@ -4959,6 +4963,44 @@ _CHAT_JS = r"""
     });
   }
 
+  function accountMessageUsage(st, u){
+    if(!u) return;
+    var counted = st.usage || {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    var fields = {input: 'input_tokens', output: 'output_tokens',
+                  cacheRead: 'cache_read_input_tokens', cacheWrite: 'cache_creation_input_tokens'};
+    Object.keys(fields).forEach(function(key){
+      var seen = u[fields[key]];
+      if(typeof seen !== 'number') return;   // omitted fields retain their snapshot
+      // Output figures are cumulative: repeated or older deltas add nothing.
+      // Input/cache fields may be corrected by final server-tool usage.
+      if(key === 'output') seen = Math.max(counted.output, seen);
+      sessionUsage[key] += seen - counted[key];
+      counted[key] = seen;
+    });
+    st.usage = counted;
+    // Occupancy is a snapshot of this round, including any prompt added by
+    // server tools, rather than the session's accumulated spend.
+    contextUsage.prompt = counted.input + counted.cacheRead + counted.cacheWrite;
+    contextUsage.output = counted.output;
+    if(CFG.rates){
+      var threshold = CFG.rates.longContextThreshold;
+      var multiplier = threshold != null && contextUsage.prompt > threshold
+        ? (CFG.rates.longContextMultiplier || 1) : 1;
+      var inputRate = CFG.rates.in * multiplier / 1e6;
+      var base = (counted.input + counted.cacheRead
+        * (CFG.rates.cacheRead == null ? 0.1 : CFG.rates.cacheRead)) * inputRate
+        + counted.output / 1e6 * CFG.rates.out * multiplier;
+      var writes = counted.cacheWrite * inputRate;
+      var cost = {lo: base + writes * 1.25, hi: base + writes * 2};
+      var accounted = st.cost || {lo: 0, hi: 0};
+      // A late tier change reprices ALL tokens in this message, including output
+      // counted earlier, while previous messages keep their own billed rates.
+      sessionCost.lo += cost.lo - accounted.lo;
+      sessionCost.hi += cost.hi - accounted.hi;
+      st.cost = cost;
+    }
+  }
+
   function handleEvent(ev, st, bubble){
     if(ev.type === 'content_block_start'){
       st.blocks[ev.index] = JSON.parse(JSON.stringify(ev.content_block));
@@ -4992,37 +5034,10 @@ _CHAT_JS = r"""
         finishBlock(st, ev.index, bubble);
       }
     } else if(ev.type === 'message_start'){
-      // Input-side counters arrive once per round, on message_start.
-      var u = ev.message && ev.message.usage;
-      if(u){
-        sessionUsage.input      += u.input_tokens || 0;
-        sessionUsage.cacheRead  += u.cache_read_input_tokens || 0;
-        sessionUsage.cacheWrite += u.cache_creation_input_tokens || 0;
-        // Snapshot, not a sum (see `contextUsage`): this round's prompt IS the
-        // current occupancy, and the answer that will extend it starts from zero.
-        contextUsage.prompt = (u.input_tokens || 0)
-          + (u.cache_read_input_tokens || 0)
-          + (u.cache_creation_input_tokens || 0);
-        contextUsage.output = 0;
-      }
+      accountMessageUsage(st, ev.message && ev.message.usage);
     } else if(ev.type === 'message_delta'){
       if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
-      // usage.output_tokens here is CUMULATIVE for this message, not a per-event
-      // increment, and a message may emit more than one message_delta. Adding
-      // each event's figure would double-count (deltas of 50 then 100 would read
-      // as 150). But sessionUsage spans every round of every question, and each
-      // round is its own message — so neither plain assignment nor plain addition
-      // is right: fold in only what this message has not contributed yet.
-      if(ev.usage && typeof ev.usage.output_tokens === 'number'){
-        var seen = ev.usage.output_tokens;
-        if(seen > st.outputCounted){
-          sessionUsage.output += seen - st.outputCounted;
-          st.outputCounted = seen;
-        }
-        // The cumulative shape that makes the counter above awkward is exactly
-        // what the snapshot wants: this round's answer so far, assigned.
-        if(seen > contextUsage.output) contextUsage.output = seen;
-      }
+      accountMessageUsage(st, ev.usage);
     } else if(ev.type === 'error'){
       var err = new Error((ev.error && ev.error.message) || 'stream error');
       err.mid_stream = true;
@@ -5345,6 +5360,7 @@ _CHAT_JS = r"""
     // Loading a transcript over a conversation you had already spent tokens on
     // would otherwise keep charging the abandoned thread's spend to the new one.
     sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    sessionCost = {lo: 0, hi: 0};
     // Same reasoning for the occupancy snapshot, plus one of its own: the
     // incoming thread has never been sent from here, so the only honest reading
     // is "not measured yet" — carrying the previous thread's figure across would

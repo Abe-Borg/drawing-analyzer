@@ -336,7 +336,7 @@ def test_live_investigation_tools_accept_strict(tmp_path):
 def test_live_harvest_under_output_config_format(monkeypatch):
     """Does ``output_config.format`` hold on the prose harvest's structuring call?
 
-    The lowest-risk structured-outputs target in the app: text-only, Sonnet 5,
+    The lowest-risk structured-outputs target in the app: text-only, Haiku 5.5,
     one flat object. What this proves on the live service:
 
     1. the request is ACCEPTED with ``HARVEST_FINDING_SCHEMA`` attached (no

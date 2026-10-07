@@ -29,6 +29,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.tokenizer import estimate_image_tokens_total
+from .core.request_usage import RequestUsage
 from . import resource_pressure
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
@@ -765,6 +766,7 @@ class SheetDigest:
     # (mirrors input_tokens/output_tokens on a hit).
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -1656,6 +1658,7 @@ def digest_sheet(
     raised_cap_used = False
     truncated_resp = None            # the first read, kept if the retry cannot land
     in_tok = out_tok = cache_read_tok = cache_write_tok = 0
+    request_usage: list[RequestUsage] = []
     while True:
         attempt = 0
         resp = None
@@ -1692,6 +1695,7 @@ def digest_sheet(
         # reading only the last one would under-report every recovered
         # truncation in the ledger, the run totals and the cost estimate.
         att_in, att_out = _message_usage(resp)
+        request_usage.append(RequestUsage.from_message(resp))
         in_tok += att_in
         out_tok += att_out
         _usage = _get(resp, "usage")
@@ -1761,4 +1765,5 @@ def digest_sheet(
         findings_note=findings_note,
         cache_read_tokens=cache_read_tok,
         cache_write_tokens=cache_write_tok,
+        request_usage=request_usage,
     )

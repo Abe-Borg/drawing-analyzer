@@ -18,6 +18,7 @@ from drawing_analyzer.core.tokenizer import _LOCAL_SAFETY_FACTORS
 OPUS_5 = "claude-opus-5"
 OPUS_5_5 = "claude-opus-5-5"
 SONNET_5_5 = "claude-sonnet-5-5"
+HAIKU_5_5 = "claude-haiku-5-5"
 SONNET_5 = "claude-sonnet-5"
 OPUS_48 = "claude-opus-4-8"
 SONNET_46 = "claude-sonnet-4-6"
@@ -29,10 +30,8 @@ HAIKU = "claude-haiku-4-5"
 # --------------------------------------------------------------------------- #
 
 
-def test_stages_that_deliberately_run_on_sonnet():
-    """Three stages are Sonnet-by-default, each for a stated reason. Pin them so
-    a well-meaning "upgrade everything to the flagship" cannot silently regress
-    the citation check's capabilities."""
+def test_stage_defaults_keep_review_judgment_separate_from_extraction():
+    """Haiku handles bounded extraction; reviewers keep their judgment models."""
     from drawing_analyzer.citation_check import citation_model
     from drawing_analyzer.prose_harvest import harvest_model
     from drawing_analyzer.set_identity import default_identity_model
@@ -44,12 +43,15 @@ def test_stages_that_deliberately_run_on_sonnet():
     assert api.model_capabilities(OPUS_5_5).supports_web_fetch is True
     assert api.model_capabilities(OPUS_5).supports_web_fetch is False
     # Advisory-only, with a deterministic regex backstop.
-    assert default_identity_model() == SONNET_5_5
+    assert default_identity_model() == HAIKU_5_5
     # Pure structuring of one prose item.
-    assert harvest_model() == SONNET_5_5
+    assert harvest_model() == HAIKU_5_5
+    assert api.REVIEW_MODEL_DEFAULT == OPUS_5_5
+    assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5_5
+    assert api.CHAT_MODEL_DEFAULT == SONNET_5_5
 
 
-@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5])
+@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5, HAIKU_5_5])
 def test_5_5_documented_capabilities(model):
     # Verified against each model's own migration/feature docs (2026-10-05),
     # not equality with a predecessor: web fetch and refusal fallback differ.
@@ -62,7 +64,7 @@ def test_5_5_documented_capabilities(model):
         supports_hires_vision=True,
         supports_web_fetch=True,
         supports_web_search=True,
-        supports_refusal_fallback=True,
+        supports_refusal_fallback=model != HAIKU_5_5,
         supports_structured_outputs=True,
     )
     assert api.effort_config_for(model=model, phase=api.PHASE_REVIEW) == {"effort": "high"}
@@ -71,7 +73,7 @@ def test_5_5_documented_capabilities(model):
     assert (model in api.OPUS_MODELS) == (model == OPUS_5_5)
 
 
-@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5])
+@pytest.mark.parametrize("model", [OPUS_5_5, SONNET_5_5, HAIKU_5_5])
 def test_5_5_hires_vision_estimate_and_batch_ceiling(model):
     from drawing_analyzer.core.tokenizer import estimate_image_tokens
 
@@ -98,7 +100,7 @@ def test_previous_generation_stays_registered_as_a_valid_override():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48, SONNET_46])
+@pytest.mark.parametrize("model", [OPUS_5, SONNET_5, OPUS_48, SONNET_46, HAIKU_5_5])
 def test_current_models_share_the_128k_output_ceiling(model):
     # Sonnet 5 must not inherit a 64k cap from a family-shaped check.
     assert api.phase_output_cap(api.PHASE_REVIEW, model=model) == 128_000
@@ -150,6 +152,15 @@ def test_opus_is_the_verification_escalation_tier():
     }
     assert api.effort_config_for(model=SONNET_5, phase=api.PHASE_VERIFICATION) == {
         "effort": "medium"
+    }
+
+
+def test_haiku_harvest_starts_at_medium_without_retuning_existing_models():
+    assert api.effort_config_for(model=HAIKU_5_5, phase=api.PHASE_HARVEST) == {
+        "effort": "medium"
+    }
+    assert api.effort_config_for(model=SONNET_5_5, phase=api.PHASE_HARVEST) == {
+        "effort": "low"
     }
 
 
@@ -212,6 +223,7 @@ def test_extended_output_guard_uses_the_selected_models_ceiling():
         # The hi-res roster does not follow family lines.
         (SONNET_46, True, True, False),
         (HAIKU, False, False, False),
+        (HAIKU_5_5, True, True, True),
         # Sending an unsupported server tool is a 400 that fails the whole
         # request, so the unknown-model fallback must be "don't send it".
         ("some-future-model", False, False, None),

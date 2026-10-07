@@ -335,17 +335,22 @@ def _attach_usage_attempt(
 ) -> SheetDigest:
     """Attach this response's usage without changing cache serialization."""
     attempts = list(getattr(digest, "usage_attempts", ()) or ())
-    attempts.append(DigestUsageAttempt(
-        input_tokens=int(digest.input_tokens or 0),
-        output_tokens=int(digest.output_tokens or 0),
-        cache_read_tokens=int(getattr(digest, "cache_read_tokens", 0) or 0),
-        cache_write_tokens=int(getattr(digest, "cache_write_tokens", 0) or 0),
-        transport=transport,
-        parse_success=(digest.error is None),
-        terminal_status="FAILED" if digest.error else "COMPLETE",
-        attempt_number=max(1, int(attempt_number or 1)),
-        request_or_custom_id=request_or_custom_id,
-    ))
+    # Inline recovery may include a raised-cap real-time retry. Preserve each
+    # response's prompt boundary rather than treating their sum as one request.
+    responses = list(getattr(digest, "request_usage", ()) or ()) or [digest]
+    for offset, response in enumerate(responses):
+        response_failed = getattr(response, "stop_reason", None) in ("max_tokens", "refusal")
+        attempts.append(DigestUsageAttempt(
+            input_tokens=int(response.input_tokens or 0),
+            output_tokens=int(response.output_tokens or 0),
+            cache_read_tokens=int(getattr(response, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(response, "cache_write_tokens", 0) or 0),
+            transport=transport,
+            parse_success=(digest.error is None and not response_failed),
+            terminal_status="FAILED" if digest.error or response_failed else "COMPLETE",
+            attempt_number=max(1, int(attempt_number or 1)) + offset,
+            request_or_custom_id=getattr(response, "request_id", "") or request_or_custom_id,
+        ))
     # SheetDigest intentionally has no slots, so this stays a runtime-only
     # extension and cannot perturb existing cache/export schemas.
     setattr(digest, "usage_attempts", attempts)

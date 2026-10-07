@@ -37,12 +37,12 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 from .core.api_config import (
     HARVEST_OUTPUT_CAP,
-    MODEL_SONNET_5_5,
+    MODEL_HAIKU_5_5,
     PHASE_HARVEST,
     apply_effort_config,
     apply_thinking_config,
@@ -52,6 +52,7 @@ from .core.api_config import (
     thinking_config_for,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format
+from .core.request_usage import RequestUsage
 from .critique import _token_overlap
 from . import resource_pressure
 from .diagnostics import get_logger
@@ -59,6 +60,7 @@ from .digest import (
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
+    _get,
     _message_text,
     _message_usage,
     _tolerant_json_object,
@@ -99,7 +101,8 @@ _MATCH_OVERLAP = 0.7
 # runs adaptive thinking rather than disabling it. Reasoning and answer shared
 # 800 tokens, so a straggler that needed any thought at all came back empty and
 # fell through to the degraded sheet-level entry. Thinking is now explicit and
-# cheap (EFFORT_LOW, registered for PHASE_HARVEST) with an envelope that fits it.
+# bounded by PHASE_HARVEST with an envelope that fits it. Haiku 5.5 starts at
+# medium effort; the existing models keep their low-effort policy.
 DEFAULT_HARVEST_MAX_TOKENS = HARVEST_OUTPUT_CAP
 DEFAULT_HARVEST_MAX_RETRIES = 2
 # The sheet text layer sent with a structuring call (a straggler needs context,
@@ -164,13 +167,13 @@ _CONFLICT_SIGNALS = (
 
 
 def harvest_model() -> str:
-    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Sonnet 5).
+    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Haiku 5.5).
 
     Turning one prose sentence into a structured ``Finding`` is formatting, not
     judgment: the item has already been found, and the host re-binds it to its
-    sheet afterwards. Sonnet 5 covers it at a fraction of the flagship's cost.
+    sheet afterwards. Haiku 5.5 covers this small extraction task cheaply.
     """
-    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_5_5
+    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_HAIKU_5_5
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +500,7 @@ def _structure_item(
     max_retries: int,
     sleep: Any,
     cache: Any = None,
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[Finding | None, int, int, bool, bool]:
     """Structure one item and report token, cache-hit, and live-call telemetry."""
     text = (sheet_text or "")[:_HARVEST_TEXT_CAP]
@@ -568,8 +572,8 @@ def _structure_item(
             "messages": [{"role": "user", "content": user}],
         }
         # Explicit, never implicit: an omitted ``thinking`` key runs adaptive
-        # on the current models. Low effort is the cheap setting that keeps
-        # it on.
+        # on the current models. The phase policy selects medium for Haiku
+        # 5.5 and low for the existing models, with thinking kept on.
         apply_thinking_config(kwargs, model=model, phase=PHASE_HARVEST)
         apply_effort_config(kwargs, model=model, phase=PHASE_HARVEST)
         if structured_now:
@@ -609,7 +613,16 @@ def _structure_item(
             _log.warning("prose-harvest structuring call failed: %s", _clean_error(exc))
             return None, 0, 0, False, True
 
+    if request_usage is not None:
+        # A paid response that cannot produce a finding must stay a failed
+        # parse even when the deterministic prose fallback completes the stage.
+        request_usage.append(replace(RequestUsage.from_message(resp), parse_success=False))
     in_tok, out_tok = _message_usage(resp)
+    stop = _get(resp, "stop_reason")
+    if stop in ("max_tokens", "refusal"):
+        reason = "truncated at max_tokens" if stop == "max_tokens" else "declined by the model"
+        _log.warning("prose-harvest structuring reply %s; retaining original prose", reason)
+        return None, in_tok, out_tok, False, True
     raw = _message_text(resp)
     obj: dict | None = None
     for c in scan_structured_blocks(raw or ""):
@@ -626,6 +639,8 @@ def _structure_item(
     if isinstance(obj.get("findings"), list) and obj["findings"]:
         obj = obj["findings"][0] if isinstance(obj["findings"][0], dict) else None
     finding = _validate_finding_item(obj, ref) if isinstance(obj, dict) else None
+    if request_usage is not None:
+        request_usage[-1] = replace(request_usage[-1], parse_success=finding is not None)
     if finding is not None:
         put_stage_cache_entry(
             cache,
@@ -719,6 +734,7 @@ class HarvestResult:
     cache_hits: int = 0
     cache_misses: int = 0
     api_calls: int = 0
+    request_usage: list[RequestUsage] = field(default_factory=list)
     expected_ids: list[str] = field(default_factory=list)
     accounted_ids: list[str] = field(default_factory=list)
 
@@ -863,11 +879,13 @@ def _process_pending(
         None, 0, 0, False, False,
     )
     if client is not None or cache is not None:
+        request_usage: list[RequestUsage] = []
         outcome = _structure_item(
             p.item.verbatim_text, p.hint, p.sheet_text, p.ref, p.sheet_id,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            cache=cache,
+            cache=cache, request_usage=request_usage,
         )
+        result.request_usage.extend(request_usage)
         _record_structure_telemetry(result, outcome, cache_enabled=cache is not None)
     _ingest_structured_pending(ledger, p, result, outcome[0])
 
@@ -1076,20 +1094,22 @@ def harvest_prose(
         and active_chain_count > 1
     )
 
-    def _run_structure(index: int) -> tuple[Finding | None, int, int, bool, bool]:
+    def _run_structure(index: int) -> tuple[tuple[Finding | None, int, int, bool, bool], list[RequestUsage]]:
         p = pending[index]
+        request_usage: list[RequestUsage] = []
         try:
-            return _structure_item(
+            outcome = _structure_item(
                 p.item.verbatim_text, p.hint, p.sheet_text, p.ref, p.sheet_id,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
-                cache=cache,
+                cache=cache, request_usage=request_usage,
             )
+            return outcome, request_usage
         except Exception as exc:  # noqa: BLE001 - reconciled to degraded below
             _log.warning(
                 "prose harvest: structuring item %s failed (%s)",
                 p.pid, _clean_error(exc),
             )
-            return None, 0, 0, False, False
+            return (None, 0, 0, False, False), request_usage
 
     if not use_parallel:
         # Exact legacy path for one dependency chain / one worker / no client.
@@ -1162,7 +1182,8 @@ def harvest_prose(
                     elif index in futures:
                         key = source_page_key(p.ref)
                         try:
-                            outcome = futures.pop(index).result()
+                            outcome, request_usage = futures.pop(index).result()
+                            result.request_usage.extend(request_usage)
                             _record_structure_telemetry(
                                 result, outcome, cache_enabled=cache is not None
                             )

@@ -309,6 +309,7 @@ def test_collect_merges_reads_and_bills_from_responses():
     assert res.findings[0].confidence == CONFIDENCE_REPRODUCED
     # Usage reflects the two actual batch responses, not a re-estimate.
     assert res.input_tokens == 200 and res.output_tokens == 40
+    assert [usage.input_tokens for usage in res.request_usage] == [100, 100]
 
 
 def test_deterministic_order_independent_of_result_arrival():
@@ -370,6 +371,7 @@ def test_collect_bad_schema_degrades_even_with_surviving_findings(body):
     assert len(res.findings) == 1
     assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
     assert (res.input_tokens, res.output_tokens) == (200, 40)
+    assert [usage.input_tokens for usage in res.request_usage] == [100, 100]
     assert cache.stats()["size"] == 0 and client.messages_create_calls == []
 
 
@@ -385,6 +387,7 @@ def test_complete_result_is_cached_and_second_run_is_a_hit():
     assert c2.files.uploaded_ids == [] and c2.create_calls == []
     _ref, res = results[0]
     assert res.cached and res.completed_runs == 2 and len(res.findings) == 1
+    assert res.request_usage == []
 
 
 # --------------------------------------------------------------------------- #

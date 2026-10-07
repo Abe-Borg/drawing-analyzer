@@ -403,6 +403,40 @@ def test_investigation_accumulates_prompt_cache_tokens_for_every_turn():
     record = result.per_finding[0]
     assert record.cache_read_tokens == 700
     assert record.cache_write_tokens == 900
+    assert [usage.input_tokens for usage in record.request_usage] == [100, 80]
+    assert [usage.cache_read_tokens for usage in record.request_usage] == [0, 700]
+    assert [usage.cache_write_tokens for usage in record.request_usage] == [900, 0]
+
+
+@pytest.mark.parametrize("final_response", ["malformed", "api_error"])
+def test_investigation_preserves_paid_turn_usage_when_final_turn_fails(final_response):
+    def responder(kw, _n):
+        if _tool_result_turns(kw):
+            if final_response == "api_error":
+                raise RuntimeError("backend failed")
+            return FakeMessage(
+                id="msg_final", content=[FakeTextBlock(text="cannot parse this")],
+                usage=FakeUsage(input_tokens=101_000, output_tokens=15),
+            )
+        response = _tool_use()
+        response.id = "msg_tool"
+        response.usage = FakeUsage(input_tokens=60_000, output_tokens=20)
+        return response
+
+    result, finding = _run_one(_LoopClient(responder))
+    record = result.per_finding[0]
+    assert finding.verification.status == "UNCERTAIN"
+    assert record.request_usage[0].request_id == "msg_tool"
+    assert record.request_usage[0].input_tokens == 60_000
+    if final_response == "malformed":
+        assert record.outcome == "not_concluded"
+        assert [usage.request_id for usage in record.request_usage] == ["msg_tool", "msg_final"]
+        assert [usage.input_tokens for usage in record.request_usage] == [60_000, 101_000]
+        assert result.input_tokens == 161_000
+    else:
+        assert record.outcome == "error"
+        assert len(record.request_usage) == 1
+        assert result.input_tokens == 60_000
 
 
 def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
@@ -720,6 +754,7 @@ def test_cache_warm_hit_replays_without_any_api_call(tmp_path):
     r2, f2 = _cached_run(_LoopClient(_explode), cache, warm_dir)
     assert r2.cache_hits == 1 and r2.investigated == 1 and r2.verified == 1
     assert r2.per_finding[0].cached is True
+    assert r2.per_finding[0].request_usage == []
     assert r2.input_tokens == 0 and r2.output_tokens == 0
     # The verdict is byte-identical and the evidence bytes were re-created.
     assert (f2.verification.status, f2.verification.note) == \

@@ -8,6 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Haiku 5.5 extraction.** Set identity and prose-to-finding structuring now
+  use `claude-haiku-5-5` at medium effort, with the existing model overrides
+  available. The capability registry includes its 1M context, 128k output,
+  adaptive thinking, extended Batch output, high-resolution vision, structured
+  outputs and web tools. Refused/truncated extraction replies cannot be cached
+  as valid results. Main review and verification model defaults are unchanged.
+- **Request-level Haiku pricing.** Cost previews, the usage ledger and report
+  chat apply Haiku's higher rate only to requests over 100k prompt tokens,
+  including cached input. Cache pricing and Batch discounts stack with the
+  selected tier; many short requests do not become a long request when summed.
+
 - **Resource-starvation diagnostics.** Every run now records whether its
   agents were starved while they worked: every transient API retry and
   give-up in every stage (kind, status, backoff, `retry-after`, rate-limit

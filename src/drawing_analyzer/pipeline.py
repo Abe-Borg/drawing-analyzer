@@ -28,6 +28,7 @@ from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     cache_write_ttl_for,
 )
+from .core.request_usage import RequestUsage
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
 from . import resource_pressure, tiling
@@ -325,8 +326,9 @@ def _record_usage(
     attempt: int = 1,
     request_id: str = "",
     cache_write_ttl: "str | None" = None,
+    request_usage: "list[RequestUsage] | None" = None,
 ) -> UsageRecord:
-    """Build a priced :class:`UsageRecord` and append it to the run's usage ledger.
+    """Append priced usage, preserving response boundaries for multi-call stages.
 
     The one place a stage's reported usage becomes a record (§15.6) — append-only,
     so no stage can overwrite another's counters. ``estimated_cost`` is priced at
@@ -338,9 +340,44 @@ def _record_usage(
     Stages that attach a plain ``{"type": "ephemeral"}`` breakpoint (digest,
     critique) leave it ``None``; stages that route through
     ``api_config``'s breakpoint helpers pass ``cache_write_ttl_for(phase)``.
+
+    ``request_usage`` carries the individual responses before a stage summed
+    its tokens. Each becomes its own record, keeping prompt-size tiers exact.
+    Aggregate fields remain the fallback for cached and legacy stage results.
     """
     from .core.pricing import usage_record_cost
     from .models import _positive as _positive_count
+
+    if request_usage and not cache_hit and transport != "CACHE":
+        # A stage may contain many short calls, or a mix of short and long
+        # calls. Price every response at its own prompt size; applying the
+        # long-context threshold to their sum overcharges small requests.
+        for number, request in enumerate(request_usage, start=attempt):
+            response_failed = (
+                request.stop_reason in ("max_tokens", "refusal")
+                or request.parse_success is False
+            )
+            response_parsed = (
+                parse_success if request.parse_success is None else request.parse_success
+            )
+            record = _record_usage(
+                run_usage, family=family, instance=instance, model=model,
+                transport=transport,
+                input_tokens=request.input_tokens,
+                output_tokens=request.output_tokens,
+                cache_read_tokens=request.cache_read_tokens,
+                cache_write_tokens=request.cache_write_tokens,
+                # Tool fees are independent of token tiers. Existing stages
+                # provide their total here; charge it once on the final record.
+                billable_tool_uses=(
+                    billable_tool_uses if number == attempt + len(request_usage) - 1 else None
+                ),
+                parse_success=response_parsed and not response_failed,
+                terminal_status="FAILED" if response_failed else terminal_status,
+                parent=parent, attempt=number,
+                request_id=request.request_id, cache_write_ttl=cache_write_ttl,
+            )
+        return record
 
     cost = usage_record_cost(
         model=model,
@@ -1533,6 +1570,7 @@ def _run_critique_stage(
             # the cheaply-served tokens from the ledger entirely.
             cache_read_tokens=0 if cached else getattr(res, "cache_read_tokens", 0),
             cache_write_tokens=0 if cached else getattr(res, "cache_write_tokens", 0),
+            request_usage=getattr(res, "request_usage", None),
             cache_hit=cached,
             parse_success=(getattr(res, "error", None) is None),
             terminal_status=(
@@ -1981,6 +2019,7 @@ def _run_qc_stages(
                     run_usage, family="harvest", instance="prose_harvest",
                     model=harvest_model(),
                     input_tokens=hres.input_tokens, output_tokens=hres.output_tokens,
+                    request_usage=getattr(hres, "request_usage", None),
                     terminal_status="PARTIAL" if hres.missing else "COMPLETE",
                 )
             if hres.cache_hits:
@@ -2195,6 +2234,7 @@ def _run_qc_stages(
                     run_usage, family="verify", instance="verify",
                     model=verify_model,
                     input_tokens=vres.input_tokens, output_tokens=vres.output_tokens,
+                    request_usage=getattr(vres, "request_usage", None),
                 )
             if vres.cache_hits:
                 _record_usage(
@@ -2239,6 +2279,7 @@ def _run_qc_stages(
                     run_usage, family="verify", instance="verify_cross",
                     model=verify_model, parent="verify",
                     input_tokens=cres.input_tokens, output_tokens=cres.output_tokens,
+                    request_usage=getattr(cres, "request_usage", None),
                 )
             if cres.cache_hits:
                 _record_usage(
@@ -2371,6 +2412,7 @@ def _run_qc_stages(
                             output_tokens=rec.output_tokens,
                             cache_read_tokens=rec.cache_read_tokens,
                             cache_write_tokens=rec.cache_write_tokens,
+                            request_usage=getattr(rec, "request_usage", None),
                             # The investigation loop caches its system prompt and
                             # tool list through api_config's breakpoint helpers,
                             # which request a 1-hour TTL — a 2x write, not 1.25x.
@@ -2474,6 +2516,7 @@ def _run_qc_stages(
                         # cached citation stage look near-free in the ledger.
                         cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
                         cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
+                        request_usage=getattr(cires, "request_usage", None),
                         # System, tools, and paused conversation prefixes all ask
                         # for 1h cache entries (2x writes rather than 1.25x).
                         cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
@@ -3464,7 +3507,9 @@ def extract_drawing_context(
                 )
         else:
             if not cached:
-                img_tok += sd.image_token_estimate
+                img_tok += sd.image_token_estimate * max(
+                    1, len(getattr(sd, "request_usage", ()) or ())
+                )
             _record_usage(
                 run_usage, family="digest",
                 instance=f"digest:{skey[0]}:p{skey[1]}",
@@ -3474,6 +3519,7 @@ def extract_drawing_context(
                 output_tokens=0 if cached else sd.output_tokens,
                 cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
                 cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
+                request_usage=getattr(sd, "request_usage", None),
                 cache_hit=cached,
                 parse_success=(sd.error is None),
                 terminal_status="FAILED" if sd.error else "COMPLETE",
@@ -3666,6 +3712,7 @@ def extract_drawing_context(
                     transport="CACHE" if ires.cached else "REAL_TIME",
                     input_tokens=ires.input_tokens,
                     output_tokens=ires.output_tokens,
+                    request_usage=getattr(ires, "request_usage", None),
                     cache_hit=ires.cached,
                     parse_success=ires.ok,
                     terminal_status="COMPLETE" if ires.ok else "FAILED",
@@ -3994,6 +4041,7 @@ def extract_drawing_context(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
+                request_usage=getattr(cross_res, "request_usage", None),
                 transport="CACHE" if getattr(cross_res, "cached", False) else "REAL_TIME",
                 cache_hit=bool(getattr(cross_res, "cached", False)),
                 terminal_status="COMPLETE" if cross_complete else "PARTIAL",

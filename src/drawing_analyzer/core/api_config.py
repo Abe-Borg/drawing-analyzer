@@ -14,11 +14,11 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
                                               (default: the escalation model).
     DRAWING_ANALYZER_IDENTITY_MODEL       — the set-identity harvest
-                                              (default Sonnet 5; advisory-only,
+                                              (default Haiku 5.5; advisory-only,
                                               with a regex edition backstop).
     DRAWING_ANALYZER_HARVEST_MODEL        — the prose-straggler structuring call
-                                              (default Sonnet 5; pure
-                                              structuring at low effort).
+                                              (default Haiku 5.5; pure
+                                              structuring at medium effort).
     DRAWING_ANALYZER_CITATION_MODEL       — the citation check (default
                                               Sonnet 5; needs web fetch, which
                                               Opus 5 lacks).
@@ -45,6 +45,7 @@ _log = logging.getLogger(__name__)
 
 MODEL_OPUS_5_5 = "claude-opus-5-5"
 MODEL_SONNET_5_5 = "claude-sonnet-5-5"
+MODEL_HAIKU_5_5 = "claude-haiku-5-5"
 # Previous generations. No longer a default anywhere, but still active models
 # and still fully registered below, so pinning one via a
 # ``DRAWING_ANALYZER_*_MODEL`` env var keeps full capabilities instead of
@@ -422,6 +423,22 @@ class ModelCapabilities:
 # and 1M context for each. Registering a model here is what unlocks its full
 # capabilities; unregistered ids fall through to the conservative defaults.
 _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
+    # Verified 2026-10-07 against the Haiku 5.5 overview/migration guide and
+    # vision, effort, structured-output, web-search and web-fetch references:
+    # https://platform.claude.com/docs/en/models/haiku-5-5/overview
+    # Haiku shares the 5.5 feature set, except server-side refusal fallback.
+    MODEL_HAIKU_5_5: ModelCapabilities(
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        supports_web_fetch=True,
+        supports_web_search=True,
+        supports_refusal_fallback=False,
+        supports_structured_outputs=True,
+    ),
     MODEL_OPUS_5_5: ModelCapabilities(
         # Always-on adaptive thinking; API default effort is medium. Our
         # review requests explicitly select high through the phase policy.
@@ -847,7 +864,7 @@ def effort_config_for(*, model: str, phase: str) -> dict | None:
 
     Returns ``None`` (i.e. "omit the field") when:
 
-    - the model does not support effort (Haiku, unknown / future models),
+    - the model does not support effort (Haiku 4.5, unknown / future models),
     - the phase has no registered default.
 
     Otherwise returns ``{"effort": <level>}`` where the level is ``high``
@@ -866,6 +883,11 @@ def effort_config_for(*, model: str, phase: str) -> dict | None:
         # routing-policy question, not a capability one, so it stays keyed
         # on family membership rather than the capability registry.
         level = EFFORT_HIGH if model in OPUS_MODELS else EFFORT_MEDIUM
+    elif phase == PHASE_HARVEST and model == MODEL_HAIKU_5_5:
+        # Start the new extraction default at medium: low can skip checks.
+        # Keep existing models' policy/cache keys stable; their low-effort
+        # harvest remains available through the model override.
+        level = EFFORT_MEDIUM
     else:
         level = _PHASE_DEFAULT_EFFORT.get(phase)
         if level is None:
