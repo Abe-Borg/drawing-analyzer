@@ -251,16 +251,22 @@ def test_a_stop_during_batch_upload_sends_no_batch_and_deletes_the_uploads():
 def test_a_batch_accepted_after_the_stop_is_canceled_at_once():
     client = _FakeClient(_succeed)
     token = CancelToken()
+    settled_mid_submit: list[bool] = []
 
     class _StopDuringSubmit(_FakeBatches):
         def create(self, *, requests, betas=None):
             token.cancel()                       # Stop lands while the submit is in flight
+            settled_mid_submit.append(token.wait_for_remote_cancels(0))
             return super().create(requests=requests)
 
     _install_batches(client, _StopDuringSubmit(client))
     with _bound(token):
         mb = _create_batch(client, [{"custom_id": "sheet__0", "params": {}}])
     assert client.cancel_calls == [mb.id]
+    # A caller that waits for the stop before exiting must not be told it has
+    # settled while the accepted batch is still uncanceled.
+    assert settled_mid_submit == [False]
+    assert token.wait_for_remote_cancels(0)
 
 
 # --------------------------------------------------------------------------- #
@@ -332,6 +338,31 @@ def test_stopping_a_batched_run_cancels_its_batch_and_keeps_the_receipt(tmp_path
     assert client.files.deleted == []
     receipts = [r["batch_id"] for r in get_default_digest_cache().pending_batches()]
     assert receipts == ["batch_abc"]
+
+
+def test_a_stop_before_critique_releases_the_retained_digest_uploads(tmp_path, monkeypatch):
+    """Economy exhaustive: the finished digest batch's uploads are retained for
+    the critique to reuse. A stop before the critique starts (here, during set
+    identity) must still delete them, not leave them to a later run's reaper."""
+    from drawing_analyzer import batch_digest
+
+    monkeypatch.setattr(batch_digest, "_run_in_background", lambda fn: fn())
+    path = _two_sheet_pdf(tmp_path)
+    token = CancelToken()
+
+    def stop_at_first_realtime_call(kwargs):
+        token.cancel()
+        return _message("{}")
+
+    client = _FakeClient(_succeed, inline_responder=stop_at_first_realtime_call)
+    with pytest.raises(RunCancelled):
+        extract_drawing_context(
+            [path], client=client, rows=2, cols=2, synthesize=False, critique=True,
+            use_batch=True, critique_use_batch=True, cancel=token,
+        )
+    assert len(client.create_calls) == 1                      # the digest batch only
+    assert client.files.uploaded_ids
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
 def test_stopping_a_fast_run_mid_critique_sends_nothing_after_the_stop(tmp_path):

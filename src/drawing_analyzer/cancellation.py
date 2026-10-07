@@ -40,8 +40,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 # The diagnostics logger, by name: this module stays a stdlib-only leaf so
 # ``core.api_config`` can import it.
@@ -61,8 +62,10 @@ class CancelToken:
     def __init__(self) -> None:
         self._event = threading.Event()
         self._lock = threading.Lock()
+        self._settled = threading.Condition(self._lock)
         self._remote: dict[str, Callable[[], Any]] = {}
         self._worker: threading.Thread | None = None
+        self._submits = 0
 
     @property
     def cancelled(self) -> bool:
@@ -91,6 +94,26 @@ class CancelToken:
         """Block up to ``seconds``; ``True`` as soon as the token is cancelled."""
         return self._event.wait(max(0.0, seconds))
 
+    @contextmanager
+    def submitting(self) -> Iterator[None]:
+        """Hold :meth:`wait_for_remote_cancels` open across one remote submit.
+
+        Refuses the submit (``RunCancelled``) once stopped. Otherwise a stop
+        that lands while the submit is in flight is not "settled" until the
+        submit returns and :meth:`track_remote` has canceled what it created.
+        The check and the count share the lock, so no stop slips between them.
+        """
+        with self._lock:
+            if self._event.is_set():
+                raise RunCancelled()
+            self._submits += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._submits -= 1
+                self._settled.notify_all()
+
     def track_remote(self, key: str, cancel_fn: Callable[[], Any]) -> None:
         """Register remote work to cancel on a stop.
 
@@ -109,12 +132,22 @@ class CancelToken:
             self._remote.pop(key, None)
 
     def wait_for_remote_cancels(self, timeout: float) -> bool:
-        """Wait for the stop's remote cancels to finish; ``True`` once done."""
+        """Wait for the stop's remote cancels to finish; ``True`` once done.
+
+        Includes a submit that was in flight at the stop (see :meth:`submitting`):
+        what it created is canceled before this reports done.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
         with self._lock:
+            while self._submits:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._settled.wait(remaining)
             worker = self._worker
         if worker is None:
             return True
-        worker.join(max(0.0, timeout))
+        worker.join(max(0.0, deadline - time.monotonic()))
         return not worker.is_alive()
 
     def _run_remote_cancels(self, pending: list[tuple[str, Callable[[], Any]]]) -> None:
@@ -149,19 +182,42 @@ def bind_thread(token: CancelToken | None) -> CancelToken | None:
 
 
 def bound_run(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Decorator: bind the call's ``cancel=`` token to this thread for its duration."""
+    """Decorator: bind the call's ``cancel=`` token to this thread for its duration.
+
+    A run that unwinds on a stop runs its :func:`on_stop` cleanups, on this
+    thread, after the body has unwound.
+    """
     @wraps(fn)
     def _wrapped(*args: Any, **kwargs: Any) -> Any:
         previous = bind_thread(kwargs.get("cancel"))
+        previous_hooks = getattr(_binding, "stop_hooks", None)
+        _binding.stop_hooks = hooks = []
         try:
             return fn(*args, **kwargs)
         except RunCancelled:
             _log.warning("===== run stopped by the user =====")
+            for hook in hooks:
+                try:
+                    hook()
+                except Exception:  # noqa: BLE001 - one cleanup never skips the rest
+                    _log.exception("stop cleanup failed")
             raise
         finally:
+            _binding.stop_hooks = previous_hooks
             bind_thread(previous)
 
     return _wrapped
+
+
+def on_stop(fn: Callable[[], Any]) -> None:
+    """Run ``fn`` if this thread's run unwinds on a stop (cleanup only; idempotent).
+
+    For resources a later stage would have released, had the stop not skipped
+    it. Outside a :func:`bound_run` call this does nothing.
+    """
+    hooks = getattr(_binding, "stop_hooks", None)
+    if hooks is not None:
+        hooks.append(fn)
 
 
 def is_cancelled() -> bool:
@@ -194,6 +250,15 @@ def pause(seconds: float, sleep: Callable[[float], None] = time.sleep) -> None:
         return
     sleep(seconds)
     token.raise_if_cancelled()
+
+
+def submitting() -> Any:
+    """Context for one remote submit: refused after a stop, awaited by a stop.
+
+    See :meth:`CancelToken.submitting`; a no-op on an unbound thread.
+    """
+    token = current()
+    return token.submitting() if token is not None else nullcontext()
 
 
 def track_remote_batch(batch_id: str, cancel_fn: Callable[[], Any]) -> None:

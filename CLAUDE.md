@@ -205,14 +205,18 @@ map lives in `src/drawing_analyzer/__init__.py`.
   request goes through `core.api_config._dispatch_messages` (`check()` before
   sending; a bound run reads the stream event by event and raises at the next
   event — fake streams must be iterable), every batch through
-  `batch_digest._create_batch` (check, then `track_remote_batch` so `cancel()`
-  cancels it from a daemon thread; a batch accepted after the stop is canceled
-  at once), Files uploads per image. Spending waits use `cancellation.pause`
+  `batch_digest._create_batch` (inside `cancellation.submitting()`, which
+  refuses after a stop and holds `wait_for_remote_cancels` open; then
+  `track_remote_batch` so `cancel()` cancels it from a daemon thread, or at
+  once if accepted after the stop), Files uploads per image. Spending waits use `cancellation.pause`
   (`transient_retry_wait`, batch polls, harvest, resubmit backoff); cleanup
   waits (`_read_with_retry`, deletes, `_cancel_unrecorded_batch`) never do.
   Forget a tracked batch when it settles (terminal poll, accepted cancel). A
   stopped batch keeps its receipt and files; a stopped submit deletes its
-  uploads. Stage starts `check()` up to markup writing, the last stop point.
+  uploads. A resource a skipped later stage would have released registers
+  `cancellation.on_stop` (run on the run thread after unwinding — e.g. the
+  retained digest uploads). Stage starts `check()` up to markup writing, the
+  last stop point.
 - **Digest path:** `tiling.py` (geometry) → `render.py` (raster) → `digest.py`
   or `batch_digest.py` (Message Batches + Files) → `digest_cache.py` (two-level
   content-keyed cache; a hit skips rendering and restores parsed findings).

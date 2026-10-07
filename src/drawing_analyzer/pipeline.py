@@ -276,6 +276,40 @@ def _close_stage_executor(executor: ThreadPoolExecutor) -> None:
     executor.shutdown(wait=True)
 
 
+def _release_unclaimed_uploads(
+    client: Any, reusable_uploads: list, *, on_log: Any, cache: Any,
+) -> None:
+    """Delete the retained digest uploads no critique batch adopted.
+
+    The digest batch that uploaded them is terminal, so nothing else needs
+    them. Adopted manifests return no IDs, so every remote file has one and
+    only one cleanup owner, and a second call finds the list empty.
+    """
+    if not reusable_uploads:
+        return
+    try:
+        cleanup_client = client
+        if cleanup_client is None:
+            from .client import get_client as _get_client
+
+            cleanup_client = _get_client()
+        unclaimed_ids = [
+            file_id
+            for reusable in reusable_uploads
+            for file_id in reusable.release_ids()
+        ]
+        if unclaimed_ids:
+            from .batch_digest import _release_uploaded_files
+
+            _release_uploaded_files(
+                cleanup_client, unclaimed_ids,
+                in_background=True, on_log=on_log, cache=cache,
+            )
+    except Exception as cleanup_exc:  # noqa: BLE001 - cleanup is additive
+        _log.warning("retained digest-upload cleanup failed: %s", cleanup_exc)
+    reusable_uploads.clear()
+
+
 def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
     """The billing transport for one digest record (§15.6).
 
@@ -3345,6 +3379,13 @@ def extract_drawing_context(
     reusable_uploads = (
         [] if config.run_critique and use_batch and critique_use_batch else None
     )
+    if reusable_uploads is not None:
+        # The critique stage releases what it does not adopt; a stop before it
+        # starts would skip that, so the release also runs on the way out.
+        # ``client`` is read at call time: a later stage may resolve it.
+        cancellation.on_stop(lambda: _release_unclaimed_uploads(
+            client, reusable_uploads, on_log=on_log, cache=cache,
+        ))
     if config.run_critique and not use_batch:
         try:
             from .render_spool import RenderedSheetSpool
@@ -3959,31 +4000,9 @@ def extract_drawing_context(
             if reusable_uploads:
                 # Cache hits, grid mismatches, and any sheet not reached after
                 # an additive critique failure still belong to the pipeline.
-                # Adopted manifests return no IDs, so every remote file has one
-                # and only one cleanup owner.
-                try:
-                    cleanup_client = client
-                    if cleanup_client is None:
-                        from .client import get_client as _get_client
-
-                        cleanup_client = _get_client()
-                    unclaimed_ids = [
-                        file_id
-                        for reusable in reusable_uploads
-                        for file_id in reusable.release_ids()
-                    ]
-                    if unclaimed_ids:
-                        from .batch_digest import _release_uploaded_files
-
-                        _release_uploaded_files(
-                            cleanup_client, unclaimed_ids,
-                            in_background=True, on_log=on_log, cache=cache,
-                        )
-                except Exception as cleanup_exc:  # noqa: BLE001 - stage is additive
-                    _log.warning(
-                        "retained digest-upload cleanup failed: %s", cleanup_exc,
-                    )
-                reusable_uploads.clear()
+                _release_unclaimed_uploads(
+                    client, reusable_uploads, on_log=on_log, cache=cache,
+                )
     _finish_stage(stage_results, journal, critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the

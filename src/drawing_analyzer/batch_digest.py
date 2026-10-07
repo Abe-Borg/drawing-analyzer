@@ -733,16 +733,17 @@ def _create_batch(
     Refused once the run is stopped (:mod:`~drawing_analyzer.cancellation`),
     and registered with the run's kill switch on acceptance, so a stop cancels
     it wherever the run's thread happens to be. A batch accepted after the
-    stop (its submit was already in flight) is canceled at once. Either way
-    the caller still records the receipt, so the next run collects whatever
-    the batch finished before the cancel landed.
+    stop (its submit was already in flight) is canceled at once — and the
+    stop's ``wait_for_remote_cancels`` waits for that. Either way the caller
+    still records the receipt, so the next run collects whatever the batch
+    finished before the cancel landed.
     """
-    cancellation.check()
-    mb = client.messages.batches.create(requests=reqs)
-    batch_id = _get(mb, "id")
-    cancellation.track_remote_batch(
-        batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
-    )
+    with cancellation.submitting():
+        mb = client.messages.batches.create(requests=reqs)
+        batch_id = _get(mb, "id")
+        cancellation.track_remote_batch(
+            batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
+        )
     return mb
 
 
