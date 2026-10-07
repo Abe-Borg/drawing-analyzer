@@ -30,11 +30,13 @@ import hashlib
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from .core.request_usage import RequestUsage
+
 from .core.api_config import (
-    MODEL_SONNET_5_5,
+    MODEL_HAIKU_5_5,
     call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
@@ -44,6 +46,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
+    _get,
     _message_text,
     _message_usage,
     _tolerant_json_object,
@@ -86,7 +89,7 @@ _CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 
 def default_identity_model() -> str:
-    """Model for the identity pass — Sonnet 5.5 by default, overridable via
+    """Model for the identity pass — Haiku 5.5 by default, overridable via
     ``DRAWING_ANALYZER_IDENTITY_MODEL``.
 
     Structured extraction over a budgeted text corpus, and **advisory only**:
@@ -98,7 +101,7 @@ def default_identity_model() -> str:
     override = os.environ.get("DRAWING_ANALYZER_IDENTITY_MODEL")
     if override and override.strip():
         return override.strip()
-    return MODEL_SONNET_5_5
+    return MODEL_HAIKU_5_5
 
 
 IDENTITY_SYSTEM_PROMPT = """\
@@ -479,6 +482,7 @@ class IdentityResult:
     error: str | None = None
     omitted_chars: int = 0          # corpus chars dropped by the budget (loss-aware)
     cached: bool = False
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -566,17 +570,28 @@ def identify_set(
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    request_usage = [RequestUsage.from_message(resp)]
+    stop = _get(resp, "stop_reason")
+    if stop in ("max_tokens", "refusal"):
+        reason = "truncated at max_tokens" if stop == "max_tokens" else "declined by the model"
+        return IdentityResult(
+            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+            error=f"identity reply {reason}", omitted_chars=budget.omitted_chars,
+            request_usage=request_usage,
+        )
     identity = parse_identity_text(text)
     if identity is None:
         return IdentityResult(
             input_tokens=in_tok, output_tokens=out_tok, model_used=model,
             error="identity reply carried no parseable identity block",
             omitted_chars=budget.omitted_chars,
+            request_usage=request_usage,
         )
     identity = union_regex_editions(identity, geometries)
     result = IdentityResult(
         identity=identity, input_tokens=in_tok, output_tokens=out_tok,
         model_used=model, omitted_chars=budget.omitted_chars,
+        request_usage=request_usage,
     )
     if cache is not None and cache_key is not None:
         # Store the finished (sanitized + regex-unioned) record — what a warm

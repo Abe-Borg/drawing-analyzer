@@ -1418,6 +1418,22 @@ def test_chat_widget_carries_no_hardcoded_output_ceiling():
     assert "max_tokens: CFG.maxTokens" in doc
 
 
+def test_haiku_chat_config_carries_request_pricing_tiers(monkeypatch):
+    import json
+
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-5-5")
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    config = json.loads(_script_block_body(doc, "da-chat-config"))
+    assert config["rates"] == {
+        "in": 0.10, "out": 0.50, "cacheRead": 0.10,
+        "longContextThreshold": 100_000, "longContextMultiplier": 5.0,
+    }
+    assert config["contextWindow"] == 1_000_000
+    assert config["maxTokens"] == 128_000
+    assert config["effort"] == "high"
+    assert config["thinking"] is True
+
+
 def test_chat_default_model_supports_everything_the_widget_sends():
     """Guard the constraint api_config documents for the chat model.
 

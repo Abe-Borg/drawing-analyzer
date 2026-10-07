@@ -60,6 +60,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
+from .core.request_usage import RequestUsage
 from . import resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
@@ -455,6 +456,7 @@ class CrossQCResult:
     # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed),
     # which is not the same as "nothing was discarded".
     discards: "CrossQCDiscardCounts | None" = None
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -1030,6 +1032,7 @@ def _build_reconcile_input(
 def _call(
     *, client: Any, model: str, system: str, user_text: str,
     max_retries: int, sleep: Any,
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[str | None, int, int, str | None]:
     """One cross-QC model call → ``(raw_text, in, out, error)``. Never raises."""
     kwargs: dict[str, Any] = {
@@ -1058,6 +1061,8 @@ def _call(
                 continue
             return None, 0, 0, _clean_error(exc)
 
+    if request_usage is not None:
+        request_usage.append(RequestUsage.from_message(resp))
     raw = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
     if not raw:
@@ -1069,12 +1074,14 @@ def _one_cross_qc_call(
     entries: list[tuple], sheet_map: dict[str, Any], *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "",
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_system_prompt(),
         user_text=_build_whole_set_input(entries, budget, preamble),
         max_retries=max_retries, sleep=sleep,
+        request_usage=request_usage,
     )
     if err is not None or raw is None:
         return [], [], in_tok, out_tok, err
@@ -1099,12 +1106,14 @@ def _map_call(
     discipline_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed)."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_map_system_prompt(),
         user_text=_build_map_input(shard, handle_by_key, budget, preamble),
         max_retries=max_retries, sleep=sleep,
+        request_usage=request_usage,
     )
     if err is not None or raw is None:
         return [], [], [], in_tok, out_tok, err
@@ -1184,12 +1193,14 @@ def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=CROSS_QC_RECONCILE_SYSTEM_PROMPT,
         user_text=_build_reconcile_input(manifest, facts, preamble),
         max_retries=max_retries, sleep=sleep,
+        request_usage=request_usage,
     )
     if err is not None or raw is None:
         return [], [], in_tok, out_tok, err
@@ -1220,6 +1231,7 @@ def _reconcile_facts(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     max_workers: int | None = None,
+    request_usage: list[RequestUsage] | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -1239,6 +1251,7 @@ def _reconcile_facts(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=counts,
+            request_usage=request_usage,
         )
         return f, c, i, o, err is None
 
@@ -1264,14 +1277,16 @@ def _reconcile_facts(
         # thread pool, and ``+=`` on a shared counter across threads would lose
         # increments.
         local_counts = CrossQCDiscardCounts()
+        local_usage: list[RequestUsage] = []
         try:
             return (*_reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=budget, preamble=preamble, counts=local_counts,
-            ), local_counts)
+                request_usage=local_usage,
+            ), local_counts, local_usage)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
-            return [], [], 0, 0, _clean_error(exc), local_counts
+            return [], [], 0, 0, _clean_error(exc), local_counts, local_usage
 
     workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
     if workers == 1:
@@ -1285,7 +1300,9 @@ def _reconcile_facts(
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
-    for f, c, in_t, out_t, err, local_counts in pair_results:
+    for f, c, in_t, out_t, err, local_counts, local_usage in pair_results:
+        if request_usage is not None:
+            request_usage.extend(local_usage)
         tot_in += in_t
         tot_out += out_t
         if counts is not None:
@@ -1569,6 +1586,7 @@ def cross_sheet_qc(
             return CrossQCResult(error=_clean_error(exc))
 
     budget = _Budget()
+    request_usage: list[RequestUsage] = []
 
     # ---- Small set: one whole-set call (unchanged, complete). ----
     if len(entries) <= MAX_SHEETS_SINGLE_CALL:
@@ -1576,6 +1594,7 @@ def cross_sheet_qc(
             entries, sheet_map, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
             preamble=preamble,
+            request_usage=request_usage,
         )
         deduped = _dedup_findings(findings)
         _log.info(
@@ -1591,6 +1610,7 @@ def cross_sheet_qc(
             text_chars_omitted=budget.omitted,
             findings_omitted=budget.findings_omitted,
             budget_degraded=budget.degraded,
+            request_usage=request_usage,
         )
         _put_cross_qc_cache(cache, cache_key, result)
         return result
@@ -1627,14 +1647,16 @@ def cross_sheet_qc(
     def _run_map(shard: list[tuple]):
         local_budget = _Budget()
         local_counts = CrossQCDiscardCounts()
+        local_usage: list[RequestUsage] = []
         try:
             return (*_map_call(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=local_budget, preamble=preamble, counts=local_counts,
-            ), local_budget, local_counts)
+                request_usage=local_usage,
+            ), local_budget, local_counts, local_usage)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
-            return [], [], [], 0, 0, _clean_error(exc), local_budget, local_counts
+            return [], [], [], 0, 0, _clean_error(exc), local_budget, local_counts, local_usage
 
     workers = _resolve_cross_qc_workers(max_workers, len(shards))
     if workers == 1:
@@ -1644,7 +1666,8 @@ def cross_sheet_qc(
             # Deterministic input-order fold; only execution is parallel.
             map_results = list(pool.map(_run_map, shards))
 
-    for f, c, facts, in_tok, out_tok, err, local_budget, local_counts in map_results:
+    for f, c, facts, in_tok, out_tok, err, local_budget, local_counts, local_usage in map_results:
+        request_usage.extend(local_usage)
         _fold_budget(budget, local_budget)
         discards.merge(local_counts)
         total_in += in_tok
@@ -1672,6 +1695,7 @@ def cross_sheet_qc(
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=discards,
             max_workers=max_workers,
+            request_usage=request_usage,
         )
         total_in += r_in
         total_out += r_out
@@ -1718,6 +1742,7 @@ def cross_sheet_qc(
         findings_omitted=budget.findings_omitted,
         budget_degraded=budget.degraded,
         discards=discards,
+        request_usage=request_usage,
     )
     _put_cross_qc_cache(cache, cache_key, result)
     return result

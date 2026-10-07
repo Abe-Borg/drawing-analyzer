@@ -546,10 +546,13 @@ def test_gauntlet_investigation_escalates_the_uncertain_finding(oracle):
     assert {a.relative_path.split("/")[1] for a in v.evidence} == {f6.qc_id}
     assert [a.leg_index for a in v.evidence] == list(range(len(v.evidence)))
     assert (work / "evidence" / f6.qc_id / "investigation.json").exists()
-    # One portable per-investigation usage record.
+    # Each paid turn keeps the same portable investigation identity.
     recs = [r for r in ctx.run_usage.records if r.stage_family == "investigate"]
-    assert [r.stage_instance for r in recs] == [f"investigate:{f6.qc_id}"]
-    assert recs[0].input_tokens > 0
+    assert len(recs) == client.investigate_calls == 2
+    assert {r.stage_instance for r in recs} == {f"investigate:{f6.qc_id}"}
+    assert [r.attempt_number for r in recs] == [1, 2]
+    assert sum(r.input_tokens for r in recs) == 160
+    assert sum(r.output_tokens for r in recs) == 32
     statuses = {s.stage: s.status for s in ctx.stage_results}
     assert statuses["investigation"] == "COMPLETE"
 
@@ -673,9 +676,12 @@ def test_gauntlet_citations_claim_complete(oracle):
     # Phase B exact billing: the run bills the server-reported search count
     # (the scripted client reports a fixed figure per request), never the old
     # 1-per-request approximation when the exact number is available.
-    (citation_rec,) = [r for r in ctx.run_usage.records
-                       if r.stage_family == "citation"]
-    billed = citation_rec.billable_tool_uses.get("web_search")
+    citation_recs = [r for r in ctx.run_usage.records
+                     if r.stage_family == "citation"]
+    assert len(citation_recs) == len(client.citation_requests)
+    assert sum(r.input_tokens for r in citation_recs) == len(client.citation_requests) * 20
+    assert sum(r.output_tokens for r in citation_recs) == len(client.citation_requests) * 8
+    billed = sum(r.billable_tool_uses.get("web_search", 0) for r in citation_recs)
     assert billed == len(client.citation_requests) * G.ScriptedQCClient.CITATION_SEARCHES_PER_REQUEST
 
     # Phase B structured provenance: the scripted checked/current editions and
@@ -1134,10 +1140,18 @@ def test_critique_replacement_status_and_cache(tmp_path, monkeypatch, bad_reads,
     assert stage.items_out == 1
     assert any(f.source_quote == "VAV-3" for f in ctx.findings)
     assert "VAV-3 serves Room 120" in ctx.combined_text
-    usage = next(r for r in ctx.run_usage.records
-                 if r.stage_family == "critique" and r.input_tokens == 300)
-    assert usage.output_tokens == 60 and usage.terminal_status == expected
-    assert usage.parse_success == (bad_reads == 1)
+    usage = [r for r in ctx.run_usage.records
+             if r.stage_family == "critique" and r.input_tokens == 100]
+    assert len(usage) == 3
+    assert len({r.stage_instance for r in usage}) == 1
+    assert [r.attempt_number for r in usage] == [1, 2, 3]
+    assert sum(r.input_tokens for r in usage) == 300
+    assert sum(r.output_tokens for r in usage) == 60
+    expected_parses = [True, False, bad_reads == 1]
+    assert [r.parse_success for r in usage] == expected_parses
+    assert [r.terminal_status for r in usage] == [
+        expected if parsed else "FAILED" for parsed in expected_parses
+    ]
     # A successful replacement writes both critique cache levels; a remaining
     # shortfall writes neither, even though it produced a useful finding.
     assert len(critique_keys) == (2 if bad_reads == 1 else 0)

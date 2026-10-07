@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from drawing_analyzer.digest_cache import DigestCache
+from drawing_analyzer.core.request_usage import RequestUsage
 from drawing_analyzer.models import (
     Anchor,
     ConflictLeg,
@@ -165,6 +166,31 @@ def _run(findings, sheets=None, **kw):
     return verify_findings(findings, sheets or [_sheet()], model=OPUS, **kw)
 
 
+@pytest.mark.parametrize("verdict", ['{"verdict":"CONFIRMED"}', ""])
+def test_verify_retains_billed_requests_with_prompt_cache(verifier_pass, verdict):
+    make, run = verifier_pass
+    client = _FakeClient({}, default=verdict)
+    create = client.messages.create
+
+    def cached_response(**kwargs):
+        response = create(**kwargs)
+        response.usage = {
+            "input_tokens": 60_000, "output_tokens": 10,
+            "cache_read_input_tokens": 20_000,
+            "cache_creation_input_tokens": 10_000,
+        }
+        response.id = "msg_cached"
+        return response
+
+    client.messages.create = cached_response
+    result = run([make("one"), make("two")], client=client, max_workers=2)
+
+    assert result.input_tokens == 120_000 and result.output_tokens == 20
+    assert result.request_usage == [
+        RequestUsage(60_000, 10, 20_000, 10_000, "msg_cached", stop_reason="end_turn")
+    ] * 2
+
+
 # --------------------------------------------------------------------------- #
 # parse_verdict
 # --------------------------------------------------------------------------- #
@@ -288,6 +314,7 @@ def test_verify_cache_cold_then_warm_recreates_exact_evidence(tmp_path):
     assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
     assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
     assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert warm.request_usage == []
     assert warm_client.calls == []
     assert (warm_finding.verification.status, warm_finding.verification.note) == (
         cold_finding.verification.status,
@@ -535,6 +562,7 @@ def test_exhausted_transient_errors_do_not_trip_the_latch(verifier_pass, status)
     result = run(findings, client=client, max_workers=1, max_retries=2)
     assert client.calls == 15 and result.api_calls == 5
     assert (result.failed, result.skipped, result.uncertain) == (5, 0, 0)
+    assert result.request_usage == []
 
 
 def test_permanent_failure_latch_bounds_concurrent_calls(verifier_pass):
@@ -741,6 +769,63 @@ def test_verify_runs_concurrently():
     assert res.verified == 3   # all cleared the barrier => true concurrency
 
 
+@pytest.mark.parametrize("crop_order", [(0, 1, 2), (2, 1, 0)])
+def test_verify_usage_keeps_input_order_when_calls_and_crops_finish_out_of_order(crop_order):
+    from drawing_analyzer.models import RunUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    def run(workers, order):
+        findings = [_finding(marker) for marker in ("usage-first", "no-crop", "usage-second")]
+        second_collected = threading.Event()
+        completed = []
+        client = _FakeClient({})
+
+        def response(**kwargs):
+            text = kwargs["messages"][0]["content"][0]["text"]
+            marker = "usage-first" if "usage-first" in text else "usage-second"
+            if workers > 1 and marker == "usage-first":
+                # The first response cannot finish until the collector has
+                # attached the second verdict, guaranteeing reverse completion.
+                assert second_collected.wait(5), "second verdict was not collected"
+            message = _FakeResp('{"verdict":"CONFIRMED"}')
+            message.id = "msg_" + marker
+            message.usage = _FakeUsage(i=60_000 if marker == "usage-first" else 100_001)
+            completed.append(marker)
+            return message
+
+        def render(items):
+            for index in order:
+                yield items[index][0], None if index == 1 else b"crop"
+
+        def progress(_done, _total, _label):
+            if getattr(findings[2].verification, "status", None) == "VERIFIED":
+                second_collected.set()
+
+        client.messages.create = response
+        result = _run(
+            findings, client=client, max_workers=workers,
+            crop_renderer=render, progress=progress,
+        )
+        assert result.verified == 2 and result.skipped == 1
+        assert result.input_tokens == 160_001 and result.output_tokens == 20
+        assert [usage.request_id for usage in result.request_usage] == [
+            "msg_usage-first", "msg_usage-second",
+        ]
+        ledger = RunUsage()
+        _record_usage(
+            ledger, family="verify", instance="verify", model="claude-haiku-5-5",
+            request_usage=result.request_usage,
+        )
+        return ledger.to_dict(), completed
+
+    sequential, _ = run(1, (0, 1, 2))
+    concurrent, completed = run(2, crop_order)
+    assert completed == ["usage-second", "usage-first"]
+    # Exported request IDs, attempt numbers, token totals, and prices must all
+    # match the sequential run despite reversed completion and crop order.
+    assert concurrent == sequential
+
+
 def test_cross_verify_model_calls_concurrent_but_render_and_attach_ordered(monkeypatch):
     main_thread = threading.get_ident()
     render_threads: list[int] = []
@@ -805,6 +890,7 @@ def test_cross_verify_cache_replays_ordered_leg_evidence(monkeypatch, tmp_path):
     assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
     assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
     assert warm_client.calls == [] and warm.input_tokens == warm.output_tokens == 0
+    assert warm.request_usage == []
     assert [a.request_order for a in warm_finding.verification.evidence] == [1, 2]
     assert [a.sha256 for a in warm_finding.verification.evidence] == [
         a.sha256 for a in cold_finding.verification.evidence

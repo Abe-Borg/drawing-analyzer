@@ -320,6 +320,22 @@ def test_pause_resumes_cache_last_assistant_block_and_preserve_payloads(dict_blo
     assert [len(c["messages"]) for c in client.calls] == [1, 2, 3, 4]
     assert outcome.cache_write_tokens == 60 and outcome.cache_read_tokens == 90
     assert outcome.web_search_requests == 6
+    assert len(outcome.request_usage) == 4
+    assert [request.cache_read_tokens for request in outcome.request_usage] == [30, 30, 30, 0]
+    # pause_turn is a normal server-tool continuation. Its billed responses
+    # must stay successful when the final resumed citation completes.
+    from drawing_analyzer.models import RunUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    usage = RunUsage()
+    _record_usage(
+        usage, family="citation", instance="citation", model=MODEL_SONNET_5_5,
+        request_usage=list(outcome.request_usage),
+        billable_tool_uses={"web_search": outcome.web_search_requests},
+    )
+    assert all(r.parse_success and r.terminal_status == "COMPLETE" for r in usage.records)
+    assert usage.total_cache_write_tokens == 60 and usage.total_cache_read_tokens == 90
+    assert sum(r.billable_tool_uses.get("web_search", 0) for r in usage.records) == 6
     for request in client.calls:
         assert request["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
         assert request["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}

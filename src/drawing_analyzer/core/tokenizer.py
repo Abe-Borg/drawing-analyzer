@@ -112,6 +112,7 @@ _LOCAL_SAFETY_FACTORS: dict[str, float] = {
     # remains the ``count_tokens`` preflight; this table is the fallback gate.
     "claude-opus-5-5": 1.10,
     "claude-sonnet-5-5": 1.10,
+    "claude-haiku-5-5": 1.10,
     "claude-opus-5": 1.10,
     "claude-sonnet-5": 1.10,
     "claude-opus-4-8": 1.10,

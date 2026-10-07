@@ -608,6 +608,24 @@ estimated cost by stage** table in the report show the actuals. Pricing constant
 carry a verified effective date (`core.pricing.PRICING_EFFECTIVE_DATE`) —
 re-verify against the published rates before relying on a dollar figure.
 
+Haiku 5.5 is the default for set identity and prose-to-finding structuring,
+both at medium effort. The visual review, cross-sheet reasoning and verification
+stages retain their existing models. Use `DRAWING_ANALYZER_IDENTITY_MODEL` and
+`DRAWING_ANALYZER_HARVEST_MODEL` to select another model for either extraction
+stage. Haiku 5.5 is also registered for the other model overrides, including
+the report assistant.
+
+Haiku's input/output rates are $0.10/$0.50 per million tokens for prompts up to
+100,000 tokens, and $0.50/$2.50 above that threshold. The threshold counts
+ordinary input plus cached reads and writes **in each API request**; output
+tokens and the run's cumulative token total do not select the tier. The preview,
+usage ledger and report chat price requests separately, with cache multipliers
+and the Batch discount applied afterwards. Refused or truncated extraction
+replies are not cached as valid results; prose harvest retains the original item
+through its existing degraded finding path. See the
+[Haiku 5.5 overview](https://platform.claude.com/docs/en/models/haiku-5-5/overview)
+and [pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
 ## Structured findings
 
 Alongside the prose digest, the vision model emits a **machine-readable findings
@@ -796,7 +814,7 @@ harvest is always unioned in as a backstop, so a stated edition can never be
 argued away. The identity is **advisory**: it steers the stages below but never
 gates or suppresses a finding; a wrong detection is visible (not laundered) in
 `set_identity.json`, the run manifest, and the combined text's *Set Identity*
-section. The identity call runs on Sonnet 5 by default
+section. The identity call runs on Haiku 5.5 at medium effort by default
 (`DRAWING_ANALYZER_IDENTITY_MODEL`): it is structured extraction, it is
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
@@ -1766,10 +1784,10 @@ quality decision.
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
 | `DRAWING_ANALYZER_CITATION_MAX_REFS` | `50` | Per-run normalized reference cap, severity-first after skipping rejected-only claims. Cache hits share the cap. `0` checks none; invalid/negative values use the default. Every skipped claim is explicitly unchecked. |
-| `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
+| `DRAWING_ANALYZER_IDENTITY_MODEL` | Haiku 5.5 | Set-identity model, text-only (Phase A), at medium effort. Advisory-only, with the regex edition harvest as a backstop. |
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
-| `DRAWING_ANALYZER_HARVEST_MODEL` | Sonnet 5 | Prose-harvest structuring model (one small call per straggler, at low effort). |
+| `DRAWING_ANALYZER_HARVEST_MODEL` | Haiku 5.5 | Prose-harvest structuring model (one small call per straggler, at medium effort on Haiku 5.5; existing model overrides retain low effort). |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
@@ -1778,7 +1796,7 @@ quality decision.
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
-| `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Sonnet 5, one flat finding object whose schema mirrors the prompt's field list — the lowest-risk stage to try it on. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
+| `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Haiku 5.5, one flat finding object whose schema mirrors the prompt's field list. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
 | `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` | off | The same contract on the verifier's two-field verdict (`verdict` as a three-way enum + `note`), on the single-crop and cross-sheet calls alike. Vision-involved, so it carries the critique's caveat; the prompt is unchanged (it already asks for a bare object), so the requests differ only by the schema. Structured and plain verdicts cache under separate keys. Prove it with `-k verify_under_output_config_format`. Whether it is worth turning on is answered by the parse-loss line the verification stage now writes (see *Verification pass*). |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |

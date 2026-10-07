@@ -296,6 +296,20 @@ def test_harvest_structuring_failure_degrades_to_sheet_entry():
     assert entry.anchor_hint == "SHEET"
     assert entry.sources == ["digest_prose_conflict"]
     assert "schedule flow total disagrees" in entry.text
+    # The prose fallback fulfilled the stage, while the paid API response
+    # failed parsing. Preserve both facts in the ledger's request metadata.
+    from drawing_analyzer.models import RunUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    usage = RunUsage()
+    _record_usage(
+        usage, family="harvest", instance="prose_harvest", model="claude-haiku-5-5",
+        request_usage=res.request_usage, terminal_status="COMPLETE",
+    )
+    (record,) = usage.records
+    assert not record.parse_success and record.terminal_status == "FAILED"
+    assert usage.total_input_tokens == res.input_tokens
+    assert usage.total_output_tokens == res.output_tokens
 
 
 def test_harvest_warm_item_cache_skips_structuring_call():

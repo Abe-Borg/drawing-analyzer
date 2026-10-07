@@ -18,6 +18,7 @@ import pytest
 from drawing_analyzer import cross_qc as X
 from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
+from drawing_analyzer.core.request_usage import RequestUsage
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef
 from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
@@ -161,6 +162,9 @@ def test_conflict_is_stamped_with_dual_anchors():
     assert leg.sheet_id == "F-A-01-1" and leg.source_name == "b.pdf"
     assert leg.source_quote == "COLO 1"
     assert res.input_tokens == 800 and res.output_tokens == 60
+    assert res.request_usage == [
+        RequestUsage(800, 60, request_id="msg_fake_1", stop_reason="end_turn")
+    ]
 
 
 @pytest.mark.parametrize("extra_text_chars", [0, 9000, 16000])
@@ -183,6 +187,7 @@ def test_cross_qc_warm_cache_skips_api_and_billed_tokens(extra_text_chars):
     assert cold.complete and cold.cached is False
     assert warm.complete and warm.cached is True
     assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert warm.request_usage == []
     omitted = max(0, len(geoms[0].sheet_text) - 4000)
     assert cold.text_chars_omitted == warm.text_chars_omitted == omitted
     assert not cold.budget_degraded and not warm.budget_degraded
@@ -380,10 +385,39 @@ def test_reconcile_all_pairs_finds_conflict_across_fact_groups(monkeypatch):
     # S001 and S022 sit in different half-cap groups, so only the pair-call that
     # unites those two groups can surface the conflict — and it does.
     assert client.reconcile_calls == 36                     # C(9,2)
+    assert len(res.request_usage) == client.map_calls + client.reconcile_calls
     conflicts = [f for f in res.findings if f.also_on]
     assert len(conflicts) == 1
     assert conflicts[0].also_on[0].source_name == "m0.pdf"
     assert res.reconciliation_completed is True
+
+
+def test_sharded_cross_qc_retains_usage_per_request_with_prompt_cache():
+    sheets, geoms = _mk_two_shard_set()
+    conflict = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "cross conflict", "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    client = _MapReconcileClient(conflict)
+    create = client.messages.create
+
+    def cached_response(**kwargs):
+        response = create(**kwargs)
+        response.usage = FakeUsage(
+            input_tokens=60_000, output_tokens=20,
+            cache_read_input_tokens=20_000, cache_creation_input_tokens=10_000,
+        )
+        return response
+
+    client.messages.create = cached_response
+    result = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
+
+    assert (client.map_calls, client.reconcile_calls) == (2, 1)
+    assert result.input_tokens == 180_000 and result.output_tokens == 60
+    assert result.request_usage == [
+        RequestUsage(60_000, 20, 20_000, 10_000, "msg_fake_1", stop_reason="end_turn")
+    ] * 3
 
 
 def test_reconcile_pairs_overlap_but_fold_in_pair_order(monkeypatch):

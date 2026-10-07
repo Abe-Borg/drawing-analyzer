@@ -91,6 +91,7 @@ def _sum_costs(costs: Sequence[float | None]) -> float | None:
 
 def _specs_cost_contribution(
     spec_chars: int, sheet_count: int, *, model: str, batch: bool,
+    request_input_tokens: Sequence[int] | None = None,
 ) -> tuple[int, float | None]:
     """``(display_tokens, usd_cost)`` for an uploaded project-specifications
     block across the whole run.
@@ -131,19 +132,38 @@ def _specs_cost_contribution(
     """
     if spec_chars <= 0 or sheet_count <= 0:
         return 0, 0.0
-    from .core.pricing import usage_record_cost
-
     spec_tokens = max(1, spec_chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE)
     display_tokens = spec_tokens * sheet_count
-    if batch:
-        cost = usage_record_cost(model=model, input_tokens=display_tokens, batch=True)
-        return display_tokens, None if cost is None else float(cost)
-    write_cost = usage_record_cost(model=model, cache_write_tokens=spec_tokens, batch=False)
-    read_cost = usage_record_cost(model=model, cache_read_tokens=spec_tokens, batch=False)
-    if write_cost is None or read_cost is None:
-        return display_tokens, None
-    total = float(write_cost) + float(read_cost) * max(0, sheet_count - 1)
-    return display_tokens, total
+    # The block can move a request across a long-context threshold; its tier
+    # must include the images and other prompt text, even though this helper
+    # prices only the specifications contribution.
+    inputs = request_input_tokens if request_input_tokens is not None else [0] * sheet_count
+    costs = []
+    for index, ordinary_input in enumerate(inputs):
+        cost = usage_record_cost(
+            model=model, batch=batch, prompt_tokens=ordinary_input + spec_tokens,
+            input_tokens=spec_tokens if batch else 0,
+            cache_write_tokens=spec_tokens if not batch and index == 0 else 0,
+            cache_read_tokens=spec_tokens if not batch and index > 0 else 0,
+        )
+        costs.append(None if cost is None else float(cost))
+    return display_tokens, _sum_costs(costs)
+
+
+def _request_costs(
+    inputs: Sequence[int], output_per_request: int, *, model: str, batch: bool,
+    shared_prompt_tokens: int = 0,
+) -> float | None:
+    """Sum requests after selecting each request's own token-rate tier."""
+    if not inputs:
+        return estimate_request_cost(0, 0, model=model, batch=batch)
+    return _sum_costs([
+        estimate_request_cost(
+            tokens, output_per_request, model=model, batch=batch,
+            prompt_tokens=tokens + shared_prompt_tokens,
+        )
+        for tokens in inputs
+    ])
 
 
 @dataclass(frozen=True)
@@ -166,6 +186,8 @@ class ImageTokenEstimate:
     #: quietly treated as vector.
     unknown_pages: int = 0
     unmeasured_pages: int = 0
+    #: Per-page counts retained so long-context tiers never use a set average.
+    per_sheet_tokens: tuple[int, ...] = ()
 
     @property
     def pages(self) -> int:
@@ -219,6 +241,7 @@ def estimate_image_tokens_for_bases(
         1, rows=rows, cols=cols, model=model
     )
     total = 0
+    per_sheet_tokens = []
     vector = raster = unknown = unmeasured = 0
     for basis in bases or []:
         classification = str(getattr(basis, "classification", "") or "")
@@ -235,6 +258,7 @@ def estimate_image_tokens_for_bases(
         ):
             unknown += 1
             total += conservative_per_sheet
+            per_sheet_tokens.append(conservative_per_sheet)
             continue
         try:
             sizes = tiling.image_pixel_sizes(
@@ -246,12 +270,15 @@ def estimate_image_tokens_for_bases(
             # Rendering will report its failure; the confirmation must still open.
             unknown += 1
             total += conservative_per_sheet
+            per_sheet_tokens.append(conservative_per_sheet)
             continue
         if classification == CLASSIFICATION_RASTER:
             raster += 1
         else:
             vector += 1
-        total += estimate_image_tokens_total(sizes, model=model)
+        page_tokens = estimate_image_tokens_total(sizes, model=model)
+        total += page_tokens
+        per_sheet_tokens.append(page_tokens)
     return ImageTokenEstimate(
         tokens=total,
         conservative_tokens=conservative_per_sheet * (vector + raster + unknown),
@@ -259,13 +286,14 @@ def estimate_image_tokens_for_bases(
         raster_pages=raster,
         unknown_pages=unknown,
         unmeasured_pages=unmeasured,
+        per_sheet_tokens=tuple(per_sheet_tokens),
     )
 
 
-def _image_tokens_for(
+def _image_token_requests_for(
     sheet_count: int, bases, *, rows: int | None, cols: int | None, model: str,
-) -> tuple[int, bool, int]:
-    """``(image_tokens, shape_aware, unmeasured_pages)`` — real shapes where we have them.
+) -> tuple[tuple[int, ...], bool, int]:
+    """``(tokens_per_sheet, shape_aware, unmeasured_pages)`` from each sheet.
 
     One resolver so the standard and exhaustive estimators cannot disagree about
     when the geometry-aware number applies. ``bases`` is used only when it covers
@@ -288,10 +316,9 @@ def _image_tokens_for(
         est = estimate_image_tokens_for_bases(
             bases, rows=rows, cols=cols, model=model
         )
-        return est.tokens, est.fully_measured, est.unknown_pages
-    return estimate_image_tokens_for_set(
-        sheet_count, rows=rows, cols=cols, model=model
-    ), False, 0
+        return est.per_sheet_tokens, est.fully_measured, est.unknown_pages
+    per_sheet = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
+    return (per_sheet,) * sheet_count, False, 0
 
 
 @dataclass(frozen=True)
@@ -346,7 +373,8 @@ def estimate_drawing_set_cost(
     focus-findings section, and one more text-only pass re-reads the digests.
 
     ``spec_chars`` (uploaded project-specifications character count, 0 when
-    none) is priced separately at the cache-aware rate (see
+    none) is priced separately at the cache-aware rate using each complete
+    request's pricing tier (see
     :func:`_specs_cost_contribution`) rather than folded into the flat 1x
     ``input_tokens`` sum above — it rides a system-prompt block that is
     cache-written once and cache-read (~0.1x) on every sheet after, so pricing
@@ -359,9 +387,10 @@ def estimate_drawing_set_cost(
     # was quoted right in one mode and wrong in the other — the mode a standard
     # run actually uses being the wrong one.
     stage_models = resolve_stage_models(model=model)
-    image_tokens, shape_aware, unmeasured = _image_tokens_for(
+    image_requests, shape_aware, unmeasured = _image_token_requests_for(
         sheet_count, bases, rows=rows, cols=cols, model=model
     )
+    image_tokens = sum(image_requests)
     read_low, read_high = _read_output_band(model=model, focus=focus)
     digest_output = sheet_count * read_high
     digest_output_low = sheet_count * read_low
@@ -369,12 +398,15 @@ def estimate_drawing_set_cost(
     if focus:
         digest_text += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
     digest_input = image_tokens + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    digest_requests = [tokens + _ASSUMED_PROMPT_TOKENS_PER_SHEET for tokens in image_requests]
+    spec_tokens = max(1, spec_chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE) if spec_chars > 0 else 0
     input_tokens = digest_input
     output_tokens = digest_output
     output_tokens_low = digest_output_low
     stage_costs: list[float | None] = [
-        estimate_request_cost(
-            digest_input, digest_output, model=model, batch=batch
+        _request_costs(
+            digest_requests, read_high, model=model, batch=batch,
+            shared_prompt_tokens=spec_tokens,
         )
     ]
 
@@ -399,12 +431,14 @@ def estimate_drawing_set_cost(
             model=stage_models.focus, batch=False,
         ))
 
-    low_cost = _sum_costs([estimate_request_cost(
-        digest_input, digest_output_low, model=model, batch=batch
+    low_cost = _sum_costs([_request_costs(
+        digest_requests, read_low, model=model, batch=batch,
+        shared_prompt_tokens=spec_tokens,
     ), *stage_costs[1:]])
     total_cost = _sum_costs(stage_costs)
     spec_display_tokens, spec_cost = _specs_cost_contribution(
-        spec_chars, sheet_count, model=model, batch=batch
+        spec_chars, sheet_count, model=model, batch=batch,
+        request_input_tokens=digest_requests,
     )
     # ``spec_cost`` is 0.0 (never None) whenever spec_chars <= 0 (see
     # _specs_cost_contribution's early return), so this is a no-op add in
@@ -744,13 +778,20 @@ def _component(
     stage: str, input_tokens: int, output_tokens: int, *, model: str, batch: bool,
     extra_cost: float = 0.0, note: str = "", primary_model: str | None = None,
     input_tokens_low: int | None = None, output_tokens_low: int | None = None,
+    request_inputs: Sequence[int] | None = None,
+    request_inputs_low: Sequence[int] | None = None,
 ) -> CostComponent:
-    base = estimate_request_cost(input_tokens, output_tokens, model=model, batch=batch)
+    def price(inputs: Sequence[int] | None, inp: int, out: int) -> float | None:
+        if inputs is None:
+            return estimate_request_cost(inp, out, model=model, batch=batch)
+        return _request_costs(inputs, out // len(inputs) if inputs else 0, model=model, batch=batch)
+
+    base = price(request_inputs, input_tokens, output_tokens)
     cost = None if base is None else base + extra_cost
-    low_base = estimate_request_cost(
+    low_base = price(
+        request_inputs if request_inputs_low is None else request_inputs_low,
         input_tokens if input_tokens_low is None else input_tokens_low,
         output_tokens if output_tokens_low is None else output_tokens_low,
-        model=model, batch=batch,
     )
     if primary_model is not None:
         note = _stage_note(note, stage_model=model, primary=primary_model)
@@ -801,30 +842,25 @@ def _critique_prefix_costs(
     read gets no breakpoint either. Both collapse to ordinary input, so both
     scenarios return the same figure.
     """
-    per_read_out = usage_record_cost(
-        model=model, output_tokens=output_tokens, batch=batch
-    )
-    if per_read_out is None:
-        return None, None
-    out_total = per_read_out * runs * sheet_count
-
     if batch or runs < 2:
-        flat = usage_record_cost(model=model, input_tokens=prefix_tokens, batch=batch)
+        flat = usage_record_cost(
+            model=model, input_tokens=prefix_tokens, output_tokens=output_tokens, batch=batch
+        )
         if flat is None:
             return None, None
-        total = flat * runs * sheet_count + out_total
+        total = flat * runs * sheet_count
         return float(total), float(total)
 
     write = usage_record_cost(
-        model=model, cache_write_tokens=prefix_tokens, batch=False
+        model=model, cache_write_tokens=prefix_tokens, output_tokens=output_tokens, batch=False
     )
     read = usage_record_cost(
-        model=model, cache_read_tokens=prefix_tokens, batch=False
+        model=model, cache_read_tokens=prefix_tokens, output_tokens=output_tokens, batch=False
     )
     if write is None or read is None:
         return None, None
-    reuse = (write + read * (runs - 1)) * sheet_count + out_total
-    no_reuse = (write * runs) * sheet_count + out_total
+    reuse = (write + read * (runs - 1)) * sheet_count
+    no_reuse = (write * runs) * sheet_count
     return float(reuse), float(no_reuse)
 
 
@@ -860,19 +896,34 @@ def _cross_qc_component(sheet_count: int, digest_text: int, *, model: str,
     rec_low, rec_high = reconcile_calls(maps_low), reconcile_calls(maps_high)
     # Cross-QC also reads up to 4k characters of text layer per sheet. Compact
     # map facts are assumed to occupy 150 tokens each, plus the sheet manifest.
-    def inputs(maps: int, recs: int) -> int:
+    def inputs(maps: int, recs: int) -> list[int]:
         fact_tokens = min(maps * DEFAULT_MAP_MAX_FACTS, MAX_FACTS_PER_RECONCILE) * 150
-        return (digest_text + sheet_count * 1_000 + maps * _ASSUMED_PROMPT_TOKENS_PER_SHEET
-                + recs * (fact_tokens + sheet_count * 30 + _ASSUMED_PROMPT_TOKENS_PER_SHEET))
+        # Fill each shard up to the runtime's sheet limit while reserving one
+        # sheet for each remaining shard. The fewest-shards scenario therefore
+        # uses full 40-sheet chunks plus a tail, and the most-shards scenario
+        # one sheet per call. Averaging chunks could hide a long-context tier.
+        text_per_sheet = digest_text // sheet_count if sheet_count else 0
+        counts = []
+        remaining = sheet_count
+        for index in range(maps):
+            count = min(MAX_SHEETS_SINGLE_CALL, remaining - (maps - index - 1))
+            counts.append(count)
+            remaining -= count
+        return [
+            count * (text_per_sheet + 1_000) + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+            for count in counts
+        ] + [fact_tokens + sheet_count * 30 + _ASSUMED_PROMPT_TOKENS_PER_SHEET] * recs
 
     high_out = phase_output_cap(PHASE_CROSS_QC, model=model)
     note = (f"{maps_low}–{maps_high} discipline shard(s) + {rec_low}–{rec_high} "
             "reconciliation call(s); discipline grouping and fact volume unknown"
             if sharded else "one text-only whole-set pass")
+    high_inputs, low_inputs = inputs(maps_high, rec_high), inputs(maps_low, rec_low)
     return _component(
-        "Cross-sheet QC", inputs(maps_high, rec_high), (maps_high + rec_high) * high_out,
-        input_tokens_low=inputs(maps_low, rec_low),
+        "Cross-sheet QC", sum(high_inputs), (maps_high + rec_high) * high_out,
+        input_tokens_low=sum(low_inputs),
         output_tokens_low=(maps_low + rec_low) * min(_ASSUMED_CROSS_QC_OUTPUT_TOKENS, high_out),
+        request_inputs=high_inputs, request_inputs_low=low_inputs,
         model=model, batch=False, note=note + "; thinking included", primary_model=primary_model,
     )
 
@@ -933,18 +984,21 @@ def estimate_exhaustive_run_cost(
 
     # Set totals, priced with each stage's own model — the same PNG dimensions
     # clamp at a different per-model cap, so one count cannot serve both (§2.4).
-    digest_set_images, shape_aware, unmeasured = _image_tokens_for(
+    digest_image_requests, shape_aware, unmeasured = _image_token_requests_for(
         sheet_count, bases, rows=rows, cols=cols, model=model
     )
-    crit_set_images, _, _ = _image_tokens_for(
+    crit_image_requests, _, _ = _image_token_requests_for(
         sheet_count, bases, rows=rows, cols=cols, model=stage_models.critique
     )
     components: list[CostComponent] = []
+    digest_set_images = sum(digest_image_requests)
 
     # Digest vision calls use the selected transport. The later synthesis and
     # focus report are synchronous calls even when digest/critique use Batch, so
     # show and price them independently rather than discounting them by mistake.
     digest_input = digest_set_images + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    digest_requests = [tokens + _ASSUMED_PROMPT_TOKENS_PER_SHEET for tokens in digest_image_requests]
+    spec_tokens = max(1, spec_chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE) if spec_chars > 0 else 0
     read_low, read_high = _read_output_band(model=model, focus=focus)
     digest_output = sheet_count * read_high
     digest_output_low = sheet_count * read_low
@@ -953,12 +1007,15 @@ def estimate_exhaustive_run_cost(
         digest_text += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
     spec_display_tokens, spec_cost = _specs_cost_contribution(
         spec_chars, sheet_count, model=model, batch=batch,
+        request_input_tokens=digest_requests,
     )
-    digest_cost = estimate_request_cost(
-        digest_input, digest_output, model=model, batch=batch,
+    digest_cost = _request_costs(
+        digest_requests, read_high, model=model, batch=batch,
+        shared_prompt_tokens=spec_tokens,
     )
-    digest_low_cost = estimate_request_cost(
-        digest_input, digest_output_low, model=model, batch=batch,
+    digest_low_cost = _request_costs(
+        digest_requests, read_low, model=model, batch=batch,
+        shared_prompt_tokens=spec_tokens,
     )
     if digest_cost is None or spec_cost is None:
         digest_total_cost = None
@@ -1027,28 +1084,26 @@ def estimate_exhaustive_run_cost(
     from .critique import critique_runs
 
     runs = critique_runs()
-    # The cache prefix is a PER-SHEET quantity (one breakpoint per sheet's shared
-    # image block), so a heterogeneous set is priced on its mean sheet. Stated
-    # rather than hidden: with real shapes the sheets differ, and modelling the
-    # cache per sheet would buy precision the surrounding assumed-token constants
-    # do not have.
-    crit_prefix = (
-        (crit_set_images // sheet_count if sheet_count else 0)
-        + _ASSUMED_PROMPT_TOKENS_PER_SHEET
-    )
-    crit_in = runs * sheet_count * crit_prefix
+    # A shared image prefix belongs to one sheet. Retain that sheet's geometry
+    # because averaging prefixes can hide a long-context pricing threshold.
+    crit_prefixes = [tokens + _ASSUMED_PROMPT_TOKENS_PER_SHEET for tokens in crit_image_requests]
+    crit_in = runs * sum(crit_prefixes)
     crit_read_low, crit_read_high = _read_output_band(model=stage_models.critique, critique=True)
     crit_out = runs * sheet_count * crit_read_high
-    crit_low, _ = _critique_prefix_costs(
-        prefix_tokens=crit_prefix, output_tokens=crit_read_low,
-        sheet_count=sheet_count, runs=runs,
-        model=stage_models.critique, batch=critique_batch,
-    )
-    _, crit_high = _critique_prefix_costs(
-        prefix_tokens=crit_prefix, output_tokens=crit_read_high,
-        sheet_count=sheet_count, runs=runs,
-        model=stage_models.critique, batch=critique_batch,
-    )
+    def critique_cost(output_per_read: int, scenario: int) -> float | None:
+        if not crit_prefixes:
+            return estimate_request_cost(0, 0, model=stage_models.critique, batch=critique_batch)
+        return _sum_costs([
+            _critique_prefix_costs(
+                prefix_tokens=prefix, output_tokens=output_per_read,
+                sheet_count=1, runs=runs,
+                model=stage_models.critique, batch=critique_batch,
+            )[scenario]
+            for prefix in crit_prefixes
+        ])
+
+    crit_low = critique_cost(crit_read_low, 0)
+    crit_high = critique_cost(crit_read_high, 1)
     transport_note = (
         " — one shared upload, Batch rate" if critique_batch
         else (" — real-time, shared image prefix prompt-cached" if runs >= 2
@@ -1090,6 +1145,7 @@ def estimate_exhaustive_run_cost(
             "Verification", n * _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING,
             n * _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING,
             model=verification_model, batch=False,
+            request_inputs=[_ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING] * n,
             note=(f"~{n} finding(s) × one crop re-check with "
                   f"{friendly_model_name(verification_model)}"),
         )
@@ -1110,6 +1166,7 @@ def estimate_exhaustive_run_cost(
             n * (_ASSUMED_CITATION_INPUT_TOKENS_PER_REF + fetch_tokens),
             n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_REF,
             model=citation_model, batch=False,
+            request_inputs=[_ASSUMED_CITATION_INPUT_TOKENS_PER_REF + fetch_tokens] * n,
             extra_cost=search_cost,
             note=(f"~{n} eligible normalized ref(s), per-run cap {budget}, "
                   f"~{searches} searches/ref"
@@ -1135,23 +1192,24 @@ def estimate_exhaustive_run_cost(
         per_call_out = phase_output_cap(PHASE_INVESTIGATION, model=stage_models.investigation)
         if not high:
             per_call_out = min(per_call_out, _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND_LOW)
-        input_tokens = calls * _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND
+        per_call_inputs = [_ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND] * calls
         if high:
             # The tool loop replays complete assistant content (thinking blocks
             # included) along with accumulated crops/tool results. Allow full
             # prior replies at the input rate; prompt-cache reuse can lower it.
-            input_tokens += calls * (calls - 1) // 2 * (
-                _ASSUMED_INVESTIGATE_EVIDENCE_TOKENS_PER_ROUND
-                + per_call_out
-            )
+            per_call_inputs = [
+                tokens + index * (_ASSUMED_INVESTIGATE_EVIDENCE_TOKENS_PER_ROUND + per_call_out)
+                for index, tokens in enumerate(per_call_inputs)
+            ]
         # The escalation tier resolves through ``investigation_model()``, which
         # honours DRAWING_ANALYZER_INVESTIGATION_MODEL before falling back to
         # the escalation constant this used to read directly.
         return _component(
             "Investigation",
-            n * input_tokens,
+            n * sum(per_call_inputs),
             n * calls * per_call_out,
             model=stage_models.investigation, batch=False,
+            request_inputs=per_call_inputs * n,
             note=f"~{n} uncertain finding(s) × up to {evidence_rounds} evidence requests "
                  f"+ closing verdict; thinking and history replay included, with "
                  f"{friendly_model_name(stage_models.investigation)}",

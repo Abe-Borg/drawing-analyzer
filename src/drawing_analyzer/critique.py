@@ -39,7 +39,7 @@ import os
 import re
 import time
 from decimal import Decimal, InvalidOperation
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .core.api_config import (
@@ -48,6 +48,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.request_usage import RequestUsage
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .diagnostics import get_logger
 from .digest import (
@@ -58,7 +59,6 @@ from .digest import (
     _clean_error,
     _get,
     _message_text,
-    _message_usage,
     stream_message,
     build_user_content,
     claims_from_cache,
@@ -1072,6 +1072,9 @@ class CritiqueRunOutcome:
     parse_status: str = ""
     parse_note: str = ""
     error: str | None = None
+    # Preserve request boundaries for pricing models with prompt-size tiers.
+    # No entry is created for a transport error that returned no response.
+    request_usage: RequestUsage | None = None
 
     @property
     def ok(self) -> bool:
@@ -1111,6 +1114,7 @@ class CritiqueResult:
     # the usage ledger prices it REAL_TIME rather than at the batch rate — the
     # critique analogue of ``SheetDigest.rescued`` (Phase 23C).
     rescued: bool = False
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -1186,18 +1190,10 @@ def outcome_from_message(
     present, so a structured request whose constraint did not take and came back
     fenced anyway still parses on the ordinary path.
     """
+    request_usage = RequestUsage.from_message(message)
+    in_tok, out_tok = request_usage.input_tokens, request_usage.output_tokens
+    cr, cw = request_usage.cache_read_tokens, request_usage.cache_write_tokens
     raw = _message_text(message)
-    in_tok, out_tok = _message_usage(message)
-    # Prompt-cache split (L2): on a cache hit/write the API reports the cached
-    # image prefix in these separate counters and ``input_tokens`` is only the
-    # uncached remainder — carry them so the ledger prices the whole read. Read
-    # them with the same dict-tolerant ``_get`` as ``_message_usage`` (not
-    # attribute-only ``extract_cache_usage``), so a dict-shaped usage — a
-    # raw-REST client, a batch dict result, or the ``dict_shape`` fixtures — is
-    # counted rather than silently zeroed (which would undercount the ledger).
-    _usage = _get(message, "usage")
-    cr = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
-    cw = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
     if not raw:
         # An empty body (e.g. adaptive thinking consumed the whole token budget)
         # is a *failed* read, not a clean sheet — so the run counts as failed (not
@@ -1206,6 +1202,7 @@ def outcome_from_message(
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
+            request_usage=request_usage,
             error=f"empty critique (stop_reason={stop!r})",
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
@@ -1217,6 +1214,7 @@ def outcome_from_message(
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
+            request_usage=request_usage,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
         )
@@ -1228,6 +1226,7 @@ def outcome_from_message(
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
+            request_usage=request_usage,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
                   f"({parsed.note})",
@@ -1243,6 +1242,7 @@ def outcome_from_message(
         run_id=run_id, status="COMPLETE", findings=findings, claims=claims,
         input_tokens=in_tok, output_tokens=out_tok,
         cache_read_tokens=cr, cache_write_tokens=cw,
+        request_usage=request_usage,
         parse_status=parsed.status, parse_note=parsed.note,
     )
 
@@ -1378,6 +1378,10 @@ def result_from_outcomes(
     total_out = sum(oc.output_tokens for oc in all_outcomes)
     total_cr = sum(oc.cache_read_tokens for oc in all_outcomes)
     total_cw = sum(oc.cache_write_tokens for oc in all_outcomes)
+    request_usage = [
+        replace(oc.request_usage, parse_success=oc.ok)
+        for oc in all_outcomes if oc.request_usage is not None
+    ]
     ok = [oc for oc in all_outcomes if oc.ok]
     errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
 
@@ -1389,6 +1393,7 @@ def result_from_outcomes(
             output_tokens=total_out,
             cache_read_tokens=total_cr,
             cache_write_tokens=total_cw,
+            request_usage=request_usage,
             runs=0,
             requested_runs=requested_runs,
             completed_runs=0,
@@ -1417,6 +1422,7 @@ def result_from_outcomes(
         output_tokens=total_out,
         cache_read_tokens=total_cr,
         cache_write_tokens=total_cw,
+        request_usage=request_usage,
         runs=len(ok),
         requested_runs=requested_runs,
         completed_runs=len(ok),
