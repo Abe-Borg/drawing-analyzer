@@ -68,7 +68,7 @@ from typing import Any, Callable, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.tokenizer import estimate_image_tokens_total
-from . import resource_pressure
+from . import cancellation, resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -686,9 +686,65 @@ def _cancel_batch(
         _log.warning("batch %s cancel failed: %s", batch_id, summarize_exc(exc))
         return False
     _log.info("batch %s cancellation accepted", batch_id)
+    # Already canceled: a later stop has nothing left to cancel here.
+    cancellation.forget_remote_batch(batch_id)
     if on_log is not None:
         on_log(f"Canceled remote batch {batch_id}")
     return True
+
+
+def _stop_remote_batch(
+    client: Any, batch_id: str, *, on_log: LogCallback | None = None
+) -> None:
+    """The kill switch's remote half: cancel a batch this run still has open.
+
+    Runs on the stop's background thread, or at once on the submitting thread
+    when the batch was accepted after the stop. A refused cancel on a batch
+    that already settled is not a failure; one that may still be running is
+    reported, so the user can cancel it from the Anthropic Console.
+    """
+    if _cancel_batch(client, batch_id, on_log=on_log):
+        return
+    try:
+        status = _normalize_status(
+            _get(client.messages.batches.retrieve(batch_id), "processing_status")
+        )
+    except Exception:  # noqa: BLE001 - unknown is reported as possibly running
+        status = ""
+    if status in ("ended", "failed", "expired", "canceled", "canceling"):
+        return
+    _log.error(
+        "stop could not cancel batch %s (status=%s); it may still be running",
+        batch_id, status or "unknown",
+    )
+    if on_log is not None:
+        on_log(
+            f"Could not cancel remote batch {batch_id}; it may still be running "
+            "and billing. Cancel it from the Batches page of the Anthropic Console.",
+            level="error",
+        )
+
+
+def _create_batch(
+    client: Any, reqs: list[dict], *, on_log: LogCallback | None = None
+) -> Any:
+    """Submit one Message Batch: the only place this run creates one.
+
+    Refused once the run is stopped (:mod:`~drawing_analyzer.cancellation`),
+    and registered with the run's kill switch on acceptance, so a stop cancels
+    it wherever the run's thread happens to be. A batch accepted after the
+    stop (its submit was already in flight) is canceled at once — and the
+    stop's ``wait_for_remote_cancels`` waits for that. Either way the caller
+    still records the receipt, so the next run collects whatever the batch
+    finished before the cancel landed.
+    """
+    with cancellation.submitting():
+        mb = client.messages.batches.create(requests=reqs)
+        batch_id = _get(mb, "id")
+        cancellation.track_remote_batch(
+            batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
+        )
+    return mb
 
 
 def _harvest_budget_seconds(
@@ -791,6 +847,7 @@ def _poll_for_harvest(
         if batch is not None:
             status = str(_get(batch, "processing_status", "") or "")
             if status in ("ended", "failed", "expired", "canceled"):
+                cancellation.forget_remote_batch(batch_id)
                 return status
         remaining = budget_seconds - (time.monotonic() - started)
         if remaining <= 0:
@@ -801,7 +858,8 @@ def _poll_for_harvest(
             resource_pressure.note_api_retry(
                 last_exc, stage="batch_harvest", attempt=errors, backoff_seconds=delay,
             )
-        sleep(delay)
+        # A stop ends the wait; the receipt lets the next run collect it.
+        cancellation.pause(delay, sleep)
 
 
 @dataclass(frozen=True)
@@ -1070,7 +1128,7 @@ def _recover_via_batch_resubmit(
                 f"(recovery round {round_no}/{max_rounds})"
             )
         try:
-            mb = client.messages.batches.create(requests=reqs)
+            mb = _create_batch(client, reqs, on_log=on_log)
         except Exception as exc:  # noqa: BLE001 - recovery is best-effort; batch errors stand
             # The backend rejecting even the submit is itself a sick-backend
             # signal — back off (within budget) and let the next round retry,
@@ -1086,7 +1144,7 @@ def _recover_via_batch_resubmit(
             resource_pressure.note_api_retry(
                 exc, stage="batch_submit", attempt=round_no, backoff_seconds=backoff,
             )
-            sleep(backoff)
+            cancellation.pause(backoff, sleep)
             continue
         retry_id = _get(mb, "id")
         # The batch submission was accepted; each item now has one additional
@@ -1301,6 +1359,7 @@ def submit_drawing_batch(
     level1_keys: dict | None = None,
     sleep: Callable[[float], None] = time.sleep,
     recovery_state: Any = None,
+    on_log: LogCallback | None = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -1325,6 +1384,11 @@ def submit_drawing_batch(
     unavailable inline fallback (:func:`_serve_inline`) runs sequentially on
     the calling thread instead, so it gets the real caching benefit via
     :func:`~drawing_analyzer.digest.digest_sheet`'s own default.
+
+    A stopped run (:mod:`~drawing_analyzer.cancellation`) uploads nothing more
+    and sends no batch: the uploads made so far are deleted and
+    ``RunCancelled`` is raised. ``on_log`` names the submitted batch, so the
+    user can find it in the Anthropic Console.
     """
     focus = normalize_focus(focus)
     focus_fragment = focus_cache_fragment(focus)
@@ -1367,17 +1431,20 @@ def submit_drawing_batch(
                 "(Files API unavailable)"
             )
         slot.attempts_submitted += 1
-        slot.digest = digest_sheet(
-            sheet,
-            client=client,
-            model=model,
-            max_tokens=max_tokens,
-            use_thinking=use_thinking,
-            effort=effort,
-            cache=cache,
-            focus=focus,
-            specs_text=specs_text,
-        )
+        try:
+            slot.digest = digest_sheet(
+                sheet,
+                client=client,
+                model=model,
+                max_tokens=max_tokens,
+                use_thinking=use_thinking,
+                effort=effort,
+                cache=cache,
+                focus=focus,
+                specs_text=specs_text,
+            )
+        except cancellation.RunCancelled:
+            return  # the submit loop's stop check deletes the uploads and raises
         # A fresh inline digest was a synchronous real-time call (no batch
         # discount); a cache hit stays a cache hit. Mark it so the usage ledger
         # prices it real-time, not at the batch rate (Phase 23B).
@@ -1397,6 +1464,8 @@ def submit_drawing_batch(
             progress(slot.index + 1, total or 0, f"{verb} {sheet.ref.display_label}")
 
     for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
+        if cancellation.is_cancelled():
+            break  # stopped: handled once, below the loop
         image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
         slot = _Slot(
             index=index, ref=sheet.ref, image_estimate=image_est,
@@ -1483,6 +1552,8 @@ def submit_drawing_batch(
 
         try:
             upload = upload_sheet_images(client, sheet, on_image=on_image, cache=cache)
+        except cancellation.RunCancelled:
+            break  # this sheet's partial uploads are already deleted
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
             rid = request_id_of(exc)
             hint = upload_failure_hint(exc)
@@ -1603,11 +1674,21 @@ def submit_drawing_batch(
         if progress is not None:
             progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
 
+    if cancellation.is_cancelled():
+        # Stopped before anything was sent: no batch will ever reference these
+        # uploads, so delete them now rather than leave them to the reaper.
+        leaked = _take_slot_upload_ids(slots)
+        _log.info("drawing batch stopped before submit; deleting %d uploaded file(s)", len(leaked))
+        delete_files(client, leaked, cache=cache)
+        raise cancellation.RunCancelled()
+
     batch_id: str | None = None
     if reqs:
         try:
-            mb = client.messages.batches.create(requests=reqs)
-        except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+            mb = _create_batch(client, reqs, on_log=on_log)
+        # A stop that lands between the check above and the submit cleans up
+        # exactly like a failed submit.
+        except (Exception, cancellation.RunCancelled):  # noqa: BLE001 - clean up before propagating (DA-034)
             # The images are already uploaded but no batch will ever reference
             # them — delete every one before re-raising so a submit failure never
             # leaks remote files (DA-034). Mirrors the critique batch's submit
@@ -1638,6 +1719,8 @@ def submit_drawing_batch(
             "batch submitted: id=%s items=%d request_id=%s",
             batch_id, len(reqs), request_id_of(mb),
         )
+        if on_log is not None:
+            on_log(f"Submitted drawing batch {batch_id} ({len(reqs)} sheet(s))")
         for s in slots:
             if s.custom_id is not None:
                 _log.info(
@@ -1735,7 +1818,7 @@ def _poll_until_terminal(
             resource_pressure.note_api_retry(
                 exc, stage="batch_poll", attempt=consecutive_errors, backoff_seconds=delay,
             )
-            sleep(delay)
+            cancellation.pause(delay, sleep)
             continue
 
         counts = _get(batch, "request_counts")
@@ -1768,6 +1851,7 @@ def _poll_until_terminal(
                 "batch %s reached terminal status=%s after %.0fs",
                 batch_id, status, elapsed,
             )
+            cancellation.forget_remote_batch(batch_id)
             return status
         # Periodic "still waiting" line, at INFO and in the GUI activity log.
         # Emitted on cadence regardless of progress, so a batch that is slowly
@@ -1812,7 +1896,9 @@ def _poll_until_terminal(
                     level="warning",
                 )
             return "stalled"
-        sleep(_progressive_interval(elapsed))
+        # A stop wakes this wait at once: the batch itself was already
+        # canceled by the stop, and its receipt lets the next run collect it.
+        cancellation.pause(_progressive_interval(elapsed), sleep)
 
 
 def _digest_from_message(

@@ -231,6 +231,9 @@ class _FakeStreamManager:
     def __exit__(self, *exc):
         return False
 
+    def __iter__(self):
+        return iter(())
+
     def get_final_message(self):
         return self._message
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diagnostics
-from . import resource_pressure
+from . import cancellation, resource_pressure
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
 from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
@@ -92,6 +92,7 @@ def _cancel_unrecorded_batch(client: Any, batch_id: str, *, sleep) -> bool:
     terminal = {"ended", "failed", "expired", "canceled"}
     try:
         batch = _read_with_retry(lambda: client.messages.batches.cancel(batch_id), sleep=sleep)
+        cancellation.forget_remote_batch(batch_id)  # a stop has nothing left to cancel
         for attempt in range(DEFAULT_DIGEST_MAX_RETRIES + 1):
             if str(_get(batch, "processing_status", "")).lower() in terminal:
                 return True

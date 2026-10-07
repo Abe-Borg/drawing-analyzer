@@ -321,6 +321,23 @@ _HOW_TO_USE = HelpDocument(
                 "your machine; nothing is sent until you accept. Progress and per-sheet "
                 "diagnostics stream into the activity log as the run works."
             ),
+            _bullet(
+                "Stop — the red button beside Analyze Drawings — is the kill switch, in "
+                "every processing mode. From the moment you confirm, nothing new is sent, "
+                "streamed requests in flight are abandoned, and every batch the run has "
+                "queued is canceled at once. A short request already in flight finishes, "
+                "and requests already made are billed."
+            ),
+            _bullet(
+                "Nothing paid is thrown away: finished sheets stay in the cache, so "
+                "re-running the same files reuses them for free, and the next run collects "
+                "anything a canceled batch finished first. If a batch cannot be canceled, "
+                "the activity log names it so you can cancel it from the Anthropic Console."
+            ),
+            _bullet(
+                "Closing the window during a run asks first, then stops the run the same "
+                "way before it closes, so no batch keeps running after the app is gone."
+            ),
         ),
         _section(
             "8 · Save your results",
@@ -1105,6 +1122,11 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "If a batch stalls, the app resubmits the unfinished sheets as fresh "
                 "batches. It deliberately does NOT fall back to full-price real-time calls "
                 "behind your back — a run cannot silently cost double."
+            ),
+            _bullet(
+                "Stop cancels a queued batch immediately in Economy and Hybrid, and "
+                "abandons in-flight requests in Fast. The batch id is in the activity log "
+                "from the moment it is submitted."
             ),
             _bullet(
                 "Fast sends everything immediately. On the two critique reads it reuses "

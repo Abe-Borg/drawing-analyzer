@@ -60,6 +60,7 @@ from .batch_digest import (
     StatusCallback,
     _batch_max_elapsed_seconds,
     _cancel_batch,
+    _create_batch,
     _poll_until_terminal,
     _release_uploaded_files,
 )
@@ -80,6 +81,7 @@ from .critique import (
     result_from_outcomes,
     run_checklists,
 )
+from . import cancellation
 from .diagnostics import get_logger, summarize_exc
 from .digest import _get
 from .digest_cache import cache_schema_version, critique_cache_key
@@ -160,6 +162,7 @@ def submit_critique_batch(
     sleep: Callable[[float], None] = time.sleep,
     level1_keys: dict | None = None,
     recovery_state: Any = None,
+    on_log: LogCallback | None = None,
 ) -> CritiqueBatch:
     """Render-stream → cache-or-upload → submit one Message Batch of critique reads.
 
@@ -184,7 +187,9 @@ def submit_critique_batch(
     already resolved (cache hits and real-time fallbacks) are preserved — the submit
     failure is additive/non-fatal (I-3) and does not propagate. Any *other*
     unexpected error escaping the submit loop deletes the uploaded files before
-    propagating, so a submit failure never leaks remote files (DA-034).
+    propagating, so a submit failure never leaks remote files (DA-034). A stop
+    (:mod:`~drawing_analyzer.cancellation`) is one of those: the uploads are
+    deleted and ``RunCancelled`` propagates, so no batch is sent.
     """
     model = model or critique_model()
     runs = critique_runs() if runs is None else max(1, int(runs))
@@ -232,6 +237,7 @@ def submit_critique_batch(
     batch_id: str | None = None
     try:
         for index, sheet_input in enumerate(iter_prefetched_sheets(rendered_sheets)):
+            cancellation.check()
             reusable = (
                 sheet_input if isinstance(sheet_input, ReusableSheetUpload) else None
             )
@@ -415,7 +421,7 @@ def submit_critique_batch(
 
                 client = _get_client()
             try:
-                mb = client.messages.batches.create(requests=reqs)
+                mb = _create_batch(client, reqs, on_log=on_log)
             except Exception as exc:  # noqa: BLE001 - additive/non-fatal (I-3), see below
                 # DA-034: the uploads are already remote but no batch will ever
                 # reference them — delete every one so a submit failure never leaks
@@ -468,10 +474,15 @@ def submit_critique_batch(
                 "critique batch submitted: id=%s items=%d (%d sheet(s) x %d read(s))",
                 batch_id, len(reqs), len(reqs) // max(1, runs), runs,
             )
-    except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+            if on_log is not None:
+                on_log(
+                    f"Submitted critique batch {batch_id} "
+                    f"({len(reqs) // max(1, runs)} sheet(s))"
+                )
+    except (Exception, cancellation.RunCancelled):  # noqa: BLE001 - clean up before propagating (DA-034)
         # An unexpected error escaped the submit loop before any batch owns the
-        # already-uploaded files (a cache-backend error, a fallback blowing up, …).
-        # Delete them so they never leak, then propagate. The expected
+        # already-uploaded files (a cache-backend error, a fallback blowing up, a
+        # stop). Delete them so they never leak, then propagate. The expected
         # ``batches.create`` failure is handled non-fatally above and returns, so it
         # never reaches here.
         if batch_id is None:

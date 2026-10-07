@@ -159,12 +159,20 @@ def test_describe_busy_names_the_job_in_flight():
         assert "analysis" in both and "export" in both
 
 
-def _stub_app(gui, *, busy=False, export_busy=False):
+def _stub_app(gui, *, busy=False, export_busy=False, run_cancel=None):
     destroyed: list[bool] = []
+    scheduled: list = []
     stub = types.SimpleNamespace(
         _busy=busy, _export_busy=export_busy,
+        _run_cancel=run_cancel, _quitting=False,
         destroy=lambda: destroyed.append(True),
+        after=lambda _delay, callback: scheduled.append(callback),
+        stop_btn=types.SimpleNamespace(configure=lambda **kw: None),
+        _log=lambda *a, **k: None, _set_progress_text=lambda *a, **k: None,
     )
+    for name in ("_request_stop", "_stop_then_quit", "_on_close_request"):
+        setattr(stub, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), stub))
+    stub.scheduled = scheduled
     return stub, destroyed
 
 
@@ -393,6 +401,96 @@ def test_the_close_prompt_says_what_quitting_costs():
     assert "discards" in message
     assert "billed" in message                    # the money, said out loud
     assert seen[0].get("default") == "no"         # X should not default to losing it
+
+
+@pytest.mark.parametrize("worker_unwinds", [True, False])
+def test_quitting_mid_analysis_stops_the_run_before_closing(monkeypatch, worker_unwinds):
+    """Quit pulls the kill switch: a daemon worker dies with the process, but a
+    remote batch would keep running and billing after the window closed. The
+    window waits for the stop to settle — bounded, never hanging on it."""
+    from drawing_analyzer.cancellation import CancelToken
+
+    with _gui_module() as (gui, tk):
+        clock = {"t": 0.0}
+        monkeypatch.setattr(gui.time, "monotonic", lambda: clock["t"])
+        tk.messagebox.askyesno = lambda *a, **k: True
+        token = CancelToken()
+        stub, destroyed = _stub_app(gui, busy=True, run_cancel=token)
+        gui.DrawingAnalyzerApp._on_close_request(stub)
+        assert token.cancelled
+        assert destroyed == []                    # the stop has not settled yet
+        stub.scheduled.pop()()                    # still busy: polls again
+        assert destroyed == []
+        if worker_unwinds:
+            stub._busy = False                    # the worker reported back
+        else:
+            clock["t"] = gui.QUIT_STOP_GRACE_SECONDS + 1
+        stub.scheduled.pop()()
+        assert destroyed == [True]
+
+
+def test_a_second_close_while_stopping_closes_at_once():
+    from drawing_analyzer.cancellation import CancelToken
+
+    with _gui_module() as (gui, tk):
+        tk.messagebox.askyesno = lambda *a, **k: True
+        stub, destroyed = _stub_app(gui, busy=True, run_cancel=CancelToken())
+        gui.DrawingAnalyzerApp._on_close_request(stub)
+        assert destroyed == []
+        tk.messagebox.askyesno = lambda *a, **k: False   # never asked again
+        gui.DrawingAnalyzerApp._on_close_request(stub)
+        assert destroyed == [True]
+
+
+@pytest.mark.parametrize("answer,stops", [(True, True), (False, False)])
+def test_stop_button_cancels_only_when_confirmed(answer, stops):
+    from drawing_analyzer.cancellation import CancelToken
+
+    with _gui_module() as (gui, tk):
+        tk.messagebox.askyesno = lambda *a, **k: answer
+        token = CancelToken()
+        stub, _ = _stub_app(gui, busy=True, run_cancel=token)
+        gui.DrawingAnalyzerApp._on_stop(stub)
+        assert token.cancelled is stops
+
+
+def test_a_broken_stop_dialog_still_stops_the_run():
+    from drawing_analyzer.cancellation import CancelToken
+
+    with _gui_module() as (gui, tk):
+        def boom(*a, **k):
+            raise RuntimeError("no display")
+
+        tk.messagebox.askyesno = boom
+        token = CancelToken()
+        stub, _ = _stub_app(gui, busy=True, run_cancel=token)
+        gui.DrawingAnalyzerApp._on_stop(stub)
+        assert token.cancelled
+
+
+def test_worker_reports_a_stopped_run_as_stopped_not_failed(monkeypatch):
+    from drawing_analyzer.cancellation import CancelToken, RunCancelled
+
+    outcomes: list[str] = []
+    seen: dict = {}
+    with _gui_module() as (gui, _tk):
+        def stopped_pipeline(*args, **kwargs):
+            seen["cancel"] = kwargs.get("cancel")
+            raise RunCancelled()
+
+        monkeypatch.setattr(gui, "extract_drawing_context", stopped_pipeline)
+        stub = types.SimpleNamespace(
+            after=lambda _delay, callback: callback(),
+            _on_cancelled=lambda: outcomes.append("stopped"),
+            _on_error=lambda message: outcomes.append("failed"),
+            _on_done=lambda ctx: outcomes.append("done"),
+            _progress_from_thread=lambda *a: None,
+            _log_from_thread=lambda *a: None, _status_from_thread=lambda *a: None,
+        )
+        token = CancelToken()
+        gui.DrawingAnalyzerApp._worker(stub, [], "", cancel=token)
+    assert outcomes == ["stopped"]
+    assert seen["cancel"] is token                # the run got the GUI's switch
 
 
 def test_a_broken_dialog_cannot_trap_the_user_in_the_window():
