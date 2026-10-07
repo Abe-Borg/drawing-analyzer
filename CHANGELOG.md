@@ -14,6 +14,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adaptive thinking, extended Batch output, high-resolution vision, structured
   outputs and web tools. Refused/truncated extraction replies cannot be cached
   as valid results. Main review and verification model defaults are unchanged.
+- **Report chat reply checks.** Thinking-only replies show a missing-answer
+  notice without automatic retries; the report-grounding instructions explicitly
+  persist through conflicting requests and distinguish evidence from instructions.
 - **Request-level Haiku pricing.** Cost previews, the usage ledger and report
   chat apply Haiku's higher rate only to requests over 100k prompt tokens,
   including cached input. Cache pricing and Batch discounts stack with the
