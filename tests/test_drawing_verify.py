@@ -769,6 +769,63 @@ def test_verify_runs_concurrently():
     assert res.verified == 3   # all cleared the barrier => true concurrency
 
 
+@pytest.mark.parametrize("crop_order", [(0, 1, 2), (2, 1, 0)])
+def test_verify_usage_keeps_input_order_when_calls_and_crops_finish_out_of_order(crop_order):
+    from drawing_analyzer.models import RunUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    def run(workers, order):
+        findings = [_finding(marker) for marker in ("usage-first", "no-crop", "usage-second")]
+        second_collected = threading.Event()
+        completed = []
+        client = _FakeClient({})
+
+        def response(**kwargs):
+            text = kwargs["messages"][0]["content"][0]["text"]
+            marker = "usage-first" if "usage-first" in text else "usage-second"
+            if workers > 1 and marker == "usage-first":
+                # The first response cannot finish until the collector has
+                # attached the second verdict, guaranteeing reverse completion.
+                assert second_collected.wait(5), "second verdict was not collected"
+            message = _FakeResp('{"verdict":"CONFIRMED"}')
+            message.id = "msg_" + marker
+            message.usage = _FakeUsage(i=60_000 if marker == "usage-first" else 100_001)
+            completed.append(marker)
+            return message
+
+        def render(items):
+            for index in order:
+                yield items[index][0], None if index == 1 else b"crop"
+
+        def progress(_done, _total, _label):
+            if getattr(findings[2].verification, "status", None) == "VERIFIED":
+                second_collected.set()
+
+        client.messages.create = response
+        result = _run(
+            findings, client=client, max_workers=workers,
+            crop_renderer=render, progress=progress,
+        )
+        assert result.verified == 2 and result.skipped == 1
+        assert result.input_tokens == 160_001 and result.output_tokens == 20
+        assert [usage.request_id for usage in result.request_usage] == [
+            "msg_usage-first", "msg_usage-second",
+        ]
+        ledger = RunUsage()
+        _record_usage(
+            ledger, family="verify", instance="verify", model="claude-haiku-5-5",
+            request_usage=result.request_usage,
+        )
+        return ledger.to_dict(), completed
+
+    sequential, _ = run(1, (0, 1, 2))
+    concurrent, completed = run(2, crop_order)
+    assert completed == ["usage-second", "usage-first"]
+    # Exported request IDs, attempt numbers, token totals, and prices must all
+    # match the sequential run despite reversed completion and crop order.
+    assert concurrent == sequential
+
+
 def test_cross_verify_model_calls_concurrent_but_render_and_attach_ordered(monkeypatch):
     main_thread = threading.get_ident()
     render_threads: list[int] = []
