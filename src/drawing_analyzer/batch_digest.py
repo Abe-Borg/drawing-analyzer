@@ -384,22 +384,44 @@ def _replace_result_with_attempt_history(
     results: list,
     slot: "_Slot",
     digest: SheetDigest,
-) -> None:
+) -> bool:
     """Replace a recovery result while retaining every earlier attempt.
 
     Three histories merge here, oldest first: responses already recorded on the
     result being replaced, the non-billable records of any batch abandoned
     under this slot since (drained from the slot so they are recorded exactly
     once), and this digest's own response.
+
+    A failed ``digest`` with no text never displaces a result that has text.
+    The raised-cap resubmission exists to improve on the read it retries, never
+    to lose it — the real-time rule
+    (:func:`~drawing_analyzer.digest.stream_with_cap_retry`). An errored item,
+    an empty reply at the larger cap, a reply declined before any output, or a
+    deferred collection would otherwise turn a partial digest into an empty
+    one. The earlier result then stays whole (text, findings, stop reason and
+    error, so a partial read is still reported and never cached) and the
+    merged history moves onto it instead. Returns whether ``digest`` was
+    adopted.
     """
     previous = results[slot.index]
     prior = list(getattr(previous, "usage_attempts", ()) or ()) if previous else []
     abandoned = _drain_abandoned_attempts(slot)
     current = list(getattr(digest, "usage_attempts", ()) or ())
     merged = prior + abandoned + current
+    adopted = not (
+        digest.error is not None and not digest.text.strip()
+        and previous is not None and previous.text.strip()
+    )
+    kept = digest if adopted else previous
+    if not adopted:
+        _log.info(
+            "item %s (%s): replacement has no text (%s); keeping the earlier read",
+            slot.custom_id, slot.ref.display_label, digest.error,
+        )
     if merged:
-        setattr(digest, "usage_attempts", merged)
-    results[slot.index] = digest
+        setattr(kept, "usage_attempts", merged)
+    results[slot.index] = kept
+    return adopted
 
 
 def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
@@ -411,15 +433,23 @@ def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
 
 
 def _defer_batch_collection(slots: list, results: list, batch_id: str, *, error: str | None = None) -> None:
-    """Return retriable errors without discarding earlier billed attempts."""
+    """Return retriable errors without discarding earlier billed attempts.
+
+    A sheet still holding an earlier read's text keeps that read (see
+    :func:`_replace_result_with_attempt_history`). Its error gains the
+    deferral, which can be the only place a run says what the next run must
+    collect or that the recovery store needs restoring.
+    """
+    note = error or (f"batch {batch_id} collection failed; "
+                     "retry next run to collect the existing batch")
     for slot in slots:
-        _replace_result_with_attempt_history(
-            results, slot, SheetDigest(
-                ref=slot.ref, text="", image_token_estimate=slot.image_estimate,
-                error=error or (f"batch {batch_id} collection failed; "
-                               "retry next run to collect the existing batch"),
-            ),
+        placeholder = SheetDigest(
+            ref=slot.ref, text="", image_token_estimate=slot.image_estimate, error=note,
         )
+        if not _replace_result_with_attempt_history(results, slot, placeholder):
+            kept = results[slot.index]
+            if kept.error:              # a complete read stays complete
+                kept.error = f"{kept.error}; {note}"
 
 
 def _served_batch_ids(batch: "DrawingBatch") -> list[str]:
@@ -1275,10 +1305,14 @@ def _recover_via_batch_resubmit(
                 still.append((slot, params))
                 continue
             digest = _parse_item(slot, res, cache=cache)
-            slot.served_by = retry_id
-            # Fresher provenance than the error it replaces, even if still empty
-            # — and a batch digest, so no ``rescued`` full-rate flag.
-            _replace_result_with_attempt_history(results, slot, digest)
+            # Fresher provenance than the error it replaces, even if still
+            # empty, but never at the cost of a read with text: that read then
+            # stays, and the slot keeps naming the batch it came from. A batch
+            # digest, so no ``rescued`` full-rate flag. Whether to go again is
+            # decided from this round's own reply, so remaining headroom is
+            # still used.
+            if _replace_result_with_attempt_history(results, slot, digest):
+                slot.served_by = retry_id
             if digest.error is None:
                 recovered += 1
                 continue

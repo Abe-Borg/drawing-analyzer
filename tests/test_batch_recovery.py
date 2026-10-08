@@ -14,7 +14,7 @@ from drawing_analyzer import batch_digest, batch_recovery, batch_critique, diges
 from drawing_analyzer.batch_recovery import BatchReceiptError, recover_pending_batches, read_batch_results
 from drawing_analyzer.digest_cache import DigestCache
 from tests.test_drawing_batch import _FakeClient, _flaky_then_ok, _make_sheet, _succeed, OPUS, NOSLEEP
-from tests.fixtures.fake_anthropic import FakeBatchResult, FakeBatchResultEnvelope, FakeMessage
+from tests.fixtures.fake_anthropic import FakeBatchResult, FakeBatchResultEnvelope, FakeMessage, FakeTextBlock
 from tests.test_drawing_batch_critique import (
     _FakeClient as CritiqueClient, _succeed as critique_succeed,
 )
@@ -458,12 +458,17 @@ def test_receipt_write_failure_cancels_before_releasing_uploads(stage, cancellat
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids if cancellation == "ended" else [])
 
 
+@pytest.mark.parametrize("prose", ["", "Real prose, cut off mid-"], ids=["empty", "cut-off"])
 @pytest.mark.parametrize("confirmed", [True, False])
-def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(confirmed, monkeypatch):
-    empty = FakeBatchResult(custom_id="sheet__0", result=FakeBatchResultEnvelope(
-        type="succeeded", message=FakeMessage(content=[], stop_reason="max_tokens"),
+def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(confirmed, prose, monkeypatch):
+    # A primary cut off with prose keeps that prose through the deferral, and
+    # its error carries the receipt failure as well as its own.
+    first = FakeBatchResult(custom_id="sheet__0", result=FakeBatchResultEnvelope(
+        type="succeeded", message=FakeMessage(
+            content=[FakeTextBlock(text=prose)] if prose else [], stop_reason="max_tokens",
+        ),
     ))
-    client = _FakeClient(_flaky_then_ok({"sheet__0": empty}))
+    client = _FakeClient(_flaky_then_ok({"sheet__0": first}))
     cache = DigestCache(None, persist=False)
     batch = batch_digest.submit_drawing_batch([_make_sheet(0), _make_sheet(1)], client=client, cache=cache, model=OPUS)
     monkeypatch.setattr(cache, "record_batch", lambda _: (_ for _ in ()).throw(OSError("disk full")))
@@ -485,6 +490,8 @@ def test_retry_receipt_failure_stops_paid_rounds_and_retains_live_uploads(confir
     assert len(client.create_calls) == 2 and len(client.cancel_calls) == 1
     assert client.rescue_calls == []
     assert "receipt persistence failed" in digests[0].error
+    assert digests[0].text == prose
+    assert ("truncated digest" in digests[0].error) == bool(prose)
     assert len(digests[0].usage_attempts) == 1 and digests[1].ok
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids if confirmed else [])
 

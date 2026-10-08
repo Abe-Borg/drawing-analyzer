@@ -684,7 +684,8 @@ is still cut off, the sheet is reported as failed and the result is **not**
 cached — a stored truncation would otherwise be served on every later run,
 indistinguishable from a complete read. The partial prose still ships,
 including in the combined digest, where a note under it says the sheet's
-digest is partial.
+digest is partial. If the raised-cap retry fails, or comes back with no text at
+all, the first read's partial prose is what ships, in every processing mode.
 
 A reply the model **declined** (`stop_reason="refusal"`, part-way through or
 before any output) is handled the same way, except that it is not re-sent. A

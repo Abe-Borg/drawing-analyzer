@@ -2062,7 +2062,43 @@ def test_abandoned_recovery_rounds_survive_on_a_sheet_recovery_never_resolves(
     assert not [a for a in (getattr(digests[1], "usage_attempts", ()) or []) if not a.billable]
 
 
-def test_batch_nonempty_truncation_is_an_error_and_is_retried():
+@pytest.mark.parametrize(
+    ("retry_reply", "caps", "billed"),
+    [
+        # A server blip: re-sent at the same raised cap while rounds remain.
+        # An errored item returns no response, so it bills nothing.
+        (
+            batch_errored_result("sheet__0", error_message="Internal Server Error").result,
+            [16_000, 32_000, 32_000],
+            [(100, 20)],
+        ),
+        # Empty at the larger cap too: raised again while headroom remains.
+        (
+            FakeBatchResultEnvelope(
+                type="succeeded",
+                message=FakeMessage(content=[], stop_reason="max_tokens"),
+            ),
+            [16_000, 32_000, 64_000],
+            [(100, 20), (100, 50), (100, 50)],
+        ),
+        # Declined before any output: billed, and not re-sent.
+        (
+            FakeBatchResultEnvelope(
+                type="succeeded",
+                message=FakeMessage(
+                    content=[], usage=FakeUsage(input_tokens=100, output_tokens=0),
+                    stop_reason="refusal",
+                ),
+            ),
+            [16_000, 32_000],
+            [(100, 20), (100, 0)],
+        ),
+    ],
+    ids=["retry-errored", "retry-empty-at-max-tokens", "retry-declined-empty"],
+)
+def test_batch_nonempty_truncation_is_an_error_and_is_retried(
+    retry_reply, caps, billed, monkeypatch,
+):
     # Parity with the real-time path. The batch parser set an error only when
     # the text was EMPTY, so a succeeded item carrying partial text at
     # max_tokens was accepted as a complete digest and cached permanently —
@@ -2115,6 +2151,55 @@ def test_batch_nonempty_truncation_is_an_error_and_is_retried():
     assert batch_digest._item_retry_params(
         slot, {"type": "succeeded"}, digest, params=params,
     ) is None
+
+    # When the raised-cap resubmission fails or comes back with no text, the
+    # first read still ships: the retry exists to improve on that read, never
+    # to lose it (the real-time rule). Rounds with headroom left still go out,
+    # every billed attempt stays on the sheet once, and the sheet names the
+    # batch its read came from. The 16k start leaves room for two doublings.
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS", "2")
+    cut_off = FakeBatchResultEnvelope(type="succeeded", message=FakeMessage(
+        # Cut off before the findings fence closed.
+        content=[FakeTextBlock(text="Real prose, cut off mid-\n\n" + _findings_block([
+            {"sheet_id": "M-100", "category": "code", "severity": "high",
+             "text": "issue", "source_quote": "VAV-3"},
+        ]).removesuffix("\n```"))],
+        usage=FakeUsage(input_tokens=100, output_tokens=20),
+        stop_reason="max_tokens",
+    ))
+    client = _FakeClient(lambda req: FakeBatchResult(
+        custom_id=req["custom_id"],
+        result=cut_off if len(client.create_calls) == 1 else retry_reply,
+    ))
+    create = client.messages.batches.create
+
+    def numbered_create(**kwargs):
+        create(**kwargs)
+        return _Obj(id=f"batch_{len(client.create_calls)}")
+
+    monkeypatch.setattr(client.messages.batches, "create", numbered_create)
+    cache = DigestCache(None, persist=False)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, cache=cache, total=1,
+        max_tokens=16_000,
+    )
+    [sd] = collect_drawing_batch(
+        batch, client=client, cache=cache, sleep=NOSLEEP, retry_failed_items=True,
+    )
+    assert sd.text == "Real prose, cut off mid-"         # the first read ships
+    assert [f.source_quote for f in sd.findings] == ["VAV-3"]
+    assert sd.stop_reason == "max_tokens"
+    assert sd.error == "truncated digest (stop_reason='max_tokens')"
+    assert len(cache._entries) == 0                     # still never stored
+    assert batch.slots[0].served_by == "batch_1"
+    assert [
+        c["requests"][0]["params"]["max_tokens"] for c in client.create_calls
+    ] == caps
+    assert [(a.input_tokens, a.output_tokens) for a in sd.usage_attempts] == billed
+    assert [a.attempt_number for a in sd.usage_attempts] == list(
+        range(1, len(billed) + 1)
+    )
+    assert client.rescue_calls == []
 
 
 # --------------------------------------------------------------------------- #
