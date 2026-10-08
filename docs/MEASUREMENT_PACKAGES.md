@@ -109,16 +109,19 @@ Use existing routing. In the environment-based harness, set the global digest
 default to Sonnet and explicitly keep critique and cross-QC on Opus before the
 child imports application modules. Resolve and compare every other stage too; if
 another stage inherits the global default, pin it so the experiment remains
-digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: five stage
-resolvers read `os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which
-binds at *import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none
-of them (docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a
-process boundary). The public `model=` parameter is another
+digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: three stage
+resolvers (critique, cross-QC, review plan) read
+`os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which binds at
+*import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none of them
+(docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a process
+boundary). Synthesis and focus default to Sonnet 5.5 on their own and never
+follow it. The public `model=` parameter is another
 valid entry point.
 
 Measure digest transcription, digest-origin findings, downstream cross-QC
-effects, and known-defect retention. The nominal 60% per-token rate reduction on
-the digest is not guaranteed stage savings: tokens, thinking, retries, and
+effects, and known-defect retention. The nominal per-token rate reduction on
+the digest (50% from Opus 5.5 at $4/$20 to Sonnet 5.5 at $2/$10; it was 60%
+against Opus 5) is not guaranteed stage savings: tokens, thinking, retries, and
 findings can change. Capability flags prove request compatibility, not equal
 quality. No new digest environment variable is prerequisite.
 
@@ -163,8 +166,9 @@ E-size sheets retain compatible keys if their requests are identical.
 
 As a hypothesis, use the real-time exhaustive image arithmetic: one digest read
 at full price, plus a critique cache write at 1.25x and a critique cache read at
-0.1x, is **2.35 full-price reads** per sheet, not three. Actual savings
-require the real sheet mix, suppression, and usage. No adaptive default is
+0.1x, is **2.35 full-price reads** per sheet, not three (2.30 on Opus 5.5, whose
+cache reads bill at 0.05x). Actual savings require the real sheet mix,
+suppression, and usage. No adaptive default is
 included in the immediate work.
 
 ### 1.6 R-05: batch first-pass verification
@@ -185,8 +189,9 @@ run saving. Do not add this transport speculatively in the corrective release.
 ### 1.7 R-06: shared digest/critique prefix
 
 Measure current real-time cache-hit rates and the population of real-time
-exhaustive runs before spending engineering effort. Compare against 2.35
-successful-hit image-read equivalents, not an assumed three full-price reads.
+exhaustive runs before spending engineering effort. Compare against 2.35 (2.30
+on Opus 5.5) successful-hit image-read equivalents, not an assumed three
+full-price reads.
 
 Changing system/persona placement alters prompts and can change review quality.
 Investigate common prefix identity, thinking/effort compatibility,
@@ -195,8 +200,115 @@ differences. Batch caching is supported by the provider on a best-effort basis;
 the current application simply does not organize those requests to rely on it.
 
 At three total reads, the one-hour shared-prefix proposal has only a 6.4%
-image-component advantage over the current successful-cache case. Do not
-restructure the pipeline around the original brief's 27% claim.
+image-component advantage (8.7% on Opus 5.5) over the current successful-cache
+case. It does not apply to Economy, where the digest and critique batches can be
+hours apart. Do not restructure the pipeline around the original brief's 27%
+claim.
+
+### 1.8 Packages for the 5.5 generation (reviewed 2026-10-08)
+
+A cost review against the 5.5 models and Anthropic's current guidance found the
+spend concentrated in the three vision stages. In an exhaustive Economy run,
+by the estimator with 4–16k output tokens per read, the critique's two reads
+are roughly 40–50% of the bill and the digest 20–25%. Investigation is 10–30%
+and verification about 10%. Every text stage together is under 3%. No run has
+recorded real per-read output, so these shares are planning figures.
+
+For technical drawings, Anthropic's prompting guides say Opus 5.5's reading
+improves as effort rises even without tools, and Sonnet 5.5's crop tools help
+only from `high` effort up. That makes the vision stages the riskiest place to
+save money. None of the packages below changes a default; each is a
+measurement, run under the protocol in 1.1.
+
+One default did move without a package, at the owner's direction on
+2026-10-08: synthesis and the focus report went from Opus 5.5 to Sonnet 5.5,
+both at `high`. Both are single text-only calls over digests the vision stages
+already wrote, together well under 1% of an exhaustive run. The overview is
+advisory prose; on QC runs its conflict statements enter the ledger, where
+they are anchored and checked like any other finding. If a reviewer finds the overview
+weaker, set `DRAWING_ANALYZER_SYNTHESIS_MODEL=claude-opus-5-5` (and
+`DRAWING_ANALYZER_FOCUS_MODEL`) to restore it. Cross-QC and the review plan
+stayed on Opus 5.5. Cross-QC is the set-wide conflict hunt, and the plan steers
+every critique read; a different plan model would rewrite the plan and so
+re-key every cached critique.
+
+Every arm can reuse a warm cache. Model ids and effort ride each stage's cache
+key, so a re-run with one stage's model changed re-bills only that stage and
+whatever consumes its output. `DRAWING_ANALYZER_MODEL` and
+`DRAWING_ANALYZER_VERIFICATION_MODEL` are read at import, so set them before
+launching the app.
+
+- **R-07: Haiku 5.5 as the verifier.** Verification is high-volume
+  classification with a checkable output (VERIFIED / REJECTED / UNCERTAIN),
+  which is the work Anthropic positions Haiku for. Haiku 5.5 bills at 1/20 of
+  Sonnet 5.5 ($0.10/$0.50 under 100k prompt tokens) and reads images at the
+  same high-resolution tier. Nothing published measures it on drawing crops.
+  - **Arms.** Run a warm exhaustive set twice, the second time with
+    `DRAWING_ANALYZER_VERIFICATION_MODEL=claude-haiku-5-5`. Hold
+    investigation constant in both arms (library `investigate=False`, or
+    `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS=1` in the GUI) so that
+    verdict differences come from the verifier.
+  - **Cost.** The Sonnet arm is served from the verdict cache. The Haiku arm
+    costs about a tenth of a cent per finding.
+  - **Promotion.** Promote only if a qualified reviewer finds no
+    VERIFIED↔REJECTED flips on real findings and the UNCERTAIN share does not
+    rise materially. Investigation is capped per run, so extra UNCERTAIN
+    verdicts become unresolved findings rather than extra spend.
+  - **Fallback.** If Haiku's VERIFIED verdicts hold but it over-produces
+    UNCERTAIN, measure a cascade instead: Haiku first, Sonnet on anything it
+    did not verify.
+  - **Ceiling.** Most of the verification line, roughly 10% of an exhaustive
+    run.
+- **R-08: Sonnet 5.5 (high) for the critique.** Set
+  `DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5-5`.
+  - **Ceiling.** Half the critique line, roughly 20% of an exhaustive run. That
+    is twice R-01's digest saving, because the critique reads every sheet
+    twice.
+  - **Risk.** The critique is the QC stack's main source of recall, and
+    verification can reject a false finding but cannot recover a missed one.
+    So promotion needs no loss of human-confirmed defects.
+  - **Effort.** Keep `high`; Sonnet 5.5 recalibrated its levels, and `high`
+    is its own default.
+  - **Do not split the pair.** Never run one read on Opus and one on Sonnet
+    while keeping the `reproduced` label (see section 2).
+- **R-09: effort sweeps.** No environment variable sets a stage's effort today.
+  Each arm needs a one-line change to `api_config._PHASE_DEFAULT_EFFORT`, or a
+  per-phase override added for the experiment.
+  - **Digest and critique.** Compare Opus 5.5 `high` (current) with `medium`
+    (the API default). `medium` cuts thinking, which is billed as output; it
+    does not touch the image input. Output's share of a read has never been
+    measured; the estimator's band puts it between a fifth and three-quarters.
+  - **Verification.** Compare Sonnet 5.5 `medium` (current, carried over from
+    Sonnet 5) with `high` (Sonnet 5.5's own default). Measure the UNCERTAIN
+    share as well as cost. Each UNCERTAIN avoided either saves an Opus
+    investigation ($0.2–1 each) or settles a finding beyond the investigation
+    cap. A dearer verifier can therefore be the cheaper run per completed
+    review.
+- **R-10: batch prompt caching of the specifications block.** This applies to
+  Economy runs with uploaded specifications. Today the block (up to about 100k
+  tokens) is billed in full on every sheet.
+  - **What the docs say.** Batch cache hits are best effort, typically 30–98%
+    for a prefix many requests share.
+  - **Break-even.** A 5-minute breakpoint against the uncached block breaks
+    even at about a 21% hit rate: a 1.25x write against a 0.05x read, both
+    halved by the batch discount.
+  - **Measurement.** Mark the block (`cache_specs=True` on the batch build) for
+    one cold Economy run and read the batch items' `cache_read` /
+    `cache_write` usage in `run_manifest.json`. The digest cache key does not
+    include the breakpoint, so a warm set would serve every sheet from cache
+    and send nothing.
+  - **Stays uncached.** The critique's per-sheet image prefix is shared by only
+    two items and breaks even at about 42%.
+- **R-11: Fast-mode critique cache timing.** A cache entry's lifetime is
+  measured from the start of the request that wrote it. If critique read 1
+  runs past five minutes, read 2 misses and re-writes the prefix. That costs
+  2.50 image-read equivalents instead of 1.30, and uncached would have been
+  2.00.
+  - **Check first.** Look at the `critique_2` records in a Fast-mode
+    `run_manifest.json`: cache writes there are misses. This costs nothing.
+  - **Fix, if misses are common.** Start read 2 when read 1's first stream
+    event arrives, because the entry becomes readable once the response
+    begins.
 
 ## 2. Explicit non-goals and rejected shortcuts
 

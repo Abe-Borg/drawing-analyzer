@@ -499,6 +499,20 @@ def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
     # tools+system tiers; dropping `tools` would invalidate all three.
     assert final_kw["tool_choice"] == {"type": "none"}
     assert final_kw["tools"], "the tool list must stay for the cached prefix"
+    assert final_kw["tools"][-1].get("cache_control")
+    # The tool_choice change invalidates the messages tier, and the close is the
+    # finding's last request: a message breakpoint here would only write the
+    # whole history at the cache-write premium for nothing to read.
+    assert not any(
+        isinstance(block, dict) and block.get("cache_control")
+        for message in final_kw["messages"]
+        for block in (message.get("content") or [])
+    )
+    assert any(
+        isinstance(block, dict) and block.get("cache_control")
+        for message in client.calls[-2]["messages"]
+        for block in (message.get("content") or [])
+    )
     budget_turn = final_kw["messages"][-1]["content"]
     assert any(isinstance(b, dict) and b.get("type") == "text"
                and "budget exhausted" in b["text"].lower() for b in budget_turn)
@@ -693,8 +707,10 @@ def test_multi_turn_requests_cache_initial_image_and_rolling_evidence_prefix():
     initial_turns = [call["messages"][0]["content"] for call in client.calls]
     assert initial_turns[0] == initial_turns[1] == initial_turns[2]
     for initial in initial_turns:
+        # Turns re-read each other within seconds, so the 5-minute default
+        # (1.25x write) serves every read a 1-hour entry (2x write) would.
         marker = initial[-1]["cache_control"]
-        assert marker == {"type": "ephemeral", "ttl": "1h"}
+        assert marker == {"type": "ephemeral"}
         assert any(block.get("type") == "image" for block in initial)
 
     def _breakpoint_count(call):
@@ -719,7 +735,7 @@ def test_multi_turn_requests_cache_initial_image_and_rolling_evidence_prefix():
     ]
     assert len(final_users) == 3
     assert "cache_control" not in final_users[1]["content"][-1]
-    assert final_users[2]["content"][-1]["cache_control"]["ttl"] == "1h"
+    assert final_users[2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_verification_serialization_roundtrips_the_new_fields():

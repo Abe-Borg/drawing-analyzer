@@ -3,7 +3,7 @@
 Extract structured information from a set of construction-drawing PDFs using Claude
 vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
 overview image plus a grid chosen for that page's physical size — **and its vector text
-layer is extracted and sent verbatim alongside the images** — to Claude Opus 5
+layer is extracted and sent verbatim alongside the images** — to Claude Opus 5.5
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
 cross-sheet **synthesis** pass reconciles tags and conflicts across the set, and an
@@ -43,12 +43,13 @@ instead of telling them to regenerate a report they cannot regenerate). **Use my
 own key** opens the field, **Use the report's key** hands it back, and **Forget
 key** clears the reader's key while saying plainly that the file's own credential
 is still in the file. Pass `include_chat=False` to omit the assistant entirely.
-The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
-Opus 5 does not support — and can be overridden with
-`DRAWING_ANALYZER_CHAT_MODEL`. It runs at a fixed `high` reasoning effort: there
-is deliberately no per-question "deep" switch, because asking a reader to
-predict, before seeing the answer, whether their question deserves more
-reasoning is a question they cannot answer. The footer meter reports how much
+The chat model defaults to Sonnet 5.5, which supports the web-search and
+web-fetch server tools at half Opus 5.5's per-token price (the reader's key pays
+for it), and can be overridden with `DRAWING_ANALYZER_CHAT_MODEL`. It runs at a
+fixed `high` reasoning effort: there is deliberately no per-question "deep"
+switch, because asking a reader to predict, before seeing the answer, whether
+their question deserves more reasoning is a question they cannot answer. The
+footer meter reports how much
 context is **left**, since the only question it exists to answer is whether the
 next question still fits.
 
@@ -455,9 +456,9 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   tool understands least. A page that cannot be measured at all is still quoted,
   never silently dropped from the total.
 - **Every stage is priced with the model it will actually run on.** Synthesis and
-  the focus report have their own overrides and follow the review-model default
-  rather than the digest's model, so a Sonnet digest with default synthesis was
-  under-quoted on that stage. The critique line follows
+  the focus report have their own overrides and their own default (Sonnet 5.5)
+  rather than the digest's model, so they are priced at Sonnet's rate even under
+  an Opus digest. The critique line follows
   `DRAWING_ANALYZER_CRITIQUE_RUNS` instead of assuming two reads, and its images
   are counted with the critique model's own token cap.
 - **Economy mode** (`use_batch=True`, the GUI default) digests every uncached sheet
@@ -609,8 +610,11 @@ carry a verified effective date (`core.pricing.PRICING_EFFECTIVE_DATE`) —
 re-verify against the published rates before relying on a dollar figure.
 
 Haiku 5.5 is the default for set identity and prose-to-finding structuring,
-both at medium effort. The visual review, cross-sheet reasoning and verification
-stages retain their existing models. Use `DRAWING_ANALYZER_IDENTITY_MODEL` and
+both at medium effort. The visual review, cross-sheet QC and verification
+stages retain their existing models. Synthesis and the focus report run on
+Sonnet 5.5 at high effort: both are text-only calls over the digests the Opus
+vision read already wrote, so Sonnet does the same reconciliation at half Opus
+5.5's per-token price. Use `DRAWING_ANALYZER_IDENTITY_MODEL` and
 `DRAWING_ANALYZER_HARVEST_MODEL` to select another model for either extraction
 stage. Haiku 5.5 is also registered for the other model overrides, including
 the report assistant.
@@ -730,7 +734,7 @@ time — is a deferred follow-up; today the reuse is within the critique's two r
 `critique=True` is still more expensive than a plain digest (see
 [Performance](#performance)), just no longer double-priced. It is additive and
 non-fatal: a failure is recorded and the standard deliverable ships — a critique
-batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 5
+batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 5.5
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
@@ -783,7 +787,7 @@ and billed, so the transport that cannot degrade does not opt in.
 The same contract is available, behind its own flag, on the two other stages
 whose reply is JSON and nothing else. The **prose harvest**'s per-straggler
 structuring call (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS=1`) is text-only,
-Sonnet 5, one flat finding object — the lowest-risk place to try the feature —
+Haiku 5.5, one flat finding object — the lowest-risk place to try the feature —
 and its schema mirrors the prompt's field list one-for-one, with the same
 category and severity enums the host validator checks. The **verifier**'s
 verdict (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS=1`) becomes `verdict` as a
@@ -975,7 +979,7 @@ more `also_on` legs on the other sheets in the conflict, each resolved to its ow
 sheet (via the set's title-block sheet-ids). The markup writer then clouds
 **both** sheets — each cloud's popup cross-references the other (*"Conflicts with
 F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict and
-where its counterpart lives. The model defaults to Opus 5
+where its counterpart lives. The model defaults to Opus 5.5
 (`DRAWING_ANALYZER_CROSS_QC_MODEL`).
 
 A cross-sheet conflict can't be judged from one sheet's crop, so these findings
@@ -1105,9 +1109,10 @@ finding status:
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
 thread-safe) while the small verify calls run on a bounded pool; a per-finding
 failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
-rest `SKIPPED` — the run always completes. Each call sends one ~1–2k-token crop
-image and a short prompt. The model defaults to Sonnet 5, overridable with
-`DRAWING_ANALYZER_VERIFY_MODEL`.
+rest `SKIPPED` — the run always completes. Each call sends one ~2–5k-token crop
+image and a short prompt. The model defaults to Sonnet 5.5 at medium effort,
+overridable with `DRAWING_ANALYZER_VERIFICATION_MODEL` (or the older
+`DRAWING_ANALYZER_VERIFY_MODEL`, which wins when set).
 
 **Not every `UNCERTAIN` is a judgment.** A garbled reply, a reply cut off by
 the output envelope or declined, and a call that failed outright all land on
@@ -1166,8 +1171,12 @@ the model can see while it works, so it converges on an answer rather than being
 cut off mid-thought when the host withdraws its tools. At the budget the host
 forces a final text-only answer, and a finding that still can't be decided
 **stays UNCERTAIN — a budget cap or a garbled reply can never mark a finding
-wrong**. Runs on the escalation model (Opus 5) by default, overridable with
-`DRAWING_ANALYZER_INVESTIGATION_MODEL`. Concluded verdicts cache
+wrong**. Runs on the escalation model (Opus 5.5, high effort) by default,
+overridable with `DRAWING_ANALYZER_INVESTIGATION_MODEL`. Each turn re-reads the
+previous turn's cached prefix within seconds, so the breakpoints use the
+5-minute cache entry (a 1.25x write, not the 1-hour entry's 2x); the forced
+text-only close changes `tool_choice`, which voids the message cache, so it
+writes none. Concluded verdicts cache
 content-addressed against a whole-set content fingerprint; a warm re-run
 *replays* the tool trace (re-render + hash-compare, zero API calls) so the
 evidence bytes are recreated exactly and any source edit falls back to a live
@@ -1508,10 +1517,11 @@ set adopts *and* in the current edition — actually support the finding citing 
 
 Web fetch matters here more than the search does. With search alone the model
 answers from result *snippets*; with fetch it can open the publisher's page and
-read the section text before ruling. That is why this stage runs on **Sonnet 5**
-rather than the review flagship — web fetch is not available on Opus 5 — and it
-is cheaper besides. Both tools carry a shared source-quality blocklist, so a
-code verdict is never grounded on a forum post or another assistant's output.
+read the section text before ruling. This stage runs on **Sonnet 5.5** at
+medium effort. Opus 5 had no web fetch, so it could only read snippets; Opus 5.5
+has it, so Sonnet 5.5 is now a cost choice, at half the per-token price. Both
+tools carry a shared source-quality blocklist, so a code verdict is never
+grounded on a forum post or another assistant's output.
 Fetch can only retrieve URLs a prior search surfaced in the same request, so the
 model cannot reach a page it invented.
 
@@ -1546,9 +1556,10 @@ https **evidence link**), and findings.csv carries four provenance columns.
 Each fetch is capped at **4,000 tokens**: enough for a clause and nearby
 definitions/exceptions, without admitting 40,000 tokens of a whole code book.
 The prompt asks for clause-level pages. Pause resumes cache the conversation
-through the newest assistant turn, retaining the preceding one-hour breakpoint
-to reuse long prefixes beyond the API's 20-block lookup window. The sliding pair
-stays within the four-breakpoint limit; usage prices writes at the 1h rate.
+through the newest assistant turn, retaining the preceding breakpoint to reuse
+long prefixes beyond the API's 20-block lookup window. The sliding pair stays
+within the four-breakpoint limit. Resumes are sent at once, so every breakpoint
+uses the 5-minute cache entry and usage prices writes at that rate.
 Real-time only, billed by reported tokens and server search counts, additive,
 and non-fatal: any failure leaves the affected claim `UNCHECKED` and holds the
 stage at `PARTIAL`.
@@ -1783,9 +1794,9 @@ focus set:
 - **Each sheet is read with your question in mind** — the vision prompt asks for
   one extra, final **`Focus findings`** section per sheet (the standard digest
   sections are unaffected).
-- **A set-level Focus Report** is assembled in one extra text-only pass: a
-  direct, cross-sheet answer to your focus, citing the sheets that carry each
-  fact. It leads the combined Markdown, is written as `00_focus.md` in folder
+- **A set-level Focus Report** is assembled in one extra text-only pass (Sonnet
+  5.5 at high effort by default): a direct, cross-sheet answer to your focus,
+  citing the sheets that carry each fact. It leads the combined Markdown, is written as `00_focus.md` in folder
   exports, and gets a pinned card (plus a *Focus* filter chip) in the HTML
   report.
 
@@ -1806,23 +1817,23 @@ quality decision.
 | Variable | Default | Effect |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
-| `DRAWING_ANALYZER_MODEL` | Opus 5 | Vision model for per-sheet digests. |
-| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5 | Cross-sheet synthesis model (text-only). |
-| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5 | Focus-report model (text-only). |
-| `DRAWING_ANALYZER_VERIFY_MODEL` | Sonnet 5 | Per-finding verification model (crop + short prompt). |
-| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5) | The Phase C investigation loop's model (multi-turn, vision + tools). |
+| `DRAWING_ANALYZER_MODEL` | Opus 5.5 | Vision model for per-sheet digests (high effort). Also the default for critique, cross-sheet QC and the review plan, which each have their own override below. |
+| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Sonnet 5.5 | Cross-sheet synthesis model (text-only, high effort). It reconciles digests the vision passes already wrote, so Sonnet is a cost choice at half Opus 5.5's per-token price. Does not follow `DRAWING_ANALYZER_MODEL`. |
+| `DRAWING_ANALYZER_FOCUS_MODEL` | Sonnet 5.5 | Focus-report model (text-only, high effort). Same reasoning as synthesis. Does not follow `DRAWING_ANALYZER_MODEL`. |
+| `DRAWING_ANALYZER_VERIFICATION_MODEL` | Sonnet 5.5 | Per-finding verification model (crop + short prompt, medium effort). The older `DRAWING_ANALYZER_VERIFY_MODEL` wins when set. |
+| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5.5) | The Phase C investigation loop's model (multi-turn, vision + tools, high effort). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET` | `40000` | Advisory token budget handed to the model per investigation, so it paces itself instead of being cut off at the round cap. Anthropic's 20,000 floor is enforced; rides the verdict-cache key. |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | scales with the set | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). Defaults to `10 + one per 4 sheets`, capped at `40`; setting this pins an absolute number at any set size. |
-| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5 | Critique-pass vision model (`critique=True`). |
-| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
-| `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
+| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5.5 | Critique-pass vision model (`critique=True`, high effort). |
+| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5.5 | Cross-sheet QC model, text-only (`cross_qc=True`, high effort). |
+| `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5.5 | Citation-check model, with web search **and web fetch** (`citation_check=True`, medium effort). Sonnet rather than the review flagship is a cost choice: Opus 5.5 also has web fetch (Opus 5 did not). A model without web fetch degrades to search-only. |
 | `DRAWING_ANALYZER_CITATION_MAX_REFS` | `50` | Per-run normalized reference cap, severity-first after skipping rejected-only claims. Cache hits share the cap. `0` checks none; invalid/negative values use the default. Every skipped claim is explicitly unchecked. |
 | `DRAWING_ANALYZER_IDENTITY_MODEL` | Haiku 5.5 | Set-identity model, text-only (Phase A), at medium effort. Advisory-only, with the regex edition harvest as a backstop. |
-| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
+| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5.5 | Review-plan authoring model, text-only (Phase A, high effort). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Haiku 5.5 | Prose-harvest structuring model (one small call per straggler, at medium effort on Haiku 5.5; existing model overrides retain low effort). |
-| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
+| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5.5 | The HTML report's in-browser **Ask AI** assistant (billed to the reader's key). Needs adaptive thinking plus the web-search **and web-fetch** server tools; a model without web fetch (such as Opus 5) degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Each fetch pulls at most 4k tokens of clause text and nearby context into the request. Rides the verdict-cache key. |

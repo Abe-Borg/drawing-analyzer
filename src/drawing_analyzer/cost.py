@@ -1,6 +1,6 @@
 """Pre-run cost estimate for a drawing set (feeds the cost-confirm dialog).
 
-Reading drawings is the app's most expensive action — one Opus 5 vision call
+Reading drawings is the app's most expensive action — one Opus 5.5 vision call
 per sheet, each carrying the overview image plus every grid tile. This estimates
 the spend *before* the run so the GUI can surface it and let the operator
 confirm or cancel. Image inputs use measured geometry when available; billed

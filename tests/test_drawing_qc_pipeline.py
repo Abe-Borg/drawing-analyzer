@@ -618,20 +618,21 @@ def test_pipeline_omitted_cross_qc_findings_stay_partial(tmp_path, monkeypatch):
     assert any("1 finding(s) omitted" in warning for warning in stage.warnings)
 
 
-def test_pipeline_prices_citation_cache_writes_at_requested_one_hour_ttl(tmp_path):
+def test_pipeline_prices_citation_cache_writes_at_the_requested_ttl(tmp_path):
     from drawing_analyzer.core.pricing import usage_record_cost
     from drawing_analyzer.digest_cache import DigestCache
 
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _CountingClient([_VAV_FINDING])
     inner = client.messages
+    requested_ttls = set()
 
     class _Messages(StreamingMessagesMixin):
         def create(self, **kwargs):
             response = inner.create(**kwargs)
             if _system_text(kwargs.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
-                assert kwargs["system"][-1]["cache_control"]["ttl"] == "1h"
-                assert kwargs["tools"][-1]["cache_control"]["ttl"] == "1h"
+                requested_ttls.add(kwargs["system"][-1]["cache_control"].get("ttl"))
+                requested_ttls.add(kwargs["tools"][-1]["cache_control"].get("ttl"))
                 response.usage.cache_creation_input_tokens = 1000
                 response.usage.cache_read_input_tokens = 2000
             return response
@@ -643,13 +644,16 @@ def test_pipeline_prices_citation_cache_writes_at_requested_one_hour_ttl(tmp_pat
     )
     record = next(r for r in ctx.run_usage.records
                   if r.stage_family == "citation" and r.transport == "REAL_TIME")
-    assert record.cache_write_ttl == "1h"
+    # The breakpoints re-read within seconds, so they ask for the 5-minute
+    # default (no ``ttl`` key), and the ledger prices the writes at that rate.
+    assert requested_ttls == {None}
+    assert record.cache_write_ttl is None
     assert record.cache_write_tokens == 1000 and record.cache_read_tokens == 2000
     kwargs = dict(model=record.model, input_tokens=record.input_tokens,
                   output_tokens=record.output_tokens, cache_write_tokens=record.cache_write_tokens,
                   cache_read_tokens=record.cache_read_tokens, billable_tool_uses=record.billable_tool_uses)
-    assert record.estimated_cost == usage_record_cost(**kwargs, cache_write_ttl="1h")
-    assert record.estimated_cost > usage_record_cost(**kwargs)
+    assert record.estimated_cost == usage_record_cost(**kwargs)
+    assert record.estimated_cost < usage_record_cost(**kwargs, cache_write_ttl="1h")
 
 
 def test_pipeline_records_a_citation_request_even_when_server_reports_zero_usage(tmp_path):

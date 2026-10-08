@@ -33,11 +33,12 @@ BATCH_DISCOUNT = 0.5
 # two are separate constants and the write rate is chosen per record by
 # :func:`cache_write_multiplier`.
 #
-# This distinction is not academic here: ``api_config._cache_control_block``
-# emits ``{"type": "ephemeral", "ttl": "1h"}``, so any stage reaching it (today
-# the investigation loop, via ``system_prompt_with_cache`` / ``tools_with_cache``)
-# writes at 2x. Pricing every write at 1.25x under-reported those records by 60%
-# in a ledger the run manifest publishes as fact.
+# This distinction is not academic here: a stage that requests ``ttl: "1h"``
+# writes at 2x, and pricing every write at 1.25x under-reported such records by
+# 60% in a ledger the run manifest publishes as fact. Today only the report
+# chat (browser-side, billed to the reader) asks for 1 hour;
+# ``api_config.CACHE_BREAKPOINT_TTL`` records which TTL the pipeline's own
+# breakpoints request.
 CACHE_WRITE_MULTIPLIER_5M = 1.25
 CACHE_WRITE_MULTIPLIER_1H = 2.00
 # Back-compat alias for the default (5-minute) write rate. Retained because
@@ -100,10 +101,11 @@ class ModelPrice:
 # time-dependence out of assembly — so the table simply carries the standing
 # price and ``PRICING_EFFECTIVE_DATE`` says when it was last checked.
 #
-# Weight note: Sonnet 5 now prices three pipeline stages (set identity, prose
-# harvest, citation) plus the report chat's own readout, so this row moves the
-# estimate more than it used to — the 50% over-statement the hedge caused was
-# correspondingly worse.
+# Weight note: when this hedge was removed, Sonnet 5 priced three pipeline
+# stages (set identity, prose harvest, citation) plus the report chat's own
+# readout, so the 50% over-statement it caused was correspondingly large. The
+# defaults have since moved to Sonnet 5.5 (citation, verification, chat) and
+# Haiku 5.5 (identity, harvest).
 MODEL_PRICING: dict[str, ModelPrice] = {
     # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-07).
     # Opus/Sonnet 5.5 read at $0.20/MTok, with different base input rates.

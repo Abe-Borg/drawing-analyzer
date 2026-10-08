@@ -862,7 +862,9 @@ _BUDGET_REFUSED_TEXT = (
 )
 
 
-def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
+def _messages_with_cache_breakpoints(
+    messages: list[dict], *, closing: bool = False,
+) -> list[dict]:
     """Copy a conversation and cache its stable evidence prefixes.
 
     Investigation already caches its static system prompt and tool schemas.  The
@@ -876,6 +878,15 @@ def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
     system and tools breakpoints this stays within Anthropic's four-breakpoint
     request limit.  The canonical ``messages`` history is never mutated, so cache
     metadata cannot leak into warm-verdict serialization or tool execution.
+
+    ``closing`` marks the forced no-tools close. Its ``tool_choice`` differs from
+    every earlier request's, and a ``tool_choice`` change invalidates the
+    messages cache tier, so the close cannot read these breakpoints. Nothing
+    reads after it either: it is the finding's last request, and the next
+    finding starts from a different crop. Marking its turns would only write the
+    whole accumulated history at the cache-write premium, so the close sends
+    them unmarked. Its system and tools tiers still read from the cache, because
+    ``tool_choice`` does not touch them.
     """
     if not cache_policy_for(PHASE_INVESTIGATION).caches_anything:
         return messages
@@ -902,7 +913,7 @@ def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
                     cacheable.append((message_index, block_index))
                     break
 
-    if not cacheable:
+    if closing or not cacheable:
         return copied
     selected = {cacheable[0], cacheable[-1]}
     for message_index, block_index in selected:
@@ -966,13 +977,14 @@ def _investigate_one(
     session_tools = tools if _strict_tools_available else relax_strict_tools(tools)
 
     for _iteration in range(hard_stop):
+        closing = tool_round >= max_rounds
         kwargs: dict = {
             "model": model,
             "max_tokens": phase_output_cap(PHASE_INVESTIGATION, model=model),
             "system": system_prompt_with_cache(
                 INVESTIGATE_SYSTEM_PROMPT, phase=PHASE_INVESTIGATION
             ),
-            "messages": _messages_with_cache_breakpoints(messages),
+            "messages": _messages_with_cache_breakpoints(messages, closing=closing),
         }
         # The tool list stays in every request, including the forced close.
         # Tool definitions render at prompt position 0, so *dropping* them
@@ -986,7 +998,7 @@ def _investigate_one(
         # process latch. Changing schemas after a thinking block breaks 5.5's
         # preserved-thinking check. The next investigation reads the latch.
         kwargs["tools"] = tools_with_cache(list(session_tools), phase=PHASE_INVESTIGATION)
-        if tool_round >= max_rounds:
+        if closing:
             kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
         apply_effort_config(kwargs, model=model, phase=PHASE_INVESTIGATION)

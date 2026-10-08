@@ -617,13 +617,15 @@ def test_critique_read_with_all_items_dropped_is_a_failure():
 
 
 @pytest.mark.parametrize("failed_run", [0, 1])
-@pytest.mark.parametrize("body", [
-    "",
-    "I reviewed the sheet and it looks fine to me.",
-    '```json\n{"findings": [ {"category":',
-    '```json\n{"findings": broken json here }\n```',
+@pytest.mark.parametrize("body, stop", [
+    ("", "end_turn"),
+    ("I reviewed the sheet and it looks fine to me.", "end_turn"),
+    ('```json\n{"findings": [ {"category":', "end_turn"),
+    ('```json\n{"findings": broken json here }\n```', "end_turn"),
+    # Cut off at the output cap: the replacement must not repeat the same cap.
+    ('```json\n{"findings": [ {"category":', "max_tokens"),
 ])
-def test_bad_read_replacement_completes_and_caches(body, failed_run):
+def test_bad_read_replacement_completes_and_caches(body, stop, failed_run):
     from drawing_analyzer.models import CONFIDENCE_REPRODUCED
 
     good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
@@ -636,6 +638,7 @@ def test_bad_read_replacement_completes_and_caches(body, failed_run):
             usage=FakeUsage(input_tokens=100, output_tokens=20,
                             cache_creation_input_tokens=900 if i == 0 else 0,
                             cache_read_input_tokens=700 if i > 0 else 0),
+            stop_reason=stop if i == failed_run else "end_turn",
         )
         for i, text in enumerate(bodies)
     ])
@@ -660,7 +663,16 @@ def test_bad_read_replacement_completes_and_caches(body, failed_run):
     ]
     assert sum(usage.cache_write_tokens for usage in res.request_usage) == 900
     assert sum(usage.cache_read_tokens for usage in res.request_usage) == 1400
-    assert client.captured[0] == client.captured[1] == client.captured[2]
+    caps = [request["max_tokens"] for request in client.captured]
+    if stop == "max_tokens":
+        assert caps[0] == caps[1] < caps[2]
+    else:
+        assert caps[0] == caps[1] == caps[2]
+    # Apart from the cap, the replacement is the same request, so it reads the
+    # warm prefix that the cap (not part of the prompt) does not touch.
+    prompts = [{k: v for k, v in request.items() if k != "max_tokens"}
+               for request in client.captured]
+    assert prompts[0] == prompts[1] == prompts[2]
     assert client.captured[2]["messages"][0]["content"][-1]["cache_control"] == {
         "type": "ephemeral",
     }

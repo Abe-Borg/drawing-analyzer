@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .core.api_config import (
-    REVIEW_MODEL_DEFAULT,
+    MODEL_SONNET_5_5,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
@@ -43,7 +43,8 @@ from .stage_cache import (
 
 # A concise overview needs far less room than a per-sheet transcription.
 DEFAULT_SYNTHESIS_MAX_TOKENS = 32_000
-# Deep reconciliation reasoning; "high" is accepted by Opus and Sonnet alike.
+# Deep reconciliation reasoning; "high" is accepted by Opus and Sonnet alike,
+# and is Sonnet 5.5's own recalibrated default.
 DEFAULT_SYNTHESIS_EFFORT = "high"
 # Fewer than this many readable sheets and there is nothing to reconcile.
 MIN_SHEETS_FOR_SYNTHESIS = 2
@@ -51,12 +52,21 @@ _SYNTHESIS_CACHE_CONTRACT = 1
 
 
 def default_synthesis_model() -> str:
-    """Model for the synthesis pass — Opus 5 by default (best coordination
-    reasoning), overridable via ``DRAWING_ANALYZER_SYNTHESIS_MODEL``."""
+    """Model for the synthesis pass — Sonnet 5.5 by default, overridable via
+    ``DRAWING_ANALYZER_SYNTHESIS_MODEL``.
+
+    One text-only call over digests the vision passes already extracted: no
+    image is read here, and the overview it writes is advisory prose. On QC
+    runs the conflicts it names are mirrored into the ledger, where they are
+    anchored and checked like every other finding. Reconciling text at high
+    effort is work Sonnet 5.5 does well, at half Opus 5.5's per-token price.
+    The vision reads, and cross-QC's own conflict hunt, stay on the review
+    model.
+    """
     override = os.environ.get("DRAWING_ANALYZER_SYNTHESIS_MODEL")
     if override and override.strip():
         return override.strip()
-    return REVIEW_MODEL_DEFAULT
+    return MODEL_SONNET_5_5
 
 
 SYNTHESIS_SYSTEM_PROMPT = """\
