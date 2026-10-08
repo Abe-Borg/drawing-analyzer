@@ -60,7 +60,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from . import resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
@@ -1477,6 +1477,8 @@ def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
     if (
         result.error is not None or not result.complete
         or result.budget_degraded or result.findings_omitted > 0
+        # A refusal fallback's conflicts came from another model than the key names.
+        or any_fallback_served(result.request_usage)
     ):
         return
     put_stage_cache_entry(

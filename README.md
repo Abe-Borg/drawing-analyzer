@@ -1462,6 +1462,40 @@ everything; only the listed events are bounded. The SDK's own in-client
 retries (two per request by default) happen beneath these loops and are
 visible only in the wire capture (`DRAWING_ANALYZER_DEBUG`).
 
+### Did another model answer? (refusal fallback)
+
+Opus 5.5 and Sonnet 5.5 run safety classifiers that can decline a request.
+Every real-time call to them opts into Anthropic's server-side refusal fallback
+(`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`), so a
+false-positive refusal does not cost that sheet or finding its coverage: the API
+re-runs the same request on a substitute it picks by refusal category inside the
+same call. For Opus 5.5 that substitute is Opus 5 or Opus 4.8 (cyber-category
+refusals go to Opus 4.8); for Sonnet 5.5 it is Sonnet 5. Message Batches calls
+cannot carry the parameter. It is unlikely to fire on construction drawings,
+but when it does the run says so:
+
+- **Pricing.** The response's `usage.iterations` is read, and each billed
+  attempt becomes its own usage record priced at the model that ran it: the
+  declined attempt at the requested model (`terminal_status` `REFUSED`), the
+  rescue at the fallback's rate (`model` is the model that ran it,
+  `requested_model` the one the stage asked for). `by_model` shows the
+  fallback model's spend.
+- **Not cached.** A fallback answer came from a different model than the cache
+  key names, so no stage stores it; the next run asks the requested model
+  again.
+- **Visible.** `run.log` gets a `Fallback:` header line and one *Refusal
+  fallback* line per stage under *Usage & estimated cost*; `run_manifest.json`
+  gets `usage.model_fallbacks` (stage family, requested model, serving model,
+  responses served, attempts declined). The review plan's `review_plan.md`
+  names the model that actually wrote it.
+- **History stays valid.** In the multi-turn investigation loop and the
+  citation check's pause resumes, the declined model's partial (its thinking
+  and tool requests before the `fallback` marker) is neither executed nor sent
+  back, as the API requires.
+
+`DRAWING_ANALYZER_REFUSAL_FALLBACK=0` turns the opt-in off, so a refusal
+returns as one (that sheet or stage then reports the failure).
+
 ## Citation check
 
 Findings often cite code sections (`refs`), and citations have a failure mode of
@@ -1819,6 +1853,7 @@ quality decision.
 | `DRAWING_ANALYZER_TILE_TARGET_PX` | `1560` | **Measurement knob.** Vector-sheet tile long edge, in pixels. Image tokens scale with the *square* of this, and the tiles ride the digest plus both critique reads, so it is the single highest-leverage number in the bill: `1400` ≈ −19% image tokens per sheet, `1240` ≈ −37%, `1100` ≈ −50%. Whether a lower value still reads the drawing is a quality question — sweep it against a real set before changing anything, and note that a changed target re-renders (it invalidates the digest/critique caches by design). Raster sheets are unaffected: with no text layer the pixels are the only channel. Clamped to `[400, 1992]` so no value can breach the API's hard 2000 px many-image cap. |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
+| `DRAWING_ANALYZER_REFUSAL_FALLBACK` | on | Real-time Opus 5.5 / Sonnet 5.5 calls opt into the server-side refusal fallback. Set `0`/`false` to let a refusal return as one (see [Did another model answer?](#did-another-model-answer-refusal-fallback)). |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
 | `DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS` | `5` | Cadence of the host sampler behind the run's resource-starvation record (scheduling lag, CPU, memory, disk; see [Was the run starved of resources?](#was-the-run-starved-of-resources)). Clamped to 1–300; `0`/`off` disables the sampler, while API retries and exhausted agent budgets are still recorded. |
 | `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |

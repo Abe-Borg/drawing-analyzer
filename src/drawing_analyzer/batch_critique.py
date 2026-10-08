@@ -83,6 +83,7 @@ from .critique import (
 )
 from . import cancellation
 from .diagnostics import get_logger, summarize_exc
+from .core.request_usage import any_fallback_served
 from .digest import _get
 from .digest_cache import cache_schema_version, critique_cache_key
 from .batch_recovery import (
@@ -630,6 +631,7 @@ def collect_critique_batch(
                 if (
                     cache is not None and slot.cache_key
                     and res.error is None and res.completed_runs == batch.runs
+                    and not any_fallback_served(res.request_usage)
                 ):
                     try:
                         cache.put(slot.cache_key, critique_cache_entry_from_result(res))

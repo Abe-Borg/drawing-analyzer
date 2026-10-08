@@ -6,6 +6,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refusal-fallback answers are priced, flagged and kept out of the cache.**
+  When Opus 5.5 (or Sonnet 5.5) declines a request, the server-side fallback
+  re-runs it on a model the API picks (Opus 4.8 for cyber-category refusals).
+  The run used to price that answer at the requested model's rate, drop the
+  declined attempt from the ledger, say nothing, and cache the substitute's
+  answer under the requested model's key. Each billed attempt is now its own
+  usage record at the model that ran it (`requested_model` names the one the
+  stage asked for; the declined attempt is `REFUSED`). No stage caches a
+  fallback answer. `run.log` gets a `Fallback:` header line plus a line per
+  stage, and `run_manifest.json` gets `usage.model_fallbacks`. Synthesis, focus
+  and the review plan now record per-response usage so their fallbacks are
+  priced too. The investigation loop and citation pause resumes no longer run
+  or echo back the declined model's partial tool requests.
+
 ### Added
 
 - **Haiku 5.5 extraction.** Set identity and prose-to-finding structuring now

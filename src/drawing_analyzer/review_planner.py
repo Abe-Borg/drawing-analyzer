@@ -40,6 +40,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.request_usage import RequestUsage, any_fallback_served
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
@@ -427,6 +428,7 @@ class PlanResult:
     dropped_items: int = 0
     cached: bool = False
     reused: bool = False              # snapshot retained for the same review facts
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -583,10 +585,12 @@ def author_review_plan(
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    request_usage = [RequestUsage.from_message(resp)]
     obj = parse_planner_text(text)
     if obj is None:
         return PlanResult(
             input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+            request_usage=request_usage,
             error="planner reply carried no parseable plans block",
         )
     plans, dropped = sanitize_plans(obj)
@@ -594,16 +598,20 @@ def author_review_plan(
     if not profiles:
         return PlanResult(
             input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+            request_usage=request_usage,
             dropped_items=dropped,
             error="planner reply contained no usable plan items",
         )
+    # review_plan.md names its author: the fallback model when one served it.
+    author = request_usage[0].served_model or model
     result = PlanResult(
         profiles=profiles,
-        markdown=render_plan_markdown(profiles, model=model, identity=identity),
+        markdown=render_plan_markdown(profiles, model=author, identity=identity),
         input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+        request_usage=request_usage,
         dropped_items=dropped,
     )
-    if cache is not None and cache_key is not None:
+    if cache is not None and cache_key is not None and not any_fallback_served(request_usage):
         # Store the SANITIZED plans — what a warm run must rebuild verbatim so
         # the critique profiles_key stays byte-identical across runs.
         cache.put(cache_key, {
