@@ -109,11 +109,13 @@ Use existing routing. In the environment-based harness, set the global digest
 default to Sonnet and explicitly keep critique and cross-QC on Opus before the
 child imports application modules. Resolve and compare every other stage too; if
 another stage inherits the global default, pin it so the experiment remains
-digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: five stage
-resolvers read `os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which
-binds at *import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none
-of them (docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a
-process boundary). The public `model=` parameter is another
+digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: three stage
+resolvers (critique, cross-QC, review plan) read
+`os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which binds at
+*import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none of them
+(docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a process
+boundary). Synthesis and focus default to Sonnet 5.5 on their own and never
+follow it. The public `model=` parameter is another
 valid entry point.
 
 Measure digest transcription, digest-origin findings, downstream cross-QC
@@ -217,6 +219,18 @@ improves as effort rises even without tools, and Sonnet 5.5's crop tools help
 only from `high` effort up. That makes the vision stages the riskiest place to
 save money. None of the packages below changes a default; each is a
 measurement, run under the protocol in 1.1.
+
+One default did move without a package, at the owner's direction on
+2026-10-08: synthesis and the focus report went from Opus 5.5 to Sonnet 5.5,
+both at `high`. Both are single text-only calls over digests the vision stages
+already wrote, together well under 1% of an exhaustive run. The overview is
+advisory prose; on QC runs its conflict statements enter the ledger, where
+they are anchored and checked like any other finding. If a reviewer finds the overview
+weaker, set `DRAWING_ANALYZER_SYNTHESIS_MODEL=claude-opus-5-5` (and
+`DRAWING_ANALYZER_FOCUS_MODEL`) to restore it. Cross-QC and the review plan
+stayed on Opus 5.5. Cross-QC is the set-wide conflict hunt, and the plan steers
+every critique read; a different plan model would rewrite the plan and so
+re-key every cached critique.
 
 Every arm can reuse a warm cache. Model ids and effort ride each stage's cache
 key, so a re-run with one stage's model changed re-bills only that stage and

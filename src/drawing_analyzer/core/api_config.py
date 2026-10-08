@@ -21,6 +21,11 @@ Model identifiers may be overridden via env vars:
                                               structuring at medium effort).
     DRAWING_ANALYZER_CITATION_MODEL       — the citation check (default
                                               Sonnet 5.5; needs web fetch).
+    DRAWING_ANALYZER_SYNTHESIS_MODEL      — the set overview (default
+                                              Sonnet 5.5, high effort;
+                                              text-only over the digests).
+    DRAWING_ANALYZER_FOCUS_MODEL          — the focus report (default
+                                              Sonnet 5.5, high effort).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
                                               (default Sonnet 5.5; needs web
                                               fetch; billed to the reader).
@@ -58,9 +63,10 @@ MODEL_SONNET_46 = "claude-sonnet-4-6"
 MODEL_HAIKU_45 = "claude-haiku-4-5"
 
 # Review runs on the current Opus flagship; verification runs on Sonnet for
-# every finding it checks; the two extraction stages (set identity, prose
-# harvest) run on Haiku. Defaults track the newest generation (Opus 5.5 /
-# Sonnet 5.5 / Haiku 5.5). Override any of these via the matching
+# every finding it checks, and so do synthesis and focus, text-only calls over
+# digests the review model already wrote; the two extraction stages (set
+# identity, prose harvest) run on Haiku. Defaults track the newest generation
+# (Opus 5.5 / Sonnet 5.5 / Haiku 5.5). Override any of these via the matching
 # ``DRAWING_ANALYZER_*_MODEL`` env var.
 #
 # WP-07 §12.13: this comment used to say verification "reserves Opus for

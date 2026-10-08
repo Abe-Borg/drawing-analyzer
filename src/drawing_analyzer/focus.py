@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .core.api_config import (
-    REVIEW_MODEL_DEFAULT,
+    MODEL_SONNET_5_5,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
@@ -58,12 +58,17 @@ _FOCUS_CACHE_CONTRACT = 1
 
 
 def default_focus_model() -> str:
-    """Model for the focus-report pass — the review model (Opus 5.5) by
-    default, overridable via ``DRAWING_ANALYZER_FOCUS_MODEL``."""
+    """Model for the focus-report pass — Sonnet 5.5 by default, overridable via
+    ``DRAWING_ANALYZER_FOCUS_MODEL``.
+
+    Like synthesis, one text-only call that answers the operator's question
+    from digests the vision passes already wrote (each sheet's own focus
+    section included), at high effort, at half Opus 5.5's per-token price.
+    """
     override = os.environ.get("DRAWING_ANALYZER_FOCUS_MODEL")
     if override and override.strip():
         return override.strip()
-    return REVIEW_MODEL_DEFAULT
+    return MODEL_SONNET_5_5
 
 
 FOCUS_REPORT_SYSTEM_PROMPT = """\

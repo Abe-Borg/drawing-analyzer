@@ -456,9 +456,9 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   tool understands least. A page that cannot be measured at all is still quoted,
   never silently dropped from the total.
 - **Every stage is priced with the model it will actually run on.** Synthesis and
-  the focus report have their own overrides and follow the review-model default
-  rather than the digest's model, so a Sonnet digest with default synthesis was
-  under-quoted on that stage. The critique line follows
+  the focus report have their own overrides and their own default (Sonnet 5.5)
+  rather than the digest's model, so they are priced at Sonnet's rate even under
+  an Opus digest. The critique line follows
   `DRAWING_ANALYZER_CRITIQUE_RUNS` instead of assuming two reads, and its images
   are counted with the critique model's own token cap.
 - **Economy mode** (`use_batch=True`, the GUI default) digests every uncached sheet
@@ -610,8 +610,11 @@ carry a verified effective date (`core.pricing.PRICING_EFFECTIVE_DATE`) —
 re-verify against the published rates before relying on a dollar figure.
 
 Haiku 5.5 is the default for set identity and prose-to-finding structuring,
-both at medium effort. The visual review, cross-sheet reasoning and verification
-stages retain their existing models. Use `DRAWING_ANALYZER_IDENTITY_MODEL` and
+both at medium effort. The visual review, cross-sheet QC and verification
+stages retain their existing models. Synthesis and the focus report run on
+Sonnet 5.5 at high effort: both are text-only calls over the digests the Opus
+vision read already wrote, so Sonnet does the same reconciliation at half Opus
+5.5's per-token price. Use `DRAWING_ANALYZER_IDENTITY_MODEL` and
 `DRAWING_ANALYZER_HARVEST_MODEL` to select another model for either extraction
 stage. Haiku 5.5 is also registered for the other model overrides, including
 the report assistant.
@@ -1791,9 +1794,9 @@ focus set:
 - **Each sheet is read with your question in mind** — the vision prompt asks for
   one extra, final **`Focus findings`** section per sheet (the standard digest
   sections are unaffected).
-- **A set-level Focus Report** is assembled in one extra text-only pass: a
-  direct, cross-sheet answer to your focus, citing the sheets that carry each
-  fact. It leads the combined Markdown, is written as `00_focus.md` in folder
+- **A set-level Focus Report** is assembled in one extra text-only pass (Sonnet
+  5.5 at high effort by default): a direct, cross-sheet answer to your focus,
+  citing the sheets that carry each fact. It leads the combined Markdown, is written as `00_focus.md` in folder
   exports, and gets a pinned card (plus a *Focus* filter chip) in the HTML
   report.
 
@@ -1814,9 +1817,9 @@ quality decision.
 | Variable | Default | Effect |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
-| `DRAWING_ANALYZER_MODEL` | Opus 5.5 | Vision model for per-sheet digests (high effort). Also the default for critique, cross-sheet QC, synthesis, focus and the review plan, which each have their own override below. |
-| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5.5 | Cross-sheet synthesis model (text-only, high effort). |
-| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5.5 | Focus-report model (text-only, high effort). |
+| `DRAWING_ANALYZER_MODEL` | Opus 5.5 | Vision model for per-sheet digests (high effort). Also the default for critique, cross-sheet QC and the review plan, which each have their own override below. |
+| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Sonnet 5.5 | Cross-sheet synthesis model (text-only, high effort). It reconciles digests the vision passes already wrote, so Sonnet is a cost choice at half Opus 5.5's per-token price. Does not follow `DRAWING_ANALYZER_MODEL`. |
+| `DRAWING_ANALYZER_FOCUS_MODEL` | Sonnet 5.5 | Focus-report model (text-only, high effort). Same reasoning as synthesis. Does not follow `DRAWING_ANALYZER_MODEL`. |
 | `DRAWING_ANALYZER_VERIFICATION_MODEL` | Sonnet 5.5 | Per-finding verification model (crop + short prompt, medium effort). The older `DRAWING_ANALYZER_VERIFY_MODEL` wins when set. |
 | `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5.5) | The Phase C investigation loop's model (multi-turn, vision + tools, high effort). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |

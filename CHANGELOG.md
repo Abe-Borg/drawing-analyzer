@@ -32,9 +32,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   named Opus 5 and Sonnet 5 for several stages, put set identity and the prose
   harvest on Opus or Sonnet, and named Opus 5.5 as the only refusal-fallback
   model. They now match the code: Opus 5.5 for review, critique, cross-QC,
-  synthesis, focus, the review plan and investigation; Sonnet 5.5 for
+  the review plan and investigation; Sonnet 5.5 for synthesis, focus,
   verification, citation and the report chat; Haiku 5.5 for set identity and
-  the prose harvest. The help's stage table also gives the investigation cap
+  the prose harvest. The help's cost note also counted only the digest for a
+  standard run; the GUI runs the set overview on every run of two or more
+  sheets, and the note and stage table now say so. The help's stage table also gives the investigation cap
   as it now scales (at most 40 per run, by set size), not a flat 10.
 
 ### Added
@@ -79,6 +81,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Synthesis and the focus report run on Sonnet 5.5, at high effort.** Both
+  were on Opus 5.5. Each is one text-only call over the digests the Opus vision
+  read already wrote, with no drawing images. Sonnet 5.5 does that
+  reconciliation at half the per-token price, and `high` is its own default
+  effort. On QC runs the overview's conflict statements still enter the ledger
+  and are checked like any other finding. By the estimator this saves about
+  $0.06 on a 10-sheet run and $0.50 on a 120-sheet run, or $0.14 and $1.24 with
+  a focus. The vision
+  reads, cross-sheet QC, the review plan and investigation stay on Opus 5.5.
+  `DRAWING_ANALYZER_SYNTHESIS_MODEL` and `DRAWING_ANALYZER_FOCUS_MODEL` restore
+  Opus, and neither follows `DRAWING_ANALYZER_MODEL` any more. Cached overviews
+  and focus reports are keyed by model, so each set re-runs these two calls
+  once.
 - **Quitting mid-analysis stops the run first.** The worker threads die with
   the process, but a submitted Message Batch used to keep running — and
   billing — after the window closed. Closing during an analysis now pulls the
