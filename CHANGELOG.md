@@ -73,12 +73,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   credited every tile with its render DPI, but the API silently downscales an
   image above the high-resolution tier's limits (2576 px long edge, 4,784
   visual tokens counted as ⌈w/28⌉·⌈h/28⌉ patches) before the model reads it.
-  Grids of 20 or fewer images were built from large near-square tiles that the
-  model read well below the ANSI E floor of 183.39 DPI: vector ARCH D 24×36 at
-  142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and ARCH E 36×48 at
-  138.7. Raster grids of 20 or fewer images fell below the 234.17 raster floor
-  too (raster Letter at 198.5). The floor is now tested at the DPI the model
-  reads, using the documented resize rule (`core.tokenizer.resized_image_size`).
+  The grids it chose with 20 or fewer images were built from large near-square
+  tiles that the model read well below the ANSI E floor of 183.39 DPI: vector
+  ARCH D 24×36 at 142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and
+  ARCH E 36×48 at 138.7. Its raster choices of 20 or fewer images fell below
+  the 234.17 raster floor too (raster Letter at 198.5). The floor is now tested
+  at the DPI the model reads, using the documented resize rule
+  (`core.tokenizer.resized_image_size`).
   Affected pages get more tiles and cost more per read: vector ARCH C +34%
   (31,991 tokens), ANSI D +45% (48,596), ARCH D +57% (52,624) and ARCH E
   36×48 +77% (110,281); raster Letter, Tabloid, C and D sizes +25% to +46%.
