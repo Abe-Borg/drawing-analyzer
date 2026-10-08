@@ -1544,9 +1544,9 @@ From those records each stage gets a **headroom verdict**:
 | Verdict | Meaning |
 |---|---|
 | `STARVED` | The stage ran out of something it needed and its result shows it: a work item still cut off at `max_tokens` on its **last** call, a server tool that refused a use because `max_uses` was spent, a `pause_turn` still unresolved when resumes ran out, or an allotment the pipeline saw it exhaust (evidence rounds, the per-run investigation or citation cap, the digest/verifier output cap, a batch abandoned by the time bound). |
-| `TIGHT` | It finished, but with no margin or with less than it was built for: a call at 90 %+ of `max_tokens`, a cap hit that a raised-cap retry recovered, a tool used up to its per-call limit, an item that asked for its whole allotment, a forced no-tools close, a recovered `pause_turn`, or an ability turned off mid-run (structured outputs, strict tool schemas, the refusal fallback or the task budget, latched off after an API rejection). |
+| `TIGHT` | It finished, but with no margin or with less than it was built for: a call at 90 %+ of `max_tokens`, a cap hit that a raised-cap retry recovered (a retry that fails, is stopped or is cut off again does not count as recovering it), a tool used up to its per-call limit, an item that asked for its whole allotment, a forced no-tools close, a recovered `pause_turn`, or an ability turned off mid-run (structured outputs, strict tool schemas, the refusal fallback or the task budget, latched off after an API rejection). |
 | `ADEQUATE` | Every call finished inside its limits with room to spare. |
-| `NOT_ASSESSED` | No call came back with a response (all served from cache, all failed, or stopped). |
+| `NOT_ASSESSED` | No call came back with a response this run can judge: everything was served from cache, failed or was stopped, or the only results are from a batch an earlier run submitted (its request, and so its limits, were never seen by this run). |
 
 The run's verdict is its worst stage. Effort and thinking are reported as sent,
 next to the highest effort the model accepts; they are per-stage design choices,

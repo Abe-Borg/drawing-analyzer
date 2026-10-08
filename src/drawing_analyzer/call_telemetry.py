@@ -862,12 +862,26 @@ _ITEM_LIMIT_COUNTERS: dict[str, Callable[[CallRecord], int]] = {
 }
 
 
-def _final_calls(records: list[CallRecord]) -> list[CallRecord]:
-    """Each work item's last call (a call with no item is its own item)."""
-    last: dict[str, CallRecord] = {}
+# Outcomes that complete a work item's request: a later one of these is what
+# recovers an earlier cap hit or resolves an earlier pause.
+_COMPLETING_OUTCOMES = frozenset({OUTCOME_OK, OUTCOME_TOOL_USE})
+
+
+def _items_left_at(records: list[CallRecord], outcome: str) -> int:
+    """Work items with an ``outcome`` call that no later call of theirs completed.
+
+    A re-send that errors, is stopped, is declined or is cut off again does not
+    recover the item: the caller ships the earlier, unfinished reply. Only a
+    later completed call does. A call with no item is its own item.
+    """
+    pending: dict[str, bool] = {}
     for r in sorted(records, key=lambda r: r.seq):
-        last[r.item or f"#{r.seq}"] = r
-    return list(last.values())
+        key = r.item or f"#{r.seq}"
+        if r.outcome == outcome:
+            pending[key] = True
+        elif r.outcome in _COMPLETING_OUTCOMES:
+            pending[key] = False
+    return sum(pending.values())
 
 
 def _summarize_stage(stage: str, records: list[CallRecord], budget: list[dict]) -> dict:
@@ -875,10 +889,9 @@ def _summarize_stage(stage: str, records: list[CallRecord], budget: list[dict]) 
                                                           OUTCOME_CANCELLED, OUTCOME_EXPIRED)]
     fractions = [r.output_fraction for r in answered if r.output_fraction is not None]
     cap_hits = [r for r in answered if r.outcome == OUTCOME_MAX_TOKENS]
-    finals = _final_calls(records)
-    final_cap_hits = [r for r in finals if r.outcome == OUTCOME_MAX_TOKENS]
+    unrecovered_cap_hits = _items_left_at(records, OUTCOME_MAX_TOKENS)
     pauses = [r for r in answered if r.outcome == OUTCOME_PAUSE_TURN]
-    final_pauses = [r for r in finals if r.outcome == OUTCOME_PAUSE_TURN]
+    unresolved_pauses = _items_left_at(records, OUTCOME_PAUSE_TURN)
     near_cap = [
         r for r in answered
         if r.outcome != OUTCOME_MAX_TOKENS and r.output_fraction is not None
@@ -936,6 +949,10 @@ def _summarize_stage(stage: str, records: list[CallRecord], budget: list[dict]) 
         "stage": stage,
         "calls": len(records),
         "answered_calls": len(answered),
+        # Answered calls whose request this run saw: a response-only record (a
+        # batch an earlier run submitted) carries no cap, effort or tools, so
+        # it cannot show that the stage had room.
+        "assessable_calls": sum(1 for r in answered if r.max_tokens is not None),
         "real_time_calls": sum(1 for r in records if r.transport == TRANSPORT_REAL_TIME),
         "batch_calls": sum(1 for r in records if r.transport == TRANSPORT_BATCH),
         "items": len({r.item for r in records if r.item}),
@@ -954,9 +971,9 @@ def _summarize_stage(stage: str, records: list[CallRecord], budget: list[dict]) 
         "output_fraction_mean": round(sum(fractions) / len(fractions), 4) if fractions else None,
         "near_cap_calls": len(near_cap),
         "max_tokens_stops": len(cap_hits),
-        "max_tokens_unrecovered": len(final_cap_hits),
+        "max_tokens_unrecovered": unrecovered_cap_hits,
         "pause_turns": len(pauses),
-        "pause_turns_unresolved": len(final_pauses),
+        "pause_turns_unresolved": unresolved_pauses,
         "refusals": sum(1 for r in answered if r.outcome == OUTCOME_REFUSAL),
         "forced_closes": sum(1 for r in records if r.forced_close),
         "errors": sum(1 for r in records if r.outcome == OUTCOME_ERROR),
@@ -1011,10 +1028,10 @@ def _stage_verdict(s: dict) -> tuple[str, list[str]]:
 
     ADEQUATE — every call finished inside its limits with room to spare.
 
-    NOT_ASSESSED — no call came back with a response (all failed, were
-    stopped, or are batch items whose result was never read), so there is no
-    consumption to judge; the stage's own status and the resource-pressure
-    record say why.
+    NOT_ASSESSED — no call came back with a response this run can judge (all
+    failed, were stopped, are batch items whose result was never read, or are
+    results of a batch an earlier run submitted, whose request this run never
+    saw); the stage's own status and the resource-pressure record say why.
     """
     starved: list[str] = []
     tight: list[str] = []
@@ -1063,7 +1080,7 @@ def _stage_verdict(s: dict) -> tuple[str, list[str]]:
         return HEADROOM_STARVED, starved + tight
     if tight:
         return HEADROOM_TIGHT, tight
-    if not s["answered_calls"]:
+    if not s["assessable_calls"]:
         return HEADROOM_NOT_ASSESSED, []
     return HEADROOM_ADEQUATE, []
 
@@ -1081,12 +1098,24 @@ def _summary_line(stages: list[dict], calls_seen: int, dropped: int) -> str:
     flagged = [s for s in stages if s["verdict"] in (HEADROOM_STARVED, HEADROOM_TIGHT)]
     if flagged:
         body = "; ".join(f"{s['stage']} {s['verdict']}: {s['reasons'][0]}" for s in flagged)
-    elif calls_seen:
+    elif verdict == HEADROOM_ADEQUATE:
         n_stages = sum(1 for s in stages if s["calls"])
         body = (
             f"{calls_seen} model {_plural(calls_seen, 'call')} across {n_stages} "
-            f"{_plural(n_stages, 'stage')}; every call finished inside its output cap "
-            "and tool limits"
+            f"{_plural(n_stages, 'stage')}; every call that returned a response "
+            "finished inside its output cap and tool limits"
+        )
+        unjudged = sum(s["calls"] - s["assessable_calls"] for s in stages)
+        if unjudged:
+            body += (
+                f" ({unjudged} {_plural(unjudged, 'call')} could not be judged: "
+                "failed, stopped, never collected, or collected from an earlier run)"
+            )
+    elif calls_seen:
+        body = (
+            f"{calls_seen} model {_plural(calls_seen, 'call')}, none with a response "
+            "this run can judge (failed, stopped, never collected, or collected from "
+            "an earlier run)"
         )
     else:
         body = "no model call was made (cache hits only, or no model stage ran)"

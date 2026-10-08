@@ -117,6 +117,12 @@ _CASES = {
          ({"item": "a", "max_tokens": 2000}, _reply(out=900))],
         ct.HEADROOM_TIGHT, {"max_tokens_stops": 1, "max_tokens_unrecovered": 0},
     ),
+    "cap_hit_whose_resend_failed": (
+        # The caller ships the cut-off first read; a failed re-send recovers nothing.
+        [({"item": "a"}, _reply(out=1000, stop="max_tokens")),
+         ({"item": "a", "max_tokens": 2000}, RuntimeError("503"))],
+        ct.HEADROOM_STARVED, {"max_tokens_stops": 1, "max_tokens_unrecovered": 1},
+    ),
     "cap_hit_unrecovered": (
         [({"item": "a"}, _reply(out=1000, stop="max_tokens")),
          ({"item": "b"}, _reply(out=100))],
@@ -306,8 +312,11 @@ def test_batch_items_are_recorded_at_submit_and_filled_from_results(active):
     assert (by_id["sheet__0"].transport, by_id["sheet__0"].max_tokens) == (ct.TRANSPORT_BATCH, 4000)
     assert by_id["sheet__0"].outcome == ct.OUTCOME_MAX_TOKENS
     assert by_id["sheet__1"].outcome == ct.OUTCOME_ERROR
-    # A batch this run did not submit (receipt recovery) still gets a record.
+    # A batch this run did not submit (receipt recovery) still gets a record,
+    # but with no request to judge it by, its stage is not assessed.
     assert by_id["sheet__7"].stage == "recovered_batch"
+    recovered = next(s for s in active.calls.stage_summaries() if s["stage"] == "recovered_batch")
+    assert recovered["verdict"] == ct.HEADROOM_NOT_ASSESSED
     digest = next(s for s in active.calls.stage_summaries() if s["stage"] == "digest")
     assert (digest["batch_calls"], digest["verdict"]) == (2, ct.HEADROOM_STARVED)
 
