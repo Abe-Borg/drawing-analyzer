@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-08
+
 ### Added
 
 - **Per-call agent diagnostics: did each agent have room to do its job?** Every
@@ -35,6 +37,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   journal's event trace). Counts, labels and identifiers only, under the same
   redaction as `run.log`; `run_manifest.json` hashes every file. The README
   now has a table of every diagnostic output and where it lives.
+
+### Fixed
+
+- **Headroom diagnostics recognize only completed recovery attempts.** A
+  raised-cap retry that errored, was stopped or was declined no longer makes
+  a still-truncated work item appear recovered. The same rule applies to
+  paused tool turns. Results recovered from batches submitted by an earlier
+  run have no recorded request configuration, so their headroom is reported
+  as `NOT_ASSESSED` rather than `ADEQUATE`.
 
 ## [1.9.0] - 2026-10-07
 
