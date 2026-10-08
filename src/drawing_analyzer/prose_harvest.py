@@ -54,7 +54,7 @@ from .core.api_config import (
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .core.request_usage import RequestUsage, fallback_served_model
 from .critique import _token_overlap
-from . import resource_pressure
+from . import call_telemetry, resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FINDING_SEVERITIES,
@@ -589,9 +589,13 @@ def _structure_item(
         structured = False
     kwargs = _params(structured)
     attempt = 0
+    # The item text is drawing prose, so the label carries its digest, not it.
+    label = (f"{call_telemetry.sheet_item(ref)}:"
+             f"{hashlib.sha256(item.encode('utf-8')).hexdigest()[:8]}")
     while True:
         try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+            with call_telemetry.scope("harvest", label):
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             if structured and STRUCTURED_OUTPUTS.rejects(exc):

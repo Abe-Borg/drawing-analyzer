@@ -69,7 +69,7 @@ from typing import Any, Callable, Iterable
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.request_usage import fallback_served_model
 from .core.tokenizer import estimate_image_tokens_total
-from . import cancellation, resource_pressure
+from . import call_telemetry, cancellation, resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -784,7 +784,11 @@ def _stop_remote_batch(
 
 
 def _create_batch(
-    client: Any, reqs: list[dict], *, on_log: LogCallback | None = None
+    client: Any,
+    reqs: list[dict],
+    *,
+    on_log: LogCallback | None = None,
+    items: dict[str, str] | None = None,
 ) -> Any:
     """Submit one Message Batch: the only place this run creates one.
 
@@ -795,6 +799,10 @@ def _create_batch(
     stop's ``wait_for_remote_cancels`` waits for that. Either way the caller
     still records the receipt, so the next run collects whatever the batch
     finished before the cancel landed.
+
+    An accepted batch opens one :mod:`~drawing_analyzer.call_telemetry`
+    record per item; ``items`` maps ``custom_id`` to the work item's portable
+    label (``SRC-0001:p0``) so the record names the sheet, not the slot.
     """
     with cancellation.submitting():
         mb = client.messages.batches.create(requests=reqs)
@@ -802,6 +810,7 @@ def _create_batch(
         cancellation.track_remote_batch(
             batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
         )
+    call_telemetry.note_batch_submit(batch_id, reqs, items=items)
     return mb
 
 
@@ -1186,7 +1195,11 @@ def _recover_via_batch_resubmit(
                 f"(recovery round {round_no}/{max_rounds})"
             )
         try:
-            mb = _create_batch(client, reqs, on_log=on_log)
+            with call_telemetry.scope("digest"):
+                mb = _create_batch(
+                    client, reqs, on_log=on_log,
+                    items={s.custom_id: call_telemetry.sheet_item(s.ref) for s, _ in pending},
+                )
         except Exception as exc:  # noqa: BLE001 - recovery is best-effort; batch errors stand
             # The backend rejecting even the submit is itself a sick-backend
             # signal — back off (within budget) and let the next round retry,
@@ -1749,7 +1762,14 @@ def submit_drawing_batch(
     batch_id: str | None = None
     if reqs:
         try:
-            mb = _create_batch(client, reqs, on_log=on_log)
+            with call_telemetry.scope("digest"):
+                mb = _create_batch(
+                    client, reqs, on_log=on_log,
+                    items={
+                        s.custom_id: call_telemetry.sheet_item(s.ref)
+                        for s in slots if s.custom_id is not None
+                    },
+                )
         # A stop that lands between the check above and the submit cleans up
         # exactly like a failed submit.
         except (Exception, cancellation.RunCancelled):  # noqa: BLE001 - clean up before propagating (DA-034)

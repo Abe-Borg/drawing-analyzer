@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import call_telemetry
 from .core.api_config import (
     MODEL_SONNET_5_5,
     model_supports_adaptive_thinking,
@@ -303,9 +304,10 @@ def generate_focus_report(
     if effective_effort:
         kwargs["output_config"] = {"effort": effective_effort}
 
-    read = stream_with_cap_retry(
-        client, kwargs, max_retries=max_retries, sleep=sleep, stage="focus",
-    )
+    with call_telemetry.scope("focus", call_telemetry.SET_ITEM):
+        read = stream_with_cap_retry(
+            client, kwargs, max_retries=max_retries, sleep=sleep, stage="focus",
+        )
     if read.message is None:
         # Report, and ship the digests anyway.
         return FocusReportResult(

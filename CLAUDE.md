@@ -179,8 +179,9 @@ map lives in `src/drawing_analyzer/__init__.py`.
   SHEET_DIGESTED / STAGE_START / STAGE_END / LEDGER_* / MARKUP_RECEIPTS /
   USAGE_TOTALS / RUN_END. Every export gets `run.log` (UTF-8+CRLF) and
   `run_manifest.json` (schema v1: status/config/sources-without-paths/stages/
-  usage/coverage + sha256 of every artifact), written **last**: artifacts →
-  markup manifest → run.log → run manifest (excludes only itself).
+  usage/coverage/`agent_headroom` + sha256 of every artifact), written
+  **last**: artifacts (including `diagnostics/`) → markup manifest → run.log →
+  run manifest (excludes only itself).
   `stage_instance` labels are portable (`digest:SRC-0001:p0`). `private_roots`
   matches case-insensitively, across both separators, only at a component
   boundary (`_private_root_re`, `(?=[\\/]|$)`). Every renderer of both artifacts
@@ -212,6 +213,41 @@ map lives in `src/drawing_analyzer/__init__.py`.
   journal incidents are bounded; the aggregates count everything. Advisory and
   never fatal. Tests inject `probe=` / `interval=` and patch
   `digest._retry_backoff_seconds` to 0 so a 429 fixture never sleeps.
+- **Call telemetry** (`call_telemetry.py`): one `CallRecord` per model
+  request — what it was given (model, `max_tokens`, effort + the model's
+  highest accepted effort, thinking, tools with `max_uses`, `tool_choice`, task
+  budget, structured/strict/fallback flags, image count) and what it used
+  (stop reason, tokens, tool calls, server tool counts, tool `error_code`s,
+  duration, message id). Recorded at `_dispatch_messages` (every real-time
+  call, including errors and stops) and at `_create_batch` +
+  `read_batch_results` (batch items, filled when results are read; results of
+  a batch this run did not submit get a `recovered_batch` record). The recorder
+  rides the run's `ResourcePressure` (`pressure.calls`, `ctx.call_telemetry`),
+  so it reaches workers through `worker_binding()`; outside a run it records
+  nothing. **Every call site wraps its request in
+  `call_telemetry.scope(stage, item)`**, with `stage` = the usage family
+  (`digest`, `critique`, `verify`, `investigate`, `citation`, `harvest`,
+  `identity`, `review_plan`, `cross_qc`, `synthesis`, `focus`) and `item` =
+  `sheet_item(ref)`, a finding id, a code ref, or `SET_ITEM` for one-per-run
+  stages (a shared item is what lets a raised-cap resend read as recovered).
+  Item allotments the request does not carry ride the scope
+  (`evidence_rounds=`, `pause_resumes=`). An unscoped call is recorded as
+  `unattributed (<module>)`; the gauntlet asserts one record per billed
+  real-time response under the ledger's own family, and that every request
+  stated thinking and effort. Records hold shape and counts only — never
+  prompt, text, image or key. `_stage_verdict` derives STARVED / TIGHT /
+  ADEQUATE / NOT_ASSESSED per stage; budget notes from `ResourcePressure`
+  starve their stage (names mapped by `canonical_stage`). Bounded at
+  `MAX_STORED_CALLS`; `calls_seen` counts everything.
+- **Diagnostics folder** (`diagnostics_bundle.py`): every export gets
+  `diagnostics/` (`00_summary.md`, `api_calls.csv/.json`,
+  `agent_headroom.json`, `api_retries.csv`, `host_samples.csv`,
+  `events.csv`), written as an ordinary artifact before `run.log` and the run
+  manifest. Each file is written independently; a failure leaves a
+  `.error.txt` note, never a failed export. Strings pass `sanitize_text` with
+  the journal's private roots; CSVs are UTF-8-BOM + CRLF with `_excel_safe` on
+  text cells. `ResourcePressure.host_series` is the bounded, decimating host
+  timeline (`MAX_STORED_HOST_SAMPLES`, stride doubles past it).
 - **Kill switch** (`cancellation.py`): `extract_drawing_context(cancel=CancelToken)`
   (the GUI's **Stop**, and quitting mid-run). `RunCancelled` is a
   **BaseException** so the I-3 `except Exception` guards cannot swallow a stop;

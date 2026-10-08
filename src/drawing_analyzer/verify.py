@@ -53,7 +53,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
-from . import resource_pressure
+from . import call_telemetry, resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -761,7 +761,8 @@ def _verify_one(
     attempt = 0
     while True:
         try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+            with call_telemetry.scope("verify", finding.id):
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade the finding, never raise
             if send_structured and STRUCTURED_OUTPUTS.rejects(exc):
@@ -1460,7 +1461,8 @@ def _call_prepared_cross(
     attempt = 0
     while True:
         try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+            with call_telemetry.scope("verify", f"{prepared.finding.id}:cross"):
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             if send_structured and STRUCTURED_OUTPUTS.rejects(exc):

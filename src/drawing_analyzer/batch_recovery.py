@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diagnostics
-from . import cancellation, resource_pressure
+from . import call_telemetry, cancellation, resource_pressure
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
 from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
@@ -65,7 +65,11 @@ def _read_with_retry(call: Callable[[], Any], *, sleep: Callable[[float], None])
 
 
 def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[str, Any]:
-    """Retry the entire stream from byte zero, discarding partial attempts."""
+    """Retry the entire stream from byte zero, discarding partial attempts.
+
+    A complete read also closes the batch items' per-call telemetry records
+    (:mod:`~drawing_analyzer.call_telemetry`) with what each item used.
+    """
     def read() -> dict[str, Any]:
         stream = client.messages.batches.results(batch_id)
         try:
@@ -74,7 +78,9 @@ def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[
             close = getattr(stream, "close", None)
             if close is not None:
                 close()
-    return _read_with_retry(read, sleep=sleep)
+    results = _read_with_retry(read, sleep=sleep)
+    call_telemetry.note_batch_results(batch_id, results)
+    return results
 
 
 class BatchReceiptError(OSError):

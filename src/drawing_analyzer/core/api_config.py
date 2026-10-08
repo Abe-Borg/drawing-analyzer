@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .. import cancellation
+from .. import call_telemetry, cancellation
 
 _log = logging.getLogger(__name__)
 
@@ -1565,14 +1565,29 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
     is raised before the request. A streamed response is read event by event
     while a stop is possible, so a stop abandons it at the next event; leaving
     the ``with`` closes the connection and the server stops generating.
+
+    Every request that is sent gets one :mod:`~drawing_analyzer.call_telemetry`
+    record — what it was given (caps, effort, thinking, tools) and what it used
+    — closed with the response, the error, or the stop.
     """
     namespace = messages_namespace(client, kwargs)
     cancellation.check()
-    if method == "create":
-        return namespace.create(**kwargs)
-    with namespace.stream(**kwargs) as stream:
-        token = cancellation.current()
-        if token is not None:
-            for _event in stream:
-                token.raise_if_cancelled()
-        return stream.get_final_message()
+    record = call_telemetry.begin(kwargs, method=method)
+    try:
+        if method == "create":
+            message = namespace.create(**kwargs)
+        else:
+            with namespace.stream(**kwargs) as stream:
+                token = cancellation.current()
+                if token is not None:
+                    for _event in stream:
+                        token.raise_if_cancelled()
+                message = stream.get_final_message()
+    except cancellation.RunCancelled:
+        call_telemetry.finish(record, cancelled=True)
+        raise
+    except Exception as exc:
+        call_telemetry.finish(record, error=exc)
+        raise
+    call_telemetry.finish(record, message=message)
+    return message

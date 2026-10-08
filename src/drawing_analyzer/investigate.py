@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from . import call_telemetry
 from .core.api_config import (
     PHASE_INVESTIGATION,
     VERIFICATION_ESCALATION_MODEL,
@@ -1006,9 +1007,12 @@ def _investigate_one(
         attempt = 0
         while True:
             try:
-                resp = _investigation_message(
-                    client, kwargs, task_budget=task_budget
-                )
+                with call_telemetry.scope(
+                    "investigate", finding.id, evidence_rounds=max_rounds,
+                ):
+                    resp = _investigation_message(
+                        client, kwargs, task_budget=task_budget
+                    )
                 session_tools = kwargs["tools"]
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)

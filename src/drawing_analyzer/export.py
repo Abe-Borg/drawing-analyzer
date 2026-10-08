@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .diagnostics_bundle import write_diagnostics_folder
 from .html_report import build_html_report
 from .models import (
     PRIMARY_LEG_ID,
@@ -270,6 +271,12 @@ def _index_document(
     )
     lines.append(
         "- `run_manifest.json` — machine-readable run summary + artifact hashes"
+    )
+    lines.append(
+        "- `diagnostics/` — the run call by call: every model call with what it was "
+        "given (model, effort, thinking, output cap, tools) and what it used, the "
+        "per-stage headroom verdict, API retries, the host timeline "
+        "(start with `diagnostics/00_summary.md`)"
     )
     if has_qc_outputs(ctx):
         findings = _qc_findings(ctx)
@@ -631,6 +638,17 @@ def build_run_manifest(
         "resource_pressure": (
             _sanitize_json(pressure.to_dict(), roots)
             if pressure is not None and hasattr(pressure, "to_dict")
+            else None
+        ),
+        # The per-call record's headroom: what each stage's model calls were
+        # given (model, effort, thinking, output cap, tools and limits) against
+        # what they used, the STARVED/TIGHT/ADEQUATE verdict per stage, and the
+        # model map. The per-call rows themselves are diagnostics/api_calls.json.
+        # Additive key — schema stays v1; ``None`` without a record.
+        "agent_headroom": (
+            _sanitize_json(ctx.call_telemetry.to_dict(), roots)
+            if getattr(ctx, "call_telemetry", None) is not None
+            and hasattr(ctx.call_telemetry, "to_dict")
             else None
         ),
         "evidence": evidence_summary(findings + reference),
@@ -1567,6 +1585,10 @@ def write_drawing_export(
         # mirrored per-tile notes. Before run.log/run_manifest.json so the §18.4
         # inventory and hashes include every tile file automatically.
         write_tile_artifacts(ctx, staging)
+        # The per-call diagnostics folder (model calls, headroom, retries, host
+        # timeline). An ordinary artifact: before run.log/run_manifest.json so
+        # the Outputs list and the hashes cover it.
+        write_diagnostics_folder(ctx, staging)
         # Phase 26A finalization order (§18.4): every ordinary artifact and the
         # markup manifest are on disk → finalize run.log (it lists what is
         # actually there) → write run_manifest.json last (it hashes them all,

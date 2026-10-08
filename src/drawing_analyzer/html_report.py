@@ -1599,9 +1599,21 @@ def _run_record_html(ctx: Any) -> str:
             text = ""
         if text:
             items.append(f"<li>Resource starvation: {html.escape(text)}</li>")
+    # Agent headroom (per-call output cap, effort, thinking, tool limits): the
+    # per-call record's own one-line verdict, escaped the same way.
+    headroom = getattr(getattr(ctx, "call_telemetry", None), "summary_line", None)
+    if callable(headroom):
+        try:
+            text = str(headroom())
+        except Exception:  # noqa: BLE001 - the report never fails on a diagnostic
+            text = ""
+        if text:
+            text = redact_for_display(text, private_roots=_roots(ctx))
+            items.append(f"<li>Agent headroom: {html.escape(text)}</li>")
     items.append(
         "<li>Full event trace: <code>run.log</code> and "
-        "<code>run_manifest.json</code>, written into every export folder.</li>"
+        "<code>run_manifest.json</code>, written into every export folder; "
+        "every model call is in <code>diagnostics/</code>.</li>"
     )
     return (
         '<details class="sources run-record"><summary>Run record</summary>'

@@ -42,6 +42,7 @@ from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from . import call_telemetry
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     clamp_effort_for_model,
@@ -1306,9 +1307,11 @@ def _critique_read(
     kwargs = _params(structured)
 
     attempt = 0
+    item = f"{call_telemetry.sheet_item(rendered.ref)}:{run_id}"
     while True:
         try:
-            resp = stream_message(client, kwargs)
+            with call_telemetry.scope("critique", item):
+                resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the set
             if structured and STRUCTURED_OUTPUTS.rejects(exc):

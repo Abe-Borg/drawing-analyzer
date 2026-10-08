@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import call_telemetry
 from .core.request_usage import RequestUsage, any_fallback_served
 
 from .core.api_config import (
@@ -557,7 +558,8 @@ def identify_set(
     attempt = 0
     while True:
         try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+            with call_telemetry.scope("identity", call_telemetry.SET_ITEM):
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             if transient_retry_wait(exc, attempt, max_retries, sleep, stage="identity"):

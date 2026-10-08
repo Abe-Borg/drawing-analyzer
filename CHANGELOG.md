@@ -6,6 +6,36 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-call agent diagnostics: did each agent have room to do its job?** Every
+  model request is now recorded where it is sent: real-time calls at the one
+  dispatch point every stage shares, batch items at submit, completed when
+  results are read. Each record holds what the call was given (model, effort
+  and the highest effort the model accepts, thinking mode, `max_tokens`, tools
+  offered with their per-call `max_uses`, `tool_choice`, task budget,
+  structured outputs, strict tools, refusal fallback, image count) and what it
+  used (stop reason, tokens, share of `max_tokens` used, tool calls, the
+  server's web-search/fetch counts, `max_uses_exceeded` refusals, duration,
+  message id). Each call names its stage and work item (sheet, finding/QC id,
+  code reference). Each stage gets a headroom verdict: `STARVED` (a work item
+  still cut off at the cap, a tool use refused, an allotment exhausted),
+  `TIGHT` (finished, but at 90 %+ of the cap, at a tool's limit, after a
+  forced close, or after losing an ability mid-run) or `ADEQUATE`. A model map
+  shows which model ran in which stage. `run.log` gets a `Headroom:` header
+  line plus *Agent provisioning & headroom* and *Model calls by stage*
+  sections. `run_manifest.json` gets an `agent_headroom` block. The GUI
+  completion summary and the report's *Run record* each get one line.
+- **A `diagnostics/` folder in every export.** `00_summary.md` answers the
+  questions first, then the per-stage table, the model map and a file guide.
+  The folder also holds `api_calls.csv` / `api_calls.json` (one row per model
+  call), `agent_headroom.json`, `api_retries.csv` (every transient API failure
+  waited out or given up on), `host_samples.csv` (the CPU / memory / disk /
+  thread timeline, kept evenly spaced within 2,000 rows) and `events.csv` (the
+  journal's event trace). Counts, labels and identifiers only, under the same
+  redaction as `run.log`; `run_manifest.json` hashes every file. The README
+  now has a table of every diagnostic output and where it lives.
+
 ## [1.9.0] - 2026-10-07
 
 ### Fixed

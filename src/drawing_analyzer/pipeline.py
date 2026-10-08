@@ -714,6 +714,13 @@ class DrawingContext:
     resource_pressure: Any = None
 
     @property
+    def call_telemetry(self) -> Any:
+        """The run's per-call record (:mod:`drawing_analyzer.call_telemetry`):
+        what every model call was given and what it used, with the per-stage
+        headroom verdict. Rides ``resource_pressure``; ``None`` without one."""
+        return getattr(self.resource_pressure, "calls", None)
+
+    @property
     def total_estimated_cost(self) -> Any:
         """The run's estimated USD cost (``Decimal``), or ``None`` if unpriceable."""
         ru = self.run_usage
