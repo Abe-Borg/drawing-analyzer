@@ -229,10 +229,11 @@ map lives in `src/drawing_analyzer/__init__.py`.
   batch item has none), and refuse the cache write if it is still unfinished.
   Partial text still ships (I-3), in `combined_text` too, with the error
   disclosed under it (`_combine`). Real-time usage accumulates across both
-  attempts and falls back to the truncated first read if the raised-cap call
-  cannot land or returns no text (`digest.stream_with_cap_retry`, shared with
-  synthesis and focus). Every persistent digest-cache read (both levels, both
-  transports) goes through
+  attempts. Both transports fall back to the truncated first read if the
+  raised-cap call cannot land or returns no text: real time in
+  `digest.stream_with_cap_retry` (shared with synthesis and focus), batch in
+  `batch_digest._replace_result_with_attempt_history` (see Batch recovery).
+  Every persistent digest-cache read (both levels, both transports) goes through
   `digest.finished_digest_entry`: an entry an older build stored under an
   unfinished `stop_reason` reads as a miss (no schema bump). An unfinished
   synthesis or focus reply ships its partial text with a `_combine`
@@ -276,7 +277,13 @@ map lives in `src/drawing_analyzer/__init__.py`.
   both. Heartbeat every 5 minutes. An abandoned batch appends a non-billable
   `DigestUsageAttempt` (`billable=False`, `terminal_status="ABANDONED_*"`, zero
   tokens) per sheet, so usage sees every attempt while the image-token estimate
-  still counts only response-bearing ones. Each slot records `served_by`.
+  still counts only response-bearing ones. Every result replacement goes
+  through `_replace_result_with_attempt_history`: a failed replacement with no
+  text never displaces a result with text. That result stays whole (a partial
+  read stays an error, never cached) and takes the merged attempt history; a
+  deferral (`_defer_batch_collection`) appends its note to its error. The next
+  round is still decided from the round's own reply. Each slot records
+  `served_by`, the batch its kept result was parsed from.
 - **Text extraction** (`render.py`): sheet text comes from
   `page.get_displaylist(annots=False)` via `TextPage.extractWORDS()`
   (`_page_text_and_view_words`, `_page_word_count`, `_page_text_and_word_count`).
