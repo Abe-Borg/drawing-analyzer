@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT, SheetDigest
 from drawing_analyzer import synthesis
 from drawing_analyzer.models import SheetRef
@@ -50,9 +49,19 @@ class _FakeClient(BetaClientMixin):
 # --------------------------------------------------------------------------- #
 
 
-def test_default_synthesis_model_is_opus(monkeypatch):
+def test_default_synthesis_model_keeps_high_effort_and_honors_override(monkeypatch):
+    # The default model must accept the request shape synthesis is tuned for:
+    # adaptive thinking at DEFAULT_SYNTHESIS_EFFORT. A default that silently
+    # dropped either would run the reconciliation shallower than intended.
     monkeypatch.delenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", raising=False)
-    assert default_synthesis_model() == REVIEW_MODEL_DEFAULT  # Opus 5
+    client = _FakeClient(lambda kw: FakeMessage(content=[FakeTextBlock(text="overview")]))
+    sheets = [_digest("M-101", "VAV-3 plan"), _digest("M-501", "VAV-3 schedule")]
+    result = synthesize_drawing_set(sheets, client=client)
+    kw = client.calls[0]
+    assert kw["model"] == result.model_used == default_synthesis_model()
+    assert kw["thinking"] == {"type": "adaptive"}
+    assert kw["output_config"] == {"effort": synthesis.DEFAULT_SYNTHESIS_EFFORT}
+
     monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-sonnet-5")
     assert default_synthesis_model() == "claude-sonnet-5"
 

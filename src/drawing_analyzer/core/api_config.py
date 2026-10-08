@@ -20,11 +20,15 @@ Model identifiers may be overridden via env vars:
                                               (default Haiku 5.5; pure
                                               structuring at medium effort).
     DRAWING_ANALYZER_CITATION_MODEL       — the citation check (default
-                                              Sonnet 5; needs web fetch, which
-                                              Opus 5 lacks).
+                                              Sonnet 5.5; needs web fetch).
+    DRAWING_ANALYZER_SYNTHESIS_MODEL      — the set overview (default
+                                              Sonnet 5.5, high effort;
+                                              text-only over the digests).
+    DRAWING_ANALYZER_FOCUS_MODEL          — the focus report (default
+                                              Sonnet 5.5, high effort).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
                                               (default Sonnet 5.5; needs web
-                                              fetch, which Opus 5 lacks).
+                                              fetch; billed to the reader).
     DRAWING_ANALYZER_REFUSAL_FALLBACK     — the server-side refusal
                                               fallback (default on; any falsy
                                               value disables it — see
@@ -59,9 +63,11 @@ MODEL_SONNET_46 = "claude-sonnet-4-6"
 MODEL_HAIKU_45 = "claude-haiku-4-5"
 
 # Review runs on the current Opus flagship; verification runs on Sonnet for
-# every finding it checks. Defaults track the newest generation (Opus 5 /
-# Sonnet 5). Override any of these via the matching ``DRAWING_ANALYZER_*_MODEL``
-# env var.
+# every finding it checks, and so do synthesis and focus, text-only calls over
+# digests the review model already wrote; the two extraction stages (set
+# identity, prose harvest) run on Haiku. Defaults track the newest generation
+# (Opus 5.5 / Sonnet 5.5 / Haiku 5.5). Override any of these via the matching
+# ``DRAWING_ANALYZER_*_MODEL`` env var.
 #
 # WP-07 §12.13: this comment used to say verification "reserves Opus for
 # escalation on CRITICAL/HIGH UNVERIFIED findings". Three things were wrong
@@ -81,7 +87,8 @@ VERIFICATION_MODEL_DEFAULT = os.environ.get(
     "DRAWING_ANALYZER_VERIFICATION_MODEL", MODEL_SONNET_5_5
 )
 
-# Model used when escalating a low-confidence/high-severity verification.
+# The investigation loop's model: it escalates anchored UNCERTAIN verdicts, at
+# any severity (see above; there is no severity gate).
 VERIFICATION_ESCALATION_MODEL = os.environ.get(
     "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_5_5
 )
@@ -91,13 +98,13 @@ VERIFICATION_ESCALATION_MODEL = os.environ.get(
 # `web_search_20260209` / `web_fetch_20260209` server tools and adaptive
 # thinking.
 #
-# This is why chat is the one role that does NOT default to Opus 5: web fetch is
-# not available on Opus 5 (Anthropic's Opus 5 migration guide lists it as one of
-# two exceptions to Opus 4.8 feature parity, alongside Priority Tier). Sending
-# the tool anyway is a 400, which would break the widget on every question.
-# Sonnet 5 supports both server tools plus adaptive thinking, and is cheaper —
-# which matters more here than elsewhere, since this call is billed to the
-# report *reader's* key, not the run's.
+# Chat defaulted away from Opus 5 because web fetch is not available on Opus 5
+# (one of two exceptions to its Opus 4.8 feature parity, alongside Priority
+# Tier); sending the tool anyway is a 400 that would break the widget on every
+# question. Opus 5.5 has web fetch, so Sonnet 5.5 is now a cost choice: both
+# server tools plus adaptive thinking at half Opus 5.5's per-token price, which
+# matters more here than elsewhere because this call is billed to the report
+# *reader's* key, not the run's.
 #
 # The requirement is enforced, not just documented: ``supports_web_fetch`` in
 # the capability registry gates the emitted tool list (html_report.py), so an
@@ -719,12 +726,14 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # The Anthropic API accepts an ``output_config.effort`` parameter on
 # supported models. The value tunes how eagerly the model produces tokens
 # and how aggressively it pursues tool calls. The documented levels are
-# ``low`` / ``medium`` / ``high`` / ``xhigh`` / ``max``. The review and
-# cross-check phases use ``xhigh`` — Anthropic recommends it for demanding
-# coding/agentic work, and per-spec review is the deepest-reasoning phase in
-# the pipeline. We still don't use ``max`` (it overshoots without a measured
-# benefit for this workload), and verification stays at medium/high so the
-# verdict envelope doesn't balloon.
+# ``low`` / ``medium`` / ``high`` / ``xhigh`` / ``max``. The review phase
+# (digest and critique) uses ``high``: Anthropic's Opus 5.5 guidance is that,
+# without tools, raising effort improves its reading of technical drawings, so
+# the API's ``medium`` default is not taken without an eval. The orphaned
+# cross-check phase stays registered at ``xhigh`` (see the scope note below).
+# We don't use ``max`` (it overshoots without a measured benefit for this
+# workload), and verification stays at medium/high so the verdict envelope
+# doesn't balloon.
 #
 # The level roster is per-model and does not follow family lines, so a coarse
 # "supports effort" boolean is not enough: sending an unsupported *level*
@@ -775,6 +784,8 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # - Harvest: low. Structuring one prose item into a Finding is formatting, not
 #   judgment; low effort is the cheap setting that keeps thinking *on* (see
 #   :func:`thinking_config_for` on why we never send ``{"type": "disabled"}``).
+#   The default harvest model, Haiku 5.5, gets medium instead: at low it can
+#   skip checks (see :func:`effort_config_for`).
 # - Citation: medium. Web research plus a short verdict.
 # - Unknown model: omit.
 #
@@ -920,11 +931,12 @@ def apply_effort_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # ---------------------------------------------------------------------------
 #
 # Each phase declares whether its system prompt and tool list are stable /
-# large / repeated enough to benefit from caching. Caching is enabled for
-# high-value phases (review, batch review, cross-check, verification +
-# retry/continuation, investigation). A phase whose prompt sits below the
-# Anthropic cache minimum should disable it here rather than pay for a cache
-# write that can never be read.
+# large / repeated enough to benefit from caching. Two stages attach breakpoints
+# through this module today: the investigation loop and the citation check.
+# The digest and critique build their own breakpoints; verification attaches
+# none, because its ~250-token system prompt is below the models' 512-token
+# minimum. A phase whose prompt sits below the Anthropic cache minimum should
+# disable it here rather than pay for a cache write that can never be read.
 
 
 @dataclass(frozen=True)
@@ -970,35 +982,45 @@ def cache_policy_for(phase: str | None) -> CachePolicy:
     return _PHASE_CACHE_POLICY.get(phase, _DEFAULT_PHASE_CACHE_POLICY)
 
 
-# The TTL every cache breakpoint in THIS module requests. Exported so the usage
-# ledger can price those writes at the right rate: a 1-hour write costs 2x base
-# input, not the 1.25x of a default 5-minute entry (see ``core.pricing``). Note
-# the digest and critique builders emit their own plain ``{"type": "ephemeral"}``
-# blocks and are therefore on the 5-minute rate — this constant describes the
-# api_config path only.
-CACHE_BREAKPOINT_TTL = "1h"
+# The TTL every cache breakpoint in THIS module requests. ``None`` is the API's
+# default 5-minute entry, and the usage ledger's spelling of it
+# (``models.UsageRecord.cache_write_ttl``). Exported so the ledger prices those
+# writes at the rate the request asked for: 1.25x base input for 5 minutes, 2x
+# for ``"1h"`` (see ``core.pricing``).
+#
+# The two stages that reach this path re-read their breakpoints seconds to a few
+# minutes apart. Each investigation turn is sent as soon as the previous one
+# returns, and the citation check runs four requests at a time over one shared
+# prefix, resuming a ``pause_turn`` at once. A read refreshes a 5-minute entry
+# at no charge, so the 1-hour TTL this used to request (inherited from a sibling
+# spec-review tool whose verification waves ran for hours) bought no extra hits.
+# It only raised the write on every turn's new evidence from 1.25x to 2x. The
+# report chat keeps its own 1-hour breakpoint (``html_report``), because a
+# reader pauses between questions. Set ``"1h"`` here only for a stage whose
+# re-reads are spaced more than five minutes apart.
+CACHE_BREAKPOINT_TTL: str | None = None
 
 
 def _cache_control_block() -> dict:
-    """Return the standard 1-hour ephemeral cache_control block.
+    """Return the ephemeral ``cache_control`` block this module attaches.
 
-    Spec Critic batch + verification waves run for 30 minutes to several
-    hours, well beyond the 5-minute default ephemeral cache TTL. The
-    1-hour TTL costs 2x the cache write but typically pays back inside
-    the second wave of a batch verification cycle, where the same system
-    prompt is sent hundreds of times.
+    The API's 5-minute default unless :data:`CACHE_BREAKPOINT_TTL` names a
+    longer TTL. Same block the digest and critique builders emit.
     """
-    return {"type": "ephemeral", "ttl": CACHE_BREAKPOINT_TTL}
+    block: dict = {"type": "ephemeral"}
+    if CACHE_BREAKPOINT_TTL is not None:
+        block["ttl"] = CACHE_BREAKPOINT_TTL
+    return block
 
 
 def cache_write_ttl_for(phase: str | None) -> str | None:
-    """Return the cache-write TTL a ``phase`` will actually request, or ``None``.
+    """Return the cache-write TTL a ``phase`` will actually request.
 
-    ``None`` means "this phase writes no cache through this module", which is
-    also the correct value to hand the pricer when no breakpoint was attached.
-    Callers pass the result straight to ``core.pricing.usage_record_cost`` so a
-    stage's reported ``cache_creation_input_tokens`` are priced at the rate the
-    request actually asked for, rather than the 5-minute default.
+    ``None`` is the 5-minute default. It is both what this module requests and
+    the correct value for the pricer when no breakpoint was attached. Callers
+    pass the result straight to ``core.pricing.usage_record_cost``, so a stage's
+    reported ``cache_creation_input_tokens`` are priced at the rate the request
+    actually asked for.
     """
     return CACHE_BREAKPOINT_TTL if cache_policy_for(phase).caches_anything else None
 
@@ -1465,6 +1487,37 @@ def apply_refusal_fallback(kwargs: dict, *, model: str) -> dict:
     out["betas"] = betas
     out["fallbacks"] = "default"
     return out
+
+
+def drop_declined_partial(content: list) -> list:
+    """Return ``content`` safe to echo back after a mid-output refusal fallback.
+
+    Before the last ``fallback`` block sits the declined model's partial. The
+    API says to echo only its ``text`` and paired server-tool blocks; its
+    thinking and ``tool_use`` blocks (requests the declined model made) must not
+    go back. The marker itself is dropped too, so the history stays valid if the
+    fallback latches off and the next turn goes out without the beta. Content
+    with no ``fallback`` block is returned unchanged.
+    """
+    kinds = [str(_block_field(b, "type") or "") for b in content]
+    if "fallback" not in kinds:
+        return content
+    boundary = len(kinds) - 1 - kinds[::-1].index("fallback")
+    answered = {
+        _block_field(b, "tool_use_id") for b, kind in zip(content[:boundary], kinds)
+        if kind.endswith("_tool_result")
+    }
+    kept = [
+        b for b, kind in zip(content[:boundary], kinds)
+        if kind == "text"
+        or (kind == "server_tool_use" and _block_field(b, "id") in answered)
+        or kind.endswith("_tool_result")
+    ]
+    return kept + list(content[boundary + 1:])
+
+
+def _block_field(block: Any, key: str) -> Any:
+    return block.get(key) if isinstance(block, dict) else getattr(block, key, None)
 
 
 def messages_namespace(client: Any, kwargs: dict):

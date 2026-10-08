@@ -23,6 +23,9 @@ from drawing_analyzer.cost import (
     format_exhaustive_cost_prompt,
 )
 from drawing_analyzer.models import RunUsage, UsageRecord
+from tests.fixtures.fake_anthropic import (
+    FakeMessage, FakeTextBlock, FakeUsage, fake_fallback_usage,
+)
 
 _OPUS = "claude-opus-5"
 
@@ -297,12 +300,57 @@ def test_haiku_usage_ledger_sums_short_and_long_requests_without_repricing_total
     assert usage.total_estimated_cost == Decimal("0.0515")
 
 
+_OPUS_5_5 = "claude-opus-5-5"
+_OPUS_4_8 = "claude-opus-4-8"
+
+
+@pytest.mark.parametrize("usage, records, fallbacks", [
+    # An ordinary reply: one record at the requested model.
+    (FakeUsage(input_tokens=1_000, output_tokens=400),
+     [(_OPUS_5_5, None, "COMPLETE", Decimal("0.012"))], []),
+    # Server-tool loop iterations without a fallback stay one ordinary record.
+    (FakeUsage(input_tokens=1_000, output_tokens=400, iterations=[
+        {"type": "message", "input_tokens": 600, "output_tokens": 100},
+        {"type": "message", "input_tokens": 400, "output_tokens": 300},
+    ]), [(_OPUS_5_5, None, "COMPLETE", Decimal("0.012"))], []),
+    # Declined by Opus 5.5, rescued by Opus 4.8: each attempt at its own rate
+    # ($4/$20 vs $5/$25), though top-level usage reports only the rescue.
+    (fake_fallback_usage(), [
+        (_OPUS_5_5, None, "REFUSED", Decimal("0.006")),
+        (_OPUS_4_8, _OPUS_5_5, "COMPLETE", Decimal("0.015")),
+    ], [{"stage_family": "digest", "requested_model": _OPUS_5_5,
+         "served_model": _OPUS_4_8, "responses": 1, "declined_attempts": 1}]),
+    # A sticky turn: the fallback model served it directly, nothing declined.
+    (fake_fallback_usage(declined=None), [
+        (_OPUS_4_8, _OPUS_5_5, "COMPLETE", Decimal("0.015")),
+    ], [{"stage_family": "digest", "requested_model": _OPUS_5_5,
+         "served_model": _OPUS_4_8, "responses": 1, "declined_attempts": 0}]),
+], ids=["ordinary", "tool-loop", "declined-then-rescued", "sticky"])
+def test_refusal_fallback_attempts_are_priced_at_the_model_that_ran_them(
+    usage, records, fallbacks,
+):
+    from drawing_analyzer.core.request_usage import RequestUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    message = FakeMessage(content=[FakeTextBlock(text="digest")], usage=usage)
+    ledger = RunUsage()
+    _record_usage(
+        ledger, family="digest", instance="digest:SRC-0001:p0", model=_OPUS_5_5,
+        request_usage=[RequestUsage.from_message(message)],
+    )
+    assert [
+        (r.model, r.requested_model, r.terminal_status, r.estimated_cost)
+        for r in ledger.records
+    ] == records
+    assert ledger.model_fallbacks() == fallbacks
+    assert ledger.to_dict()["model_fallbacks"] == fallbacks
+
+
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
     """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
 
-    ``api_config._cache_control_block`` requests the 1-hour TTL, so any stage
-    routed through its breakpoint helpers (today the investigation loop) writes
-    at 2x. Pricing every write at 1.25x under-reported those records by 60%.
+    Any stage that requests the 1-hour TTL writes at 2x; pricing every write at
+    1.25x under-reported such records by 60%.
     """
     five_min = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
     one_hour = usage_record_cost(
@@ -327,15 +375,20 @@ def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
 def test_cache_write_ttl_comes_from_the_policy_that_builds_the_breakpoint(monkeypatch):
     """The ledger's TTL is read from the same policy the request builder uses.
 
-    Every registered phase currently caches, so all of them write at the 1-hour
-    rate. The ``None`` branch is still live for a phase whose policy disables
-    caching — it must report "no cache written" rather than a rate, or the
-    pricer would invent a write cost for a request that never made one.
+    Whatever TTL the breakpoint helper attaches is the TTL the pricer is told,
+    for every phase that caches. A phase whose policy disables caching must
+    report "no cache written" rather than a rate, or the pricer would invent a
+    write cost for a request that never made one. The longer TTL is forced here
+    so the two branches are distinguishable.
     """
     from drawing_analyzer.core import api_config as api
 
+    for phase in (api.PHASE_INVESTIGATION, api.PHASE_CITATION):
+        assert api.cache_write_ttl_for(phase) == api._cache_control_block().get("ttl")
+
+    monkeypatch.setattr(api, "CACHE_BREAKPOINT_TTL", "1h")
+    assert api._cache_control_block() == {"type": "ephemeral", "ttl": "1h"}
     assert api.cache_write_ttl_for(api.PHASE_INVESTIGATION) == "1h"
-    assert api.cache_write_ttl_for(api.PHASE_HARVEST) == "1h"
 
     monkeypatch.setitem(
         api._PHASE_CACHE_POLICY, "uncached_phase",

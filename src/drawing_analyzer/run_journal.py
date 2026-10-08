@@ -787,7 +787,20 @@ def _usage_lines(ctx: Any) -> list[str]:
         "  (totals are derived sums over the append-only usage ledger, §15.6; "
         "costs are estimates)"
     )
+    for row in _model_fallbacks(ctx):
+        lines.append(
+            f"  Refusal fallback: {row['stage_family']} — {row['requested_model']} "
+            f"declined {_int(row.get('declined_attempts', 0))} attempt(s); "
+            f"{row['served_model']} served {_int(row.get('responses', 0))} response(s) "
+            "(priced at the serving model's rate, not cached)"
+        )
     return lines
+
+
+def _model_fallbacks(ctx: Any) -> list[dict]:
+    """The run's refusal-fallback rows, or ``[]`` for a context without a ledger."""
+    rows = getattr(getattr(ctx, "run_usage", None), "model_fallbacks", None)
+    return list(rows()) if callable(rows) else []
 
 
 def evidence_summary(findings: "list[Any]") -> dict:
@@ -923,6 +936,14 @@ def render_run_log(
         lines.append(
             f"Starvation:  {starvation} (API throttling, host CPU/memory/disk, agent "
             "budgets — see Resource pressure below)"
+        )
+    fallbacks = _model_fallbacks(ctx)
+    if fallbacks:
+        served = sorted({str(row["served_model"]) for row in fallbacks})
+        lines.append(
+            f"Fallback:    {sum(_int(row.get('responses', 0)) for row in fallbacks)} "
+            f"response(s) served by {', '.join(served)} after a refusal "
+            "(see Usage & estimated cost below)"
         )
     environment = dict(journal.environment) if journal is not None else {}
     if environment:

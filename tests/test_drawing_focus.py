@@ -206,11 +206,21 @@ def test_digest_sheet_focus_isolated_in_cache():
 # --------------------------------------------------------------------------- #
 
 
-def test_default_focus_model_env_override(monkeypatch):
-    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
-
+def test_default_focus_model_keeps_high_effort_and_honors_override(monkeypatch):
+    # As for synthesis: the default model must accept adaptive thinking at
+    # DEFAULT_FOCUS_EFFORT, not silently drop either.
     monkeypatch.delenv("DRAWING_ANALYZER_FOCUS_MODEL", raising=False)
-    assert default_focus_model() == REVIEW_MODEL_DEFAULT
+    client = _FakeClient(
+        lambda kw: FakeMessage(content=[FakeTextBlock(text="Room 101: WC-1")])
+    )
+    result = generate_focus_report(
+        [_digest("P-101", "Room 101 has WC-1")], ROOMS_FOCUS, client=client,
+    )
+    kw = client.calls[0]
+    assert kw["model"] == result.model_used == default_focus_model()
+    assert kw["thinking"] == {"type": "adaptive"}
+    assert kw["output_config"] == {"effort": focus.DEFAULT_FOCUS_EFFORT}
+
     monkeypatch.setenv("DRAWING_ANALYZER_FOCUS_MODEL", "claude-sonnet-5")
     assert default_focus_model() == "claude-sonnet-5"
 

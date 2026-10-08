@@ -25,11 +25,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .core.api_config import (
-    REVIEW_MODEL_DEFAULT,
+    MODEL_SONNET_5_5,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -59,12 +59,17 @@ _FOCUS_CACHE_CONTRACT = 1
 
 
 def default_focus_model() -> str:
-    """Model for the focus-report pass — Opus 5 by default, overridable via
-    ``DRAWING_ANALYZER_FOCUS_MODEL``."""
+    """Model for the focus-report pass — Sonnet 5.5 by default, overridable via
+    ``DRAWING_ANALYZER_FOCUS_MODEL``.
+
+    Like synthesis, one text-only call that answers the operator's question
+    from digests the vision passes already wrote (each sheet's own focus
+    section included), at high effort, at half Opus 5.5's per-token price.
+    """
     override = os.environ.get("DRAWING_ANALYZER_FOCUS_MODEL")
     if override and override.strip():
         return override.strip()
-    return REVIEW_MODEL_DEFAULT
+    return MODEL_SONNET_5_5
 
 
 FOCUS_REPORT_SYSTEM_PROMPT = """\
@@ -324,8 +329,9 @@ def generate_focus_report(
         request_usage=request_usage,
     )
     # Only a complete report is cached. An unfinished one served from the
-    # cache would read as complete on every later run, at zero cost.
-    if result.ok:
+    # cache would read as complete on every later run, at zero cost; and a
+    # refusal fallback's answer came from another model than the key names.
+    if result.ok and not any_fallback_served(result.request_usage):
         put_stage_cache_entry(
             cache,
             cache_key,

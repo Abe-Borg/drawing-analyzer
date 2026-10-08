@@ -23,6 +23,8 @@ from drawing_analyzer.cost import (
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
 )
+from drawing_analyzer.focus import default_focus_model
+from drawing_analyzer.synthesis import default_synthesis_model
 
 OPUS = "claude-opus-5-5"
 OUT_PER_SHEET = 64_000
@@ -274,8 +276,9 @@ def test_drawing_estimate_batch_keeps_synthesis_at_realtime_rate():
         10, model=OPUS, batch=True, synthesize=True
     )
     synth_input = 10 * TEXT_PER_SHEET + PROMPT_PER_SHEET
+    # Synthesis is priced at its own resolved model, not the review model.
     expected_delta = estimate_request_cost(
-        synth_input, SYNTH_OUT, model=OPUS, batch=False
+        synth_input, SYNTH_OUT, model=default_synthesis_model(), batch=False
     )
     assert with_synthesis.total_cost - without.total_cost == pytest.approx(expected_delta)
 
@@ -293,7 +296,7 @@ def test_drawing_estimate_batch_keeps_focus_report_at_realtime_rate():
     )
     focus_input = 10 * (TEXT_PER_SHEET + FOCUS_PER_SHEET) + PROMPT_PER_SHEET
     focus_cost = estimate_request_cost(
-        focus_input, FOCUS_OUT, model=OPUS, batch=False
+        focus_input, FOCUS_OUT, model=default_focus_model(), batch=False
     )
     assert focused.total_cost == pytest.approx(digest_cost + focus_cost)
 
