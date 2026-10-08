@@ -337,8 +337,8 @@ def test_pause_resumes_cache_last_assistant_block_and_preserve_payloads(dict_blo
     assert usage.total_cache_write_tokens == 60 and usage.total_cache_read_tokens == 90
     assert sum(r.billable_tool_uses.get("web_search", 0) for r in usage.records) == 6
     for request in client.calls:
-        assert request["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-        assert request["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+        assert request["system"][-1]["cache_control"] == {"type": "ephemeral"}
+        assert request["tools"][-1]["cache_control"] == {"type": "ephemeral"}
         assistants = request["messages"][1:]
         marked = [(i, j) for i, m in enumerate(assistants)
                   for j, b in enumerate(m["content"]) if "cache_control" in b]
@@ -351,7 +351,7 @@ def test_pause_resumes_cache_last_assistant_block_and_preserve_payloads(dict_blo
             expected = [b if isinstance(b, dict) else vars(b) for b in originals[i].content]
             assert blocks == expected  # Keep encrypted tool results and IDs intact.
         if assistants:
-            assert assistants[-1]["content"][-1]["cache_control"]["ttl"] == "1h"
+            assert assistants[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert responses == originals  # Cache decoration never mutates SDK responses.
 
 
@@ -363,5 +363,5 @@ def test_resume_sdk_blocks_preserve_thinking_signatures():
     messages = [{"role": "assistant", "content": blocks}]
     cached = citation._resume_messages_with_cache(messages)
     assert cached[0]["content"][0] == {"type": "thinking", "thinking": "reason", "signature": "signed"}
-    assert cached[0]["content"][-1]["cache_control"]["ttl"] == "1h"
+    assert cached[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert messages[0]["content"] is blocks

@@ -300,9 +300,8 @@ def test_haiku_usage_ledger_sums_short_and_long_requests_without_repricing_total
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
     """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
 
-    ``api_config._cache_control_block`` requests the 1-hour TTL, so any stage
-    routed through its breakpoint helpers (today the investigation loop) writes
-    at 2x. Pricing every write at 1.25x under-reported those records by 60%.
+    Any stage that requests the 1-hour TTL writes at 2x; pricing every write at
+    1.25x under-reported such records by 60%.
     """
     five_min = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
     one_hour = usage_record_cost(
@@ -327,15 +326,20 @@ def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
 def test_cache_write_ttl_comes_from_the_policy_that_builds_the_breakpoint(monkeypatch):
     """The ledger's TTL is read from the same policy the request builder uses.
 
-    Every registered phase currently caches, so all of them write at the 1-hour
-    rate. The ``None`` branch is still live for a phase whose policy disables
-    caching — it must report "no cache written" rather than a rate, or the
-    pricer would invent a write cost for a request that never made one.
+    Whatever TTL the breakpoint helper attaches is the TTL the pricer is told,
+    for every phase that caches. A phase whose policy disables caching must
+    report "no cache written" rather than a rate, or the pricer would invent a
+    write cost for a request that never made one. The longer TTL is forced here
+    so the two branches are distinguishable.
     """
     from drawing_analyzer.core import api_config as api
 
+    for phase in (api.PHASE_INVESTIGATION, api.PHASE_CITATION):
+        assert api.cache_write_ttl_for(phase) == api._cache_control_block().get("ttl")
+
+    monkeypatch.setattr(api, "CACHE_BREAKPOINT_TTL", "1h")
+    assert api._cache_control_block() == {"type": "ephemeral", "ttl": "1h"}
     assert api.cache_write_ttl_for(api.PHASE_INVESTIGATION) == "1h"
-    assert api.cache_write_ttl_for(api.PHASE_HARVEST) == "1h"
 
     monkeypatch.setitem(
         api._PHASE_CACHE_POLICY, "uncached_phase",

@@ -2462,9 +2462,10 @@ def _run_qc_stages(
                             cache_read_tokens=rec.cache_read_tokens,
                             cache_write_tokens=rec.cache_write_tokens,
                             request_usage=getattr(rec, "request_usage", None),
-                            # The investigation loop caches its system prompt and
-                            # tool list through api_config's breakpoint helpers,
-                            # which request a 1-hour TTL — a 2x write, not 1.25x.
+                            # The investigation loop caches its system prompt, tool
+                            # list and evidence turns through api_config's
+                            # breakpoint helpers; price the writes at the TTL
+                            # those helpers request.
                             cache_write_ttl=cache_write_ttl_for(PHASE_INVESTIGATION),
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
@@ -2567,8 +2568,9 @@ def _run_qc_stages(
                         cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
                         cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
                         request_usage=getattr(cires, "request_usage", None),
-                        # System, tools, and paused conversation prefixes all ask
-                        # for 1h cache entries (2x writes rather than 1.25x).
+                        # System, tools, and paused conversation prefixes all use
+                        # api_config's breakpoint helpers; price the writes at the
+                        # TTL those helpers request.
                         cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
                         billable_tool_uses={"web_search": int(
                             getattr(cires, "web_search_requests", 0) or 0

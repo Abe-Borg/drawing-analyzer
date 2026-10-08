@@ -47,6 +47,7 @@ from .core.api_config import (
     clamp_effort_for_model,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    output_cap_for_model,
 )
 from .core.request_usage import RequestUsage
 from .core.structured_outputs import StructuredOutputsGate, attach_format
@@ -55,6 +56,7 @@ from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
+    MAX_TOKENS_RETRY_CEILING,
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
     _get,
@@ -113,11 +115,13 @@ def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
 # Back-compat alias for the private spelling used before Phase 23C made it public.
 _run_checklists = run_checklists
 
-# Critique shares the digest's output-shaping defaults: Opus 5, adaptive
-# thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
-# Decoupled from the digest cap: the critique is a second full-coverage read of
-# the same images and deserves its own envelope, not whatever the digest is set
-# to this week. Same 64k reasoning as digest (see DEFAULT_DIGEST_MAX_TOKENS).
+# Critique shares the digest's output-shaping defaults: the review model (Opus
+# 5.5), adaptive thinking, effort high, a 64k max_tokens envelope (full
+# coverage, deliberate reasoning). Decoupled from the digest cap: the critique is
+# a second full-coverage read of the same images and deserves its own envelope,
+# not whatever the digest is set to this week. Same 64k reasoning as digest (see
+# DEFAULT_DIGEST_MAX_TOKENS), and the same raised cap for a truncated read's
+# replacement (MAX_TOKENS_RETRY_CEILING).
 DEFAULT_CRITIQUE_MAX_TOKENS = 64_000
 DEFAULT_CRITIQUE_EFFORT = DEFAULT_DIGEST_EFFORT
 DEFAULT_CRITIQUE_MAX_RETRIES = DEFAULT_DIGEST_MAX_RETRIES
@@ -1075,6 +1079,9 @@ class CritiqueRunOutcome:
     # Preserve request boundaries for pricing models with prompt-size tiers.
     # No entry is created for a transport error that returned no response.
     request_usage: RequestUsage | None = None
+    # The response's ``stop_reason`` ("" when no response arrived). A read that
+    # failed at ``max_tokens`` is replaced at a raised cap, not the same one.
+    stop_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -1193,16 +1200,17 @@ def outcome_from_message(
     request_usage = RequestUsage.from_message(message)
     in_tok, out_tok = request_usage.input_tokens, request_usage.output_tokens
     cr, cw = request_usage.cache_read_tokens, request_usage.cache_write_tokens
+    stop = _get(message, "stop_reason")
+    stop_reason = str(stop or "")
     raw = _message_text(message)
     if not raw:
         # An empty body (e.g. adaptive thinking consumed the whole token budget)
         # is a *failed* read, not a clean sheet — so the run counts as failed (not
         # merged, not cached) and is re-attempted next time.
-        stop = _get(message, "stop_reason")
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            request_usage=request_usage,
+            request_usage=request_usage, stop_reason=stop_reason,
             error=f"empty critique (stop_reason={stop!r})",
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
@@ -1214,7 +1222,7 @@ def outcome_from_message(
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            request_usage=request_usage,
+            request_usage=request_usage, stop_reason=stop_reason,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
         )
@@ -1226,7 +1234,7 @@ def outcome_from_message(
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            request_usage=request_usage,
+            request_usage=request_usage, stop_reason=stop_reason,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
                   f"({parsed.note})",
@@ -1242,7 +1250,7 @@ def outcome_from_message(
         run_id=run_id, status="COMPLETE", findings=findings, claims=claims,
         input_tokens=in_tok, output_tokens=out_tok,
         cache_read_tokens=cr, cache_write_tokens=cw,
-        request_usage=request_usage,
+        request_usage=request_usage, stop_reason=stop_reason,
         parse_status=parsed.status, parse_note=parsed.note,
     )
 
@@ -1502,13 +1510,13 @@ def critique_sheet_self_consistent(
     # would just pay the cache-write premium for nothing).
     cache_prefix = runs >= 2
 
-    def _read(i: int) -> CritiqueRunOutcome:
+    def _read(i: int, cap: int = max_tokens) -> CritiqueRunOutcome:
         return _critique_read(
             rendered,
             run_id=f"critique_{i + 1}",
             client=client,
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=cap,
             use_thinking=use_thinking,
             effort=effort,
             max_retries=max_retries,
@@ -1523,11 +1531,24 @@ def critique_sheet_self_consistent(
         # One replacement per sheet, while the shared image prefix is still warm.
         # Reuse the failed slot's provenance/checklist; retain its original outcome
         # so billed tokens (including parse failures) remain in the usage totals.
+        #
+        # A read cut off at ``max_tokens`` would most likely be cut off again at
+        # the same cap, so its replacement gets the digest's raised cap: double,
+        # bounded by MAX_TOKENS_RETRY_CEILING and the model's ceiling.
+        # ``max_tokens`` is not part of the prompt, so the warm image prefix
+        # still serves it. The result keeps the cache key the read was looked
+        # up under, as a raised-cap digest does.
+        cap = max_tokens
+        if all_outcomes[failed_run].stop_reason == "max_tokens":
+            cap = max(max_tokens, output_cap_for_model(
+                model, requested=min(max_tokens * 2, MAX_TOKENS_RETRY_CEILING),
+            ))
         _log.info(
-            "critique: replacing failed read %d/%d (%s)",
+            "critique: replacing failed read %d/%d (%s)%s",
             failed_run + 1, runs, rendered.ref.display_label,
+            f" at max_tokens={cap:,}" if cap != max_tokens else "",
         )
-        all_outcomes.append(_read(failed_run))
+        all_outcomes.append(_read(failed_run, cap))
 
     result = result_from_outcomes(
         all_outcomes, requested_runs=runs, label=rendered.ref.display_label
