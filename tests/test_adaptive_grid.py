@@ -27,7 +27,7 @@ from drawing_analyzer import render  # noqa: E402
 
 
 SHAPES = [(8.5, 11), (11, 17), (34, 44), (30, 42), (8.5, 11)]
-GRIDS = [(20, 1), (2, 1), (6, 6), (6, 6), (21, 1)]
+GRIDS = [(43, 1), (2, 1), (6, 6), (6, 6), (27, 1)]
 
 
 def _mixed_pdf(path):
@@ -263,7 +263,7 @@ def test_cost_prices_chosen_grids_and_unmeasured_allowance_bounds_large_pages(tm
     pdf = _mixed_pdf(tmp_path / "mixed.pdf")
     bases = list(render.iter_sheet_cost_bases([pdf]))
     est = estimate_image_tokens_for_bases(bases, model="claude-opus-5")
-    assert est.tokens == 7_399 + 14_352 + 93_013 + 85_987 + 12_043
+    assert est.tokens == 7_280 + 14_125 + 91_168 + 83_328 + 11_736
     assert est.tokens < estimate_image_tokens_for_bases(bases, rows=6, cols=6,
                                                      model="claude-opus-5").tokens
     for model in ("claude-opus-5", "claude-haiku-4-5"):

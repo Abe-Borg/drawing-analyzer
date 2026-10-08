@@ -91,7 +91,8 @@ map lives in `src/drawing_analyzer/__init__.py`.
   is the pre-run estimate (verification/citation as a low–high band); price every
   stage with **its own resolved model** and the runtime's own `critique_runs()`.
   Count critique imagery with the critique model, never reused from the digest
-  count (`estimate_image_tokens` clamps at 4784 hi-res / 1568 standard).
+  count (`estimate_image_tokens` prices ⌈w/28⌉·⌈h/28⌉ patches after the API's
+  resize, at most 4784 hi-res / 1568 standard).
 - **Image-token geometry:** the GUI starts drawing preflight whenever files
   are loaded, even with no installed profiles. It prices from real page shapes
   once that scan has measured the current file list, and from the conservative
@@ -107,7 +108,10 @@ map lives in `src/drawing_analyzer/__init__.py`.
   before preflight clears the previous selection's bases.
   `pipeline.estimate_image_tokens_for_set` remains a true upper bound: without
   sizes it covers the adaptive 100-image budget (478,400 tokens/page on Opus 5).
-  Explicit 6×6 / fixed-grid mode keeps the legacy 177,008 allowance.
+  Explicit 6×6 / fixed-grid mode keeps the legacy 177,008 allowance. Both bound
+  each image with `core.tokenizer.image_tokens_upper_bound`, never by pricing a
+  square: the API resizes an oversized square below the cap that a narrower
+  image of the same long edge reaches.
   `cost.estimate_image_tokens_for_bases` prices each page from a `SheetCostBasis`
   (displayed w/h, vector/raster/unknown, capped text length, geometry
   availability and error — no words, full text, image bytes, or path). Aspect
@@ -148,17 +152,18 @@ map lives in `src/drawing_analyzer/__init__.py`.
   and critique spool/upload matching. Never compare adaptive pages to global
   `None` grid arguments. Cost bases choose the same grid before pricing it with
   the stage's model; a cheaper model changes pricing, not the selected geometry.
-  Measured Opus 5 image tokens per read, before blank suppression, with the
-  minimum DPI read: vector Letter 93,013 → 7,399 (20×1, −92.0%, 183.53 DPI);
-  vector Tabloid 77,905 → 14,352 (2×1, −81.6%, 190.91 DPI); raster Letter
-  151,619 → 12,043 (21×1, −92.1%, 234.35 DPI); vector ANSI D 22×34 77,905 →
-  48,596 (7×3, −37.6%, 183.39 DPI); vector ARCH D 24×36 80,248 → 52,624
-  (5×2, −34.4%, 184.29 DPI). The 20×1 / 21×1 strip results follow the
-  image-count target discontinuity; square grids are not necessarily the token
-  minimum. A sheet larger than ANSI E can cost more than 6×6, because 6×6
-  reads it below the floor (ARCH E 36×48: 6×6 reads 168.10 DPI; 7×5 costs
-  110,281 vs 90,276). Digest and both critique reads use the chosen grid.
-  E / E1 counts and images stay unchanged.
+  Measured Opus 5 image tokens per read (patch-priced), before blank
+  suppression, with the minimum DPI read: vector Letter 91,168 → 7,280 (43×1,
+  −92.0%, 183.53 DPI); vector Tabloid 76,216 → 14,125 (2×1, −81.5%, 190.91 DPI);
+  raster Letter 148,248 → 11,736 (27×1, −92.1%, 234.35 DPI); vector ANSI D
+  22×34 76,216 → 47,040 (7×3, −38.3%, 183.39 DPI); vector ARCH D 24×36
+  78,288 → 51,952 (5×2, −33.6%, 184.29 DPI). The 43×1 / 27×1 strip results
+  follow the image-count target discontinuity and patch rounding, which favors
+  strips just under a whole number of 28 px patches tall; square grids are not
+  necessarily the token minimum. A sheet larger than ANSI E can cost more than
+  6×6, because 6×6 reads it below the floor (ARCH E 36×48: 6×6 reads 168.10
+  DPI; 7×5 costs 107,408 vs 87,024). Digest and both critique reads use the
+  chosen grid. E / E1 counts and images stay unchanged.
 - **Work dirs:** verify, investigate, and markup create a `drawing_qc_*` temp
   dir when the caller supplied no `work_dir`. `pipeline._prune_stale_work_dirs`
   reaps them on the way **in** (`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default

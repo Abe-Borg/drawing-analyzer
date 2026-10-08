@@ -125,10 +125,11 @@ _GRID_MODEL = "claude-opus-5"
 # ---------------------------------------------------------------------------
 #
 # Image tokens scale with the SQUARE of effective resolution — a tile's cost is
-# its pixel area over 750 — and the tiles ride the digest plus both critique
-# reads, so the vector target is the single highest-leverage number in the app's
-# bill. On a 34x44" sheet at the 6x6 grid: 1560 px is ~183 minimum tile DPI and ~92.9k image
-# tokens/sheet; 1400 px is ~19% fewer, 1240 px ~37% fewer, 1100 px ~50% fewer.
+# its count of 28x28-px patches, close to its pixel area over 784 — and the tiles
+# ride the digest plus both critique reads, so the vector target is the single
+# highest-leverage number in the app's bill. On a 34x44" sheet at the 6x6 grid:
+# 1560 px is ~183 minimum tile DPI and ~91.2k image tokens/sheet; 1400 px is
+# ~20% fewer, 1240 px ~36% fewer, 1100 px ~50% fewer.
 #
 # Whether any of those hold up is a QUALITY question this module cannot answer,
 # so the default is unchanged and this exists only to make a sweep runnable
@@ -370,9 +371,12 @@ def rendered_pixel_size(
     Rounding the dimension instead — ``round((x1-x0) * zoom)`` — is what the
     plan's §2.5/§2.6 reference values were derived with, and it is *systematically
     low*, because an integer rect expands to contain rather than to nearest:
-    92,871 vs the renderer's 93,013 for a vector E-size sheet at 6x6 (0.15%).
-    Those figures remain valid arithmetic cross-checks; they are not the pixel
-    counts this codebase's renderer emits, and §2.5 says as much.
+    under the older ``w*h/750`` price, 92,871 vs the renderer's 93,013 for a
+    vector E-size sheet at 6x6 (0.15%). Priced in 28 px patches the two agree on
+    that sheet (91,168), because no extra pixel crosses a patch boundary there;
+    near a boundary one pixel is a whole row of patches. Either way the plan's
+    sizes are not the pixel counts this codebase's renderer emits, and §2.5
+    says as much.
 
     Pure: no PyMuPDF (I-5). ``zoom <= 0`` or an inverted rect yields ``(0, 0)``,
     which the tokenizer prices at zero rather than raising.

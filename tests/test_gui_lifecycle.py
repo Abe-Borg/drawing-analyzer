@@ -289,9 +289,9 @@ def test_gui_measured_estimate_prices_each_pages_physical_grid(tmp_path, monkeyp
         workers.pop()()
         callbacks.pop()()
         bases = app._usable_preflight_bases()
-        # Pixel/render oracles from the mixed-size grid qualification: 20x1,
-        # 2x1, 6x6 vector grids and the 21x1 raster grid, on the hi-res tier.
-        expected = 7_399 + 14_352 + 93_013 + 12_043
+        # Pixel/render oracles from the mixed-size grid qualification: 43x1,
+        # 2x1, 6x6 vector grids and the 27x1 raster grid, on the hi-res tier.
+        expected = 7_280 + 14_125 + 91_168 + 11_736
         standard = estimate_drawing_set_cost(4, bases=bases)
         exhaustive = estimate_exhaustive_run_cost(4, bases=bases)
         assert standard.shape_aware and exhaustive.shape_aware

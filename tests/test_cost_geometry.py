@@ -12,14 +12,17 @@ string snapshots (§10.5), plus a handful of hand-checked values from §2.5/§2.
 so the implementation is not merely self-consistent.
 
 **On the reference values.** §2.5's figures were derived with whole-pixel
-dimension rounding — ``round((x1-x0) * zoom)``. The renderer does not do that:
-``get_pixmap`` sizes the pixmap from ``(rect * matrix).irect``, the smallest
-integer rect containing the *transformed* rect, which expands to contain and so
-runs systematically higher. A vector E-size sheet is 92,871 tokens by the plan's
-rule and 93,013 by the renderer's — 0.15%. §2.5 says its values are "arithmetic
-cross-checks, not production regression fixtures requiring exact agreement with
-rasterizer rounding", which is exactly this. The rendered-fixture tests below
-assert against the **renderer**; the plan's numbers are asserted only within a
+dimension rounding — ``round((x1-x0) * zoom)`` — and the older ``w*h/750``
+price. The renderer does not round that way: ``get_pixmap`` sizes the pixmap
+from ``(rect * matrix).irect``, the smallest integer rect containing the
+*transformed* rect, which expands to contain and so runs up to a pixel higher.
+Under the documented price, ``ceil(w/28) * ceil(h/28)`` patches, that pixel
+crosses no patch boundary on these sheets, so the plan's rounding and the
+renderer's price a vector E-size sheet identically (91,168; the plan's own
+92,871 and 93,013 came from the older price). §2.5 says its values are
+"arithmetic cross-checks, not production regression fixtures requiring exact
+agreement with rasterizer rounding". The rendered-fixture tests below assert
+against the **renderer**; re-derived plan values are asserted only within a
 documented tolerance.
 """
 from __future__ import annotations
@@ -32,7 +35,7 @@ from drawing_analyzer.cost import (
     estimate_exhaustive_run_cost,
     estimate_image_tokens_for_bases,
 )
-from drawing_analyzer.core.tokenizer import estimate_image_tokens
+from drawing_analyzer.core.tokenizer import image_tokens_upper_bound
 from drawing_analyzer.models import (
     CLASSIFICATION_RASTER,
     CLASSIFICATION_UNKNOWN,
@@ -89,34 +92,36 @@ def test_image_tokens_are_scale_invariant_in_both_regimes(grid, classification):
 
 
 # --------------------------------------------------------------------------- #
-# §2.6 — aspect sensitivity DIFFERS by regime, because of cap clamping
+# §2.6 — aspect sensitivity DIFFERS by regime, because of the token cap
 # --------------------------------------------------------------------------- #
 
 
 def test_aspect_ratio_drives_cost_in_the_shipping_many_image_regime():
-    """At 6x6 / 1560 nothing clamps: the largest image is 3,245 < the 4,784 cap.
+    """At 6x6 / 1560 nothing is resized: the largest image is 3,136 < the 4,784 cap.
 
-    The plan measures the 34x44-vs-square spread at 20.27% of the larger.
+    Priced in patches, the 34x44-vs-square spread is 18.9% of the larger (the
+    plan's 20.27% used the older w*h/750 price).
     """
     tall, square = tokens(E, rows=6, cols=6), tokens(SQUARE, rows=6, cols=6)
     assert tall < square
     spread = (square - tall) / square
-    assert 0.19 < spread < 0.22, spread
+    assert 0.18 < spread < 0.20, spread
 
 
-def test_aspect_ratio_washes_out_entirely_in_the_few_image_regime():
-    """At 3x3 / 2576 essentially every image hits the cap, so only count matters.
+def test_aspect_ratio_washes_out_in_the_few_image_regime():
+    """At 3x3 / 2576 every image is resized to just under the cap, so count rules.
 
     This is the half that is easy to get backwards: the <=20-image branch is not
-    "more precise", it is *insensitive* — an E-size sheet and a square cost the
-    same because both saturate.
+    "more precise", it is *insensitive* — an E-size sheet and a square cost
+    within 0.2% of each other because both saturate.
     """
-    assert tokens(E, rows=3, cols=3) == tokens(SQUARE, rows=3, cols=3)
+    tall, square = tokens(E, rows=3, cols=3), tokens(SQUARE, rows=3, cols=3)
+    assert abs(tall - square) / square < 0.002
+    cap = image_tokens_upper_bound(tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES, model=OPUS)
     images = tiling.total_images_for_grid(3, 3)
-    cap = estimate_image_tokens(9999, 9999, model=OPUS)
-    assert tokens(E, rows=3, cols=3) == images * cap == 47_840
+    assert all(0.99 * images * cap < page <= images * cap for page in (tall, square))
     # 2x2 (5 images) is under the 20-image threshold too.
-    assert tokens(E, rows=2, cols=2) == 5 * 4_784 == 23_920
+    assert 0.99 * 5 * cap < tokens(E, rows=2, cols=2) <= 5 * cap
 
 
 # --------------------------------------------------------------------------- #
@@ -308,19 +313,27 @@ def test_the_explicit_fixed_grid_allowance_is_unchanged():
     assert estimate_image_tokens_for_set(1, rows=6, cols=6, model=OPUS) == 177_008
 
 
-def test_the_plan_reference_value_is_reproduced_within_the_rounding_delta():
-    """92,871 (round-the-dimension) vs 93,013 (the renderer's irect). 0.15%."""
-    assert tokens(E) == pytest.approx(92_871, rel=0.003)
-    assert tokens(SQUARE, rows=6, cols=6) == pytest.approx(116_481, rel=0.003)
-    # ...and the renderer's own value exactly, which is what actually bills.
-    assert tokens(E) == 93_013
+def test_the_hand_derived_patch_counts_are_reproduced():
+    """§2.5's 6x6 geometry, priced in patches by hand.
+
+    Every image's 1560 px long edge is 56 patches. On an E-size sheet the short
+    edge is 44 patches on 21 images (1206 px), 41 on 8 (1123 px) and 47 on 8
+    (1295 px): 21*56*44 + 8*56*41 + 8*56*47 = 91,168. On a 30x30 square, 21
+    images are square and 16 edge tiles are 52 patches short:
+    21*56*56 + 16*56*52 = 112,448.
+    """
+    assert tokens(E) == 91_168
+    assert tokens(SQUARE, rows=6, cols=6) == 112_448
 
 
 def test_the_mixed_set_total_matches_the_plans_independent_derivation():
-    """§2.5's 20 E + 8 D + 6 B + 2 letter set: the plan derives 3,150,948."""
+    """§2.5's 20 E + 8 D + 6 B + 2 letter set, re-priced in patches: 3,089,296.
+
+    The plan derived 3,150,948 with the older w*h/750 price.
+    """
     bases = ([basis(E)] * 20 + [basis(D)] * 8 + [basis(B)] * 6 + [basis(LETTER)] * 2)
     est = estimate_image_tokens_for_bases(bases, rows=6, cols=6, model=OPUS)
-    assert est.tokens == pytest.approx(3_150_948, rel=0.003)
+    assert est.tokens == pytest.approx(3_089_296, rel=0.003)
     assert est.vector_pages == 36 and est.fully_measured
     # The shipped allowance quotes this set at roughly twice that.
     assert est.conservative_tokens / est.tokens > 1.9
@@ -344,14 +357,17 @@ def test_the_same_page_costs_differently_on_a_standard_tier_model():
 # --------------------------------------------------------------------------- #
 
 
-def test_more_overlap_never_reduces_and_actually_moves_the_estimate():
-    """Overlap enlarges every interior tile, so tokens rise monotonically.
+def test_overlap_reaches_the_estimate():
+    """Overlap reshapes the edge tiles, and the estimate must see it.
 
-    The strict comparison guards against passing on an ignored parameter.
+    Every tile renders at the same long edge, so overlap changes the edge tiles'
+    aspect ratios, not the interior tiles' pixels. On a square page it elongates
+    every edge tile, so tokens fall; on an E-size page patch rounding can move
+    them either way. The strict comparison guards against passing on an ignored
+    parameter.
     """
-    zero = tokens(E, overlap_frac=0.0)
-    assert tokens(E, overlap_frac=tiling.DEFAULT_OVERLAP_FRAC) >= zero
-    assert tokens(E, overlap_frac=0.20) > zero
+    assert (tokens(SQUARE, rows=6, cols=6, overlap_frac=0.20)
+            < tokens(SQUARE, rows=6, cols=6, overlap_frac=0.0))
 
 
 # --------------------------------------------------------------------------- #

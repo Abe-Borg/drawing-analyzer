@@ -16,13 +16,13 @@ E_H = 34 * 72
 
 
 @pytest.mark.parametrize("shape,vector,raster", [
-    ((8.5, 11), (20, 1), (21, 1)),
-    ((11, 8.5), (1, 20), (1, 21)),
+    ((8.5, 11), (43, 1), (27, 1)),
+    ((11, 8.5), (1, 43), (1, 27)),
     ((11, 17), (2, 1), (4, 1)),
     ((17, 11), (1, 2), (1, 4)),
     ((18, 24), (2, 3), (3, 3)),
     ((22, 34), (7, 3), (7, 3)),
-    ((24, 36), (5, 2), (6, 3)),
+    ((24, 36), (5, 2), (5, 4)),
     ((34, 44), (6, 6), (6, 6)),
     ((44, 34), (6, 6), (6, 6)),
     ((30, 42), (6, 6), (6, 6)),
@@ -95,13 +95,13 @@ def test_chosen_grid_minimizes_image_tokens_over_all_feasible_grids(shape, raste
 
 
 def test_fixed_grid_switch_and_caller_pins_win(monkeypatch):
-    assert tiling.choose_grid(612, 792) == (20, 1)
+    assert tiling.choose_grid(612, 792) == (43, 1)
     monkeypatch.setenv(tiling.FIXED_GRID_ENV, "1")
     assert tiling.choose_grid(612, 792) == (6, 6)
     assert tiling.choose_grid(612, 792, rows=2, cols=3) == (2, 3)
     assert tiling.choose_grid(612, 792, rows=2) == (2, 6)
     monkeypatch.delenv(tiling.FIXED_GRID_ENV)
-    assert tiling.choose_grid(612, 792) == (20, 1)
+    assert tiling.choose_grid(612, 792) == (43, 1)
     assert tiling.choose_grid(612, 792, cols=2) == (6, 2)
 
 

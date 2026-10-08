@@ -174,10 +174,10 @@ def exceeds_per_call_limit_for_model(
 # Image / vision token estimation
 # ---------------------------------------------------------------------------
 #
-# Claude bills an image at approximately ``width * height / 750`` tokens (per
-# the vision docs), after any resize down to the model's native resolution, and
-# clamped to a per-model token cap. The published cost tables match
-# ``ceil(w*h/750)`` with no extra padding, so we mirror that exactly:
+# Claude bills an image by 28x28-pixel patches, one visual token each:
+# ``ceil(w/28) * ceil(h/28)``, counted on the image after the API resizes it to
+# fit the model's tier (vision docs, "Resolution and token cost"). The resize
+# keeps every image within its tier's limits:
 #
 #   * High-resolution tier: up to 4784 tokens, long edge <= 2576 px.
 #   * Standard tier (Sonnet 4.6 / Haiku 4.5 / unknown): up to 1568 tokens,
@@ -193,8 +193,6 @@ def exceeds_per_call_limit_for_model(
 # These are local *estimates* for budgeting (mirroring the documented
 # formula); the authoritative number is still Anthropic's ``count_tokens``
 # endpoint, which accepts image/document blocks like any other content.
-
-_IMAGE_TOKEN_DIVISOR = 750
 
 _IMAGE_TOKEN_CAP_HIRES = 4784      # Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7
 _IMAGE_LONG_EDGE_HIRES = 2576
@@ -239,11 +237,10 @@ def resized_image_size(width_px: int, height_px: int, *, model: str | None) -> t
     edge rounded half to even. An image within both limits comes back
     unchanged; non-positive sizes come back as ``(0, 0)``.
 
-    The limits are the model's tier caps, as in :func:`estimate_image_tokens`.
-    Pricing needs nothing more than the token cap, because a downscaled image
-    costs at most the cap. Resolution does: a near-square 2576 px image on the
-    high-resolution tier reaches the model at roughly three quarters of its
-    rendered size per edge, which ``tiling.effective_tile_dpi`` must count.
+    The limits are the model's tier caps. :func:`estimate_image_tokens` prices
+    the resized size, and ``tiling.effective_tile_dpi`` counts the lost
+    resolution: a near-square 2576 px image on the high-resolution tier reaches
+    the model at roughly three quarters of its rendered size per edge.
     """
     if width_px <= 0 or height_px <= 0:
         return 0, 0
@@ -273,22 +270,26 @@ def resized_image_size(width_px: int, height_px: int, *, model: str | None) -> t
 def estimate_image_tokens(width_px: int, height_px: int, *, model: str | None) -> int:
     """Estimate the billed token cost of one image of ``width_px x height_px``.
 
-    Mirrors the documented vision pricing: resize down so the long edge fits the
-    model's native resolution (preserving aspect ratio), then ``ceil(w*h/750)``,
-    clamped to the per-model token cap. Returns an integer >= 0.
+    Mirrors the documented vision pricing: the patch count
+    ``ceil(w/28) * ceil(h/28)`` of the size the API resizes the image to
+    (:func:`resized_image_size`), which never exceeds the tier's token cap.
+    Returns an integer >= 0.
     """
-    if width_px <= 0 or height_px <= 0:
-        return 0
-    token_cap, long_edge_cap = _image_caps_for_model(model)
-    w = float(width_px)
-    h = float(height_px)
-    longest = max(w, h)
-    if longest > long_edge_cap:
-        scale = long_edge_cap / longest
-        w *= scale
-        h *= scale
-    tokens = math.ceil((w * h) / _IMAGE_TOKEN_DIVISOR)
-    return min(token_cap, tokens)
+    read_w, read_h = resized_image_size(width_px, height_px, model=model)
+    return _patches(read_w) * _patches(read_h)
+
+
+def image_tokens_upper_bound(long_edge_px: int, *, model: str | None) -> int:
+    """The most one image with no edge over ``long_edge_px`` can cost on ``model``.
+
+    Every image costs at most the tier's token cap, and no more patches than a
+    square at that edge. Pricing the square through :func:`estimate_image_tokens`
+    would understate the bound: the API resizes an oversized square, which loses
+    patches that a narrower image of the same long edge keeps (a 2576 px square
+    reads as 4761 tokens; a 2576x1456 image costs the full 4784).
+    """
+    token_cap, _ = _image_caps_for_model(model)
+    return min(token_cap, _patches(max(long_edge_px, 0)) ** 2)
 
 
 def estimate_image_tokens_total(
