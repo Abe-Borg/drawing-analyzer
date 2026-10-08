@@ -303,22 +303,22 @@ def test_drawing_estimate_batch_keeps_focus_report_at_realtime_rate():
 
 def test_image_token_estimate_uses_the_raster_upper_bound():
     # A sheet's rasterness is unknown before rendering, and raster sheets render
-    # at the higher target — so the pre-render budget preview must quote the
-    # raster target or it would under-quote a scanned-sheet run. It equals the
-    # raster-target computation and is >= the reduced vector default.
+    # at the higher target — so the pre-render budget preview must bound a
+    # scanned sheet's render, not only a vector one's, at any page shape. The
+    # 17.9x10 in page renders 2576x1440 images at 1x1, which cost the full
+    # per-image cap although a 2576 px square resizes to fewer tokens.
     from drawing_analyzer import tiling
-    from drawing_analyzer.core.tokenizer import estimate_image_tokens
+    from drawing_analyzer.core.tokenizer import estimate_image_tokens_total
     from drawing_analyzer.pipeline import estimate_image_tokens_for_set
 
-    images_per_sheet = tiling.total_images_for_grid(6, 6)  # 37 -> many-image regime
-    raster_edge = tiling.TARGET_LONG_EDGE_PX_RASTER
-    vector_edge = tiling.TARGET_LONG_EDGE_PX_DEFAULT
-    expected = 3 * images_per_sheet * estimate_image_tokens(raster_edge, raster_edge, model=OPUS)
-    vector_bound = 3 * images_per_sheet * estimate_image_tokens(vector_edge, vector_edge, model=OPUS)
-
-    est = estimate_image_tokens_for_set(3, rows=6, cols=6, model=OPUS)
-    assert est == expected
-    assert est >= vector_bound  # never under-quotes the vector render
+    for rows, cols in ((6, 6), (1, 1)):
+        est = estimate_image_tokens_for_set(3, rows=rows, cols=cols, model=OPUS)
+        for w, h in ((34, 44), (44, 34), (30, 30), (8.5, 11), (17.9, 10)):
+            for raster in (True, False):
+                sizes = tiling.image_pixel_sizes(w * 72, h * 72, rows=rows, cols=cols,
+                                                 is_raster=raster)
+                measured = 3 * estimate_image_tokens_total(sizes, model=OPUS)
+                assert measured <= est, (rows, cols, w, h, raster)
 
 
 def test_exhaustive_estimate_carries_transport_and_prompt_reflects_it():

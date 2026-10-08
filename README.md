@@ -406,6 +406,13 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   (CropBox, after rotation), overlapping tile geometry and image-count target.
   Every tile meets the minimum DPI of today's 44×34 inch ANSI E sheet at 6×6:
   **183.39 DPI for vector, 234.17 DPI for raster**, at the default 8% overlap.
+  That DPI is measured at the resolution the model actually reads. The API
+  silently downscales an image above the high-resolution tier's limits
+  (2576 px long edge, and 4,784 visual tokens counted as ⌈w/28⌉·⌈h/28⌉
+  patches), so a near-square 2576 px tile reaches the model at about three
+  quarters of its rendered DPI. The grid search applies that documented resize
+  (`core.tokenizer.resized_image_size`) to every tile instead of crediting the
+  render resolution.
   The overview and all content-bearing tiles still cover the whole sheet (I-1).
   ANSI E (34×44 inches) and ARCH E1 (30×42 inches), in either orientation,
   keep 6×6, byte-identical imagery, and existing digest/critique cache keys.
@@ -413,23 +420,34 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   `DRAWING_ANALYZER_FIXED_GRID=1` restores the historical fixed 6×6 default.
   Above 20 images, vector tiles target **1560 px** and raster tiles **1992 px**,
   safely below the **2000 px hard cap**. At 20 or fewer, both target **2576 px**.
-  Rectangular grids are allowed: the target change makes 20×1 narrow strips
-  the token minimum for portrait vector Letter; raster Letter chooses 1×1.
+  Rectangular grids are allowed: the target change makes 43×1 narrow strips
+  the token minimum for portrait vector Letter, and raster Letter chooses
+  27×1 strips at 1992 px, because one 2576 px image of the page would be
+  downscaled to about 199 DPI, below the raster floor.
   Larger sheets can need more than six rows/columns. Pages that cannot meet
   the DPI floor within 100 images are reported as failed, never read below it.
   Cost confirmation prices those pages at the conservative allowance; digest
   and critique prescans record their failures and continue with the other pages.
 
   Measured with `tiling.image_pixel_sizes` and `core.tokenizer` on Opus 5,
-  counting every tile before blank suppression, per vision read:
+  counting every tile before blank suppression, per vision read. Tokens are
+  priced as the API bills them: ⌈w/28⌉·⌈h/28⌉ patches of each image after the
+  API's resize. The DPI column is the lowest DPI the model reads, after that
+  resize:
 
-  | Page (portrait) | Grid | Fixed 6×6 tokens | Chosen tokens | Savings | Minimum tile DPI |
+  | Page (portrait) | Grid | Fixed 6×6 tokens | Chosen tokens | Savings | Minimum tile DPI read |
   | --- | --- | ---: | ---: | ---: | ---: |
-  | Vector Letter, 8.5×11 in | 20×1 | 93,013 | 7,399 | 92.0% | 183.53 |
-  | Vector Tabloid, 11×17 in | 2×1 | 77,905 | 14,352 | 81.6% | 234.18 |
-  | Raster Letter, 8.5×11 in | 1×1 | 151,619 | 9,568 | 93.7% | 234.18 |
-  | Vector ANSI E, 34×44 in | 6×6 | 93,013 | 93,013 | 0% | 183.39 |
-  | Vector ARCH E1, 30×42 in | 6×6 | 85,987 | 85,987 | 0% | 192.12 |
+  | Vector Letter, 8.5×11 in | 43×1 | 91,168 | 7,280 | 92.0% | 183.53 |
+  | Vector Tabloid, 11×17 in | 2×1 | 76,216 | 14,125 | 81.5% | 190.91 |
+  | Raster Letter, 8.5×11 in | 27×1 | 148,248 | 11,736 | 92.1% | 234.35 |
+  | Vector ANSI D, 22×34 in | 7×3 | 76,216 | 47,040 | 38.3% | 183.39 |
+  | Vector ARCH D, 24×36 in | 5×2 | 78,288 | 51,952 | 33.6% | 184.29 |
+  | Vector ANSI E, 34×44 in | 6×6 | 91,168 | 91,168 | 0% | 183.39 |
+  | Vector ARCH E1, 30×42 in | 6×6 | 83,328 | 83,328 | 0% | 192.12 |
+
+  A sheet larger than ANSI E can cost more than the fixed 6×6, because 6×6
+  reads it below the floor: vector ARCH E (36×48 in) chooses 7×5 at 107,408
+  tokens, where 6×6 would cost 87,024 but read at 168.10 DPI.
 
   The same savings apply to the digest and both critique reads. Tile labels,
   findings bounds, anchors, crops, cross-QC legs, upload/spool reuse and tile
@@ -1878,7 +1896,7 @@ quality decision.
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |
 | `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
 | `DRAWING_ANALYZER_FIXED_GRID` | off | Set `1` to restore fixed 6×6 tiling. Otherwise choose each page's grid from displayed size, minimizing image tokens while preserving the matching vector/raster ANSI E DPI floor. Explicit `rows`/`cols` still win. |
-| `DRAWING_ANALYZER_TILE_TARGET_PX` | `1560` | **Measurement knob.** Vector-sheet tile long edge, in pixels. Image tokens scale with the *square* of this, and the tiles ride the digest plus both critique reads, so it is the single highest-leverage number in the bill: `1400` ≈ −19% image tokens per sheet, `1240` ≈ −37%, `1100` ≈ −50%. Whether a lower value still reads the drawing is a quality question — sweep it against a real set before changing anything, and note that a changed target re-renders (it invalidates the digest/critique caches by design). Raster sheets are unaffected: with no text layer the pixels are the only channel. Clamped to `[400, 1992]` so no value can breach the API's hard 2000 px many-image cap. |
+| `DRAWING_ANALYZER_TILE_TARGET_PX` | `1560` | **Measurement knob.** Vector-sheet tile long edge, in pixels. Image tokens scale with the *square* of this, and the tiles ride the digest plus both critique reads, so it is the single highest-leverage number in the bill: `1400` ≈ −20% image tokens per sheet, `1240` ≈ −36%, `1100` ≈ −50%. Whether a lower value still reads the drawing is a quality question — sweep it against a real set before changing anything, and note that a changed target re-renders (it invalidates the digest/critique caches by design). Raster sheets are unaffected: with no text layer the pixels are the only channel. Clamped to `[400, 1992]` so no value can breach the API's hard 2000 px many-image cap. |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_REFUSAL_FALLBACK` | on | Real-time Opus 5.5 / Sonnet 5.5 calls opt into the server-side refusal fallback. Set `0`/`false` to let a refusal return as one (see [Did another model answer?](#did-another-model-answer-refusal-fallback)). |

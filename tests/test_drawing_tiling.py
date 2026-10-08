@@ -16,17 +16,18 @@ E_H = 34 * 72
 
 
 @pytest.mark.parametrize("shape,vector,raster", [
-    ((8.5, 11), (20, 1), (1, 1)),
-    ((11, 8.5), (1, 20), (1, 1)),
-    ((11, 17), (2, 1), (2, 1)),
-    ((17, 11), (1, 2), (1, 2)),
-    ((18, 24), (2, 2), (3, 2)),
-    ((24, 36), (3, 2), (4, 3)),
+    ((8.5, 11), (43, 1), (27, 1)),
+    ((11, 8.5), (1, 43), (1, 27)),
+    ((11, 17), (2, 1), (4, 1)),
+    ((17, 11), (1, 2), (1, 4)),
+    ((18, 24), (2, 3), (3, 3)),
+    ((22, 34), (7, 3), (7, 3)),
+    ((24, 36), (5, 2), (5, 4)),
     ((34, 44), (6, 6), (6, 6)),
     ((44, 34), (6, 6), (6, 6)),
     ((30, 42), (6, 6), (6, 6)),
     ((42, 30), (6, 6), (6, 6)),
-    ((36, 48), (4, 3), (7, 5)),
+    ((36, 48), (7, 5), (7, 5)),
     ((60, 80), (11, 9), (11, 9)),
 ])
 def test_grid_choice_from_displayed_size(shape, vector, raster):
@@ -35,10 +36,12 @@ def test_grid_choice_from_displayed_size(shape, vector, raster):
     assert tiling.choose_grid(w, h, is_raster=True) == raster
 
 
-@pytest.mark.parametrize("shape", [(8.5, 11), (24, 36), (34, 44), (60, 80), (4, 65)])
+@pytest.mark.parametrize("shape", [(8.5, 11), (22, 34), (24, 36), (34, 44), (60, 80), (4, 65)])
 @pytest.mark.parametrize("raster", [False, True])
 @pytest.mark.parametrize("overlap", [0.0, 0.08, 0.20])
 def test_adaptive_grid_preserves_dpi_and_full_coverage(shape, raster, overlap):
+    from drawing_analyzer.core.tokenizer import resized_image_size
+
     w, h = (v * 72 for v in shape)
     rows, cols = tiling.choose_grid(w, h, overlap_frac=overlap, is_raster=raster)
     target = tiling.target_long_edge_px(rows * cols + 1, is_raster=raster)
@@ -46,7 +49,13 @@ def test_adaptive_grid_preserves_dpi_and_full_coverage(shape, raster, overlap):
     floor = min(72 * tiling.zoom_for_rect(t.width, t.height,
                  tiling.target_long_edge_px(37, is_raster=raster)) for t in baseline)
     rects = tiling.tile_rects(w, h, rows=rows, cols=cols, overlap_frac=overlap)
-    assert all(72 * target / max(t.width, t.height) + 1e-9 >= floor for t in rects)
+    sizes = tiling.image_pixel_sizes(w, h, overlap_frac=overlap, is_raster=raster)
+    for t, rendered in zip(rects, sizes[1:]):
+        # The API downscales a tile over its tier's limits before the model
+        # reads it, so the floor holds for the read pixels on both axes.
+        read = resized_image_size(*rendered, model="claude-opus-5")
+        scale = min(r / p for r, p in zip(read, rendered))
+        assert 72 * target / max(t.width, t.height) * scale + 1e-9 >= floor
     # Exactly one crop per (row, col), each within the page bounds.
     assert len(rects) == rows * cols
     assert {(t.row, t.col) for t in rects} == {(r, c) for r in range(rows) for c in range(cols)}
@@ -59,7 +68,6 @@ def test_adaptive_grid_preserves_dpi_and_full_coverage(shape, raster, overlap):
         assert t.y0 <= t.row * h / rows + 1e-9
         assert t.x1 + 1e-9 >= (t.col + 1) * w / cols
         assert t.y1 + 1e-9 >= (t.row + 1) * h / rows
-    sizes = tiling.image_pixel_sizes(w, h, overlap_frac=overlap, is_raster=raster)
     assert len(sizes) == rows * cols + 1 <= tiling.MAX_IMAGES_PER_SHEET
     if len(sizes) > 20:
         assert max(max(s) for s in sizes) <= 2000
@@ -87,13 +95,13 @@ def test_chosen_grid_minimizes_image_tokens_over_all_feasible_grids(shape, raste
 
 
 def test_fixed_grid_switch_and_caller_pins_win(monkeypatch):
-    assert tiling.choose_grid(612, 792) == (20, 1)
+    assert tiling.choose_grid(612, 792) == (43, 1)
     monkeypatch.setenv(tiling.FIXED_GRID_ENV, "1")
     assert tiling.choose_grid(612, 792) == (6, 6)
     assert tiling.choose_grid(612, 792, rows=2, cols=3) == (2, 3)
     assert tiling.choose_grid(612, 792, rows=2) == (2, 6)
     monkeypatch.delenv(tiling.FIXED_GRID_ENV)
-    assert tiling.choose_grid(612, 792) == (20, 1)
+    assert tiling.choose_grid(612, 792) == (43, 1)
     assert tiling.choose_grid(612, 792, cols=2) == (6, 2)
 
 

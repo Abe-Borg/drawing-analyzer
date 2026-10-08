@@ -142,34 +142,40 @@ Judgement (owner-reviewed against the previous release's recorded medians):
   |---|---|---|
   | oversized image | **rejected** outright | silently downscaled |
   | render target | 1560 px vector / 1992 px raster, both a margin under the hard 2000 px cap | 2576 px, the full Opus native long edge |
-  | per-image cost vs the cap | **under it** — a square tile at 1560 px costs 3,245 of the 4,784 tokens allowed | **over it** — a 4:3 image at 2576 px works out to 6,636, so it clamps |
-  | what moves the token count | page **aspect ratio**, the grid, overlap — and the **render target, quadratically** | nothing you can set: the count is the cap |
+  | per-image cost vs the cap | **under it** — a square tile at 1560 px costs 3,136 (56×56 patches) of the 4,784 tokens allowed | **over it** — a 4:3 image at 2576 px would be 92×69 = 6,348 patches, so the API resizes it to 4,740 |
+  | what moves the token count | page **aspect ratio**, the grid, overlap — and the **render target, roughly quadratically** | nothing you can set: the count sits within 1% of the cap |
 
   The 2576 branch is deliberate policy, not an oversight: at ≤20 images an
   oversized image is downscaled rather than rejected, so no safety margin is
   needed and an off-by-one there is harmless. It is also why `--estimate` and
-  the GUI preview behave differently on a one-sheet job than on a set.
+  the GUI preview behave differently on a one-sheet job than on a set. The
+  downscale still costs resolution: the API shrinks the image until its
+  ⌈w/28⌉·⌈h/28⌉ patch count fits 4,784, so the model reads fewer pixels than
+  were rendered. The page-grid search tests its DPI floor after that downscale
+  (README, *Per-page tile grids*).
 
   **The render target is the highest-leverage cost knob, and only in the >20
-  regime.** Nothing clamps there, so image tokens go as the square of the
-  target. Measured through `cost.estimate_image_tokens_for_bases` on an E-size
+  regime.** Nothing is resized there, so image tokens go roughly as the square
+  of the target. Measured through `cost.estimate_image_tokens_for_bases` on an E-size
   vector sheet at the shipped 6×6 grid, Opus 5:
 
   | `DRAWING_ANALYZER_TILE_TARGET_PX` | image tokens | vs default | (t/1560)² |
   |---|---|---|---|
-  | 1560 (default) | 90,276 | 1.000 | 1.000 |
-  | 1400 | 72,723 | 0.806 | 0.805 |
-  | 1240 | 57,062 | 0.632 | 0.632 |
-  | 1100 | 44,914 | 0.498 | 0.497 |
+  | 1560 (default) | 87,024 | 1.000 | 1.000 |
+  | 1400 | 71,428 | 0.821 | 0.805 |
+  | 1240 | 56,250 | 0.646 | 0.632 |
+  | 1100 | 44,400 | 0.510 | 0.497 |
 
-  Quadratic to three decimals. Whether a lower target still *reads* the drawing
-  is a separate question that no recorded measurement has answered.
+  Close to quadratic: each edge is billed in whole 28 px patches, and a partial
+  patch is a larger share of a smaller image, so the saving runs 2–3% short of
+  (t/1560)² at the lower targets. Whether a lower target still *reads* the
+  drawing is a separate question that no recorded measurement has answered.
 
   **The invariance that does hold is to the page's physical size**, and it is a
   different claim from the one above. Rendering normalizes every page to the
   target long edge, so two pages of the same aspect ratio cost the same
   regardless of how big they are on paper: an E-size 48×36 in sheet, a 24×18 in
-  half-size print of it, and a 12×9 in reduction all come to 90,276 tokens.
+  half-size print of it, and a 12×9 in reduction all come to 87,024 tokens.
   That is exactly why `cost.estimate_image_tokens_for_bases` needs only two
   facts per page — aspect ratio, and whether the page has words — and why the
   correction against the conservative allowance is ~1.9× on a vector E-size

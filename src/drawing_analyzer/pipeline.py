@@ -29,7 +29,7 @@ from .core.api_config import (
     cache_write_ttl_for,
 )
 from .core.request_usage import RequestUsage, any_fallback_served
-from .core.tokenizer import estimate_image_tokens
+from .core.tokenizer import image_tokens_upper_bound
 from .diagnostics import get_logger
 from . import cancellation, resource_pressure, tiling
 from .digest import (
@@ -4542,15 +4542,13 @@ def estimate_image_tokens_for_set(
     if rows is None and cols is None and not tiling.fixed_grid_enabled():
         # Without page sizes, bound every grid in the adaptive request budget.
         # A huge page may need more than 36 tiles to satisfy the DPI floor.
-        return sheet_count * tiling.MAX_IMAGES_PER_SHEET * estimate_image_tokens(
-            tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES,
+        return sheet_count * tiling.MAX_IMAGES_PER_SHEET * image_tokens_upper_bound(
             tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES, model=model,
         )
     rows, cols = tiling.choose_grid(72, 72, rows=rows, cols=cols)
     images_per_sheet = tiling.total_images_for_grid(rows, cols)
     long_edge = tiling.target_long_edge_px(images_per_sheet, is_raster=True)
-    # A square image at the long-edge target is the largest area (hence most
-    # tokens) the renderer can emit, so it bounds the per-image cost from above.
-    # Integer clip containment can add a pixel on either edge.
-    per_image = estimate_image_tokens(long_edge + 2, long_edge + 2, model=model)
+    # Bound every image the renderer can emit at the long-edge target. Integer
+    # clip containment can add a pixel on either edge.
+    per_image = image_tokens_upper_bound(long_edge + 2, model=model)
     return sheet_count * images_per_sheet * per_image

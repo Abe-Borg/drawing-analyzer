@@ -50,6 +50,13 @@ Two many-image render targets both sit under the cap:
   margin costs <0.5% of linear resolution), so a rounded tile can never reach
   cap+1 and trip the rejection.
 
+A silent downscale still costs resolution. At any image count, the API shrinks
+an image whose ``ceil(w/28) * ceil(h/28)`` patch count exceeds the tier's token
+limit (4784 on the high-resolution tier) until it fits, so a near-square
+2576 px tile reaches the model at roughly three quarters of its rendered DPI.
+:func:`effective_tile_dpi` measures DPI after that downscale, and the grid
+search holds every tile to the ANSI E floor at the resolution the model reads.
+
 Fake clients do not enforce these API limits; geometry tests must check the
 rendered pixel sizes explicitly.
 """
@@ -108,15 +115,21 @@ TARGET_LONG_EDGE_PX_FEW_IMAGES = 2576
 # The >20-images rule is a hard threshold in the vision docs.
 MANY_IMAGES_THRESHOLD = 20
 
+# The one model whose vision tier chooses the grid: the search prices images
+# with it and measures tile DPI after its downscale. A cheaper stage model
+# changes pricing, never the selected geometry.
+_GRID_MODEL = "claude-opus-5"
+
 # ---------------------------------------------------------------------------
 # Vector render-target override (measurement knob, default off)
 # ---------------------------------------------------------------------------
 #
 # Image tokens scale with the SQUARE of effective resolution — a tile's cost is
-# its pixel area over 750 — and the tiles ride the digest plus both critique
-# reads, so the vector target is the single highest-leverage number in the app's
-# bill. On a 34x44" sheet at the 6x6 grid: 1560 px is ~183 minimum tile DPI and ~92.9k image
-# tokens/sheet; 1400 px is ~19% fewer, 1240 px ~37% fewer, 1100 px ~50% fewer.
+# its count of 28x28-px patches, close to its pixel area over 784 — and the tiles
+# ride the digest plus both critique reads, so the vector target is the single
+# highest-leverage number in the app's bill. On a 34x44" sheet at the 6x6 grid:
+# 1560 px is ~183 minimum tile DPI and ~91.2k image tokens/sheet; 1400 px is
+# ~20% fewer, 1240 px ~36% fewer, 1100 px ~50% fewer.
 #
 # Whether any of those hold up is a QUALITY question this module cannot answer,
 # so the default is unchanged and this exists only to make a sweep runnable
@@ -358,9 +371,12 @@ def rendered_pixel_size(
     Rounding the dimension instead — ``round((x1-x0) * zoom)`` — is what the
     plan's §2.5/§2.6 reference values were derived with, and it is *systematically
     low*, because an integer rect expands to contain rather than to nearest:
-    92,871 vs the renderer's 93,013 for a vector E-size sheet at 6x6 (0.15%).
-    Those figures remain valid arithmetic cross-checks; they are not the pixel
-    counts this codebase's renderer emits, and §2.5 says as much.
+    under the older ``w*h/750`` price, 92,871 vs the renderer's 93,013 for a
+    vector E-size sheet at 6x6 (0.15%). Priced in 28 px patches the two agree on
+    that sheet (91,168), because no extra pixel crosses a patch boundary there;
+    near a boundary one pixel is a whole row of patches. Either way the plan's
+    sizes are not the pixel counts this codebase's renderer emits, and §2.5
+    says as much.
 
     Pure: no PyMuPDF (I-5). ``zoom <= 0`` or an inverted rect yields ``(0, 0)``,
     which the tokenizer prices at zero rather than raising.
@@ -376,13 +392,28 @@ def effective_tile_dpi(
     page_width_pt: float, page_height_pt: float, *, rows: int, cols: int,
     overlap_frac: float = DEFAULT_OVERLAP_FRAC, is_raster: bool = False,
 ) -> float:
-    """Lowest render DPI among the actual overlapping tile rectangles."""
+    """Lowest DPI the model reads among the actual overlapping tile rectangles.
+
+    Each tile's render DPI is scaled by the downscale the API applies to its
+    rendered pixels (``core.tokenizer.resized_image_size`` on the grid model's
+    tier), on the worse axis. A tile within the tier's limits reads at its
+    render DPI. At the default overlap every 6x6 tile on ANSI E and ARCH E1 is
+    within them, so the floor and those pages' grids do not move.
+    """
+    from .core.tokenizer import resized_image_size
+
     target = target_long_edge_px(total_images_for_grid(rows, cols), is_raster=is_raster)
-    return min(
-        72.0 * zoom_for_rect(tr.width, tr.height, target)
-        for tr in tile_rects(page_width_pt, page_height_pt, rows=rows, cols=cols,
-                             overlap_frac=overlap_frac)
-    )
+    read_scale: dict[tuple[int, int], float] = {}  # a grid repeats a few tile sizes
+    lowest = math.inf
+    for tr in tile_rects(page_width_pt, page_height_pt, rows=rows, cols=cols,
+                         overlap_frac=overlap_frac):
+        zoom = zoom_for_rect(tr.width, tr.height, target)
+        size = rendered_pixel_size(tr.x0, tr.y0, tr.x1, tr.y1, zoom)
+        if size not in read_scale:
+            read_w, read_h = resized_image_size(*size, model=_GRID_MODEL)
+            read_scale[size] = min(read_w / size[0], read_h / size[1])
+        lowest = min(lowest, 72.0 * zoom * read_scale[size])
+    return lowest
 
 
 class InfeasibleGridError(ValueError):
@@ -399,9 +430,11 @@ def choose_grid(
     An explicit dimension pins the grid (the other defaults to six), as does
     DRAWING_ANALYZER_FIXED_GRID=1. Otherwise minimize Opus 5 image tokens, using
     the exact pixel geometry and request-count target, subject to every tile
-    meeting the matching vector/raster ANSI E 6x6 DPI floor. ANSI E and ARCH E1
-    retain 6x6 and their existing cache keys. All candidates cover the full page.
-    A page too large to meet the floor within the image budget fails explicitly.
+    meeting the matching vector/raster ANSI E 6x6 DPI floor at the resolution
+    the model reads, after the API's downscale (:func:`effective_tile_dpi`).
+    ANSI E and ARCH E1 retain 6x6 and their existing cache keys. All candidates
+    cover the full page. A page too large to meet the floor within the image
+    budget fails explicitly.
     """
     if rows is not None or cols is not None or fixed_grid_enabled():
         resolved = (DEFAULT_GRID_ROWS if rows is None else rows,
@@ -442,7 +475,7 @@ def _choose_grid(w: float, h: float, overlap: float, raster: bool,
                 continue
             sizes = image_pixel_sizes(w, h, rows=r, cols=c, overlap_frac=overlap,
                                       is_raster=raster)
-            score = (estimate_image_tokens_total(sizes, model="claude-opus-5"),
+            score = (estimate_image_tokens_total(sizes, model=_GRID_MODEL),
                      r * c, max(w / c, h / r), r, c)
             if best is None or score < best:
                 best = score

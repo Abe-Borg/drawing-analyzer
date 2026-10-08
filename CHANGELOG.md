@@ -77,6 +77,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   results cannot be collected this run; the sheet's error then gives both the
   truncation and the reason collection was deferred, such as a receipt that
   could not be saved. Rounds that still have output cap to grant run as before.
+- **The tile DPI floor counts the API's downscale.** The page-grid search
+  credited every tile with its render DPI, but the API silently downscales an
+  image above the high-resolution tier's limits (2576 px long edge, 4,784
+  visual tokens counted as ⌈w/28⌉·⌈h/28⌉ patches) before the model reads it.
+  The grids it chose with 20 or fewer images were built from large near-square
+  tiles that the model read well below the ANSI E floor of 183.39 DPI: vector
+  ARCH D 24×36 at 142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and
+  ARCH E 36×48 at 138.7. Its raster choices of 20 or fewer images fell below
+  the 234.17 raster floor too (raster Letter at 198.5). The floor is now tested
+  at the DPI the model reads, using the documented resize rule
+  (`core.tokenizer.resized_image_size`).
+  Affected pages get more tiles and cost more per read, priced as the API
+  bills: vector ARCH C +31% (30,960 tokens), ANSI D +42% (47,040), ARCH D +56%
+  (51,952) and ARCH E 36×48 +74% (107,408); raster Letter, Tabloid, C and D
+  sizes +23% to +45%. ANSI E and ARCH E1 keep 6×6, their imagery and their
+  cache keys, and vector Tabloid and ANSI C keep their grids. A page whose grid
+  changes re-renders and re-digests once; no cache schema bump is needed,
+  because the render identity already keys on rows, columns and target. The
+  README grid table now reports the DPI the model reads (vector Tabloid's
+  234.18 render DPI reads at 190.91).
+- **Image tokens are priced the way the API bills them.** The estimator
+  priced an image at ⌈w·h/750⌉ after a long-edge-only resize. The API resizes
+  an image to fit both its tier's long edge and its token limit, then bills
+  ⌈w/28⌉·⌈h/28⌉ patches. The old price ran 0.5–3.3% high on most grids but
+  about 13% low on a thin strip, so strip grids were quoted low (vector Letter
+  by 7%). Cost previews and the grid search now price the documented resize
+  and patch count, which re-prices every quoted figure (ANSI E: 93,013 →
+  91,168 tokens per read). Vector Letter moves from 20×1 to 43×1 strips, 8.5%
+  cheaper per read; patch pricing also settles the raster Letter and raster
+  ARCH D grids above. The conservative allowances (478,400 and 177,008 tokens
+  per page) are unchanged.
 
 ### Added
 

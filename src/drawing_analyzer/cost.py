@@ -1076,7 +1076,7 @@ def estimate_exhaustive_run_cost(
     # single largest QC line by half.
     #
     # The images are priced with the CRITIQUE model, not the digest's.
-    # ``estimate_image_tokens`` clamps at a per-model cap — 4784 on a
+    # ``estimate_image_tokens`` is capped per model — 4784 on a
     # hi-resolution model, 1568 on a standard-tier one — so reusing the digest's
     # count for a critique pointed at a standard-tier model is a ~3x error
     # (§2.4). Latent today, since Opus 5 and Sonnet 5 share the tier, and
