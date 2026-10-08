@@ -53,6 +53,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   billing — after the window closed. Closing during an analysis now pulls the
   kill switch and closes once the stop settles (at most 30 seconds); a second
   close request closes at once.
+- **Investigation and citation prompt-cache writes cost less.** Their cache
+  breakpoints now use the 5-minute entry (1.25x base input) instead of the
+  1-hour entry (2x). Both stages re-read their cached prefixes seconds apart:
+  each investigation turn follows the last, and citation requests share one
+  prefix four at a time. The longer TTL never bought an extra hit; it only
+  raised the price of every turn's new evidence. The investigation's forced
+  text-only close no longer marks message breakpoints. Its `tool_choice`
+  change voids the message cache, and nothing reads after it, so those writes
+  were pure premium. Modeled on Opus 5.5, an investigated finding costs about
+  20–27% less, and the model is sent the same tokens. The usage ledger prices
+  the writes at the 5-minute rate. Cached investigation and citation verdicts
+  stay valid, because neither key includes the TTL.
 
 ### Removed
 
@@ -66,6 +78,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RECOVERY_DIRECT` / `RECOVERY_BATCH` constants and the direct-call rescue
   (`_rescue_failed_items_sync`) are gone. The inline real-time fallback for a
   failed Files API upload is unchanged.
+
+### Fixed
+
+- **A truncated critique read is replaced at a raised output cap.** A
+  real-time critique read cut off at `max_tokens` used to get its one
+  replacement at the same 64k cap, so the paid retry would most likely be cut
+  off too. The replacement now gets the digest's raised cap (double, at most
+  128k). Other failed reads are still replaced at the original cap. The raised
+  cap is not part of the prompt, so the replacement still reads the warm image
+  prefix.
+- **Model defaults in the README, the in-app help and CLAUDE.md.** They still
+  named Opus 5 and Sonnet 5 for several stages, put set identity and the prose
+  harvest on Opus or Sonnet, and named Opus 5.5 as the only refusal-fallback
+  model. They now match the code: Opus 5.5 for review, critique, cross-QC,
+  synthesis, focus, the review plan and investigation; Sonnet 5.5 for
+  verification, citation and the report chat; Haiku 5.5 for set identity and
+  the prose harvest. The help's stage table also gives the investigation cap
+  as it now scales (at most 40 per run, by set size), not a flat 10.
 
 ## [1.8.0] - 2026-10-05
 

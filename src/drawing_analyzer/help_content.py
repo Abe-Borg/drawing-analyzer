@@ -845,7 +845,7 @@ arithmetic re-check (Decimal)   your PC   free
 edition audit                   your PC   free
 anchor quotes -> rectangles     your PC   free
 verify         (1 call/finding) Anthropic paid
-investigate    (<=10 per run)   Anthropic paid
+investigate    (<=40, by size)  Anthropic paid
 citation check (per code ref)   Anthropic paid
 draw markups, reopen, reconcile your PC   free
 report, exports, run manifest   your PC   free
@@ -995,24 +995,25 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "variable if your firm standardizes on something else."
             ),
             _bullet(
-                "Claude Opus 5.5 — reading the sheets, the critique, working out the set's "
-                "identity, writing the review plan, the cross-sheet conflict hunt, and the "
-                "investigation loop. The deep-reasoning work."
+                "Claude Opus 5.5 — reading the sheets, the critique, writing the review "
+                "plan, the cross-sheet conflict hunt, the set overview and focus report, "
+                "and the investigation loop. The deep-reasoning work, at high effort: "
+                "Anthropic's guidance is that Opus 5.5 reads technical drawings better "
+                "as effort rises."
             ),
             _bullet(
                 "Claude Sonnet 5.5 — the first verification look at each finding. Smaller, "
-                "faster and cheaper, because the question is narrow: does this one thing "
-                "hold in this one crop? It also runs the report's Ask-AI assistant, which "
-                "needs to fetch web pages — a thing Opus 5 cannot do."
+                "faster and half the price, because the question is narrow: does this one "
+                "thing hold in this one crop? It also runs the citation check, which "
+                "fetches the cited code section from the web, and the report's Ask-AI "
+                "assistant, which the report reader's own key pays for."
             ),
             _bullet(
-                "Sonnet 5.5 also runs three stages outright: the set-identity read "
-                "(advisory only, with a deterministic regex backstop), the prose "
-                "harvest's structuring call (the item is already found — all that "
-                "is left is restating one sentence in the findings format), and "
-                "the citation check. That last one is a capability choice rather "
-                "than a cost one: checking a code citation needs to fetch the page, "
-                "which Opus 5 cannot do."
+                "Claude Haiku 5.5 — the two extraction jobs: the set-identity read "
+                "(advisory only, with a deterministic regex backstop) and the prose "
+                "harvest's structuring call (the item is already found — all that is "
+                "left is restating one sentence in the findings format). The fastest "
+                "and cheapest model, at about a twentieth of Sonnet's price."
             ),
             _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "

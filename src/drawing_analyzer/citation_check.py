@@ -32,9 +32,9 @@ The set's **adopted editions** are harvested offline from the sheet text layers
 (general-notes sheets state them: "NFPA 13, 2016 EDITION") and included in the
 prompt so the model can judge both the adopted and the current edition.
 
-Tool type: ``web_search_20260209`` — the current server-side web-search variant
-for Opus 5 (verified against the API docs at implementation time; the basic
-``web_search_20250305`` serves older models). Overridable via
+Tool type: ``web_search_20260209`` — the dynamic-filtering web-search variant
+for the 4.6-and-later models (verified against the API docs at implementation
+time; the basic ``web_search_20250305`` serves older models). Overridable via
 ``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE`` so an API rename never needs a code
 change. Server-tool turns can stop with ``pause_turn`` (the server-side loop hit
 its iteration cap); the call is resumed a bounded number of times.
@@ -145,14 +145,15 @@ _VALID_VERDICTS = frozenset({"CHECKED_SUPPORTS", "CHECKED_MISMATCH"})
 
 
 def citation_model() -> str:
-    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Sonnet 5).
+    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Sonnet 5.5).
 
-    Sonnet 5 rather than the review flagship, and this is a capability choice
-    before it is a cost one: ``web_fetch`` is **not available on Opus 5**, so an
-    Opus citation check can only ever read search *snippets*. Sonnet 5 can open
-    the cited section and read it. For "does this code section say what the
-    drawing claims", that is the difference between a plausible verdict and a
-    defensible one — and it costs less.
+    The check needs ``web_fetch`` as well as search: with fetch the model opens
+    the cited section and reads it instead of judging from search *snippets*.
+    For "does this code section say what the drawing claims", that is the
+    difference between a plausible verdict and a defensible one. This was a
+    capability choice while the review flagship was Opus 5, which has no web
+    fetch. Opus 5.5 has it, so Sonnet 5.5 is now a cost choice, at half the
+    per-token price.
     """
     return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5_5
 

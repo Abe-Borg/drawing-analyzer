@@ -298,7 +298,8 @@ consume ledger entries and nothing else.
 
 - **Planning:** `set_identity.py` — one text-only call → advisory `SetIdentity`
   (consumers take `SetIdentity | None` and never gate a finding on it). The
-  regex edition harvest unions in as `origin="regex"`. Runs on Sonnet 5.5. Coerce
+  regex edition harvest unions in as `origin="regex"`. Runs on Haiku 5.5 at
+  medium effort. Coerce
   every list-shaped field through `set_identity._as_list` (a string must not be
   consumed per character). The international code-designation regex is
   **case-sensitive**; `Eurocode` keeps its own case-insensitive group.
@@ -317,7 +318,9 @@ consume ledger entries and nothing else.
 - **Finders:** the digest findings block; `critique.py` (a second full-coverage
   vision read, twice; self-consistency sets `reproduced`). On the real-time path
   the two reads prompt-cache their shared image prefix when `runs>=2`; the batch
-  path stays uncached. `use_batch` resolves from `DRAWING_ANALYZER_USE_BATCH`
+  path stays uncached. A failed real-time read gets one replacement; one cut
+  off at `max_tokens` is replaced at the digest's raised cap
+  (`MAX_TOKENS_RETRY_CEILING`). `use_batch` resolves from `DRAWING_ANALYZER_USE_BATCH`
   when the caller leaves it `None`. Structured outputs are opt-in and **critique
   only** among high-volume calls (`DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1`
   + registry capability + that stage's `StructuredOutputsGate`). `prose_harvest`
@@ -350,8 +353,8 @@ consume ledger entries and nothing else.
   doubt. `sheet_index.py`'s harvest stays unbounded; both diff directions
   already run `classify_reference`. `prose_harvest.py` mirrors prose
   Coordination/Conflict items, synthesis conflicts, and opted-in focus items
-  (match first; one structuring call for stragglers on Sonnet 5.5 at
-  `EFFORT_LOW`). Its boilerplate filter is anchored at **both** ends, length
+  (match first; one structuring call per unmatched straggler on Haiku 5.5 at
+  medium effort). Its boilerplate filter is anchored at **both** ends, length
   floor 8; the `filtered` count is observational and feeds neither `missing` nor
   `complete`. Opt-in `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`:
   `HARVEST_STRUCTURED_SYSTEM_PROMPT` is one substitution on the fenced prompt;
@@ -427,14 +430,18 @@ consume ledger entries and nothing else.
   and do not advance the counter. Per run, `…_MAX_FINDINGS` is severity-first,
   10 + one per 4 sheets, ceiling 40, unless an explicit env value pins it.
   Commit the assistant turn before answering tools; answer every tool_use id in
-  one user turn; force a no-tools close at the cap. A capped or garbled outcome
+  one user turn; force a no-tools close at the cap. Its breakpoints use the
+  5-minute default (`api_config.CACHE_BREAKPOINT_TTL`; turns re-read within
+  seconds). The close's `tool_choice` change voids the messages tier, so it
+  marks no message breakpoint. A capped or garbled outcome
   stays UNCERTAIN — never REJECTED — and is a designed stage COMPLETE; it only
   updates `finding.verification` in place. Concluded verdicts cache in
   `stage=investigation` (finding identity + whole-set fingerprint +
   model/prompt/round-budget/task-budget), complete-only; a warm hit replays the
   tool trace with sha-compare and has no TTL. `citation_check.py` runs on
-  Sonnet 5.5 (`web_search` + `web_fetch` per unique code ref; web fetch is
-  unavailable on Opus 5). Both tools carry the shared source-quality blocklist.
+  Sonnet 5.5 at medium effort (`web_search` + `web_fetch` per unique code ref;
+  web fetch is unavailable on Opus 5, available on Opus 5.5, so Sonnet is a cost
+  choice). Both tools carry the shared source-quality blocklist.
   The resolved tool set rides the verdict cache key.
   The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
   ledger, including `pause_turn` resumes and error or still-paused exits.
@@ -583,13 +590,16 @@ consume ledger entries and nothing else.
   conversion is a hard failure, including the batch→real-time fallbacks.
 - **Refusal fallback is a registry capability.**
   `ModelCapabilities.supports_refusal_fallback` decides which models opt in —
-  never a comparison against one model id. Opus 5.5 is today's only declarer
-  (`stop_reason="refusal"`, HTTP 200); Opus 4.8 is the fallback target, with
-  the same effort, thinking, output cap, hi-res vision, and $5/$25 pricing.
-  `core.api_config.call_with_refusal_fallback` attaches `fallbacks: "default"`
-  (beta `server-side-fallback-2026-07-01`) on Opus-5-routed real-time calls
-  (`digest.stream_message`, `verify.py`, the investigation loop) and re-routes
-  through `client.beta.messages`. The parameter is rejected on the Batches API.
+  never a comparison against one model id. Opus 5.5, Sonnet 5.5 and Opus 5
+  declare it (`stop_reason="refusal"`, HTTP 200); Haiku 5.5 has no server-side
+  fallback and does not. `fallbacks: "default"` lets the server choose the
+  substitute by refusal category (Opus 5 for Opus 5.5, Sonnet 5 for Sonnet
+  5.5). `core.api_config.call_with_refusal_fallback` attaches it (beta
+  `server-side-fallback-2026-07-01`) to every real-time call on a declaring
+  model — digest and critique (`digest.stream_message`), verification,
+  investigation, cross-QC, citation, review plan, synthesis and focus — and
+  re-routes through `client.beta.messages`. The parameter is rejected on the
+  Batches API.
   `verify.py` resolves one model (`VERIFICATION_MODEL_DEFAULT`) and never
   escalates; `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`. A 400
   naming the fallback beta turns the feature off for the process

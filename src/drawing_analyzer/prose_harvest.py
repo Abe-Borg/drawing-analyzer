@@ -464,7 +464,7 @@ HARVEST_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()[:16]
 
-# Its own latch: this is a text-only Sonnet 5 call, and a rejection on the
+# Its own latch: this is a text-only Haiku 5.5 call, and a rejection on the
 # critique's 37-image vision request says nothing about it (nor the reverse).
 STRUCTURED_OUTPUTS = StructuredOutputsGate(
     "prose_harvest", "DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS"
