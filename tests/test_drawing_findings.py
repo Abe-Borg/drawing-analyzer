@@ -259,19 +259,22 @@ def test_digest_sheet_unparseable_block_keeps_prose_clean_and_ships():
     assert sd.findings == []
 
 
-def test_digest_sheet_truncated_response_fails_the_sheet_but_still_ships_prose():
-    # A response cut off at ``max_tokens`` is a DIFFERENT thing from a block that
-    # will not parse, and the two used to be conflated. The prose itself may be
-    # severed mid-sentence, so the sheet is marked failed and (see
-    # test_drawing_digest) never cached — but I-3 still holds: the partial prose
-    # ships, and the run reports the sheet rather than sinking.
+@pytest.mark.parametrize("stop", ["max_tokens", "refusal"])
+def test_digest_sheet_unfinished_response_fails_the_sheet_but_still_ships_prose(stop):
+    # A response cut off at ``max_tokens``, or declined part-way with
+    # ``refusal``, is a DIFFERENT thing from a block that will not parse, and
+    # the two used to be conflated. The prose itself may be severed
+    # mid-sentence, so the sheet is marked failed and (see test_drawing_digest)
+    # never cached — but I-3 still holds: the partial prose ships, and the run
+    # reports the sheet rather than sinking.
     raw = "Good prose digest of the sheet.\n```json\n{\"findings\": [ {\"category\":"
     client = _FakeClient(lambda kw: FakeMessage(
-        content=[FakeTextBlock(text=raw)], stop_reason="max_tokens"))
+        content=[FakeTextBlock(text=raw)], stop_reason=stop))
     sd = digest_sheet(_sheet(), client=client, model=OPUS)
     assert not sd.ok
-    assert sd.error == "truncated digest (stop_reason='max_tokens')"
-    # The prose still ships, and the machine block still never reaches it.
+    assert sd.error and sd.stop_reason == stop
+    # The prose still ships byte-exact (I-2), and the machine block still
+    # never reaches it.
     assert sd.text == "Good prose digest of the sheet."
     assert "```" not in sd.text and '"findings"' not in sd.text
     assert sd.findings == []

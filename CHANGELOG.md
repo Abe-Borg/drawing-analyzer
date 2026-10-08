@@ -38,6 +38,33 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   standard run; the GUI runs the set overview on every run of two or more
   sheets, and the note and stage table now say so. The help's stage table also gives the investigation cap
   as it now scales (at most 40 per run, by set size), not a flat 10.
+- **A declined or cut-off reply is no longer cached as a complete one.** The
+  rule was "never cache a truncated read", and three paths broke it.
+  - **Declined digests.** A digest reply ending with `stop_reason="refusal"`
+    that still carried partial text read as finished on both transports, so it
+    was cached and served on every later run at zero cost, with no error. It
+    now fails the sheet like a truncation: the partial prose still ships (I-3)
+    and the cache write is refused. For both, the combined digest now carries
+    that prose with a note under it saying the sheet's digest is partial; it
+    used to show only the failure notice. A refusal is not re-sent: a real-time
+    request already carried the server-side refusal fallback, and a batch item,
+    which cannot carry one, would only be declined again. Digests an earlier
+    version cached under `max_tokens` or `refusal` are now read as a miss at
+    both cache levels, so those sheets are read once more; complete entries
+    keep hitting and no cache schema changes.
+  - **Synthesis and the focus report** never checked `stop_reason`. An
+    overview or room-by-room table cut off at its 32k cap, or declined, was
+    accepted and written to the stage cache. Both now use the digest's single
+    raised-cap retry (`min(2x, MAX_TOKENS_RETRY_CEILING)`, streamed). A reply
+    still unfinished ships its partial text with a note under it in the
+    combined digest, holds its stage at PARTIAL, is listed in the run errors,
+    and is never cached; a partial overview is not mined for findings. These
+    stage-cache entries do not record why a reply ended, so an unfinished one
+    an earlier version cached is still served until its inputs change.
+  - A raised-cap retry that comes back with no text no longer replaces the
+    first read's partial prose. Every billed synthesis and focus response is
+    now recorded in the usage ledger, including failed replies and the first
+    read a retry replaced.
 
 ### Added
 

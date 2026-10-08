@@ -222,11 +222,23 @@ map lives in `src/drawing_analyzer/__init__.py`.
   content-keyed cache; a hit skips rendering and restores parsed findings).
   Findings fences are **line-anchored**, accept 3+ backticks or tildes, and a
   closer must match its opener's character and length. Never cache a truncated
-  read: both transports treat an unfinished reply (empty or cut off) as an
-  error, retry once at `digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache
-  write if it is still cut off. Real-time usage accumulates across both
+  read: both transports treat an unfinished reply (empty, cut off, or declined
+  with `refusal` — `digest.unfinished_reply_error` is the one rule) as an
+  error, retry a cut-off one once at `digest.MAX_TOKENS_RETRY_CEILING` (never a
+  refusal: a capable model's real-time request already carried the fallback, a
+  batch item has none), and refuse the cache write if it is still unfinished.
+  Partial text still ships (I-3), in `combined_text` too, with the error
+  disclosed under it (`_combine`). Real-time usage accumulates across both
   attempts and falls back to the truncated first read if the raised-cap call
-  cannot land. Critique does not re-rasterize: `render_spool.py` rebuilds the
+  cannot land or returns no text (`digest.stream_with_cap_retry`, shared with
+  synthesis and focus). Every persistent digest-cache read (both levels, both
+  transports) goes through
+  `digest.finished_digest_entry`: an entry an older build stored under an
+  unfinished `stop_reason` reads as a miss (no schema bump). An unfinished
+  synthesis or focus reply ships its partial text with a `_combine`
+  disclosure, holds its stage at PARTIAL, records every billed response, and
+  is never cached; a partial overview is never harvested.
+  Critique does not re-rasterize: `render_spool.py` rebuilds the
   same `RenderedSheet` from the digest's PNG bytes; the batch path adopts the
   digest's terminal uploads. A second render is the per-page fallback
   (`_one_page_fallback` re-renders exactly the page that failed). A failed spool

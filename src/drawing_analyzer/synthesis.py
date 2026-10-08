@@ -8,9 +8,10 @@ never drawn — are invisible in the per-sheet text. This module runs ONE extra,
 reads every per-sheet digest and reconciles them into a concise "Drawing Set
 Overview", which the pipeline prepends to the combined digest.
 
-It reuses the SDK-shape-tolerant parsing, error sanitization, and transient
-retry from ``digest.py`` so a synthesis failure degrades gracefully (the
-per-sheet digests still ship) and never dumps a raw HTML error page.
+It reuses the SDK-shape-tolerant parsing, error sanitization, transient retry,
+and the raised-cap retry for a cut-off reply from ``digest.py`` so a synthesis
+failure degrades gracefully (the per-sheet digests still ship) and never dumps
+a raw HTML error page.
 """
 from __future__ import annotations
 
@@ -30,10 +31,10 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
+    _get,
     _message_text,
-    _message_usage,
-    stream_message,
-    transient_retry_wait,
+    stream_with_cap_retry,
+    unfinished_reply_error,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -203,11 +204,22 @@ class SynthesisResult:
     # user turn could not carry, and how many characters that cost.
     sheets_omitted: int = 0
     chars_omitted: int = 0
+    # Every billed response, oldest first — a cut-off first read and its
+    # raised-cap retry are two. Runtime-only: a cache hit made no request.
     request_usage: list[RequestUsage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.error is None and bool(self.text.strip())
+
+    @property
+    def partial(self) -> bool:
+        """An unfinished reply (cut off or declined) that still carries text.
+
+        The text ships (I-3), but it is not the whole overview: never ``ok``,
+        so never cached.
+        """
+        return self.error is not None and bool(self.text.strip())
 
 
 def synthesize_drawing_set(
@@ -227,7 +239,11 @@ def synthesize_drawing_set(
     Returns an empty, ``error``-stamped result (never raises) when there are
     fewer than :data:`MIN_SHEETS_FOR_SYNTHESIS` readable sheets, or when the call
     fails — so the caller can fall back to the plain per-sheet digests. Transient
-    failures are retried with backoff like the per-sheet digest.
+    failures are retried with backoff like the per-sheet digest, and a reply cut
+    off at ``max_tokens`` is re-sent once at a raised cap
+    (:func:`~drawing_analyzer.digest.stream_with_cap_retry`). A reply still cut
+    off after that, or declined, is :attr:`SynthesisResult.partial`: its text
+    is returned for the caller to ship, ``error``-stamped, and never cached.
     """
     model = model or default_synthesis_model()
     ok_sheets = [sd for sd in sheet_digests if sd.ok]
@@ -285,34 +301,34 @@ def synthesize_drawing_set(
     if effective_effort:
         kwargs["output_config"] = {"effort": effective_effort}
 
-    attempt = 0
-    while True:
-        try:
-            resp = stream_message(client, kwargs)
-            break
-        except Exception as exc:  # noqa: BLE001 - report, fall back to per-sheet
-            if transient_retry_wait(exc, attempt, max_retries, sleep, stage="synthesis"):
-                attempt += 1
-                continue
-            return SynthesisResult(
-                text="", model_used=model, error=_clean_error(exc),
-                sheets_omitted=prompt.sheets_omitted,
-                chars_omitted=prompt.chars_omitted,
-            )
+    read = stream_with_cap_retry(
+        client, kwargs, max_retries=max_retries, sleep=sleep, stage="synthesis",
+    )
+    if read.message is None:
+        # Report and fall back to the per-sheet digests.
+        return SynthesisResult(
+            text="", model_used=model, error=_clean_error(read.error),
+            sheets_omitted=prompt.sheets_omitted,
+            chars_omitted=prompt.chars_omitted,
+        )
 
-    text = _message_text(resp)
-    in_tok, out_tok = _message_usage(resp)
-    error = None if text else "empty synthesis result"
+    text = _message_text(read.message)
+    request_usage = [RequestUsage.from_message(r) for r in read.responses]
     result = SynthesisResult(
         text=text,
-        input_tokens=in_tok,
-        output_tokens=out_tok,
+        input_tokens=sum(r.input_tokens for r in request_usage),
+        output_tokens=sum(r.output_tokens for r in request_usage),
         model_used=model,
-        error=error,
+        error=unfinished_reply_error(
+            "synthesis result", text, _get(read.message, "stop_reason")
+        ),
         sheets_omitted=prompt.sheets_omitted,
         chars_omitted=prompt.chars_omitted,
-        request_usage=[RequestUsage.from_message(resp)],
+        request_usage=request_usage,
     )
+    # Only a complete overview is cached. An unfinished one served from the
+    # cache would read as complete on every later run, at zero cost; and a
+    # refusal fallback's answer came from another model than the key names.
     if result.ok and not any_fallback_served(result.request_usage):
         put_stage_cache_entry(
             cache,
