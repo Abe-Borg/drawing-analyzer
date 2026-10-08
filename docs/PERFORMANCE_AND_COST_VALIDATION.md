@@ -148,7 +148,11 @@ Judgement (owner-reviewed against the previous release's recorded medians):
   The 2576 branch is deliberate policy, not an oversight: at ≤20 images an
   oversized image is downscaled rather than rejected, so no safety margin is
   needed and an off-by-one there is harmless. It is also why `--estimate` and
-  the GUI preview behave differently on a one-sheet job than on a set.
+  the GUI preview behave differently on a one-sheet job than on a set. The
+  downscale still costs resolution: the API shrinks the image until its
+  ⌈w/28⌉·⌈h/28⌉ patch count fits 4,784, so the model reads fewer pixels than
+  were rendered. The page-grid search tests its DPI floor after that downscale
+  (README, *Per-page tile grids*).
 
   **The render target is the highest-leverage cost knob, and only in the >20
   regime.** Nothing clamps there, so image tokens go as the square of the

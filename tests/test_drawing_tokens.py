@@ -2,11 +2,18 @@
 
 Locks the estimator to Anthropic's published vision cost tables: tokens =
 ceil(w*h/750) after resize to the model's native long edge, clamped to the
-per-model token cap.
+per-model token cap. Also locks the size the API downscales an image to, which
+the tile DPI floor is measured at.
 """
 from __future__ import annotations
 
-from drawing_analyzer.core.tokenizer import estimate_image_tokens, estimate_image_tokens_total
+import pytest
+
+from drawing_analyzer.core.tokenizer import (
+    estimate_image_tokens,
+    estimate_image_tokens_total,
+    resized_image_size,
+)
 
 OPUS = "claude-opus-5"
 SONNET = "claude-sonnet-4-6"
@@ -58,3 +65,21 @@ def test_nonpositive_sizes_are_zero():
 def test_total_sums_each_image():
     sizes = [(1000, 1000), (200, 200)]
     assert estimate_image_tokens_total(sizes, model=OPUS) == 1334 + 54
+
+
+@pytest.mark.parametrize("model,size,read", [
+    # The vision docs' resize examples. On the standard tier the token limit
+    # binds before the 1568 px edge does.
+    (SONNET, (1075, 1520), (924, 1307)),
+    (SONNET, (1920, 1080), (1456, 819)),
+    # High-resolution tier: both fit unchanged; a 4K frame stops at the edge.
+    (OPUS, (1075, 1520), (1075, 1520)),
+    (OPUS, (1920, 1080), (1920, 1080)),
+    (OPUS, (3840, 2160), (2576, 1449)),
+    (OPUS, (2160, 3840), (1449, 2576)),
+    # A square at the 2576 px edge exceeds 4784 patches and shrinks to fit:
+    # the downscale the tile DPI floor has to count.
+    (OPUS, (2576, 2576), (1932, 1932)),
+])
+def test_resized_image_size_follows_the_documented_downscale(model, size, read):
+    assert resized_image_size(*size, model=model) == read

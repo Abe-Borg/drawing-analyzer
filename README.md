@@ -405,6 +405,13 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   (CropBox, after rotation), overlapping tile geometry and image-count target.
   Every tile meets the minimum DPI of today's 44×34 inch ANSI E sheet at 6×6:
   **183.39 DPI for vector, 234.17 DPI for raster**, at the default 8% overlap.
+  That DPI is measured at the resolution the model actually reads. The API
+  silently downscales an image above the high-resolution tier's limits
+  (2576 px long edge, and 4,784 visual tokens counted as ⌈w/28⌉·⌈h/28⌉
+  patches), so a near-square 2576 px tile reaches the model at about three
+  quarters of its rendered DPI. The grid search applies that documented resize
+  (`core.tokenizer.resized_image_size`) to every tile instead of crediting the
+  render resolution.
   The overview and all content-bearing tiles still cover the whole sheet (I-1).
   ANSI E (34×44 inches) and ARCH E1 (30×42 inches), in either orientation,
   keep 6×6, byte-identical imagery, and existing digest/critique cache keys.
@@ -413,22 +420,31 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   Above 20 images, vector tiles target **1560 px** and raster tiles **1992 px**,
   safely below the **2000 px hard cap**. At 20 or fewer, both target **2576 px**.
   Rectangular grids are allowed: the target change makes 20×1 narrow strips
-  the token minimum for portrait vector Letter; raster Letter chooses 1×1.
+  the token minimum for portrait vector Letter, and raster Letter chooses
+  21×1 strips at 1992 px, because one 2576 px image of the page would be
+  downscaled to about 199 DPI, below the raster floor.
   Larger sheets can need more than six rows/columns. Pages that cannot meet
   the DPI floor within 100 images are reported as failed, never read below it.
   Cost confirmation prices those pages at the conservative allowance; digest
   and critique prescans record their failures and continue with the other pages.
 
   Measured with `tiling.image_pixel_sizes` and `core.tokenizer` on Opus 5,
-  counting every tile before blank suppression, per vision read:
+  counting every tile before blank suppression, per vision read. The DPI
+  column is the lowest DPI the model reads, after the API's downscale:
 
-  | Page (portrait) | Grid | Fixed 6×6 tokens | Chosen tokens | Savings | Minimum tile DPI |
+  | Page (portrait) | Grid | Fixed 6×6 tokens | Chosen tokens | Savings | Minimum tile DPI read |
   | --- | --- | ---: | ---: | ---: | ---: |
   | Vector Letter, 8.5×11 in | 20×1 | 93,013 | 7,399 | 92.0% | 183.53 |
-  | Vector Tabloid, 11×17 in | 2×1 | 77,905 | 14,352 | 81.6% | 234.18 |
-  | Raster Letter, 8.5×11 in | 1×1 | 151,619 | 9,568 | 93.7% | 234.18 |
+  | Vector Tabloid, 11×17 in | 2×1 | 77,905 | 14,352 | 81.6% | 190.91 |
+  | Raster Letter, 8.5×11 in | 21×1 | 151,619 | 12,043 | 92.1% | 234.35 |
+  | Vector ANSI D, 22×34 in | 7×3 | 77,905 | 48,596 | 37.6% | 183.39 |
+  | Vector ARCH D, 24×36 in | 5×2 | 80,248 | 52,624 | 34.4% | 184.29 |
   | Vector ANSI E, 34×44 in | 6×6 | 93,013 | 93,013 | 0% | 183.39 |
   | Vector ARCH E1, 30×42 in | 6×6 | 85,987 | 85,987 | 0% | 192.12 |
+
+  A sheet larger than ANSI E can cost more than the fixed 6×6, because 6×6
+  reads it below the floor: vector ARCH E (36×48 in) chooses 7×5 at 110,281
+  tokens, where 6×6 would cost 90,276 but read at 168.10 DPI.
 
   The same savings apply to the digest and both critique reads. Tile labels,
   findings bounds, anchors, crops, cross-QC legs, upload/spool reuse and tile

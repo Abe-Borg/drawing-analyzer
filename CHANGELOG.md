@@ -67,6 +67,28 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`_rescue_failed_items_sync`) are gone. The inline real-time fallback for a
   failed Files API upload is unchanged.
 
+### Fixed
+
+- **The tile DPI floor counts the API's downscale.** The page-grid search
+  credited every tile with its render DPI, but the API silently downscales an
+  image above the high-resolution tier's limits (2576 px long edge, 4,784
+  visual tokens counted as ⌈w/28⌉·⌈h/28⌉ patches) before the model reads it.
+  Grids of 20 or fewer images were built from large near-square tiles that the
+  model read well below the ANSI E floor of 183.39 DPI: vector ARCH D 24×36 at
+  142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and ARCH E 36×48 at
+  138.7. Raster grids of 20 or fewer images fell below the 234.17 raster floor
+  too (raster Letter at 198.5). The floor is now tested at the DPI the model
+  reads, using the documented resize rule (`core.tokenizer.resized_image_size`).
+  Affected pages get more tiles and cost more per read: vector ARCH C +34%
+  (31,991 tokens), ANSI D +45% (48,596), ARCH D +57% (52,624) and ARCH E
+  36×48 +77% (110,281); raster Letter, Tabloid, C and D sizes +25% to +46%.
+  ANSI E and ARCH E1 keep 6×6, their imagery and their cache keys, and vector
+  Letter, Tabloid and ANSI C keep their grids. A page whose grid changes
+  re-renders and re-digests once; no cache schema bump is needed, because the
+  render identity already keys on rows, columns and target. The README grid
+  table now reports the DPI the model reads (vector Tabloid's 234.18 render
+  DPI reads at 190.91).
+
 ## [1.8.0] - 2026-10-05
 
 ### Added

@@ -127,13 +127,20 @@ map lives in `src/drawing_analyzer/__init__.py`.
   subject to every overlapping tile meeting ANSI E's 44×34 inch 6×6 minimum
   DPI (183.39 vector / 234.17 raster at 8% overlap). Compare like with like and
   resolve the <=20-image 2576 px target versus >20-image 1560/1992 targets
-  before testing DPI. A page with no feasible grid fails explicitly. Cost
+  before testing DPI. The floor is tested at the DPI the model **reads**:
+  `effective_tile_dpi` scales each tile's render DPI by the API's downscale
+  (`core.tokenizer.resized_image_size`, the documented resize to ≤2576 px and
+  ⌈w/28⌉·⌈h/28⌉ ≤ 4784 patches on the hi-res tier), on the worse axis. Render
+  DPI alone overstates it: a near-square 2576 px tile reads at about 0.75×.
+  `tiling._GRID_MODEL` (Opus 5) both prices the search and sets that tier, so
+  geometry has one rule. A page with no feasible grid fails explicitly. Cost
   estimation substitutes the conservative allowance and discloses the fallback;
   digest and critique prescans report that page's failure and continue, keeping
   both stages partial while processing the other pages. Keep I-1.
   ANSI E (34×44) and ARCH E1 (30×42), either orientation, retain 6×6 and their
   cache keys; no prompt/schema/render-identity version bump is needed because
-  actual rows/cols/target already key the render. Level 2 hashes PNG bytes plus
+  actual rows/cols/target already key the render (a floor change that moves a
+  page's grid re-renders and re-digests it once). Level 2 hashes PNG bytes plus
   tile layout on non-6×6 grids, so blank suppression cannot collide grids;
   6×6 retains the legacy key format.
   Consumers must use `RenderedSheet` / `SheetGeometry.rows, cols`, including
@@ -141,12 +148,17 @@ map lives in `src/drawing_analyzer/__init__.py`.
   and critique spool/upload matching. Never compare adaptive pages to global
   `None` grid arguments. Cost bases choose the same grid before pricing it with
   the stage's model; a cheaper model changes pricing, not the selected geometry.
-  Measured Opus 5 image tokens per read, before blank suppression: vector
-  Letter 93,013 → 7,399 (20×1, −92.0%, 183.53 DPI); vector Tabloid 77,905 →
-  14,352 (2×1, −81.6%, 234.18 DPI); raster Letter 151,619 → 9,568 (1×1,
-  −93.7%, 234.18 DPI). The 20×1 strip result follows the image-count target
-  discontinuity; square grids are not necessarily the token minimum. Digest
-  and both critique reads benefit. E / E1 counts and images stay unchanged.
+  Measured Opus 5 image tokens per read, before blank suppression, with the
+  minimum DPI read: vector Letter 93,013 → 7,399 (20×1, −92.0%, 183.53 DPI);
+  vector Tabloid 77,905 → 14,352 (2×1, −81.6%, 190.91 DPI); raster Letter
+  151,619 → 12,043 (21×1, −92.1%, 234.35 DPI); vector ANSI D 22×34 77,905 →
+  48,596 (7×3, −37.6%, 183.39 DPI); vector ARCH D 24×36 80,248 → 52,624
+  (5×2, −34.4%, 184.29 DPI). The 20×1 / 21×1 strip results follow the
+  image-count target discontinuity; square grids are not necessarily the token
+  minimum. A sheet larger than ANSI E can cost more than 6×6, because 6×6
+  reads it below the floor (ARCH E 36×48: 6×6 reads 168.10 DPI; 7×5 costs
+  110,281 vs 90,276). Digest and both critique reads use the chosen grid.
+  E / E1 counts and images stay unchanged.
 - **Work dirs:** verify, investigate, and markup create a `drawing_qc_*` temp
   dir when the caller supplied no `work_dir`. `pipeline._prune_stale_work_dirs`
   reaps them on the way **in** (`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default

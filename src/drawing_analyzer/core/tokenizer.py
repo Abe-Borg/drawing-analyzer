@@ -219,6 +219,57 @@ def _image_caps_for_model(model: str | None) -> tuple[int, int]:
     return _IMAGE_TOKEN_CAP_DEFAULT, _IMAGE_LONG_EDGE_DEFAULT
 
 
+# The API reads an image as 28x28-pixel patches, one visual token each, and the
+# tier's token limit counts those patches.
+_IMAGE_PATCH_PX = 28
+
+
+def _patches(px: int) -> int:
+    """Patches along one image edge: ``ceil(px / 28)``."""
+    return -(-px // _IMAGE_PATCH_PX)
+
+
+def resized_image_size(width_px: int, height_px: int, *, model: str | None) -> tuple[int, int]:
+    """The size the API downscales an image to before ``model`` reads it.
+
+    Mirrors the vision docs' reference implementation ("How Claude resizes and
+    pads images"): the largest aspect-preserving size whose patch-padded edges
+    fit the tier's long-edge limit and whose ``ceil(w/28) * ceil(h/28)`` patch
+    count fits its token limit, searched along the long edge with the short
+    edge rounded half to even. An image within both limits comes back
+    unchanged; non-positive sizes come back as ``(0, 0)``.
+
+    The limits are the model's tier caps, as in :func:`estimate_image_tokens`.
+    Pricing needs nothing more than the token cap, because a downscaled image
+    costs at most the cap. Resolution does: a near-square 2576 px image on the
+    high-resolution tier reaches the model at roughly three quarters of its
+    rendered size per edge, which ``tiling.effective_tile_dpi`` must count.
+    """
+    if width_px <= 0 or height_px <= 0:
+        return 0, 0
+    token_cap, long_edge_cap = _image_caps_for_model(model)
+
+    def fits(w: int, h: int) -> bool:
+        return (_patches(w) * _IMAGE_PATCH_PX <= long_edge_cap
+                and _patches(h) * _IMAGE_PATCH_PX <= long_edge_cap
+                and _patches(w) * _patches(h) <= token_cap)
+
+    if fits(width_px, height_px):
+        return width_px, height_px
+    long_px = max(width_px, height_px)
+    aspect = long_px / min(width_px, height_px)
+    lo, hi = 1, long_px  # lo always fits; hi never does
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        # round() is half-to-even, the tie rule the live API uses.
+        if fits(mid, max(round(mid / aspect), 1)):
+            lo = mid
+        else:
+            hi = mid
+    short = max(round(lo / aspect), 1)
+    return (lo, short) if width_px >= height_px else (short, lo)
+
+
 def estimate_image_tokens(width_px: int, height_px: int, *, model: str | None) -> int:
     """Estimate the billed token cost of one image of ``width_px x height_px``.
 
