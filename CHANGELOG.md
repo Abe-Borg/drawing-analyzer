@@ -65,6 +65,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     first read's partial prose. Every billed synthesis and focus response is
     now recorded in the usage ledger, including failed replies and the first
     read a retry replaced.
+- **Economy mode keeps a sheet's partial digest when its retry fails.** A batch
+  digest cut off at `max_tokens` is resubmitted at a raised output cap. When
+  that resubmission came back errored, empty at the larger cap, or declined
+  before any output, its empty result replaced the first read, and the sheet's
+  partial prose disappeared from the report, the combined digest and the
+  per-sheet export. The first read now stays, as it already did in Hybrid and
+  Fast modes. The sheet is still reported as failed and never cached, every
+  billed attempt stays in the usage ledger, and the diagnostics log names the
+  batch the kept read came from. The same holds when the resubmission's
+  results cannot be collected this run; the sheet's error then gives both the
+  truncation and the reason collection was deferred, such as a receipt that
+  could not be saved. Rounds that still have output cap to grant run as before.
 
 ### Added
 
