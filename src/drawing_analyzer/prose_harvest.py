@@ -52,7 +52,7 @@ from .core.api_config import (
     thinking_config_for,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, fallback_served_model
 from .critique import _token_overlap
 from . import resource_pressure
 from .diagnostics import get_logger
@@ -641,7 +641,8 @@ def _structure_item(
     finding = _validate_finding_item(obj, ref) if isinstance(obj, dict) else None
     if request_usage is not None:
         request_usage[-1] = replace(request_usage[-1], parse_success=finding is not None)
-    if finding is not None:
+    # A refusal fallback's finding came from another model than the key names.
+    if finding is not None and fallback_served_model(resp) is None:
         put_stage_cache_entry(
             cache,
             # Re-resolved: a read that degraded mid-call came back under the

@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
+from .core.request_usage import fallback_served_model
 from .core.tokenizer import estimate_image_tokens_total
 from . import cancellation, resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
@@ -324,6 +325,9 @@ class DigestUsageAttempt:
     # estimate is charged per *response-bearing* attempt and must not be
     # multiplied by attempts that never came back.
     billable: bool = True
+    # The model that ran this attempt when a refusal fallback split a real-time
+    # rescue response (``None``: the requested model, the ordinary case).
+    model: str | None = None
 
 
 def _attach_usage_attempt(
@@ -338,18 +342,35 @@ def _attach_usage_attempt(
     # Inline recovery may include a raised-cap real-time retry. Preserve each
     # response's prompt boundary rather than treating their sum as one request.
     responses = list(getattr(digest, "request_usage", ()) or ()) or [digest]
-    for offset, response in enumerate(responses):
-        response_failed = getattr(response, "stop_reason", None) in ("max_tokens", "refusal")
+    # A refusal fallback's response splits into its billed attempts, each
+    # priced at the model that ran it (see ``pipeline._record_usage``).
+    parts = [
+        (response, hop) for response in responses
+        for hop in (getattr(response, "hops", ()) or (None,))
+    ]
+    for offset, (response, hop) in enumerate(parts):
+        declined = hop is not None and not hop.served
+        response_failed = declined or (
+            getattr(response, "stop_reason", None) in ("max_tokens", "refusal")
+        )
+        tokens = hop if hop is not None else response
         attempts.append(DigestUsageAttempt(
-            input_tokens=int(response.input_tokens or 0),
-            output_tokens=int(response.output_tokens or 0),
-            cache_read_tokens=int(getattr(response, "cache_read_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(response, "cache_write_tokens", 0) or 0),
+            input_tokens=int(tokens.input_tokens or 0),
+            output_tokens=int(tokens.output_tokens or 0),
+            cache_read_tokens=int(getattr(tokens, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(tokens, "cache_write_tokens", 0) or 0),
             transport=transport,
             parse_success=(digest.error is None and not response_failed),
-            terminal_status="FAILED" if digest.error or response_failed else "COMPLETE",
+            terminal_status=(
+                "REFUSED" if declined
+                else "FAILED" if digest.error or response_failed else "COMPLETE"
+            ),
             attempt_number=max(1, int(attempt_number or 1)) + offset,
             request_or_custom_id=getattr(response, "request_id", "") or request_or_custom_id,
+            model=(
+                (hop.model or (response.served_model if hop.served else None))
+                if hop is not None else None
+            ),
         ))
     # SheetDigest intentionally has no slots, so this stays a runtime-only
     # extension and cannot perturb existing cache/export schemas.
@@ -1936,7 +1957,10 @@ def _digest_from_message(
     text, findings, findings_note = parse_findings(
         raw_text, slot.ref, getattr(slot, "rows", 0), getattr(slot, "cols", 0)
     )
-    if cache is not None and slot.cache_key and error is None and raw_text:
+    if (
+        cache is not None and slot.cache_key and error is None and raw_text
+        and fallback_served_model(message) is None
+    ):
         cache.put(
             slot.cache_key,
             {

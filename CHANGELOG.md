@@ -6,6 +6,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refusal-fallback answers are priced, flagged and kept out of the cache.**
+  When Opus 5.5 (or Sonnet 5.5) declines a request, the server-side fallback
+  re-runs it on a model the API picks (Opus 4.8 for cyber-category refusals).
+  The run used to price that answer at the requested model's rate, drop the
+  declined attempt from the ledger, say nothing, and cache the substitute's
+  answer under the requested model's key. Each billed attempt is now its own
+  usage record at the model that ran it (`requested_model` names the one the
+  stage asked for; the declined attempt is `REFUSED`). No stage caches a
+  fallback answer. `run.log` gets a `Fallback:` header line plus a line per
+  stage, and `run_manifest.json` gets `usage.model_fallbacks`. Synthesis, focus
+  and the review plan now record per-response usage so their fallbacks are
+  priced too. The investigation loop and citation pause resumes no longer run
+  or echo back the declined model's partial tool requests.
+- **A truncated critique read is replaced at a raised output cap.** A
+  real-time critique read cut off at `max_tokens` used to get its one
+  replacement at the same 64k cap, so the paid retry would most likely be cut
+  off too. The replacement now gets the digest's raised cap (double, at most
+  128k). Other failed reads are still replaced at the original cap. The raised
+  cap is not part of the prompt, so the replacement still reads the warm image
+  prefix.
+- **Model defaults in the README, the in-app help and CLAUDE.md.** They still
+  named Opus 5 and Sonnet 5 for several stages, put set identity and the prose
+  harvest on Opus or Sonnet, and named Opus 5.5 as the only refusal-fallback
+  model. They now match the code: Opus 5.5 for review, critique, cross-QC,
+  synthesis, focus, the review plan and investigation; Sonnet 5.5 for
+  verification, citation and the report chat; Haiku 5.5 for set identity and
+  the prose harvest. The help's stage table also gives the investigation cap
+  as it now scales (at most 40 per run, by set size), not a flat 10.
+
 ### Added
 
 - **Haiku 5.5 extraction.** Set identity and prose-to-finding structuring now
@@ -78,24 +109,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RECOVERY_DIRECT` / `RECOVERY_BATCH` constants and the direct-call rescue
   (`_rescue_failed_items_sync`) are gone. The inline real-time fallback for a
   failed Files API upload is unchanged.
-
-### Fixed
-
-- **A truncated critique read is replaced at a raised output cap.** A
-  real-time critique read cut off at `max_tokens` used to get its one
-  replacement at the same 64k cap, so the paid retry would most likely be cut
-  off too. The replacement now gets the digest's raised cap (double, at most
-  128k). Other failed reads are still replaced at the original cap. The raised
-  cap is not part of the prompt, so the replacement still reads the warm image
-  prefix.
-- **Model defaults in the README, the in-app help and CLAUDE.md.** They still
-  named Opus 5 and Sonnet 5 for several stages, put set identity and the prose
-  harvest on Opus or Sonnet, and named Opus 5.5 as the only refusal-fallback
-  model. They now match the code: Opus 5.5 for review, critique, cross-QC,
-  synthesis, focus, the review plan and investigation; Sonnet 5.5 for
-  verification, citation and the report chat; Haiku 5.5 for set identity and
-  the prose harvest. The help's stage table also gives the investigation cap
-  as it now scales (at most 40 per run, by set size), not a flat 10.
 
 ## [1.8.0] - 2026-10-05
 

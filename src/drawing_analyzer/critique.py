@@ -49,7 +49,7 @@ from .core.api_config import (
     model_supports_effort,
     output_cap_for_model,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .diagnostics import get_logger
 from .digest import (
@@ -1563,7 +1563,10 @@ def critique_sheet_self_consistent(
     # permanently deny the requested self-consistency, or cache a malformed read as
     # a clean/corroborated sheet (DA-008). Mirrors digest_sheet refusing to cache
     # transient/degraded reads.
-    if cache is not None and cache_key is not None and result.completed_runs == runs:
+    if (
+        cache is not None and cache_key is not None and result.completed_runs == runs
+        and not any_fallback_served(result.request_usage)
+    ):
         # Re-read the latch: a rejection during the reads above means these
         # outcomes came back under the fenced contract, whatever this run set out
         # to send.

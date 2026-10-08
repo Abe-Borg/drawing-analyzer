@@ -26,7 +26,10 @@ from drawing_analyzer.digest_cache import (
     persistence_enabled,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import (
+    BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage,
+    fake_fallback_usage,
+)
 
 OPUS = "claude-opus-5"
 
@@ -502,13 +505,25 @@ def test_digest_sheet_cache_miss_on_sheet_text_change():
     assert client.calls == 2
 
 
-def test_digest_sheet_does_not_cache_empty_result():
+@pytest.mark.parametrize("response, ok", [
+    # Empty/error digests are never cached.
+    (FakeMessage(content=[], stop_reason="max_tokens"), False),
+    # A refusal fallback's digest is real work, but another model wrote it:
+    # stored under this key it would replay as the requested model's read.
+    (FakeMessage(
+        content=[FakeTextBlock(text="VAV-3 serves Rm 120")], usage=fake_fallback_usage(),
+    ), True),
+], ids=["empty", "refusal-fallback"])
+def test_digest_sheet_does_not_cache_result(response, ok):
     cache = DigestCache(None, persist=False)
-    client = _CountingClient(lambda kw: FakeMessage(content=[], stop_reason="max_tokens"))
+    client = _CountingClient(lambda kw: response)
 
     sd = digest_sheet(_sheet(), client=client, model=OPUS, cache=cache)
-    assert not sd.ok
-    assert cache.stats()["size"] == 0  # empty/error digests are never cached
+    assert sd.ok is ok
+    assert cache.stats()["size"] == 0
+    first_run_calls = client.calls
+    digest_sheet(_sheet(), client=client, model=OPUS, cache=cache)
+    assert client.calls == 2 * first_run_calls  # the next run asks again
 
 
 def test_a_lost_open_race_after_migration_does_not_empty_the_cache(tmp_path, monkeypatch):

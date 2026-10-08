@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .core.api_config import (
@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.request_usage import RequestUsage, any_fallback_served
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -196,6 +197,7 @@ class FocusReportResult:
     # user turn could not carry, and how many characters that cost.
     sheets_omitted: int = 0
     chars_omitted: int = 0
+    request_usage: list[RequestUsage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -304,8 +306,9 @@ def generate_focus_report(
         error=error,
         sheets_omitted=prompt.sheets_omitted,
         chars_omitted=prompt.chars_omitted,
+        request_usage=[RequestUsage.from_message(resp)],
     )
-    if result.ok:
+    if result.ok and not any_fallback_served(result.request_usage):
         put_stage_cache_entry(
             cache,
             cache_key,

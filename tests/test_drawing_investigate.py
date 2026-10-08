@@ -35,10 +35,12 @@ from drawing_analyzer.models import (
 from tests.fixtures.fake_anthropic import (
     BetaClientMixin,
     StreamingMessagesMixin,
+    FakeFallbackBlock,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
     FakeUsage,
+    fake_fallback_usage,
 )
 
 PAGE_W, PAGE_H = 800.0, 600.0
@@ -439,17 +441,27 @@ def test_investigation_preserves_paid_turn_usage_when_final_turn_fails(final_res
         assert result.input_tokens == 60_000
 
 
-def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
+@pytest.mark.parametrize("declined_partial", [False, True], ids=["one-model", "refusal-fallback"])
+def test_multiple_tool_uses_in_one_turn_are_all_answered_together(declined_partial):
+    # A mid-output refusal fallback leaves the declined model's partial before
+    # the ``fallback`` marker. Its tool request is neither run nor echoed back.
+    prefix = [
+        FakeToolUseBlock(name="crop_region", input={"rect": [0, 0, 50, 50]}, id="declined"),
+        FakeFallbackBlock(),
+    ] if declined_partial else []
+
     def responder(kw, _n):
         if _tool_result_turns(kw):
             return _verdict("CONTRADICTED", "schedule shows 200 PSI")
         return FakeMessage(
             content=[
+                *prefix,
                 FakeToolUseBlock(name="find_text", input={"query": "PUMP"}, id="t1"),
                 FakeToolUseBlock(name="crop_region",
                                  input={"rect": [10, 10, 300, 200]}, id="t2"),
             ],
-            stop_reason="tool_use", usage=FakeUsage(),
+            stop_reason="tool_use",
+            usage=fake_fallback_usage() if declined_partial else FakeUsage(),
         )
 
     client = _LoopClient(responder)
@@ -459,6 +471,8 @@ def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
                 for b in client.calls[-1]["messages"][-1]["content"]
                 if isinstance(b, dict) and b.get("type") == "tool_result"]
     assert answered == ["t1", "t2"]                # one user turn, both ids
+    echoed = client.calls[-1]["messages"][-2]["content"]
+    assert [getattr(b, "id", None) for b in echoed] == ["t1", "t2"]
     # TWO evidence requests, though they arrived in one turn: each is a real
     # crop rendered, saved and sent. This used to read 1, which is how a
     # 6-request budget bought 18+.
@@ -802,6 +816,17 @@ def test_cache_never_admits_capped_or_garbled_outcomes(tmp_path):
         usage=FakeUsage()))
     _cached_run(garbled, cache, tmp_path / "b")
     assert cache.stats()["size"] == 0                # garbled: not stored
+
+    def _rescued(kw, _n):
+        if not _tool_result_turns(kw):
+            return _tool_use()
+        reply = _verdict()
+        reply.usage = fake_fallback_usage()
+        return reply
+
+    _, f = _cached_run(_LoopClient(_rescued), cache, tmp_path / "c")
+    assert f.verification.status == "VERIFIED"
+    assert cache.stats()["size"] == 0                # another model concluded it
 
 
 def test_cache_sha_mismatch_falls_back_to_a_live_run(tmp_path):

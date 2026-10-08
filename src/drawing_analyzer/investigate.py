@@ -54,12 +54,13 @@ from .core.api_config import (
     apply_thinking_config,
     cache_policy_for,
     call_with_refusal_fallback,
+    drop_declined_partial,
     model_supports_structured_outputs,
     phase_output_cap,
     system_prompt_with_cache,
     tools_with_cache,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -1027,7 +1028,9 @@ def _investigate_one(
         out.cache_read_tokens += usage.cache_read_tokens
         out.cache_write_tokens += usage.cache_write_tokens
         stop = str(getattr(resp, "stop_reason", "") or "")
-        content = list(getattr(resp, "content", None) or [])
+        # After a mid-output refusal fallback, the declined model's tool
+        # requests are neither run nor echoed back; the fallback's are.
+        content = drop_declined_partial(list(getattr(resp, "content", None) or []))
 
         if stop == "pause_turn":
             pause_count += 1
@@ -1507,6 +1510,7 @@ def investigate_findings(
                 and budget_state_before == _task_budget_available
                 and outcome.tool_trace
                 and all(step.get("sha256") for step in outcome.tool_trace)
+                and not any_fallback_served(outcome.request_usage)
             ):
                 cache.put(cache_key, {
                     "status": status,

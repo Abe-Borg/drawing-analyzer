@@ -592,14 +592,27 @@ consume ledger entries and nothing else.
   `ModelCapabilities.supports_refusal_fallback` decides which models opt in —
   never a comparison against one model id. Opus 5.5, Sonnet 5.5 and Opus 5
   declare it (`stop_reason="refusal"`, HTTP 200); Haiku 5.5 has no server-side
-  fallback and does not. `fallbacks: "default"` lets the server choose the
-  substitute by refusal category (Opus 5 for Opus 5.5, Sonnet 5 for Sonnet
-  5.5). `core.api_config.call_with_refusal_fallback` attaches it (beta
-  `server-side-fallback-2026-07-01`) to every real-time call on a declaring
-  model — digest and critique (`digest.stream_message`), verification,
-  investigation, cross-QC, citation, review plan, synthesis and focus — and
-  re-routes through `client.beta.messages`. The parameter is rejected on the
-  Batches API.
+  fallback and does not. The API picks the substitute
+  by refusal category (Opus 5.5 → Opus 5 / Opus 4.8, cyber → Opus 4.8;
+  Sonnet 5.5 → Sonnet 5). `core.api_config.call_with_refusal_fallback`
+  attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on
+  every real-time call (`digest.stream_message` and every stage's `create`)
+  and re-routes through `client.beta.messages`. The parameter is rejected on
+  the Batches API. The served-by signal is a `fallback_message` entry in
+  `usage.iterations`, read once by `RequestUsage.from_message` (`served_model`,
+  per-attempt `hops`). Never compare top-level `model` with the request (an
+  alias echoes back canonical; the fakes default to `claude-opus-5`). A
+  fallback answer: (1) is priced per attempt at the model that ran it —
+  `_record_usage` and the batch rescue's `_attach_usage_attempt` split `hops`
+  (declined = `REFUSED`, rescue carries `requested_model`); (2) is never cached
+  — every write site checks `any_fallback_served` / `fallback_served_model`;
+  (3) is reported by `RunUsage.model_fallbacks()` (run.log `Fallback:` line,
+  manifest `usage.model_fallbacks`). A stage whose usage reaches the ledger
+  must carry `request_usage`, or its fallback is priced at the requested
+  model. Content echoed back into history goes through
+  `api_config.drop_declined_partial` (investigation turns, citation pause
+  resumes): the declined partial's thinking/`tool_use` is neither executed nor
+  echoed.
   `verify.py` resolves one model (`VERIFICATION_MODEL_DEFAULT`) and never
   escalates; `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`. A 400
   naming the fallback beta turns the feature off for the process

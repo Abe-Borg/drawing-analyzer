@@ -66,7 +66,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Iterable
 
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 
 from .core.api_config import (
     CITATION_OUTPUT_CAP,
@@ -79,6 +79,7 @@ from .core.api_config import (
     build_web_fetch_tool,
     build_web_search_tool,
     call_with_refusal_fallback,
+    drop_declined_partial,
     cache_policy_for,
     effort_config_for,
     model_capabilities,
@@ -1004,7 +1005,10 @@ def _check_one(
             # resumed from a conversation missing the searches it had already
             # done. The claims that need three resumes are the ones with the
             # most work behind them.
-            messages = [*messages, {"role": "assistant", "content": _get(resp, "content")}]
+            messages = [*messages, {
+                "role": "assistant",
+                "content": drop_declined_partial(list(_get(resp, "content") or [])),
+            }]
             continue
         return _CheckOutcome(
             raw_text=_message_text(resp),
@@ -1425,6 +1429,7 @@ def check_citations(
             if (
                 key is not None and parsed and outcome.error is None
                 and all(h in per for h, _c in handled)
+                and not any_fallback_served(outcome.request_usage)
             ):
                 cache.put(key, {
                     "per_claim": {

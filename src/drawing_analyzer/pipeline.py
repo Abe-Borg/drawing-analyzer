@@ -28,7 +28,7 @@ from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     cache_write_ttl_for,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
 from . import cancellation, resource_pressure, tiling
@@ -369,6 +369,7 @@ def _record_usage(
     request_id: str = "",
     cache_write_ttl: "str | None" = None,
     request_usage: "list[RequestUsage] | None" = None,
+    requested_model: "str | None" = None,
 ) -> UsageRecord:
     """Append priced usage, preserving response boundaries for multi-call stages.
 
@@ -394,28 +395,46 @@ def _record_usage(
         # A stage may contain many short calls, or a mix of short and long
         # calls. Price every response at its own prompt size; applying the
         # long-context threshold to their sum overcharges small requests.
-        for number, request in enumerate(request_usage, start=attempt):
-            response_failed = (
+        # A response a refusal fallback served is split into its billed
+        # attempts, each priced at the model that ran it (the declined
+        # attempt at the requested model, the rescue at the fallback's rate).
+        parts = [
+            (request, hop) for request in request_usage
+            for hop in (getattr(request, "hops", ()) or (None,))
+        ]
+        for number, (request, hop) in enumerate(parts, start=attempt):
+            declined = hop is not None and not hop.served
+            response_failed = declined or (
                 request.stop_reason in ("max_tokens", "refusal")
                 or request.parse_success is False
             )
             response_parsed = (
                 parse_success if request.parse_success is None else request.parse_success
             )
+            tokens = hop if hop is not None else request
+            billed_model = (
+                (hop.model or (getattr(request, "served_model", None) if hop.served else None)
+                 or model)
+                if hop is not None else model
+            )
             record = _record_usage(
-                run_usage, family=family, instance=instance, model=model,
+                run_usage, family=family, instance=instance, model=billed_model,
+                requested_model=model if billed_model != model else None,
                 transport=transport,
-                input_tokens=request.input_tokens,
-                output_tokens=request.output_tokens,
-                cache_read_tokens=request.cache_read_tokens,
-                cache_write_tokens=request.cache_write_tokens,
+                input_tokens=tokens.input_tokens,
+                output_tokens=tokens.output_tokens,
+                cache_read_tokens=tokens.cache_read_tokens,
+                cache_write_tokens=tokens.cache_write_tokens,
                 # Tool fees are independent of token tiers. Existing stages
                 # provide their total here; charge it once on the final record.
                 billable_tool_uses=(
-                    billable_tool_uses if number == attempt + len(request_usage) - 1 else None
+                    billable_tool_uses if number == attempt + len(parts) - 1 else None
                 ),
                 parse_success=response_parsed and not response_failed,
-                terminal_status="FAILED" if response_failed else terminal_status,
+                terminal_status=(
+                    "REFUSED" if declined
+                    else "FAILED" if response_failed else terminal_status
+                ),
                 parent=parent, attempt=number,
                 request_id=request.request_id, cache_write_ttl=cache_write_ttl,
             )
@@ -461,6 +480,7 @@ def _record_usage(
             request_or_custom_id=request_id,
             estimated_cost=cost,
             cache_write_ttl=cache_write_ttl,
+            requested_model=requested_model,
         )
     )
 
@@ -1653,7 +1673,10 @@ def _run_critique_stage(
         # structured run will find and serve it. Same correction, same reason, as
         # the level-2 store key.
         identity = level1_identities.get(_refkey(ref)) if cache is not None else None
-        if identity is not None and res.error is None and res.runs == runs:
+        if (
+            identity is not None and res.error is None and res.runs == runs
+            and not any_fallback_served(getattr(res, "request_usage", None) or ())
+        ):
             cache.put(
                 critique_cache_key_level1(
                     identity,
@@ -3492,7 +3515,10 @@ def extract_drawing_context(
     # real, non-empty digest is stored — mirroring digest_sheet's own guard.
     if cache is not None:
         for sd in miss_sheets:
-            if sd.error is None and (sd.text or "").strip():
+            if (
+                sd.error is None and (sd.text or "").strip()
+                and not any_fallback_served(getattr(sd, "request_usage", None) or ())
+            ):
                 key = level1_keys.get(_refkey(sd.ref))
                 if key is not None:
                     cache.put(key, cache_entry_from_digest(sd))
@@ -3565,10 +3591,12 @@ def extract_drawing_context(
                 1 for a in usage_attempts if getattr(a, "billable", True)
             )
             for usage_attempt in usage_attempts:
+                attempt_model = getattr(usage_attempt, "model", None) or model
                 _record_usage(
                     run_usage, family="digest",
                     instance=f"digest:{skey[0]}:p{skey[1]}",
-                    model=model,
+                    model=attempt_model,
+                    requested_model=model if attempt_model != model else None,
                     transport=getattr(usage_attempt, "transport", sheet_transport),
                     input_tokens=getattr(usage_attempt, "input_tokens", 0),
                     output_tokens=getattr(usage_attempt, "output_tokens", 0),
@@ -3585,9 +3613,11 @@ def extract_drawing_context(
                 )
         else:
             if not cached:
-                img_tok += sd.image_token_estimate * max(
-                    1, len(getattr(sd, "request_usage", ()) or ())
-                )
+                # A refusal fallback read the images once per billed attempt.
+                img_tok += sd.image_token_estimate * max(1, sum(
+                    len(getattr(u, "hops", ()) or ()) or 1
+                    for u in (getattr(sd, "request_usage", ()) or ())
+                ))
             _record_usage(
                 run_usage, family="digest",
                 instance=f"digest:{skey[0]}:p{skey[1]}",
@@ -3876,6 +3906,7 @@ def extract_drawing_context(
                     transport="CACHE" if pres.cached else "REAL_TIME",
                     input_tokens=pres.input_tokens,
                     output_tokens=pres.output_tokens,
+                    request_usage=getattr(pres, "request_usage", None),
                     cache_hit=pres.cached,
                     parse_success=pres.ok,
                     terminal_status="COMPLETE" if pres.ok else "FAILED",
@@ -4188,6 +4219,7 @@ def extract_drawing_context(
                     run_usage, family="synthesis", instance="synthesis",
                     model=synthesis_model or default_synthesis_model(),
                     input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    request_usage=getattr(result, "request_usage", None),
                     transport=(
                         "CACHE" if getattr(result, "cached", False) else "REAL_TIME"
                     ),
@@ -4265,6 +4297,7 @@ def extract_drawing_context(
                     run_usage, family="focus", instance="focus",
                     model=focus_model or default_focus_model(),
                     input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+                    request_usage=getattr(fresult, "request_usage", None),
                     transport=(
                         "CACHE" if getattr(fresult, "cached", False) else "REAL_TIME"
                     ),

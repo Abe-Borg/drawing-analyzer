@@ -23,6 +23,9 @@ from drawing_analyzer.cost import (
     format_exhaustive_cost_prompt,
 )
 from drawing_analyzer.models import RunUsage, UsageRecord
+from tests.fixtures.fake_anthropic import (
+    FakeMessage, FakeTextBlock, FakeUsage, fake_fallback_usage,
+)
 
 _OPUS = "claude-opus-5"
 
@@ -295,6 +298,52 @@ def test_haiku_usage_ledger_sums_short_and_long_requests_without_repricing_total
         Decimal("0.007"), Decimal("0.007"), Decimal("0.0375"),
     ]
     assert usage.total_estimated_cost == Decimal("0.0515")
+
+
+_OPUS_5_5 = "claude-opus-5-5"
+_OPUS_4_8 = "claude-opus-4-8"
+
+
+@pytest.mark.parametrize("usage, records, fallbacks", [
+    # An ordinary reply: one record at the requested model.
+    (FakeUsage(input_tokens=1_000, output_tokens=400),
+     [(_OPUS_5_5, None, "COMPLETE", Decimal("0.012"))], []),
+    # Server-tool loop iterations without a fallback stay one ordinary record.
+    (FakeUsage(input_tokens=1_000, output_tokens=400, iterations=[
+        {"type": "message", "input_tokens": 600, "output_tokens": 100},
+        {"type": "message", "input_tokens": 400, "output_tokens": 300},
+    ]), [(_OPUS_5_5, None, "COMPLETE", Decimal("0.012"))], []),
+    # Declined by Opus 5.5, rescued by Opus 4.8: each attempt at its own rate
+    # ($4/$20 vs $5/$25), though top-level usage reports only the rescue.
+    (fake_fallback_usage(), [
+        (_OPUS_5_5, None, "REFUSED", Decimal("0.006")),
+        (_OPUS_4_8, _OPUS_5_5, "COMPLETE", Decimal("0.015")),
+    ], [{"stage_family": "digest", "requested_model": _OPUS_5_5,
+         "served_model": _OPUS_4_8, "responses": 1, "declined_attempts": 1}]),
+    # A sticky turn: the fallback model served it directly, nothing declined.
+    (fake_fallback_usage(declined=None), [
+        (_OPUS_4_8, _OPUS_5_5, "COMPLETE", Decimal("0.015")),
+    ], [{"stage_family": "digest", "requested_model": _OPUS_5_5,
+         "served_model": _OPUS_4_8, "responses": 1, "declined_attempts": 0}]),
+], ids=["ordinary", "tool-loop", "declined-then-rescued", "sticky"])
+def test_refusal_fallback_attempts_are_priced_at_the_model_that_ran_them(
+    usage, records, fallbacks,
+):
+    from drawing_analyzer.core.request_usage import RequestUsage
+    from drawing_analyzer.pipeline import _record_usage
+
+    message = FakeMessage(content=[FakeTextBlock(text="digest")], usage=usage)
+    ledger = RunUsage()
+    _record_usage(
+        ledger, family="digest", instance="digest:SRC-0001:p0", model=_OPUS_5_5,
+        request_usage=[RequestUsage.from_message(message)],
+    )
+    assert [
+        (r.model, r.requested_model, r.terminal_status, r.estimated_cost)
+        for r in ledger.records
+    ] == records
+    assert ledger.model_fallbacks() == fallbacks
+    assert ledger.to_dict()["model_fallbacks"] == fallbacks
 
 
 def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
