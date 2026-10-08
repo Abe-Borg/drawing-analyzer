@@ -55,12 +55,46 @@ class FakeUsage:
     # Present only when the response carried server tool telemetry — ``None``
     # mimics the SDK shapes that omit it (readers must treat that as unknown).
     server_tool_use: Any = None
+    # Per-attempt usage (``usage.iterations``); ``None`` on an ordinary reply.
+    iterations: Any = None
+
+
+def fake_fallback_usage(
+    *,
+    served_model: str = "claude-opus-4-8",
+    declined: tuple[int, int] | None = (1_000, 100),
+    served: tuple[int, int] = (1_000, 400),
+) -> FakeUsage:
+    """Usage of a reply a server-side refusal fallback served.
+
+    ``declined`` is the requested model's refused attempt (``None`` for a
+    sticky turn the fallback model served directly). Top-level usage covers the
+    serving attempt only, as the API reports it.
+    """
+    def _entry(kind: str, model: str | None, tokens: tuple[int, int]) -> dict:
+        return {
+            "type": kind, "model": model,
+            "input_tokens": tokens[0], "output_tokens": tokens[1],
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        }
+
+    iterations = [_entry("message", None, declined)] if declined else []
+    iterations.append(_entry("fallback_message", served_model, served))
+    return FakeUsage(input_tokens=served[0], output_tokens=served[1], iterations=iterations)
 
 
 @dataclass
 class FakeTextBlock:
     text: str
     type: str = "text"
+
+
+@dataclass
+class FakeFallbackBlock:
+    """The switch point a mid-output refusal fallback leaves in ``content``."""
+    from_model: str = "claude-opus-5-5"
+    to_model: str = "claude-opus-4-8"
+    type: str = "fallback"
 
 
 @dataclass

@@ -29,7 +29,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.tokenizer import estimate_image_tokens_total
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from . import cancellation, resource_pressure
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
@@ -1742,7 +1742,11 @@ def digest_sheet(
     # ``max_tokens`` now sets ``error`` above and so is refused here: a stored
     # truncation is served forever, at zero cost and indistinguishable from a
     # complete read, which is how a cut-off sheet became permanent.
-    if cache is not None and cache_key is not None and error is None and raw_text:
+    # A refusal fallback's answer came from another model than the key names.
+    if (
+        cache is not None and cache_key is not None and error is None and raw_text
+        and not any_fallback_served(request_usage)
+    ):
         cache.put(
             cache_key,
             {

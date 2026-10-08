@@ -2340,6 +2340,10 @@ class UsageRecord:
     # possible. Defaults to ``None``, which is both the common case and the
     # rate every pre-existing record was priced at.
     cache_write_ttl: "str | None" = None
+    # The model the stage asked for, set only when a server-side refusal
+    # fallback ran this attempt on a different one (``model`` is then the model
+    # that ran and was billed). ``None`` on every ordinary record.
+    requested_model: "str | None" = None
 
     def to_dict(self) -> dict:
         return {
@@ -2361,6 +2365,7 @@ class UsageRecord:
             "request_or_custom_id": self.request_or_custom_id,
             "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
             "cache_write_ttl": self.cache_write_ttl,
+            "requested_model": self.requested_model,
         }
 
 
@@ -2505,6 +2510,36 @@ class RunUsage:
         """
         return self._rollup(lambda r: r.model or "")
 
+    def model_fallbacks(self) -> "list[dict]":
+        """Responses a server-side refusal fallback served, per stage and model pair.
+
+        One row per ``(stage_family, requested_model, served_model)``, sorted, so
+        run.log and the manifest name every stage whose answer came from a
+        model other than the one it asked for. ``declined_attempts`` counts the
+        requested model's billed refusals in that family (``REFUSED`` records).
+        """
+        served: dict[tuple, int] = {}
+        declined: dict[tuple, int] = {}
+        for r in self.records:
+            if r.terminal_status == "REFUSED":
+                key = (r.stage_family, r.requested_model or r.model)
+                declined[key] = declined.get(key, 0) + 1
+            elif r.requested_model:
+                key = (r.stage_family, r.requested_model, r.model)
+                served[key] = served.get(key, 0) + 1
+        return [
+            {
+                "stage_family": family,
+                "requested_model": requested,
+                "served_model": model,
+                "responses": count,
+                # Charged to the first row of the pair, so a family served by
+                # two fallback models does not count its refusals twice.
+                "declined_attempts": declined.pop((family, requested), 0),
+            }
+            for (family, requested, model), count in sorted(served.items())
+        ]
+
     def to_dict(self) -> dict:
         cost = self.total_estimated_cost
         return {
@@ -2528,5 +2563,6 @@ class RunUsage:
                     else str(g["estimated_cost"])}
                 for m, g in self.by_model().items()
             },
+            "model_fallbacks": self.model_fallbacks(),
             "records": [r.to_dict() for r in self.records],
         }

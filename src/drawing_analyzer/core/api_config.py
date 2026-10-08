@@ -1467,6 +1467,37 @@ def apply_refusal_fallback(kwargs: dict, *, model: str) -> dict:
     return out
 
 
+def drop_declined_partial(content: list) -> list:
+    """Return ``content`` safe to echo back after a mid-output refusal fallback.
+
+    Before the last ``fallback`` block sits the declined model's partial. The
+    API says to echo only its ``text`` and paired server-tool blocks; its
+    thinking and ``tool_use`` blocks (requests the declined model made) must not
+    go back. The marker itself is dropped too, so the history stays valid if the
+    fallback latches off and the next turn goes out without the beta. Content
+    with no ``fallback`` block is returned unchanged.
+    """
+    kinds = [str(_block_field(b, "type") or "") for b in content]
+    if "fallback" not in kinds:
+        return content
+    boundary = len(kinds) - 1 - kinds[::-1].index("fallback")
+    answered = {
+        _block_field(b, "tool_use_id") for b, kind in zip(content[:boundary], kinds)
+        if kind.endswith("_tool_result")
+    }
+    kept = [
+        b for b, kind in zip(content[:boundary], kinds)
+        if kind == "text"
+        or (kind == "server_tool_use" and _block_field(b, "id") in answered)
+        or kind.endswith("_tool_result")
+    ]
+    return kept + list(content[boundary + 1:])
+
+
+def _block_field(block: Any, key: str) -> Any:
+    return block.get(key) if isinstance(block, dict) else getattr(block, key, None)
+
+
 def messages_namespace(client: Any, kwargs: dict):
     """Return ``client.beta.messages`` when ``kwargs`` carries betas, else
     ``client.messages``. Pairs with :func:`apply_refusal_fallback` so a call
