@@ -81,7 +81,7 @@ from .critique import (
     result_from_outcomes,
     run_checklists,
 )
-from . import cancellation
+from . import call_telemetry, cancellation
 from .diagnostics import get_logger, summarize_exc
 from .core.request_usage import any_fallback_served
 from .digest import _get
@@ -422,7 +422,14 @@ def submit_critique_batch(
 
                 client = _get_client()
             try:
-                mb = _create_batch(client, reqs, on_log=on_log)
+                with call_telemetry.scope("critique"):
+                    mb = _create_batch(
+                        client, reqs, on_log=on_log,
+                        items={
+                            cid: f"{call_telemetry.sheet_item(slot.ref)}:{run_id}"
+                            for cid, (slot, run_id) in by_custom_id.items()
+                        },
+                    )
             except Exception as exc:  # noqa: BLE001 - additive/non-fatal (I-3), see below
                 # DA-034: the uploads are already remote but no batch will ever
                 # reference them — delete every one so a submit failure never leaks

@@ -381,7 +381,9 @@ per sheet, the `*_reviewed.pdf` copies (incomplete ones named
 (the placement receipts + coverage proof) — alongside the prose digest and HTML
 report, plus (every run, QC or not) **`run.log`** — the sanitized per-run log —
 and **`run_manifest.json`** — the machine-readable run summary that hashes every
-artifact in the folder (see [Run log & run manifest](#run-log--run-manifest)). When the set has **set-level** findings — a cross-sheet synthesis conflict
+artifact in the folder (see [Run log & run manifest](#run-log--run-manifest)) —
+and a **`diagnostics/`** folder with every model call the run made, what each was
+given and what it used (see [The `diagnostics/` folder](#the-diagnostics-folder)). When the set has **set-level** findings — a cross-sheet synthesis conflict
 that names no single sheet — they are written to a dedicated
 `Drawing_Set_Review_Notes.pdf` (its own analyzer-owned pages and reconciled
 receipts) rather than being pinned onto an arbitrary drawing.
@@ -1411,6 +1413,8 @@ carries two artifacts built from it (Phase 26A, DA-024):
   placed no call contributes no usage row at all — the
   ledger/receipt/coverage accounting, the **resource-starvation check**
   (a `Starvation:` header verdict plus a *Resource pressure* section — see
+  below), the **agent headroom check** (a `Headroom:` header verdict plus the
+  *Agent provisioning & headroom* and *Model calls by stage* sections — see
   below), prose
   carry-through counts, the artifacts written, every run error, and the full
   event trace. UTF-8 + CRLF so Notepad reads it cleanly. This is per-run and
@@ -1419,7 +1423,8 @@ carries two artifacts built from it (Phase 26A, DA-024):
 - **`run_manifest.json`** — the machine-readable counterpart (`schema_version`
   1): final status, configuration, source inventory, typed stage results, the
   usage ledger with derived totals, prose/evidence/markup-coverage summaries,
-  the `resource_pressure` starvation record,
+  the `resource_pressure` starvation record, the `agent_headroom` block
+  (per-stage provisioning, headroom verdicts and the model map),
   sanitized errors, and the **sha256 + size of every artifact in the export**
   (`run.log` and `markup_manifest.json` included). Finalization is non-circular
   (§18.4): ordinary artifacts are written first, then `run.log`, then the
@@ -1505,6 +1510,88 @@ and the journal trace shows the events as they happened — `API_RETRY`,
 everything; only the listed events are bounded. The SDK's own in-client
 retries (two per request by default) happen beneath these loops and are
 visible only in the wire capture (`DRAWING_ANALYZER_DEBUG`).
+
+### Did the agents have enough room? (agent headroom)
+
+The starvation check above asks whether the API or the computer held the run
+back. The other half of "were the agents starved" is what each agent was
+*given*: its output envelope (`max_tokens`, which adaptive thinking shares with
+the reply), its effort level and thinking mode, the tools it could call and how
+many uses each allowed, and the allotments the pipeline sets per work item (the
+investigation's evidence rounds, the citation check's `pause_turn` resumes). A
+thin result from an agent that ran out of room looks the same in the findings
+as one from an agent that had nothing more to say. The per-call record tells
+them apart.
+
+**Every model request is recorded where it is sent** (module
+`call_telemetry.py`): every real-time call at the one dispatch point all stages
+share, and every Message Batch item at submit, completed when its results are
+read. Each record holds what the call was given (model, effort and the highest
+effort that model accepts, thinking mode, `max_tokens`, tools offered with
+their per-call `max_uses`, `tool_choice`, task budget, structured outputs,
+strict tool schemas, refusal fallback, image count) and what it used (stop
+reason, input/output/cache tokens, share of `max_tokens` used, thinking blocks,
+tool calls by name, the server's own web-search/web-fetch counts, tool errors
+such as `max_uses_exceeded`, duration, message id). Each call also names its
+stage, using the same family names as the usage table (`digest`, `critique`,
+`verify`, `investigate`, `citation`, …), and its **work item**: `SRC-0001:p0`
+for a sheet, a finding (joined to its `QC-###` in the export), a code reference
+for the citation check, or `set` for one-per-run stages. A call made outside a
+labeled stage is still recorded, as `unattributed (<module>)`.
+
+From those records each stage gets a **headroom verdict**:
+
+| Verdict | Meaning |
+|---|---|
+| `STARVED` | The stage ran out of something it needed and its result shows it: a work item still cut off at `max_tokens` on its **last** call, a server tool that refused a use because `max_uses` was spent, a `pause_turn` still unresolved when resumes ran out, or an allotment the pipeline saw it exhaust (evidence rounds, the per-run investigation or citation cap, the digest/verifier output cap, a batch abandoned by the time bound). |
+| `TIGHT` | It finished, but with no margin or with less than it was built for: a call at 90 %+ of `max_tokens`, a cap hit that a raised-cap retry recovered (a retry that fails, is stopped or is cut off again does not count as recovering it), a tool used up to its per-call limit, an item that asked for its whole allotment, a forced no-tools close, a recovered `pause_turn`, or an ability turned off mid-run (structured outputs, strict tool schemas, the refusal fallback or the task budget, latched off after an API rejection). |
+| `ADEQUATE` | Every call finished inside its limits with room to spare. |
+| `NOT_ASSESSED` | No call came back with a response this run can judge: everything was served from cache, failed or was stopped, or the only results are from a batch an earlier run submitted (its request, and so its limits, were never seen by this run). |
+
+The run's verdict is its worst stage. Effort and thinking are reported as sent,
+next to the highest effort the model accepts; they are per-stage design choices,
+not inputs to the verdict. Output tokens include thinking, because the API
+reports them together.
+
+Where it shows: a `Headroom:` header line in `run.log` plus an *Agent
+provisioning & headroom* section (one block per stage: models, effort, thinking,
+cap and peak use, tools and their limits, item allotments, abilities sent, and
+the reasons behind a TIGHT or STARVED verdict) and a *Model calls by stage*
+table (where each model ran: calls, real-time vs batch, work items, tokens);
+`run_manifest.json`'s `agent_headroom` block; one line in the GUI completion
+summary and the report's *Run record*; and the `diagnostics/` folder below.
+
+### The `diagnostics/` folder
+
+Every export carries a `diagnostics/` folder with the detail behind those
+summaries, in forms Excel or a script can open. Start with `00_summary.md`.
+
+| File | What it holds |
+|---|---|
+| `00_summary.md` | The answers first (did the agents have room, were they starved by the API or the computer, did another model answer, which models ran), then the per-stage headroom table, the model map, the resource-pressure record and a guide to every file. |
+| `api_calls.csv` | One row per model call: stage, work item and `qc_id`, transport, model asked for and model that answered, effort, thinking, `max_tokens`, output tokens and `output_fraction`, stop reason/outcome, tools offered, their limits, calls made and `tools_at_limit`, `forced_close`, task budget, item allotments, duration, batch/custom/message ids, error. |
+| `api_calls.json` | The same calls with every field, for scripts. |
+| `agent_headroom.json` | The per-stage provisioning and headroom counters and the model map (also in `run_manifest.json`). |
+| `api_retries.csv` | Every transient API failure (429/529/503/5xx/timeout/connection) the run waited out or gave up on: stage, HTTP status, attempt, backoff, `retry-after`, rate-limit headers, request id. |
+| `host_samples.csv` | The CPU / memory / disk / thread timeline the host sampler recorded during the run. `lag_seconds` is how late the sampler woke, the direct sign of CPU starvation. Bounded at 2,000 rows; a longer run keeps an evenly spaced series over its whole length. |
+| `events.csv` | The run journal's event trace (the same events as `run.log`'s *Event trace*), one per row. |
+
+Same privacy boundary as `run.log`: counts, labels and identifiers only, never
+a prompt, drawing text, a reply, an image or a key. Error strings and item
+labels pass the same secret-redaction and path-scrubbing filter. The CSVs are
+UTF-8 with a BOM and CRLF line endings, like `findings.csv`. `run_manifest.json`
+hashes every file in the folder.
+
+### Where every diagnostic lives
+
+| Output | Where | Scope |
+|---|---|---|
+| `run.log` | export folder | One run, human-readable: inputs, configuration, stages, usage, starvation, headroom, model map, errors, full event trace. |
+| `run_manifest.json` | export folder | The same run, machine-readable, plus the sha256 of every exported file. |
+| `diagnostics/` | export folder | Every model call, API retry, host sample and journal event (above). |
+| `markup_manifest.json` | export folder (QC runs) | Every planned markup placement and its reconciled receipt. |
+| `evidence/<QC-###>/investigation.json` | export folder (when investigation ran) | The full tool trace of each investigated finding: every crop/search requested and the verdict. |
+| `drawing_analyzer.log` | `%LOCALAPPDATA%\DrawingAnalyzer\logs\` on Windows (the app's settings folder elsewhere) | The app session's rotating diagnostic log: request ids, batch ids, `custom_id`-to-sheet maps, retry detail. Stays on the computer; reset at each app launch. Set `DRAWING_ANALYZER_DEBUG=1` to add the SDK's wire-level request/response lines. |
 
 ### Did another model answer? (refusal fallback)
 

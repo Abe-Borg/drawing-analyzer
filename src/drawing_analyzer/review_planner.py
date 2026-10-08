@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import call_telemetry
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     model_supports_adaptive_thinking,
@@ -575,7 +576,8 @@ def author_review_plan(
     attempt = 0
     while True:
         try:
-            resp = stream_message(client, kwargs)
+            with call_telemetry.scope("review_plan", call_telemetry.SET_ITEM):
+                resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             if transient_retry_wait(exc, attempt, max_retries, sleep, stage="review_plan"):

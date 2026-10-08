@@ -88,7 +88,7 @@ from .core.api_config import (
     thinking_config_for,
     tools_with_cache,
 )
-from . import resource_pressure
+from . import call_telemetry, resource_pressure
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
@@ -969,7 +969,12 @@ def _check_one(
         attempt = 0
         while True:
             try:
-                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+                with call_telemetry.scope(
+                    "citation", ref, pause_resumes=_MAX_PAUSE_RESUMES,
+                ):
+                    resp = call_with_refusal_fallback(
+                        client, kwargs, model=model, method="create",
+                    )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise
                 if transient_retry_wait(exc, attempt, max_retries, sleep, stage="citation"):

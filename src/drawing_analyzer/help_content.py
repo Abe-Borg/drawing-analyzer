@@ -631,6 +631,16 @@ _HOW_IT_WORKS = HelpDocument(
                 "budgets), and the SHA-256 of every file in the export. Both are written "
                 "even when the run fails."
             ),
+            _para(
+                "The export's diagnostics folder goes call by call. Every model call is "
+                "one row in api_calls.csv: the stage and sheet or finding it served, the "
+                "model, the effort and thinking it was given, its output cap and how "
+                "much of it was used, the tools it could call with their limits, and how "
+                "it ended. From those rows each stage gets a headroom verdict: STARVED "
+                "(it ran out of output room, tool uses or an allotment), TIGHT (it "
+                "finished, but at the limit) or ADEQUATE. A table shows which model ran "
+                "in which stage. Start with diagnostics/00_summary.md."
+            ),
         ),
     ),
 )
@@ -758,8 +768,9 @@ _WHY_TRUST_IT = HelpDocument(
                 "software and model versions, every input accepted or rejected, the "
                 "settings actually used, a per-stage table with statuses and call counts, "
                 "the token and dollar usage, whether the agents were starved of API "
-                "capacity, CPU, memory or disk while they worked, and the SHA-256 hash of "
-                "every file produced. "
+                "capacity, CPU, memory or disk while they worked, whether each stage had "
+                "enough output room, tool uses and evidence rounds to finish, which model "
+                "ran where, and the SHA-256 hash of every file produced. "
                 "They are written even when the run fails, so a bad run leaves the same "
                 "trail as a good one."
             ),

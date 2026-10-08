@@ -2212,6 +2212,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 )
             except Exception:  # noqa: BLE001 - a diagnostic never breaks the summary
                 pass
+        # Agent headroom: did each stage's model calls have room to work (output
+        # cap, effort, thinking, tool limits, per-item budgets)? The per-call
+        # detail is in the export's diagnostics/ folder.
+        telemetry = getattr(ctx, "call_telemetry", None)
+        headroom_line = getattr(telemetry, "summary_line", None)
+        if callable(headroom_line):
+            try:
+                starved = getattr(telemetry, "headroom_status", "") == "STARVED"
+                self._log(
+                    f"Agent headroom: {headroom_line()}",
+                    level="warning" if starved else "muted",
+                )
+            except Exception:  # noqa: BLE001 - a diagnostic never breaks the summary
+                pass
         # When exhaustive QC ran, surface the per-stage status so the operator can
         # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5). With
         # the Phase 26B completeness gate open, a PARTIAL with no degraded stage

@@ -165,9 +165,11 @@ def test_write_drawing_export_creates_folder_and_all_files(tmp_path):
     assert folder.name == "Weld_County_Mechanical_Permit_Set_drawings_2026-06-07_070200"
     written = sorted(p.name for p in folder.iterdir())
     # Phase 26A (§18.4/§18.5, DA-024): EVERY export — QC or not — carries the
-    # per-run ``run.log`` and the machine-readable ``run_manifest.json``.
+    # per-run ``run.log`` and the machine-readable ``run_manifest.json``, and
+    # the per-call ``diagnostics/`` folder.
     assert written == sorted(
         [
+            "diagnostics",
             "report.html",
             "00_index.md",
             "00_synthesis.md",

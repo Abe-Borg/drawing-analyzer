@@ -51,6 +51,12 @@ Module layout::
     resource_pressure.py  per-run resource-starvation record: API throttling
                       retries, host CPU/memory/disk sampler, exhausted agent
                       budgets -> verdict in run.log / run_manifest.json
+    call_telemetry.py one record per model call: what it was given (model,
+                      effort, thinking, output cap, tools + limits) and what
+                      it used -> per-stage headroom verdict + model map
+    diagnostics_bundle.py the export's diagnostics/ folder (api_calls.csv/json,
+                      agent_headroom.json, api_retries.csv, host_samples.csv,
+                      events.csv, 00_summary.md)
     cancellation.py   the run kill switch: CancelToken / RunCancelled, the
                       per-thread binding, remote batch cancels on a stop
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored

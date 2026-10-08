@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import call_telemetry
 from .core.api_config import (
     PHASE_REVIEW,
     REVIEW_MODEL_DEFAULT,
@@ -1783,9 +1784,10 @@ def digest_sheet(
     # every later run at zero cost and with nothing in the log to show for it.
     # The digest runs adaptive thinking at effort "high" and thinking shares
     # this envelope, so a dense sheet reaches the cap in the ordinary case.
-    read = stream_with_cap_retry(
-        client, kwargs, max_retries=max_retries, sleep=sleep, stage="digest",
-    )
+    with call_telemetry.scope("digest", call_telemetry.sheet_item(sheet.ref)):
+        read = stream_with_cap_retry(
+            client, kwargs, max_retries=max_retries, sleep=sleep, stage="digest",
+        )
     # Usage accumulates across attempts. Each response was billed, so reading
     # only the last one would under-report every recovered truncation in the
     # ledger, the run totals and the cost estimate.

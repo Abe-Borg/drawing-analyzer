@@ -882,6 +882,30 @@ def _resource_lines(ctx: Any) -> list[str]:
     return [str(line) for line in render()]
 
 
+def _headroom_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
+    """The per-call record's headroom section (:mod:`drawing_analyzer.call_telemetry`).
+
+    What every stage's model calls were given (model, effort, thinking, output
+    cap, tools and limits) against what they used, with the stage's
+    STARVED / TIGHT / ADEQUATE verdict. ``diagnostics/api_calls.csv`` carries
+    the same calls one row each.
+    """
+    telemetry = getattr(ctx, "call_telemetry", None)
+    render = getattr(telemetry, "render_lines", None)
+    if not callable(render):
+        return ["  (no per-call record was attached — agent headroom was not assessed)"]
+    # Redacted without flattening: the block is column-aligned.
+    return [redact_for_display(line, private_roots=roots) for line in render()]
+
+
+def _model_map_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
+    """Where each model was called: one row per (model, stage)."""
+    render = getattr(getattr(ctx, "call_telemetry", None), "render_model_map_lines", None)
+    if not callable(render):
+        return []
+    return [redact_for_display(line, private_roots=roots) for line in render()]
+
+
 def _prose_lines(ctx: Any) -> list[str]:
     acc = dict(getattr(ctx, "prose_accounting", None) or {})
     if not acc:
@@ -915,6 +939,15 @@ def render_run_log(
     if journal is None:
         journal = getattr(ctx, "run_journal", None)
 
+    # The private-root list belongs to the journal, so every section builder
+    # that sanitizes free-form text (input/sheet/stage errors, the ledger tally,
+    # mutated source names) is handed it. It used to reach only the Errors
+    # section below, so a rejected input's PermissionError printed the user's
+    # own directory names in full while the same string in `ctx.errors` was
+    # scrubbed (P9 item 44). test_run_journal.py asserts structurally that no
+    # sanitize_text call in this module omits it.
+    roots = tuple(getattr(journal, "private_roots", ()) or ())
+
     lines: list[str] = [
         _HEAVY_RULE,
         "Drawing Analyzer — run log",
@@ -937,6 +970,13 @@ def render_run_log(
             f"Starvation:  {starvation} (API throttling, host CPU/memory/disk, agent "
             "budgets — see Resource pressure below)"
         )
+    headroom = getattr(getattr(ctx, "call_telemetry", None), "summary_line", None)
+    if callable(headroom):
+        lines.append(
+            "Headroom:    "
+            + sanitize_text(headroom(), max_chars=400, private_roots=roots)
+            + " (see Agent provisioning & headroom below)"
+        )
     fallbacks = _model_fallbacks(ctx)
     if fallbacks:
         served = sorted({str(row["served_model"]) for row in fallbacks})
@@ -950,15 +990,6 @@ def render_run_log(
         pairs = [f"{k}={v}" for k, v in environment.items()]
         lines.append("Environment: " + pairs[0])
         lines.extend(f"             {p}" for p in pairs[1:])
-
-    # The private-root list belongs to the journal, so every section builder
-    # that sanitizes free-form text (input/sheet/stage errors, the ledger tally,
-    # mutated source names) is handed it. It used to reach only the Errors
-    # section below, so a rejected input's PermissionError printed the user's
-    # own directory names in full while the same string in `ctx.errors` was
-    # scrubbed (P9 item 44). test_run_journal.py asserts structurally that no
-    # sanitize_text call in this module omits it.
-    roots = tuple(getattr(journal, "private_roots", ()) or ())
 
     def section(title: str, *builders: Any) -> None:
         # Each section renders independently and never sinks the log: run.log
@@ -980,6 +1011,8 @@ def render_run_log(
     section("Stages", lambda c: _stage_lines(c, journal, roots))
     section("Usage & estimated cost", _usage_lines)
     section("Resource pressure (starvation check)", _resource_lines)
+    section("Agent provisioning & headroom", lambda c: _headroom_lines(c, roots))
+    section("Model calls by stage", lambda c: _model_map_lines(c, roots))
     section("Findings, ledger & markup coverage", lambda c: _ledger_lines(c, roots))
     section("Prose carry-through (§14.9)", _prose_lines)
 

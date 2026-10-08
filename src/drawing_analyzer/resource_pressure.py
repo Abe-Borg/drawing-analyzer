@@ -80,6 +80,7 @@ from functools import wraps
 from typing import Any, Callable
 
 from . import cancellation
+from .call_telemetry import CallTelemetry
 from .diagnostics import get_logger, request_id_of, status_of
 
 _log = get_logger()
@@ -139,6 +140,10 @@ LOW_DISK_BYTES = 1024 ** 3
 MAX_STORED_API_EVENTS = 200
 MAX_STORED_EXHAUSTIONS = 100
 MAX_INCIDENT_EVENTS = 50
+# The host time series (``diagnostics/host_samples.csv``). Past the bound every
+# other stored row is dropped and the stride doubles, so a long run keeps an
+# evenly spaced series over its whole length rather than only its first hours.
+MAX_STORED_HOST_SAMPLES = 2_000
 
 
 def _utc_now() -> datetime:
@@ -816,6 +821,15 @@ class ResourcePressure:
         self._prev_sample: HostSample | None = None
         self._incident_events = 0
         self.incidents_unlogged = 0
+        self.host_series: list[dict[str, Any]] = []
+        self.host_series_stride = 1
+        self._host_series_seen = 0
+        # Provisioning leg: one record per model call (what it was given and
+        # what it used). Owned here so it reaches every worker thread through
+        # this record's binding (:func:`worker_binding`).
+        self.calls = CallTelemetry(
+            clock=self._clock, exhaustions=lambda: list(self.exhaustions),
+        )
 
     # -- wiring ------------------------------------------------------------- #
 
@@ -1027,6 +1041,8 @@ class ResourcePressure:
     def _ingest_host_sample(self, sample: HostSample, *, lag_seconds: float) -> None:
         """Fold one probe reading into the aggregates; journal threshold breaches."""
         incidents: list[tuple[str, dict[str, Any]]] = []
+        cpu_pct: float | None = None
+        busy_pct: float | None = None
         with self._lock:
             h = self.host
             h.samples += 1
@@ -1077,11 +1093,13 @@ class ResourcePressure:
                         if sample.process_cpu_seconds is not None and prev.process_cpu_seconds is not None:
                             ratio = max(0.0, sample.process_cpu_seconds - prev.process_cpu_seconds) / d_wall
                             h.process_cpu_peak_ratio = max(h.process_cpu_peak_ratio, ratio)
+                            cpu_pct = 100.0 * ratio
                         if sample.system_cpu_times is not None and prev.system_cpu_times is not None:
                             d_idle = sample.system_cpu_times[0] - prev.system_cpu_times[0]
                             d_total = sample.system_cpu_times[1] - prev.system_cpu_times[1]
                             if d_total > 0:
                                 busy = 100.0 * max(0.0, min(1.0, 1.0 - d_idle / d_total))
+                                busy_pct = busy
                                 h.system_cpu_busy_max_pct = max(h.system_cpu_busy_max_pct or 0.0, busy)
                                 h.system_cpu_busy_sum_pct += busy
                                 h.system_cpu_busy_samples += 1
@@ -1095,6 +1113,7 @@ class ResourcePressure:
                         h.late_ticks += 1
                         incidents.append((SIGNAL_CPU_STARVED, {"lag_s": round(lag_seconds, 2)}))
             self._prev_sample = sample
+            self._append_host_row(sample, lag_seconds, cpu_pct, busy_pct)
             to_log: list[tuple[str, dict[str, Any]]] = []
             for incident in incidents:
                 if self._incident_events < MAX_INCIDENT_EVENTS:
@@ -1104,6 +1123,37 @@ class ResourcePressure:
                     self.incidents_unlogged += 1
         for kind, fields in to_log:
             self._emit("RESOURCE_PRESSURE", stage="host", level="WARNING", kind=kind, **fields)
+
+    def _append_host_row(
+        self, sample: HostSample, lag_seconds: float,
+        cpu_pct: float | None, busy_pct: float | None,
+    ) -> None:
+        """Keep one series row (caller holds the lock); decimate past the bound."""
+        self._host_series_seen += 1
+        if (self._host_series_seen - 1) % self.host_series_stride:
+            return
+        first = self._first_sample
+        memory_load = None
+        if sample.system_memory_total and sample.system_memory_available is not None:
+            memory_load = 100.0 * (1.0 - sample.system_memory_available / sample.system_memory_total)
+        row: dict[str, Any] = {
+            "at": _iso(self._clock()),
+            "t_seconds": round(sample.wall - first.wall, 3) if first is not None else 0.0,
+            "lag_seconds": round(float(lag_seconds), 3),
+            "process_cpu_pct": None if cpu_pct is None else round(cpu_pct, 1),
+            "rss_bytes": sample.rss_bytes,
+            "system_memory_load_pct": None if memory_load is None else round(memory_load, 1),
+            "system_memory_available_bytes": sample.system_memory_available,
+            "system_cpu_busy_pct": None if busy_pct is None else round(busy_pct, 1),
+            "load_1m": None if sample.load_1m is None else round(sample.load_1m, 2),
+            "threads": int(sample.threads or 0),
+        }
+        for label, free in sorted(sample.disk_free.items()):
+            row[f"disk_free_{label}_bytes"] = int(free)
+        self.host_series.append(row)
+        if len(self.host_series) > MAX_STORED_HOST_SAMPLES:
+            self.host_series = self.host_series[::2]
+            self.host_series_stride *= 2
 
     # -- verdict ------------------------------------------------------------ #
 
@@ -1297,7 +1347,11 @@ class ResourcePressure:
                     "events": [e.to_dict() for e in self.api_events],
                     "events_dropped": self.api_events_dropped,
                 },
-                "host": self.host.to_dict(),
+                "host": {
+                    **self.host.to_dict(),
+                    "series_rows": len(self.host_series),
+                    "series_stride": self.host_series_stride,
+                },
                 "budget": {
                     "exhaustions": [e.to_dict() for e in self.exhaustions],
                     "dropped": self.exhaustions_dropped,

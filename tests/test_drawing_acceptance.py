@@ -38,6 +38,7 @@ manual script; everything mechanically checkable is pinned here.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -839,8 +840,43 @@ def test_gauntlet_all_outputs_agree(oracle):
 
     # No absolute private path leaks into the portable deliverables.
     private_root = str(oracle.set.root)
-    for name in ("findings.json", "run.log", "run_manifest.json", "markup_manifest.json"):
-        assert private_root not in (export / name).read_text(encoding="utf-8"), name
+    diagnostics = sorted(
+        p.relative_to(export).as_posix() for p in (export / "diagnostics").iterdir()
+    )
+    for name in ("findings.json", "run.log", "run_manifest.json", "markup_manifest.json",
+                 *diagnostics):
+        assert private_root not in (export / name).read_text(encoding="utf-8-sig"), name
+
+
+# ---- per-call record: every billed call, what it was given and used -----------
+
+
+def test_gauntlet_every_billed_call_has_a_provisioning_record(oracle):
+    ctx, export = oracle.ctx, oracle.export
+    records = ctx.call_telemetry.records
+    # One record per billed real-time response, filed under the usage ledger's
+    # own stage family: no call escapes attribution, none is double-counted.
+    billed = Counter(r.stage_family for r in ctx.run_usage.records if r.transport == "REAL_TIME")
+    answered = Counter(r.stage for r in records if r.outcome not in ("ERROR", "CANCELLED"))
+    assert answered == billed
+    # "Thinking and effort are always explicit" holds on every request sent.
+    assert all(r.thinking != "omitted" and r.effort for r in records)
+    # The investigation's per-finding allotment rides its calls, and the
+    # export joins its finding id to the QC id the reader sees.
+    f6 = next(f for f in ctx.all_findings if "Concrete pad" in f.text)
+    investigate = [r for r in records if r.stage == "investigate"]
+    assert investigate and all(r.item_limits.get("evidence_rounds") for r in investigate)
+    csv_text = (export / "diagnostics" / "api_calls.csv").read_bytes().decode("utf-8-sig")
+    rows = list(csv.DictReader(io.StringIO(csv_text)))
+    assert len(rows) == len(records)
+    assert {r["qc_id"] for r in rows if r["stage"] == "investigate"} == {f6.qc_id}
+    manifest = json.loads((export / "run_manifest.json").read_text(encoding="utf-8"))
+    headroom = manifest["agent_headroom"]
+    assert headroom["headroom_status"] == ctx.call_telemetry.headroom_status
+    assert {s["stage"] for s in headroom["stages"]} == set(billed)
+    assert {a["path"] for a in manifest["artifacts"]} >= {
+        "diagnostics/00_summary.md", "diagnostics/api_calls.csv", "diagnostics/api_calls.json",
+    }
 
 
 # ---- assertion 14: sacred prose ----------------------------------------------

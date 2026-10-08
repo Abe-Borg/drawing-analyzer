@@ -61,7 +61,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from .core.request_usage import RequestUsage, any_fallback_served
-from . import resource_pressure, tiling
+from . import call_telemetry, resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -1053,7 +1053,8 @@ def _call(
     attempt = 0
     while True:
         try:
-            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
+            with call_telemetry.scope("cross_qc"):
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the run
             if transient_retry_wait(exc, attempt, max_retries, sleep, stage="cross_qc"):

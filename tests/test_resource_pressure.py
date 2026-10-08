@@ -210,6 +210,25 @@ def test_lag_incidents_and_cpu_starved_signal():
     assert p.host.wall_seconds == 29.0 and p.host.process_cpu_seconds == 14.5
     assert p.host.process_cpu_peak_ratio == pytest.approx(0.5)
     assert p.host.system_cpu_busy_max_pct == pytest.approx(25.0)
+    # The timeline (diagnostics/host_samples.csv) keeps every reading.
+    assert [row["t_seconds"] for row in p.host_series] == [0.0, 5.1, 12.0, 20.0, 29.0]
+    assert [row["lag_seconds"] for row in p.host_series] == [0.0, 0.1, 2.0, 3.0, 4.0]
+    assert p.host_series[0]["process_cpu_pct"] is None          # no interval yet
+    assert p.host_series[-1]["process_cpu_pct"] == pytest.approx(50.0)
+    assert p.host_series[-1]["disk_free_temp_bytes"] == 50 << 30
+
+
+def test_host_series_stays_bounded_and_evenly_spaced(monkeypatch):
+    monkeypatch.setattr(rp, "MAX_STORED_HOST_SAMPLES", 4)
+    p = _monitored(1.0)
+    for t in range(13):
+        p._ingest_host_sample(_sample(float(t)), lag_seconds=0.0)
+    assert p.host.samples == 13
+    assert len(p.host_series) <= 4
+    times = [row["t_seconds"] for row in p.host_series]
+    assert times[0] == 0.0
+    assert times == [i * p.host_series_stride for i in range(len(times))]
+    assert times[-1] >= 13 - 2 * p.host_series_stride   # still reaches the run's end
 
 
 def test_one_severe_lag_is_a_verdict_on_its_own():
