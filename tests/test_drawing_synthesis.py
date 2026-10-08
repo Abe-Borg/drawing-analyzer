@@ -180,11 +180,49 @@ def test_synthesis_api_error_is_clean_and_nonraising():
     assert result.error == "502 bad gateway (server temporarily unavailable — try again)"
 
 
-def test_synthesis_empty_response_flags_error():
-    client = _FakeClient(lambda kw: FakeMessage(content=[], stop_reason="max_tokens"))
+@pytest.mark.parametrize(
+    ("replies", "ok"),
+    [
+        # Cut off, then finished at the raised cap: complete, both reads billed.
+        ([("max_tokens", "Overview cut off mid-"), ("end_turn", "Whole overview.")], True),
+        # Empty both times (thinking spent the cap): a failure, nothing to ship.
+        ([("max_tokens", ""), ("max_tokens", "")], False),
+        # Still cut off at the raised cap: the partial text ships, flagged.
+        ([("max_tokens", "Overview cut off mid-"), ("max_tokens", "Overview, later cut off mid-")], False),
+        # Declined: never re-sent; the partial text ships, flagged.
+        ([("refusal", "Overview declined mid-")], False),
+    ],
+    ids=["recovered", "empty", "still-cut-off", "declined"],
+)
+def test_synthesis_unfinished_reply_is_flagged_and_never_cached(replies, ok):
+    # An overview cut off at its 32k cap (or declined) used to be accepted as
+    # complete and written to the stage cache. The digest's single raised-cap
+    # retry now applies, and a reply still unfinished keeps its text (I-3) but
+    # is never ``ok`` — so never cached.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    def responder(_kw):
+        stop, text = replies[min(len(client.calls), len(replies)) - 1]
+        return FakeMessage(
+            content=[FakeTextBlock(text=text)] if text else [],
+            usage=FakeUsage(input_tokens=10, output_tokens=5),
+            stop_reason=stop,
+        )
+
+    client = _FakeClient(responder)
+    cache = DigestCache(None, persist=False)
     sheets = [_digest("a", "x"), _digest("b", "y")]
-    result = synthesize_drawing_set(sheets, client=client, model=OPUS)
-    assert not result.ok and "empty synthesis" in result.error
+    result = synthesize_drawing_set(sheets, client=client, model=OPUS, cache=cache)
+
+    assert len(client.calls) == len(replies)
+    caps = [kw["max_tokens"] for kw in client.calls]
+    assert caps == sorted(set(caps))                     # a retry only ever raises the cap
+    assert result.ok is ok
+    assert result.text == replies[-1][1]
+    assert result.partial is (not ok and bool(result.text))
+    assert (result.input_tokens, result.output_tokens) == (10 * len(replies), 5 * len(replies))
+    assert [r.stop_reason for r in result.request_usage] == [stop for stop, _ in replies]
+    assert len(cache._entries) == (1 if ok else 0)
 
 
 def test_synthesis_retries_transient_then_succeeds():
@@ -350,15 +388,25 @@ def test_pipeline_no_synthesis_by_default(tmp_path):
     assert len(calls) == 2
 
 
-def test_pipeline_synthesis_failure_falls_back(tmp_path):
+@pytest.mark.parametrize(
+    "overview",
+    ["", "PARTIAL OVERVIEW: VAV-3 on M-101 disagrees with M-5"],
+    ids=["empty", "declined-partial"],
+)
+def test_pipeline_synthesis_failure_falls_back(tmp_path, monkeypatch, overview):
     pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer import pipeline
     from drawing_analyzer.pipeline import extract_drawing_context
 
     path = _make_pdf(pymupdf, tmp_path / "set.pdf", pages=2)
 
     def responder(kw):
         if kw["system"] == SYNTHESIS_SYSTEM_PROMPT:
-            return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
+            if not overview:
+                return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
+            return FakeMessage(
+                content=[FakeTextBlock(text=overview)], stop_reason="refusal",
+            )
         return FakeMessage(content=[FakeTextBlock(text="digest body")])
 
     class _C(BetaClientMixin):
@@ -369,9 +417,32 @@ def test_pipeline_synthesis_failure_falls_back(tmp_path):
 
             self.messages = _M()
 
+    harvested: list[str] = []
+    real_qc = pipeline._run_qc_stages
+
+    def _spy_qc(**kwargs):
+        harvested.append(kwargs["synthesis_text"])
+        return real_qc(**kwargs)
+
+    monkeypatch.setattr(pipeline, "_run_qc_stages", _spy_qc)
     ctx = extract_drawing_context([path], client=_C(), rows=2, cols=2, synthesize=True)
 
-    assert ctx.synthesis_text == ""  # synthesis failed
-    assert "Drawing Set Overview" not in ctx.combined_text
     assert "digest body" in ctx.combined_text  # per-sheet digests still shipped
     assert any("Cross-sheet synthesis" in e for e in ctx.errors)  # failure surfaced
+    # Every billed synthesis reply is recorded (§15.6), not only a good one.
+    records = [r for r in ctx.run_usage.records if r.stage_family == "synthesis"]
+    assert records and all(r.terminal_status == "FAILED" for r in records)
+    # An unfinished overview is never harvested into findings.
+    assert harvested == [""]
+    stage = next(s for s in ctx.stage_results if s.stage == "synthesis")
+    if not overview:
+        assert stage.status == "FAILED"
+        assert ctx.synthesis_text == ""  # synthesis failed
+        assert "Drawing Set Overview" not in ctx.combined_text
+    else:
+        # The partial overview still ships (I-3), disclosed in place, and the
+        # stage holds at PARTIAL rather than claiming a complete overview.
+        assert stage.status == "PARTIAL"
+        assert ctx.synthesis_text == overview
+        text = ctx.combined_text
+        assert text.index(overview) < text.index(stage.errors[0]) < text.index("## Sheet 1/2")

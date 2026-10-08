@@ -860,6 +860,116 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     )
 
 
+# Stop reasons that mean the model did not finish its reply. ``max_tokens``: cut
+# off at the output cap. ``refusal``: declined. On the real-time path that is the
+# answer of the whole server-side fallback chain (``fallbacks: "default"``, see
+# :func:`stream_message`); a batch item carries no fallback at all, because the
+# Batches API rejects the parameter. Either way any text the reply carries is
+# partial: it may ship (I-3), but it is never a complete read, so it is never
+# cached as one or served from the cache as one.
+UNFINISHED_STOP_REASONS = frozenset({"max_tokens", "refusal"})
+
+
+def unfinished_reply_error(what: str, text: str, stop_reason: Any) -> str | None:
+    """Why a reply is not a complete ``what``, or ``None`` when it is.
+
+    One wording for every stage that streams one long reply — the digest on
+    both transports, synthesis, focus — so they cannot drift apart: an empty
+    reply, one cut off at ``max_tokens``, and one declined with ``refusal``. The
+    two unfinished kinds may still carry partial text, which the caller ships
+    (I-3); the error is what keeps that text out of the cache.
+    """
+    if not text:
+        return f"empty {what} (stop_reason={stop_reason!r})"
+    if stop_reason == "max_tokens":
+        return f"truncated {what} (stop_reason='max_tokens')"
+    if stop_reason == "refusal":
+        return f"{what} declined by the model (stop_reason='refusal')"
+    return None
+
+
+@dataclass
+class CapRetryRead:
+    """What :func:`stream_with_cap_retry` got back for one request."""
+
+    # The reply to use, or ``None`` when no call landed at all.
+    message: Any = None
+    # Every response that came back, oldest first. Each one was billed, so a
+    # caller sums usage over all of them, never just ``message``.
+    responses: list = field(default_factory=list)
+    # Why no call landed, when ``message`` is ``None``.
+    error: Exception | None = None
+
+
+def stream_with_cap_retry(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    max_retries: int,
+    sleep: Any,
+    stage: str,
+) -> CapRetryRead:
+    """Stream one request, re-sending it once at a raised cap if it is cut off.
+
+    The shared loop of every stage that streams one long reply (digest,
+    synthesis, focus), so the retry rule has one home. Transient failures retry
+    with backoff (:func:`transient_retry_wait`; ``stage`` names the loop). A
+    reply cut off at ``max_tokens`` is re-sent once at ``min(2x,``
+    :data:`MAX_TOKENS_RETRY_CEILING```)``, clamped to the model's own ceiling;
+    no headroom left means no retry. Adaptive thinking shares the ``max_tokens``
+    envelope with the answer, so a long reply reaches the cap in the ordinary
+    case. A declined reply (``refusal``) is not re-sent: a capable model's
+    request already carried the server-side fallback (:func:`stream_message`),
+    and the same request would most likely be declined again.
+
+    The retry exists to improve on the first read, never to lose it: when the
+    raised-cap call fails, or comes back with no text at all, the first read is
+    the reply returned. Whether that reply is complete is the caller's question
+    (:func:`unfinished_reply_error`).
+    """
+    model = str(kwargs.get("model", ""))
+    responses: list = []
+    first_read = None                 # the cut-off read a raised-cap retry improves on
+    while True:
+        attempt = 0
+        resp = None
+        call_error: Exception | None = None
+        while True:
+            try:
+                resp = stream_message(client, kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001 - the caller reports it
+                if transient_retry_wait(exc, attempt, max_retries, sleep, stage=stage):
+                    attempt += 1
+                    continue
+                call_error = exc
+                break
+        if resp is None:
+            if first_read is None:
+                return CapRetryRead(responses=responses, error=call_error)
+            # The raised-cap retry failed; the first read still ships (I-3).
+            return CapRetryRead(message=first_read, responses=responses)
+        responses.append(resp)
+        if first_read is not None:
+            # A retry with no text (declined before any output, or its thinking
+            # spent the larger cap too) would turn a partial reply into none.
+            return CapRetryRead(
+                message=resp if _message_text(resp) else first_read,
+                responses=responses,
+            )
+        if _get(resp, "stop_reason") != "max_tokens":
+            return CapRetryRead(message=resp, responses=responses)
+        old_cap = int(kwargs.get("max_tokens") or 0)
+        raised = output_cap_for_model(
+            model, requested=min(old_cap * 2, MAX_TOKENS_RETRY_CEILING)
+        )
+        if raised <= old_cap:
+            # No headroom left to grant; not a retry.
+            return CapRetryRead(message=resp, responses=responses)
+        kwargs = {**kwargs, "max_tokens": raised}
+        first_read = resp
+
+
 def _server_web_search_requests(resp: Any) -> int | None:
     """The server-reported web-search count for one response, or ``None``.
 
@@ -1522,6 +1632,22 @@ def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericCla
     return out
 
 
+def finished_digest_entry(entry: Any) -> dict | None:
+    """A digest-cache ``entry`` worth serving, or ``None`` to read it as a miss.
+
+    Nothing unfinished is written any more (:func:`unfinished_reply_error`), but
+    a cache filled before a stop reason was recognized as unfinished can still
+    hold one: a declined digest, or a truncation stored before the raised-cap
+    retry existed. Served, it would repeat the partial read on every later run
+    at zero cost and with no error, so it reads as a miss and the next complete
+    read replaces it. Every read of the persistent digest cache goes through
+    here; the stored shape is unchanged, so no schema bump (I-6).
+    """
+    if entry is None or entry.get("stop_reason") in UNFINISHED_STOP_REASONS:
+        return None
+    return entry
+
+
 def sheet_digest_from_cache_entry(entry: dict, ref: SheetRef) -> SheetDigest:
     """Build a cached :class:`SheetDigest` from a digest-cache ``entry`` + ``ref``.
 
@@ -1621,7 +1747,7 @@ def digest_sheet(
             specs=specs_cache_fragment(specs_text),
             sheet_text=sheet.sheet_text,
         )
-        hit = cache.get(cache_key)
+        hit = finished_digest_entry(cache.get(cache_key))
         if hit is not None:
             return SheetDigest(
                 ref=sheet.ref,
@@ -1657,78 +1783,38 @@ def digest_sheet(
     # every later run at zero cost and with nothing in the log to show for it.
     # The digest runs adaptive thinking at effort "high" and thinking shares
     # this envelope, so a dense sheet reaches the cap in the ordinary case.
-    raised_cap_used = False
-    truncated_resp = None            # the first read, kept if the retry cannot land
-    in_tok = out_tok = cache_read_tok = cache_write_tok = 0
-    request_usage: list[RequestUsage] = []
-    while True:
-        attempt = 0
-        resp = None
-        call_error: Exception | None = None
-        while True:
-            try:
-                resp = stream_message(client, kwargs)
-                break
-            except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
-                if transient_retry_wait(exc, attempt, max_retries, sleep, stage="digest"):
-                    attempt += 1
-                    continue
-                call_error = exc
-                break
-
-        if resp is None:
-            if truncated_resp is None:
-                return SheetDigest(
-                    ref=sheet.ref,
-                    text="",
-                    image_token_estimate=image_est,
-                    error=_clean_error(call_error),
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
-                )
-            # The RAISED-CAP retry failed, but the first read is still in hand.
-            # Falling through to it keeps the truncated prose shipping (I-3)
-            # instead of turning a partial digest into an empty one — the retry
-            # exists to improve on that read, never to risk losing it.
-            resp = truncated_resp
-            break
-
-        # Usage accumulates across attempts. Each response was billed, so
-        # reading only the last one would under-report every recovered
-        # truncation in the ledger, the run totals and the cost estimate.
-        att_in, att_out = _message_usage(resp)
-        request_usage.append(RequestUsage.from_message(resp))
-        in_tok += att_in
-        out_tok += att_out
-        _usage = _get(resp, "usage")
-        cache_read_tok += int(_get(_usage, "cache_read_input_tokens", 0) or 0)
-        cache_write_tok += int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
-
-        if _get(resp, "stop_reason") != "max_tokens" or raised_cap_used:
-            break
-        old_cap = int(kwargs.get("max_tokens") or max_tokens)
-        raised = output_cap_for_model(
-            model, requested=min(old_cap * 2, MAX_TOKENS_RETRY_CEILING)
+    read = stream_with_cap_retry(
+        client, kwargs, max_retries=max_retries, sleep=sleep, stage="digest",
+    )
+    # Usage accumulates across attempts. Each response was billed, so reading
+    # only the last one would under-report every recovered truncation in the
+    # ledger, the run totals and the cost estimate.
+    request_usage = [RequestUsage.from_message(r) for r in read.responses]
+    in_tok = sum(r.input_tokens for r in request_usage)
+    out_tok = sum(r.output_tokens for r in request_usage)
+    cache_read_tok = sum(r.cache_read_tokens for r in request_usage)
+    cache_write_tok = sum(r.cache_write_tokens for r in request_usage)
+    resp = read.message
+    if resp is None:
+        return SheetDigest(
+            ref=sheet.ref,
+            text="",
+            image_token_estimate=image_est,
+            error=_clean_error(read.error),
+            input_tokens=in_tok,
+            output_tokens=out_tok,
         )
-        if raised <= old_cap:
-            break                  # no headroom left to grant; not a retry
-        kwargs = {**kwargs, "max_tokens": raised}
-        raised_cap_used = True
-        truncated_resp = resp
 
     raw_text = _message_text(resp)
     stop = _get(resp, "stop_reason")
 
-    error: str | None = None
-    if not raw_text:
-        error = f"empty digest (stop_reason={stop!r})"
-    elif stop == "max_tokens":
-        # Still truncated after the raised cap. The partial text is returned —
-        # it is real work and the prose is better than nothing — but the sheet
-        # is marked failed so the run reports it, and the cache guard below
-        # refuses to store it. Caching a truncated read is the worst outcome:
-        # it is indistinguishable from a complete one on every later run.
-        error = "truncated digest (stop_reason='max_tokens')"
+    # Still truncated after the raised cap, or declined (a final ``refusal``):
+    # the partial text is returned — it is real work and the prose is better
+    # than nothing — but the sheet is marked failed so the run reports it, and
+    # the cache guard below refuses to store it. Caching an unfinished read is
+    # the worst outcome: it is indistinguishable from a complete one on every
+    # later run.
+    error = unfinished_reply_error("digest", raw_text, stop)
 
     # Split the findings block off the prose. ``text`` is the prose only, so
     # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
@@ -1739,9 +1825,10 @@ def digest_sheet(
 
     # Cache only a real, successful digest — never an empty/error result (those
     # are transient and a re-run should re-attempt them). A digest truncated at
-    # ``max_tokens`` now sets ``error`` above and so is refused here: a stored
-    # truncation is served forever, at zero cost and indistinguishable from a
-    # complete read, which is how a cut-off sheet became permanent.
+    # ``max_tokens`` or declined now sets ``error`` above and so is refused
+    # here: a stored partial read is served forever, at zero cost and
+    # indistinguishable from a complete one, which is how a cut-off sheet
+    # became permanent.
     if cache is not None and cache_key is not None and error is None and raw_text:
         cache.put(
             cache_key,

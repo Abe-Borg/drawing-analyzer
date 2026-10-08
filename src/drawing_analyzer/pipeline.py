@@ -39,6 +39,7 @@ from .digest import (
     SheetDigest,
     cache_entry_from_digest,
     digest_sheet,
+    finished_digest_entry,
     focus_cache_fragment,
     normalize_focus,
     normalize_specs_text,
@@ -774,6 +775,8 @@ def _combine(
     focus: str = "",
     focus_report: str = "",
     identity: str = "",
+    overview_note: str = "",
+    focus_report_note: str = "",
 ) -> str:
     """Build the combined digest document from per-sheet results.
 
@@ -787,6 +790,12 @@ def _combine(
     Phase A) is non-empty it leads the document — a reader should know what the
     set *is* before reading anything about it. All three are additive; the
     per-sheet digests are unchanged (I-2).
+
+    ``overview_note`` / ``focus_report_note`` disclose a partial overview or
+    report — a reply cut off at ``max_tokens`` or declined, whose text still
+    ships (I-3) — in a blockquote under its text, as a failed sheet's error is
+    shown in its section. This document is what a downstream spec reviewer
+    reads, with no run errors beside it, so a partial section must say so.
     """
     total = len(sheets)
     lines: list[str] = [
@@ -813,6 +822,9 @@ def _combine(
             lines.append("")
         lines.append(focus_report.strip())
         lines.append("")
+        if focus_report_note:
+            lines.append(f"> [{focus_report_note}]")
+            lines.append("")
         lines.append("---")
         lines.append("")
     if overview.strip():
@@ -820,6 +832,9 @@ def _combine(
         lines.append("")
         lines.append(overview.strip())
         lines.append("")
+        if overview_note:
+            lines.append(f"> [{overview_note}]")
+            lines.append("")
         lines.append("---")
         lines.append("")
     for i, sd in enumerate(sheets, start=1):
@@ -1198,7 +1213,7 @@ def _level1_partition(
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
-        entry = cache.get(key)
+        entry = finished_digest_entry(cache.get(key))
         if entry is not None:
             cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
         else:
@@ -4137,6 +4152,9 @@ def extract_drawing_context(
     # statements into the findings ledger, so the text must exist by then — the
     # prose itself is untouched either way (I-2).
     synthesis_text = ""
+    # Set only for a partial overview (a reply cut off or declined): ``_combine``
+    # prints it under the text, and it keeps that text out of the harvest.
+    synthesis_note = ""
     synthesis_stage = StageResult(stage="synthesis", expected=config.run_synthesis)
     if config.run_synthesis:
         if synthesis_future is None:
@@ -4164,7 +4182,24 @@ def extract_drawing_context(
             synthesis_stage.errors.append(str(exc))
             _log.warning("synthesis: failed: %s", exc)
         else:
-            if result.ok:
+            s_cached = bool(getattr(result, "cached", False))
+            if result.ok or getattr(result, "request_usage", None):
+                # Every billed response is recorded (§15.6), not only a
+                # successful overview's: a cut-off first read the raised-cap
+                # retry replaced, or an overview that never finished, cost
+                # money too.
+                _record_usage(
+                    run_usage, family="synthesis", instance="synthesis",
+                    model=synthesis_model or default_synthesis_model(),
+                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    request_usage=getattr(result, "request_usage", None),
+                    transport="CACHE" if s_cached else "REAL_TIME",
+                    cache_hit=s_cached,
+                    parse_success=result.ok,
+                    terminal_status="COMPLETE" if result.ok else "FAILED",
+                )
+            partial = bool(getattr(result, "partial", False))
+            if result.ok or partial:
                 synthesis_text = result.text
                 # DA-028, mirroring the cross-QC budget path: sheets the prompt
                 # budget could not carry are sheets this overview never saw, so
@@ -4180,19 +4215,24 @@ def extract_drawing_context(
                         "synthesis: prompt budget omitted %d sheet(s) — "
                         "the overview does not cover the whole set", omitted,
                     )
-                synthesis_stage.status = "PARTIAL" if omitted else "COMPLETE"
-                # The synthesis call is billed, so its usage is recorded (§15.6).
-                _record_usage(
-                    run_usage, family="synthesis", instance="synthesis",
-                    model=synthesis_model or default_synthesis_model(),
-                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
-                    transport=(
-                        "CACHE" if getattr(result, "cached", False) else "REAL_TIME"
-                    ),
-                    cache_hit=bool(getattr(result, "cached", False)),
+                if partial:
+                    # Cut off even after the raised-cap retry, or declined. The
+                    # text ships too (I-3), disclosed in place, but it is not
+                    # the whole overview — and, like a failed sheet's prose, it
+                    # is never harvested into findings: its last item may end
+                    # mid-statement.
+                    synthesis_note = f"this overview is partial: {result.error}"
+                    errors.append(f"Cross-sheet synthesis: {result.error}")
+                    synthesis_stage.errors.append(str(result.error))
+                    _log.warning(
+                        "synthesis: %s; shipping the partial overview", result.error,
+                    )
+                synthesis_stage.status = (
+                    "PARTIAL" if omitted or partial else "COMPLETE"
                 )
                 _log.info(
-                    "synthesis: ok (input=%d output=%d tok)",
+                    "synthesis: %s (input=%d output=%d tok)",
+                    "partial" if partial else "ok",
                     result.input_tokens, result.output_tokens,
                 )
             elif (
@@ -4217,6 +4257,7 @@ def extract_drawing_context(
     # Additive: a failure here is recorded and the standard deliverable —
     # per-sheet digests plus any synthesis — ships exactly as it would have.
     focus_report_text = ""
+    focus_report_note = ""   # set only for a partial report, like synthesis_note
     if focus:
         if focus_future is None:
             if progress is not None:
@@ -4242,14 +4283,28 @@ def extract_drawing_context(
             errors.append(f"Focus report: {exc}")
             _log.warning("focus report: failed: %s", exc)
         else:
-            if fresult.ok:
+            f_cached = bool(getattr(fresult, "cached", False))
+            if fresult.ok or getattr(fresult, "request_usage", None):
+                # Every billed response is recorded (§15.6), as for synthesis.
+                _record_usage(
+                    run_usage, family="focus", instance="focus",
+                    model=focus_model or default_focus_model(),
+                    input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+                    request_usage=getattr(fresult, "request_usage", None),
+                    transport="CACHE" if f_cached else "REAL_TIME",
+                    cache_hit=f_cached,
+                    parse_success=fresult.ok,
+                    terminal_status="COMPLETE" if fresult.ok else "FAILED",
+                )
+            f_partial = bool(getattr(fresult, "partial", False))
+            if fresult.ok or f_partial:
                 focus_report_text = fresult.text
                 # DA-028: same rule as synthesis above — a report assembled from
                 # part of the set is not a COMPLETE answer to the operator's
                 # focus, and the journal is where that is recorded (the focus
                 # pass has no StageResult of its own).
                 f_omitted = int(getattr(fresult, "sheets_omitted", 0) or 0)
-                focus_status = "PARTIAL" if f_omitted else "COMPLETE"
+                focus_status = "PARTIAL" if f_omitted or f_partial else "COMPLETE"
                 if f_omitted:
                     errors.append(
                         f"Focus report: prompt budget omitted {f_omitted} sheet(s); "
@@ -4258,18 +4313,17 @@ def extract_drawing_context(
                     _log.warning(
                         "focus report: prompt budget omitted %d sheet(s)", f_omitted,
                     )
-                # The focus call is billed, so its usage is recorded (§15.6).
-                _record_usage(
-                    run_usage, family="focus", instance="focus",
-                    model=focus_model or default_focus_model(),
-                    input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
-                    transport=(
-                        "CACHE" if getattr(fresult, "cached", False) else "REAL_TIME"
-                    ),
-                    cache_hit=bool(getattr(fresult, "cached", False)),
-                )
+                if f_partial:
+                    # Cut off even after the raised-cap retry, or declined: the
+                    # answer ships (I-3), disclosed in place as partial.
+                    focus_report_note = f"this report is partial: {fresult.error}"
+                    errors.append(f"Focus report: {fresult.error}")
+                    _log.warning(
+                        "focus report: %s; shipping the partial report", fresult.error,
+                    )
                 _log.info(
-                    "focus report: ok (input=%d output=%d tok)",
+                    "focus report: %s (input=%d output=%d tok)",
+                    "partial" if f_partial else "ok",
                     fresult.input_tokens, fresult.output_tokens,
                 )
             elif (
@@ -4311,7 +4365,8 @@ def extract_drawing_context(
         client=client, qc_work_dir=qc_work_dir, progress=progress,
         total=total, errors=errors, critique_findings=critique_findings,
         cross_findings=cross_findings, claims=numeric_claims,
-        synthesis_text=synthesis_text,
+        # A partial overview ships, disclosed, but is never harvested.
+        synthesis_text="" if synthesis_note else synthesis_text,
         accepted_documents=inventory.accepted_documents,
         journal=journal,
         set_identity=set_identity_obj,
@@ -4387,6 +4442,8 @@ def extract_drawing_context(
             focus=focus,
             focus_report=focus_report_text,
             identity=set_identity_obj.context_block() if set_identity_obj else "",
+            overview_note=synthesis_note,
+            focus_report_note=focus_report_note,
         ),
         sheets=sheets,
         file_count=file_count,

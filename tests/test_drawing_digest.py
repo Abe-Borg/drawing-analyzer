@@ -480,6 +480,19 @@ def test_pipeline_level1_cache_skips_render_on_second_run(tmp_path, monkeypatch)
     assert renders["n"] == 0                      # skip-render: the payoff
     assert "digest body" in ctx2.combined_text
 
+    # An entry an older build stored under an unfinished stop reason (a
+    # declined digest cached as complete) is served from neither level: the
+    # sheets render and are read again, and the fresh reads replace it.
+    for entry in cache._entries.values():
+        entry["stop_reason"] = "refusal"
+    renders["n"] = 0
+    calls_before = len(client.messages.calls)
+    ctx3 = extract_drawing_context([path], client=client, rows=2, cols=2, cache=cache)
+    assert ctx3.cached_sheet_count == 0 and ctx3.ok_sheet_count == 2
+    assert renders["n"] == 2
+    assert len(client.messages.calls) == calls_before + 2
+    assert {e["stop_reason"] for e in cache._entries.values()} == {"end_turn"}
+
     # A request-param change re-keys level-1 (the images would be read anew), so
     # the sheets render again — the cache stays correct, not just fast.
     renders["n"] = 0
@@ -629,6 +642,17 @@ def test_truncated_digest_retries_at_a_raised_cap_and_is_never_cached():
     assert len(client.messages.calls) == 1 and sd.ok
     assert len(cache._entries) == 1
 
+    # Declined: a reply carrying partial text with ``stop_reason="refusal"``
+    # used to read as a complete digest and was cached. On this path the
+    # server-side fallback already ran, so it is not re-sent either.
+    cache = DigestCache(None, persist=False)
+    client = _Client(["refusal"])
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS, cache=cache)
+    assert len(client.messages.calls) == 1
+    assert not sd.ok and sd.error and sd.stop_reason == "refusal"
+    assert sd.text                                        # partial prose still ships (I-3)
+    assert len(cache._entries) == 0                       # never stored
+
 
 def test_a_recovered_truncation_bills_both_attempts():
     # The raised-cap retry overwrote ``resp``, so the usage read afterwards saw
@@ -681,11 +705,27 @@ def test_a_recovered_truncation_bills_both_attempts():
     ]
 
 
-def test_a_failed_retry_keeps_the_truncated_first_read():
-    # If the raised-cap retry fails permanently, discarding the first response
-    # turns a partial digest into an EMPTY one — losing prose already paid for
-    # and breaking the I-3 promise that the deliverable still ships. The retry
-    # exists to improve on that read, never to risk losing it.
+@pytest.mark.parametrize(
+    ("retry", "billed"),
+    [
+        (ValueError("permanent 400 on the raised cap"), (100, 20)),
+        # Declined before any output: a billed reply with no text at all.
+        (
+            FakeMessage(
+                content=[], usage=FakeUsage(input_tokens=100, output_tokens=0),
+                stop_reason="refusal",
+            ),
+            (200, 20),
+        ),
+    ],
+    ids=["retry-call-failed", "retry-declined-empty"],
+)
+def test_a_failed_retry_keeps_the_truncated_first_read(retry, billed):
+    # If the raised-cap retry fails permanently — or comes back with no text —
+    # discarding the first response turns a partial digest into an EMPTY one,
+    # losing prose already paid for and breaking the I-3 promise that the
+    # deliverable still ships. The retry exists to improve on that read, never
+    # to risk losing it.
     class _Msgs(StreamingMessagesMixin):
         def __init__(self):
             self.calls: list[dict] = []
@@ -698,7 +738,9 @@ def test_a_failed_retry_keeps_the_truncated_first_read():
                     usage=FakeUsage(input_tokens=100, output_tokens=20),
                     stop_reason="max_tokens",
                 )
-            raise ValueError("permanent 400 on the raised cap")
+            if isinstance(retry, Exception):
+                raise retry
+            return retry
 
     class _Client(BetaClientMixin):
         def __init__(self):
@@ -710,4 +752,4 @@ def test_a_failed_retry_keeps_the_truncated_first_read():
     assert sd.text.startswith("Real prose")          # the first read still ships
     assert not sd.ok                                  # but the sheet is reported
     assert sd.error == "truncated digest (stop_reason='max_tokens')"
-    assert (sd.input_tokens, sd.output_tokens) == (100, 20)   # only what billed
+    assert (sd.input_tokens, sd.output_tokens) == billed      # only what billed

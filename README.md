@@ -662,6 +662,20 @@ is still cut off, the sheet is reported as failed and the result is **not**
 cached — a stored truncation would otherwise be served on every later run,
 indistinguishable from a complete read. The partial prose still ships.
 
+A reply the model **declined** (`stop_reason="refusal"`, part-way through or
+before any output) is handled the same way, except that it is not re-sent. A
+real-time digest (Hybrid and Fast modes) has already been through the
+server-side refusal fallback; a Message Batches item (Economy mode) cannot carry
+that fallback, so the same request would only be declined again — a sheet
+declined in Economy mode may still succeed in Hybrid or Fast. A digest that an
+earlier version cached under either stop reason is no longer served: the next
+run reads that sheet again. The **cross-sheet synthesis** and the **focus
+report** follow the same rule. A reply cut off at its 32k cap is retried once at
+a raised cap; one that is still cut off, or declined, ships its partial text
+with a note in the combined digest saying it is partial, holds that stage at
+partial, appears in the run's errors, and is never cached. A partial overview
+is not mined for findings.
+
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
 byte-for-byte what it was before the block existed (the prose digest is sacred).
