@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 
 from .core.api_config import (
     MODEL_HAIKU_5_5,
@@ -593,7 +593,7 @@ def identify_set(
         model_used=model, omitted_chars=budget.omitted_chars,
         request_usage=request_usage,
     )
-    if cache is not None and cache_key is not None:
+    if cache is not None and cache_key is not None and not any_fallback_served(request_usage):
         # Store the finished (sanitized + regex-unioned) record — what a warm
         # run must reproduce byte-for-byte.
         cache.put(cache_key, {

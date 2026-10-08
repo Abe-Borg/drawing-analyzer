@@ -239,11 +239,23 @@ map lives in `src/drawing_analyzer/__init__.py`.
   content-keyed cache; a hit skips rendering and restores parsed findings).
   Findings fences are **line-anchored**, accept 3+ backticks or tildes, and a
   closer must match its opener's character and length. Never cache a truncated
-  read: both transports treat an unfinished reply (empty or cut off) as an
-  error, retry once at `digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache
-  write if it is still cut off. Real-time usage accumulates across both
+  read: both transports treat an unfinished reply (empty, cut off, or declined
+  with `refusal` — `digest.unfinished_reply_error` is the one rule) as an
+  error, retry a cut-off one once at `digest.MAX_TOKENS_RETRY_CEILING` (never a
+  refusal: a capable model's real-time request already carried the fallback, a
+  batch item has none), and refuse the cache write if it is still unfinished.
+  Partial text still ships (I-3), in `combined_text` too, with the error
+  disclosed under it (`_combine`). Real-time usage accumulates across both
   attempts and falls back to the truncated first read if the raised-cap call
-  cannot land. Critique does not re-rasterize: `render_spool.py` rebuilds the
+  cannot land or returns no text (`digest.stream_with_cap_retry`, shared with
+  synthesis and focus). Every persistent digest-cache read (both levels, both
+  transports) goes through
+  `digest.finished_digest_entry`: an entry an older build stored under an
+  unfinished `stop_reason` reads as a miss (no schema bump). An unfinished
+  synthesis or focus reply ships its partial text with a `_combine`
+  disclosure, holds its stage at PARTIAL, records every billed response, and
+  is never cached; a partial overview is never harvested.
+  Critique does not re-rasterize: `render_spool.py` rebuilds the
   same `RenderedSheet` from the digest's PNG bytes; the batch path adopts the
   digest's terminal uploads. A second render is the per-page fallback
   (`_one_page_fallback` re-renders exactly the page that failed). A failed spool
@@ -315,7 +327,8 @@ consume ledger entries and nothing else.
 
 - **Planning:** `set_identity.py` — one text-only call → advisory `SetIdentity`
   (consumers take `SetIdentity | None` and never gate a finding on it). The
-  regex edition harvest unions in as `origin="regex"`. Runs on Sonnet 5.5. Coerce
+  regex edition harvest unions in as `origin="regex"`. Runs on Haiku 5.5 at
+  medium effort. Coerce
   every list-shaped field through `set_identity._as_list` (a string must not be
   consumed per character). The international code-designation regex is
   **case-sensitive**; `Eurocode` keeps its own case-insensitive group.
@@ -334,7 +347,9 @@ consume ledger entries and nothing else.
 - **Finders:** the digest findings block; `critique.py` (a second full-coverage
   vision read, twice; self-consistency sets `reproduced`). On the real-time path
   the two reads prompt-cache their shared image prefix when `runs>=2`; the batch
-  path stays uncached. `use_batch` resolves from `DRAWING_ANALYZER_USE_BATCH`
+  path stays uncached. A failed real-time read gets one replacement; one cut
+  off at `max_tokens` is replaced at the digest's raised cap
+  (`MAX_TOKENS_RETRY_CEILING`). `use_batch` resolves from `DRAWING_ANALYZER_USE_BATCH`
   when the caller leaves it `None`. Structured outputs are opt-in and **critique
   only** among high-volume calls (`DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1`
   + registry capability + that stage's `StructuredOutputsGate`). `prose_harvest`
@@ -367,8 +382,8 @@ consume ledger entries and nothing else.
   doubt. `sheet_index.py`'s harvest stays unbounded; both diff directions
   already run `classify_reference`. `prose_harvest.py` mirrors prose
   Coordination/Conflict items, synthesis conflicts, and opted-in focus items
-  (match first; one structuring call for stragglers on Sonnet 5.5 at
-  `EFFORT_LOW`). Its boilerplate filter is anchored at **both** ends, length
+  (match first; one structuring call per unmatched straggler on Haiku 5.5 at
+  medium effort). Its boilerplate filter is anchored at **both** ends, length
   floor 8; the `filtered` count is observational and feeds neither `missing` nor
   `complete`. Opt-in `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`:
   `HARVEST_STRUCTURED_SYSTEM_PROMPT` is one substitution on the fenced prompt;
@@ -444,14 +459,18 @@ consume ledger entries and nothing else.
   and do not advance the counter. Per run, `…_MAX_FINDINGS` is severity-first,
   10 + one per 4 sheets, ceiling 40, unless an explicit env value pins it.
   Commit the assistant turn before answering tools; answer every tool_use id in
-  one user turn; force a no-tools close at the cap. A capped or garbled outcome
+  one user turn; force a no-tools close at the cap. Its breakpoints use the
+  5-minute default (`api_config.CACHE_BREAKPOINT_TTL`; turns re-read within
+  seconds). The close's `tool_choice` change voids the messages tier, so it
+  marks no message breakpoint. A capped or garbled outcome
   stays UNCERTAIN — never REJECTED — and is a designed stage COMPLETE; it only
   updates `finding.verification` in place. Concluded verdicts cache in
   `stage=investigation` (finding identity + whole-set fingerprint +
   model/prompt/round-budget/task-budget), complete-only; a warm hit replays the
   tool trace with sha-compare and has no TTL. `citation_check.py` runs on
-  Sonnet 5.5 (`web_search` + `web_fetch` per unique code ref; web fetch is
-  unavailable on Opus 5). Both tools carry the shared source-quality blocklist.
+  Sonnet 5.5 at medium effort (`web_search` + `web_fetch` per unique code ref;
+  web fetch is unavailable on Opus 5, available on Opus 5.5, so Sonnet is a cost
+  choice). Both tools carry the shared source-quality blocklist.
   The resolved tool set rides the verdict cache key.
   The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
   ledger, including `pause_turn` resumes and error or still-paused exits.
@@ -600,13 +619,29 @@ consume ledger entries and nothing else.
   conversion is a hard failure, including the batch→real-time fallbacks.
 - **Refusal fallback is a registry capability.**
   `ModelCapabilities.supports_refusal_fallback` decides which models opt in —
-  never a comparison against one model id. Opus 5.5 is today's only declarer
-  (`stop_reason="refusal"`, HTTP 200); Opus 4.8 is the fallback target, with
-  the same effort, thinking, output cap, hi-res vision, and $5/$25 pricing.
-  `core.api_config.call_with_refusal_fallback` attaches `fallbacks: "default"`
-  (beta `server-side-fallback-2026-07-01`) on Opus-5-routed real-time calls
-  (`digest.stream_message`, `verify.py`, the investigation loop) and re-routes
-  through `client.beta.messages`. The parameter is rejected on the Batches API.
+  never a comparison against one model id. Opus 5.5, Sonnet 5.5 and Opus 5
+  declare it (`stop_reason="refusal"`, HTTP 200); Haiku 5.5 has no server-side
+  fallback and does not. The API picks the substitute
+  by refusal category (Opus 5.5 → Opus 5 / Opus 4.8, cyber → Opus 4.8;
+  Sonnet 5.5 → Sonnet 5). `core.api_config.call_with_refusal_fallback`
+  attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) on
+  every real-time call (`digest.stream_message` and every stage's `create`)
+  and re-routes through `client.beta.messages`. The parameter is rejected on
+  the Batches API. The served-by signal is a `fallback_message` entry in
+  `usage.iterations`, read once by `RequestUsage.from_message` (`served_model`,
+  per-attempt `hops`). Never compare top-level `model` with the request (an
+  alias echoes back canonical; the fakes default to `claude-opus-5`). A
+  fallback answer: (1) is priced per attempt at the model that ran it —
+  `_record_usage` and the batch rescue's `_attach_usage_attempt` split `hops`
+  (declined = `REFUSED`, rescue carries `requested_model`); (2) is never cached
+  — every write site checks `any_fallback_served` / `fallback_served_model`;
+  (3) is reported by `RunUsage.model_fallbacks()` (run.log `Fallback:` line,
+  manifest `usage.model_fallbacks`). A stage whose usage reaches the ledger
+  must carry `request_usage`, or its fallback is priced at the requested
+  model. Content echoed back into history goes through
+  `api_config.drop_declined_partial` (investigation turns, citation pause
+  resumes): the declined partial's thinking/`tool_use` is neither executed nor
+  echoed.
   `verify.py` resolves one model (`VERIFICATION_MODEL_DEFAULT`) and never
   escalates; `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`. A 400
   naming the fallback beta turns the feature off for the process

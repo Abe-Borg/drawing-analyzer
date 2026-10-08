@@ -80,7 +80,7 @@ from .stage_cache import (
     put_stage_cache_entry,
     stage_cache_key,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, fallback_served_model
 
 _log = get_logger()
 
@@ -794,7 +794,8 @@ def _verify_one(
         Verification(status=status, note=note, evidence=list(artifacts)),
         in_tok,
         out_tok,
-        valid_model_verdict,
+        # A refusal fallback's verdict came from another model than the key names.
+        valid_model_verdict and fallback_served_model(resp) is None,
         send_structured,
         _degrade_kind(resp, valid_model_verdict),
         RequestUsage.from_message(resp),
@@ -1488,7 +1489,9 @@ def _call_prepared_cross(
     in_tok, out_tok = _message_usage(resp)
     v = Verification(status=status, note=note, evidence=prepared.artifacts)
     return _CallResult(
-        v, in_tok, out_tok, valid_model_verdict, send_structured,
+        v, in_tok, out_tok,
+        valid_model_verdict and fallback_served_model(resp) is None,
+        send_structured,
         _degrade_kind(resp, valid_model_verdict),
         RequestUsage.from_message(resp),
     )

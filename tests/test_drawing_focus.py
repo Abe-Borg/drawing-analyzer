@@ -206,11 +206,21 @@ def test_digest_sheet_focus_isolated_in_cache():
 # --------------------------------------------------------------------------- #
 
 
-def test_default_focus_model_env_override(monkeypatch):
-    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
-
+def test_default_focus_model_keeps_high_effort_and_honors_override(monkeypatch):
+    # As for synthesis: the default model must accept adaptive thinking at
+    # DEFAULT_FOCUS_EFFORT, not silently drop either.
     monkeypatch.delenv("DRAWING_ANALYZER_FOCUS_MODEL", raising=False)
-    assert default_focus_model() == REVIEW_MODEL_DEFAULT
+    client = _FakeClient(
+        lambda kw: FakeMessage(content=[FakeTextBlock(text="Room 101: WC-1")])
+    )
+    result = generate_focus_report(
+        [_digest("P-101", "Room 101 has WC-1")], ROOMS_FOCUS, client=client,
+    )
+    kw = client.calls[0]
+    assert kw["model"] == result.model_used == default_focus_model()
+    assert kw["thinking"] == {"type": "adaptive"}
+    assert kw["output_config"] == {"effort": focus.DEFAULT_FOCUS_EFFORT}
+
     monkeypatch.setenv("DRAWING_ANALYZER_FOCUS_MODEL", "claude-sonnet-5")
     assert default_focus_model() == "claude-sonnet-5"
 
@@ -387,12 +397,48 @@ def test_focus_report_api_error_is_clean_and_nonraising():
     assert result.error == "502 bad gateway (server temporarily unavailable — try again)"
 
 
-def test_focus_report_empty_response_flags_error():
-    client = _FakeClient(lambda kw: FakeMessage(content=[], stop_reason="max_tokens"))
+@pytest.mark.parametrize(
+    ("replies", "ok"),
+    [
+        # Cut off, then finished at the raised cap: complete, both reads billed.
+        ([("max_tokens", "Room 101: WC-1, LAV-"), ("end_turn", "Room 101: WC-1, LAV-2.")], True),
+        # Empty both times (thinking spent the cap): a failure, nothing to ship.
+        ([("max_tokens", ""), ("max_tokens", "")], False),
+        # Still cut off at the raised cap: the partial table ships, flagged.
+        ([("max_tokens", "Room 101: WC-1"), ("max_tokens", "Room 101: WC-1; Room 1")], False),
+        # Declined: never re-sent; the partial table ships, flagged.
+        ([("refusal", "Room 101: WC-1")], False),
+    ],
+    ids=["recovered", "empty", "still-cut-off", "declined"],
+)
+def test_focus_report_unfinished_reply_is_flagged_and_never_cached(replies, ok):
+    # A long room-by-room table competing with high-effort thinking for the
+    # 32k cap is the likeliest reply to be cut off, and it used to be accepted
+    # as complete and cached. The digest's single raised-cap retry now applies,
+    # and a reply still unfinished keeps its text (I-3) but is never cached.
+    def responder(_kw):
+        stop, text = replies[min(len(client.calls), len(replies)) - 1]
+        return FakeMessage(
+            content=[FakeTextBlock(text=text)] if text else [],
+            usage=FakeUsage(input_tokens=10, output_tokens=5),
+            stop_reason=stop,
+        )
+
+    client = _FakeClient(responder)
+    cache = DigestCache(None, persist=False)
     result = generate_focus_report(
-        [_digest("a", "x")], ROOMS_FOCUS, client=client, model=OPUS
+        [_digest("a", "x")], ROOMS_FOCUS, client=client, model=OPUS, cache=cache,
     )
-    assert not result.ok and "empty focus report" in result.error
+
+    assert len(client.calls) == len(replies)
+    caps = [kw["max_tokens"] for kw in client.calls]
+    assert caps == sorted(set(caps))                     # a retry only ever raises the cap
+    assert result.ok is ok
+    assert result.text == replies[-1][1]
+    assert result.partial is (not ok and bool(result.text))
+    assert (result.input_tokens, result.output_tokens) == (10 * len(replies), 5 * len(replies))
+    assert [r.stop_reason for r in result.request_usage] == [stop for stop, _ in replies]
+    assert len(cache._entries) == (1 if ok else 0)
 
 
 def test_focus_report_retries_transient_then_succeeds():
@@ -501,7 +547,12 @@ def test_pipeline_no_focus_changes_nothing(tmp_path):
     assert all("ADDITIONAL PER-RUN FOCUS" not in kw["system"] for kw in calls)
 
 
-def test_pipeline_focus_report_failure_ships_digests(tmp_path):
+@pytest.mark.parametrize(
+    "report",
+    ["", "PARTIAL REPORT: Room 101 → WC-1; Room 1"],
+    ids=["empty", "cut-off-partial"],
+)
+def test_pipeline_focus_report_failure_ships_digests(tmp_path, report):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.pipeline import extract_drawing_context
 
@@ -509,7 +560,10 @@ def test_pipeline_focus_report_failure_ships_digests(tmp_path):
 
     def responder(kw):
         if kw["system"] == FOCUS_REPORT_SYSTEM_PROMPT:
-            return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
+            # Cut off at max_tokens — empty, or with a partial table — both
+            # times: the raised-cap retry does not recover it either.
+            content = [FakeTextBlock(text=report)] if report else []
+            return FakeMessage(content=content, stop_reason="max_tokens")
         return FakeMessage(content=[FakeTextBlock(text="digest body")])
 
     class _C(BetaClientMixin):
@@ -525,7 +579,25 @@ def test_pipeline_focus_report_failure_ships_digests(tmp_path):
     )
 
     assert ctx.focus == ROOMS_FOCUS
-    assert ctx.focus_report_text == ""                  # report failed
-    assert "## Focus Report" not in ctx.combined_text   # no empty section
     assert "digest body" in ctx.combined_text           # digests still shipped
-    assert any("Focus report" in e for e in ctx.errors)  # failure surfaced
+    focus_errors = [e for e in ctx.errors if e.startswith("Focus report")]
+    assert focus_errors                                 # failure surfaced
+    # Both billed replies (the first read and its raised-cap retry) are recorded.
+    records = [r for r in ctx.run_usage.records if r.stage_family == "focus"]
+    assert [r.terminal_status for r in records] == ["FAILED", "FAILED"]
+    (end,) = [
+        e for e in ctx.run_journal.events
+        if (e.event_code, e.stage) == ("STAGE_END", "focus")
+    ]
+    if not report:
+        assert ctx.focus_report_text == ""              # report failed
+        assert "## Focus Report" not in ctx.combined_text   # no empty section
+        assert end.fields["status"] == "FAILED"
+    else:
+        # The partial report still ships (I-3), disclosed in place, and is
+        # recorded as PARTIAL rather than as a complete answer.
+        assert ctx.focus_report_text == report
+        error = focus_errors[0].removeprefix("Focus report: ")
+        text = ctx.combined_text
+        assert text.index(report) < text.index(error) < text.index("## Sheet 1/2")
+        assert end.fields["status"] == "PARTIAL"

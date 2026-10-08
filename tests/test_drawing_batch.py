@@ -738,6 +738,17 @@ def test_cache_hit_skips_upload_and_batch_item():
     assert client2.files.uploaded_ids == []  # nothing uploaded
     assert all(d.ok for d in digests)
 
+    # An entry an older build stored under an unfinished stop reason (a
+    # declined digest cached as complete) is not a hit: both sheets are
+    # submitted again, and the fresh reads replace the entries.
+    for entry in cache._entries.values():
+        entry["stop_reason"] = "refusal"
+    client3 = _FakeClient(_succeed)
+    _, digests = _run_batch(client3, sheets, cache=cache)
+    assert [d.cached for d in digests] == [False, False]
+    assert all(d.ok for d in digests) and len(client3.submitted) == 2
+    assert {e["stop_reason"] for e in cache._entries.values()} == {"end_turn"}
+
 
 def test_partial_cache_only_submits_the_miss():
     cache = DigestCache(None, persist=False)
@@ -2088,6 +2099,22 @@ def test_batch_nonempty_truncation_is_an_error_and_is_retried():
         slot, {"type": "succeeded"}, digest, params=params,
     )
     assert retry is not None and retry["max_tokens"] > DEFAULT_DIGEST_MAX_TOKENS
+
+    # A declined item is unfinished too: an error, partial prose kept, never
+    # stored. It is NOT resubmitted: a batch item carries no refusal fallback
+    # (the Batches API rejects it), so the same request would be declined again.
+    declined = FakeMessage(
+        content=[FakeTextBlock(text="Real prose, declined mid-")],
+        usage=FakeUsage(input_tokens=100, output_tokens=20),
+        stop_reason="refusal",
+    )
+    digest = batch_digest._digest_from_message(slot, declined, cache=cache)
+    assert digest.error and digest.stop_reason == "refusal"
+    assert digest.text                                  # partial prose kept (I-3)
+    assert len(cache._entries) == 0                     # never stored
+    assert batch_digest._item_retry_params(
+        slot, {"type": "succeeded"}, digest, params=params,
+    ) is None
 
 
 # --------------------------------------------------------------------------- #

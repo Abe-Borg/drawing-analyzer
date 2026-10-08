@@ -28,7 +28,7 @@ from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     cache_write_ttl_for,
 )
-from .core.request_usage import RequestUsage
+from .core.request_usage import RequestUsage, any_fallback_served
 from .core.tokenizer import image_tokens_upper_bound
 from .diagnostics import get_logger
 from . import cancellation, resource_pressure, tiling
@@ -39,6 +39,7 @@ from .digest import (
     SheetDigest,
     cache_entry_from_digest,
     digest_sheet,
+    finished_digest_entry,
     focus_cache_fragment,
     normalize_focus,
     normalize_specs_text,
@@ -369,6 +370,7 @@ def _record_usage(
     request_id: str = "",
     cache_write_ttl: "str | None" = None,
     request_usage: "list[RequestUsage] | None" = None,
+    requested_model: "str | None" = None,
 ) -> UsageRecord:
     """Append priced usage, preserving response boundaries for multi-call stages.
 
@@ -394,28 +396,46 @@ def _record_usage(
         # A stage may contain many short calls, or a mix of short and long
         # calls. Price every response at its own prompt size; applying the
         # long-context threshold to their sum overcharges small requests.
-        for number, request in enumerate(request_usage, start=attempt):
-            response_failed = (
+        # A response a refusal fallback served is split into its billed
+        # attempts, each priced at the model that ran it (the declined
+        # attempt at the requested model, the rescue at the fallback's rate).
+        parts = [
+            (request, hop) for request in request_usage
+            for hop in (getattr(request, "hops", ()) or (None,))
+        ]
+        for number, (request, hop) in enumerate(parts, start=attempt):
+            declined = hop is not None and not hop.served
+            response_failed = declined or (
                 request.stop_reason in ("max_tokens", "refusal")
                 or request.parse_success is False
             )
             response_parsed = (
                 parse_success if request.parse_success is None else request.parse_success
             )
+            tokens = hop if hop is not None else request
+            billed_model = (
+                (hop.model or (getattr(request, "served_model", None) if hop.served else None)
+                 or model)
+                if hop is not None else model
+            )
             record = _record_usage(
-                run_usage, family=family, instance=instance, model=model,
+                run_usage, family=family, instance=instance, model=billed_model,
+                requested_model=model if billed_model != model else None,
                 transport=transport,
-                input_tokens=request.input_tokens,
-                output_tokens=request.output_tokens,
-                cache_read_tokens=request.cache_read_tokens,
-                cache_write_tokens=request.cache_write_tokens,
+                input_tokens=tokens.input_tokens,
+                output_tokens=tokens.output_tokens,
+                cache_read_tokens=tokens.cache_read_tokens,
+                cache_write_tokens=tokens.cache_write_tokens,
                 # Tool fees are independent of token tiers. Existing stages
                 # provide their total here; charge it once on the final record.
                 billable_tool_uses=(
-                    billable_tool_uses if number == attempt + len(request_usage) - 1 else None
+                    billable_tool_uses if number == attempt + len(parts) - 1 else None
                 ),
                 parse_success=response_parsed and not response_failed,
-                terminal_status="FAILED" if response_failed else terminal_status,
+                terminal_status=(
+                    "REFUSED" if declined
+                    else "FAILED" if response_failed else terminal_status
+                ),
                 parent=parent, attempt=number,
                 request_id=request.request_id, cache_write_ttl=cache_write_ttl,
             )
@@ -461,6 +481,7 @@ def _record_usage(
             request_or_custom_id=request_id,
             estimated_cost=cost,
             cache_write_ttl=cache_write_ttl,
+            requested_model=requested_model,
         )
     )
 
@@ -774,6 +795,8 @@ def _combine(
     focus: str = "",
     focus_report: str = "",
     identity: str = "",
+    overview_note: str = "",
+    focus_report_note: str = "",
 ) -> str:
     """Build the combined digest document from per-sheet results.
 
@@ -787,6 +810,14 @@ def _combine(
     Phase A) is non-empty it leads the document — a reader should know what the
     set *is* before reading anything about it. All three are additive; the
     per-sheet digests are unchanged (I-2).
+
+    ``overview_note`` / ``focus_report_note`` disclose a partial overview or
+    report — a reply cut off at ``max_tokens`` or declined, whose text still
+    ships (I-3) — in a blockquote under its text. A sheet whose digest failed
+    but kept partial prose (cut off or declined) is shown the same way: its
+    prose, byte-exact (I-2), then its error. This document is what a
+    downstream spec reviewer reads, with no run errors beside it, so a partial
+    section must say so — and must not drop the prose the run already paid for.
     """
     total = len(sheets)
     lines: list[str] = [
@@ -813,6 +844,9 @@ def _combine(
             lines.append("")
         lines.append(focus_report.strip())
         lines.append("")
+        if focus_report_note:
+            lines.append(f"> [{focus_report_note}]")
+            lines.append("")
         lines.append("---")
         lines.append("")
     if overview.strip():
@@ -820,15 +854,26 @@ def _combine(
         lines.append("")
         lines.append(overview.strip())
         lines.append("")
+        if overview_note:
+            lines.append(f"> [{overview_note}]")
+            lines.append("")
         lines.append("---")
         lines.append("")
     for i, sd in enumerate(sheets, start=1):
         lines.append(_sheet_header(i, total, sd.ref))
         lines.append("")
-        if sd.error:
+        text = sd.text.strip()
+        if sd.error and text:
+            # An unfinished read: the partial prose ships, disclosed under it
+            # (the report badges it and the per-sheet export heads it with its
+            # status; this document has neither).
+            lines.append(text)
+            lines.append("")
+            lines.append(f"> [this sheet's digest is partial: {sd.error}]")
+        elif sd.error:
             lines.append(f"> [drawing analysis failed for this sheet: {sd.error}]")
         else:
-            lines.append(sd.text.strip())
+            lines.append(text)
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -1198,7 +1243,7 @@ def _level1_partition(
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
-        entry = cache.get(key)
+        entry = finished_digest_entry(cache.get(key))
         if entry is not None:
             cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
         else:
@@ -1653,7 +1698,10 @@ def _run_critique_stage(
         # structured run will find and serve it. Same correction, same reason, as
         # the level-2 store key.
         identity = level1_identities.get(_refkey(ref)) if cache is not None else None
-        if identity is not None and res.error is None and res.runs == runs:
+        if (
+            identity is not None and res.error is None and res.runs == runs
+            and not any_fallback_served(getattr(res, "request_usage", None) or ())
+        ):
             cache.put(
                 critique_cache_key_level1(
                     identity,
@@ -2462,9 +2510,10 @@ def _run_qc_stages(
                             cache_read_tokens=rec.cache_read_tokens,
                             cache_write_tokens=rec.cache_write_tokens,
                             request_usage=getattr(rec, "request_usage", None),
-                            # The investigation loop caches its system prompt and
-                            # tool list through api_config's breakpoint helpers,
-                            # which request a 1-hour TTL — a 2x write, not 1.25x.
+                            # The investigation loop caches its system prompt, tool
+                            # list and evidence turns through api_config's
+                            # breakpoint helpers; price the writes at the TTL
+                            # those helpers request.
                             cache_write_ttl=cache_write_ttl_for(PHASE_INVESTIGATION),
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
@@ -2567,8 +2616,9 @@ def _run_qc_stages(
                         cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
                         cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
                         request_usage=getattr(cires, "request_usage", None),
-                        # System, tools, and paused conversation prefixes all ask
-                        # for 1h cache entries (2x writes rather than 1.25x).
+                        # System, tools, and paused conversation prefixes all use
+                        # api_config's breakpoint helpers; price the writes at the
+                        # TTL those helpers request.
                         cache_write_ttl=cache_write_ttl_for(PHASE_CITATION),
                         billable_tool_uses={"web_search": int(
                             getattr(cires, "web_search_requests", 0) or 0
@@ -3490,7 +3540,10 @@ def extract_drawing_context(
     # real, non-empty digest is stored — mirroring digest_sheet's own guard.
     if cache is not None:
         for sd in miss_sheets:
-            if sd.error is None and (sd.text or "").strip():
+            if (
+                sd.error is None and (sd.text or "").strip()
+                and not any_fallback_served(getattr(sd, "request_usage", None) or ())
+            ):
                 key = level1_keys.get(_refkey(sd.ref))
                 if key is not None:
                     cache.put(key, cache_entry_from_digest(sd))
@@ -3563,10 +3616,12 @@ def extract_drawing_context(
                 1 for a in usage_attempts if getattr(a, "billable", True)
             )
             for usage_attempt in usage_attempts:
+                attempt_model = getattr(usage_attempt, "model", None) or model
                 _record_usage(
                     run_usage, family="digest",
                     instance=f"digest:{skey[0]}:p{skey[1]}",
-                    model=model,
+                    model=attempt_model,
+                    requested_model=model if attempt_model != model else None,
                     transport=getattr(usage_attempt, "transport", sheet_transport),
                     input_tokens=getattr(usage_attempt, "input_tokens", 0),
                     output_tokens=getattr(usage_attempt, "output_tokens", 0),
@@ -3583,9 +3638,11 @@ def extract_drawing_context(
                 )
         else:
             if not cached:
-                img_tok += sd.image_token_estimate * max(
-                    1, len(getattr(sd, "request_usage", ()) or ())
-                )
+                # A refusal fallback read the images once per billed attempt.
+                img_tok += sd.image_token_estimate * max(1, sum(
+                    len(getattr(u, "hops", ()) or ()) or 1
+                    for u in (getattr(sd, "request_usage", ()) or ())
+                ))
             _record_usage(
                 run_usage, family="digest",
                 instance=f"digest:{skey[0]}:p{skey[1]}",
@@ -3874,6 +3931,7 @@ def extract_drawing_context(
                     transport="CACHE" if pres.cached else "REAL_TIME",
                     input_tokens=pres.input_tokens,
                     output_tokens=pres.output_tokens,
+                    request_usage=getattr(pres, "request_usage", None),
                     cache_hit=pres.cached,
                     parse_success=pres.ok,
                     terminal_status="COMPLETE" if pres.ok else "FAILED",
@@ -4137,6 +4195,9 @@ def extract_drawing_context(
     # statements into the findings ledger, so the text must exist by then — the
     # prose itself is untouched either way (I-2).
     synthesis_text = ""
+    # Set only for a partial overview (a reply cut off or declined): ``_combine``
+    # prints it under the text, and it keeps that text out of the harvest.
+    synthesis_note = ""
     synthesis_stage = StageResult(stage="synthesis", expected=config.run_synthesis)
     if config.run_synthesis:
         if synthesis_future is None:
@@ -4164,7 +4225,24 @@ def extract_drawing_context(
             synthesis_stage.errors.append(str(exc))
             _log.warning("synthesis: failed: %s", exc)
         else:
-            if result.ok:
+            s_cached = bool(getattr(result, "cached", False))
+            if result.ok or getattr(result, "request_usage", None):
+                # Every billed response is recorded (§15.6), not only a
+                # successful overview's: a cut-off first read the raised-cap
+                # retry replaced, or an overview that never finished, cost
+                # money too.
+                _record_usage(
+                    run_usage, family="synthesis", instance="synthesis",
+                    model=synthesis_model or default_synthesis_model(),
+                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    request_usage=getattr(result, "request_usage", None),
+                    transport="CACHE" if s_cached else "REAL_TIME",
+                    cache_hit=s_cached,
+                    parse_success=result.ok,
+                    terminal_status="COMPLETE" if result.ok else "FAILED",
+                )
+            partial = bool(getattr(result, "partial", False))
+            if result.ok or partial:
                 synthesis_text = result.text
                 # DA-028, mirroring the cross-QC budget path: sheets the prompt
                 # budget could not carry are sheets this overview never saw, so
@@ -4180,19 +4258,24 @@ def extract_drawing_context(
                         "synthesis: prompt budget omitted %d sheet(s) — "
                         "the overview does not cover the whole set", omitted,
                     )
-                synthesis_stage.status = "PARTIAL" if omitted else "COMPLETE"
-                # The synthesis call is billed, so its usage is recorded (§15.6).
-                _record_usage(
-                    run_usage, family="synthesis", instance="synthesis",
-                    model=synthesis_model or default_synthesis_model(),
-                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
-                    transport=(
-                        "CACHE" if getattr(result, "cached", False) else "REAL_TIME"
-                    ),
-                    cache_hit=bool(getattr(result, "cached", False)),
+                if partial:
+                    # Cut off even after the raised-cap retry, or declined. The
+                    # text ships too (I-3), disclosed in place, but it is not
+                    # the whole overview — and, like a failed sheet's prose, it
+                    # is never harvested into findings: its last item may end
+                    # mid-statement.
+                    synthesis_note = f"this overview is partial: {result.error}"
+                    errors.append(f"Cross-sheet synthesis: {result.error}")
+                    synthesis_stage.errors.append(str(result.error))
+                    _log.warning(
+                        "synthesis: %s; shipping the partial overview", result.error,
+                    )
+                synthesis_stage.status = (
+                    "PARTIAL" if omitted or partial else "COMPLETE"
                 )
                 _log.info(
-                    "synthesis: ok (input=%d output=%d tok)",
+                    "synthesis: %s (input=%d output=%d tok)",
+                    "partial" if partial else "ok",
                     result.input_tokens, result.output_tokens,
                 )
             elif (
@@ -4217,6 +4300,7 @@ def extract_drawing_context(
     # Additive: a failure here is recorded and the standard deliverable —
     # per-sheet digests plus any synthesis — ships exactly as it would have.
     focus_report_text = ""
+    focus_report_note = ""   # set only for a partial report, like synthesis_note
     if focus:
         if focus_future is None:
             if progress is not None:
@@ -4242,14 +4326,28 @@ def extract_drawing_context(
             errors.append(f"Focus report: {exc}")
             _log.warning("focus report: failed: %s", exc)
         else:
-            if fresult.ok:
+            f_cached = bool(getattr(fresult, "cached", False))
+            if fresult.ok or getattr(fresult, "request_usage", None):
+                # Every billed response is recorded (§15.6), as for synthesis.
+                _record_usage(
+                    run_usage, family="focus", instance="focus",
+                    model=focus_model or default_focus_model(),
+                    input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+                    request_usage=getattr(fresult, "request_usage", None),
+                    transport="CACHE" if f_cached else "REAL_TIME",
+                    cache_hit=f_cached,
+                    parse_success=fresult.ok,
+                    terminal_status="COMPLETE" if fresult.ok else "FAILED",
+                )
+            f_partial = bool(getattr(fresult, "partial", False))
+            if fresult.ok or f_partial:
                 focus_report_text = fresult.text
                 # DA-028: same rule as synthesis above — a report assembled from
                 # part of the set is not a COMPLETE answer to the operator's
                 # focus, and the journal is where that is recorded (the focus
                 # pass has no StageResult of its own).
                 f_omitted = int(getattr(fresult, "sheets_omitted", 0) or 0)
-                focus_status = "PARTIAL" if f_omitted else "COMPLETE"
+                focus_status = "PARTIAL" if f_omitted or f_partial else "COMPLETE"
                 if f_omitted:
                     errors.append(
                         f"Focus report: prompt budget omitted {f_omitted} sheet(s); "
@@ -4258,18 +4356,17 @@ def extract_drawing_context(
                     _log.warning(
                         "focus report: prompt budget omitted %d sheet(s)", f_omitted,
                     )
-                # The focus call is billed, so its usage is recorded (§15.6).
-                _record_usage(
-                    run_usage, family="focus", instance="focus",
-                    model=focus_model or default_focus_model(),
-                    input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
-                    transport=(
-                        "CACHE" if getattr(fresult, "cached", False) else "REAL_TIME"
-                    ),
-                    cache_hit=bool(getattr(fresult, "cached", False)),
-                )
+                if f_partial:
+                    # Cut off even after the raised-cap retry, or declined: the
+                    # answer ships (I-3), disclosed in place as partial.
+                    focus_report_note = f"this report is partial: {fresult.error}"
+                    errors.append(f"Focus report: {fresult.error}")
+                    _log.warning(
+                        "focus report: %s; shipping the partial report", fresult.error,
+                    )
                 _log.info(
-                    "focus report: ok (input=%d output=%d tok)",
+                    "focus report: %s (input=%d output=%d tok)",
+                    "partial" if f_partial else "ok",
                     fresult.input_tokens, fresult.output_tokens,
                 )
             elif (
@@ -4311,7 +4408,8 @@ def extract_drawing_context(
         client=client, qc_work_dir=qc_work_dir, progress=progress,
         total=total, errors=errors, critique_findings=critique_findings,
         cross_findings=cross_findings, claims=numeric_claims,
-        synthesis_text=synthesis_text,
+        # A partial overview ships, disclosed, but is never harvested.
+        synthesis_text="" if synthesis_note else synthesis_text,
         accepted_documents=inventory.accepted_documents,
         journal=journal,
         set_identity=set_identity_obj,
@@ -4387,6 +4485,8 @@ def extract_drawing_context(
             focus=focus,
             focus_report=focus_report_text,
             identity=set_identity_obj.context_block() if set_identity_obj else "",
+            overview_note=synthesis_note,
+            focus_report_note=focus_report_note,
         ),
         sheets=sheets,
         file_count=file_count,

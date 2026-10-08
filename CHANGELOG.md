@@ -6,6 +6,97 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refusal-fallback answers are priced, flagged and kept out of the cache.**
+  When Opus 5.5 (or Sonnet 5.5) declines a request, the server-side fallback
+  re-runs it on a model the API picks (Opus 4.8 for cyber-category refusals).
+  The run used to price that answer at the requested model's rate, drop the
+  declined attempt from the ledger, say nothing, and cache the substitute's
+  answer under the requested model's key. Each billed attempt is now its own
+  usage record at the model that ran it (`requested_model` names the one the
+  stage asked for; the declined attempt is `REFUSED`). No stage caches a
+  fallback answer. `run.log` gets a `Fallback:` header line plus a line per
+  stage, and `run_manifest.json` gets `usage.model_fallbacks`. Synthesis, focus
+  and the review plan now record per-response usage so their fallbacks are
+  priced too. The investigation loop and citation pause resumes no longer run
+  or echo back the declined model's partial tool requests.
+- **A truncated critique read is replaced at a raised output cap.** A
+  real-time critique read cut off at `max_tokens` used to get its one
+  replacement at the same 64k cap, so the paid retry would most likely be cut
+  off too. The replacement now gets the digest's raised cap (double, at most
+  128k). Other failed reads are still replaced at the original cap. The raised
+  cap is not part of the prompt, so the replacement still reads the warm image
+  prefix.
+- **Model defaults in the README, the in-app help and CLAUDE.md.** They still
+  named Opus 5 and Sonnet 5 for several stages, put set identity and the prose
+  harvest on Opus or Sonnet, and named Opus 5.5 as the only refusal-fallback
+  model. They now match the code: Opus 5.5 for review, critique, cross-QC,
+  the review plan and investigation; Sonnet 5.5 for synthesis, focus,
+  verification, citation and the report chat; Haiku 5.5 for set identity and
+  the prose harvest. The help's cost note also counted only the digest for a
+  standard run; the GUI runs the set overview on every run of two or more
+  sheets, and the note and stage table now say so. The help's stage table also gives the investigation cap
+  as it now scales (at most 40 per run, by set size), not a flat 10.
+- **A declined or cut-off reply is no longer cached as a complete one.** The
+  rule was "never cache a truncated read", and three paths broke it.
+  - **Declined digests.** A digest reply ending with `stop_reason="refusal"`
+    that still carried partial text read as finished on both transports, so it
+    was cached and served on every later run at zero cost, with no error. It
+    now fails the sheet like a truncation: the partial prose still ships (I-3)
+    and the cache write is refused. For both, the combined digest now carries
+    that prose with a note under it saying the sheet's digest is partial; it
+    used to show only the failure notice. A refusal is not re-sent: a real-time
+    request already carried the server-side refusal fallback, and a batch item,
+    which cannot carry one, would only be declined again. Digests an earlier
+    version cached under `max_tokens` or `refusal` are now read as a miss at
+    both cache levels, so those sheets are read once more; complete entries
+    keep hitting and no cache schema changes.
+  - **Synthesis and the focus report** never checked `stop_reason`. An
+    overview or room-by-room table cut off at its 32k cap, or declined, was
+    accepted and written to the stage cache. Both now use the digest's single
+    raised-cap retry (`min(2x, MAX_TOKENS_RETRY_CEILING)`, streamed). A reply
+    still unfinished ships its partial text with a note under it in the
+    combined digest, holds its stage at PARTIAL, is listed in the run errors,
+    and is never cached; a partial overview is not mined for findings. These
+    stage-cache entries do not record why a reply ended, so an unfinished one
+    an earlier version cached is still served until its inputs change.
+  - A raised-cap retry that comes back with no text no longer replaces the
+    first read's partial prose. Every billed synthesis and focus response is
+    now recorded in the usage ledger, including failed replies and the first
+    read a retry replaced.
+- **The tile DPI floor counts the API's downscale.** The page-grid search
+  credited every tile with its render DPI, but the API silently downscales an
+  image above the high-resolution tier's limits (2576 px long edge, 4,784
+  visual tokens counted as ⌈w/28⌉·⌈h/28⌉ patches) before the model reads it.
+  The grids it chose with 20 or fewer images were built from large near-square
+  tiles that the model read well below the ANSI E floor of 183.39 DPI: vector
+  ARCH D 24×36 at 142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and
+  ARCH E 36×48 at 138.7. Its raster choices of 20 or fewer images fell below
+  the 234.17 raster floor too (raster Letter at 198.5). The floor is now tested
+  at the DPI the model reads, using the documented resize rule
+  (`core.tokenizer.resized_image_size`).
+  Affected pages get more tiles and cost more per read, priced as the API
+  bills: vector ARCH C +31% (30,960 tokens), ANSI D +42% (47,040), ARCH D +56%
+  (51,952) and ARCH E 36×48 +74% (107,408); raster Letter, Tabloid, C and D
+  sizes +23% to +45%. ANSI E and ARCH E1 keep 6×6, their imagery and their
+  cache keys, and vector Tabloid and ANSI C keep their grids. A page whose grid
+  changes re-renders and re-digests once; no cache schema bump is needed,
+  because the render identity already keys on rows, columns and target. The
+  README grid table now reports the DPI the model reads (vector Tabloid's
+  234.18 render DPI reads at 190.91).
+- **Image tokens are priced the way the API bills them.** The estimator
+  priced an image at ⌈w·h/750⌉ after a long-edge-only resize. The API resizes
+  an image to fit both its tier's long edge and its token limit, then bills
+  ⌈w/28⌉·⌈h/28⌉ patches. The old price ran 0.5–3.3% high on most grids but
+  about 13% low on a thin strip, so strip grids were quoted low (vector Letter
+  by 7%). Cost previews and the grid search now price the documented resize
+  and patch count, which re-prices every quoted figure (ANSI E: 93,013 →
+  91,168 tokens per read). Vector Letter moves from 20×1 to 43×1 strips, 8.5%
+  cheaper per read; patch pricing also settles the raster Letter and raster
+  ARCH D grids above. The conservative allowances (478,400 and 177,008 tokens
+  per page) are unchanged.
+
 ### Added
 
 - **Haiku 5.5 extraction.** Set identity and prose-to-finding structuring now
@@ -48,11 +139,36 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Synthesis and the focus report run on Sonnet 5.5, at high effort.** Both
+  were on Opus 5.5. Each is one text-only call over the digests the Opus vision
+  read already wrote, with no drawing images. Sonnet 5.5 does that
+  reconciliation at half the per-token price, and `high` is its own default
+  effort. On QC runs the overview's conflict statements still enter the ledger
+  and are checked like any other finding. By the estimator this saves about
+  $0.06 on a 10-sheet run and $0.50 on a 120-sheet run, or $0.14 and $1.24 with
+  a focus. The vision
+  reads, cross-sheet QC, the review plan and investigation stay on Opus 5.5.
+  `DRAWING_ANALYZER_SYNTHESIS_MODEL` and `DRAWING_ANALYZER_FOCUS_MODEL` restore
+  Opus, and neither follows `DRAWING_ANALYZER_MODEL` any more. Cached overviews
+  and focus reports are keyed by model, so each set re-runs these two calls
+  once.
 - **Quitting mid-analysis stops the run first.** The worker threads die with
   the process, but a submitted Message Batch used to keep running — and
   billing — after the window closed. Closing during an analysis now pulls the
   kill switch and closes once the stop settles (at most 30 seconds); a second
   close request closes at once.
+- **Investigation and citation prompt-cache writes cost less.** Their cache
+  breakpoints now use the 5-minute entry (1.25x base input) instead of the
+  1-hour entry (2x). Both stages re-read their cached prefixes seconds apart:
+  each investigation turn follows the last, and citation requests share one
+  prefix four at a time. The longer TTL never bought an extra hit; it only
+  raised the price of every turn's new evidence. The investigation's forced
+  text-only close no longer marks message breakpoints. Its `tool_choice`
+  change voids the message cache, and nothing reads after it, so those writes
+  were pure premium. Modeled on Opus 5.5, an investigated finding costs about
+  20–27% less, and the model is sent the same tokens. The usage ledger prices
+  the writes at the 5-minute rate. Cached investigation and citation verdicts
+  stay valid, because neither key includes the TTL.
 
 ### Removed
 
@@ -66,40 +182,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RECOVERY_DIRECT` / `RECOVERY_BATCH` constants and the direct-call rescue
   (`_rescue_failed_items_sync`) are gone. The inline real-time fallback for a
   failed Files API upload is unchanged.
-
-### Fixed
-
-- **The tile DPI floor counts the API's downscale.** The page-grid search
-  credited every tile with its render DPI, but the API silently downscales an
-  image above the high-resolution tier's limits (2576 px long edge, 4,784
-  visual tokens counted as ⌈w/28⌉·⌈h/28⌉ patches) before the model reads it.
-  The grids it chose with 20 or fewer images were built from large near-square
-  tiles that the model read well below the ANSI E floor of 183.39 DPI: vector
-  ARCH D 24×36 at 142.8, ANSI D 22×34 at 153.3, ARCH C 18×24 at 170.6 and
-  ARCH E 36×48 at 138.7. Its raster choices of 20 or fewer images fell below
-  the 234.17 raster floor too (raster Letter at 198.5). The floor is now tested
-  at the DPI the model reads, using the documented resize rule
-  (`core.tokenizer.resized_image_size`).
-  Affected pages get more tiles and cost more per read, priced as the API
-  bills: vector ARCH C +31% (30,960 tokens), ANSI D +42% (47,040), ARCH D +56%
-  (51,952) and ARCH E 36×48 +74% (107,408); raster Letter, Tabloid, C and D
-  sizes +23% to +45%. ANSI E and ARCH E1 keep 6×6, their imagery and their
-  cache keys, and vector Tabloid and ANSI C keep their grids. A page whose grid
-  changes re-renders and re-digests once; no cache schema bump is needed,
-  because the render identity already keys on rows, columns and target. The
-  README grid table now reports the DPI the model reads (vector Tabloid's
-  234.18 render DPI reads at 190.91).
-- **Image tokens are priced the way the API bills them.** The estimator
-  priced an image at ⌈w·h/750⌉ after a long-edge-only resize. The API resizes
-  an image to fit both its tier's long edge and its token limit, then bills
-  ⌈w/28⌉·⌈h/28⌉ patches. The old price ran 0.5–3.3% high on most grids but
-  about 13% low on a thin strip, so strip grids were quoted low (vector Letter
-  by 7%). Cost previews and the grid search now price the documented resize
-  and patch count, which re-prices every quoted figure (ANSI E: 93,013 →
-  91,168 tokens per read). Vector Letter moves from 20×1 to 43×1 strips, 8.5%
-  cheaper per read; patch pricing also settles the raster Letter and raster
-  ARCH D grids above. The conservative allowances (478,400 and 177,008 tokens
-  per page) are unchanged.
 
 ## [1.8.0] - 2026-10-05
 

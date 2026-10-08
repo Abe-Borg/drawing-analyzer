@@ -67,6 +67,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
+from .core.request_usage import fallback_served_model
 from .core.tokenizer import estimate_image_tokens_total
 from . import cancellation, resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
@@ -84,11 +85,13 @@ from .digest import (
     build_digest_request_params,
     digest_sheet,
     findings_from_cache,
+    finished_digest_entry,
     focus_cache_fragment,
     normalize_focus,
     normalize_specs_text,
     parse_findings,
     specs_cache_fragment,
+    unfinished_reply_error,
 )
 from .digest_cache import digest_cache_key
 from .batch_recovery import (
@@ -324,6 +327,9 @@ class DigestUsageAttempt:
     # estimate is charged per *response-bearing* attempt and must not be
     # multiplied by attempts that never came back.
     billable: bool = True
+    # The model that ran this attempt when a refusal fallback split a real-time
+    # rescue response (``None``: the requested model, the ordinary case).
+    model: str | None = None
 
 
 def _attach_usage_attempt(
@@ -338,18 +344,35 @@ def _attach_usage_attempt(
     # Inline recovery may include a raised-cap real-time retry. Preserve each
     # response's prompt boundary rather than treating their sum as one request.
     responses = list(getattr(digest, "request_usage", ()) or ()) or [digest]
-    for offset, response in enumerate(responses):
-        response_failed = getattr(response, "stop_reason", None) in ("max_tokens", "refusal")
+    # A refusal fallback's response splits into its billed attempts, each
+    # priced at the model that ran it (see ``pipeline._record_usage``).
+    parts = [
+        (response, hop) for response in responses
+        for hop in (getattr(response, "hops", ()) or (None,))
+    ]
+    for offset, (response, hop) in enumerate(parts):
+        declined = hop is not None and not hop.served
+        response_failed = declined or (
+            getattr(response, "stop_reason", None) in ("max_tokens", "refusal")
+        )
+        tokens = hop if hop is not None else response
         attempts.append(DigestUsageAttempt(
-            input_tokens=int(response.input_tokens or 0),
-            output_tokens=int(response.output_tokens or 0),
-            cache_read_tokens=int(getattr(response, "cache_read_tokens", 0) or 0),
-            cache_write_tokens=int(getattr(response, "cache_write_tokens", 0) or 0),
+            input_tokens=int(tokens.input_tokens or 0),
+            output_tokens=int(tokens.output_tokens or 0),
+            cache_read_tokens=int(getattr(tokens, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(tokens, "cache_write_tokens", 0) or 0),
             transport=transport,
             parse_success=(digest.error is None and not response_failed),
-            terminal_status="FAILED" if digest.error or response_failed else "COMPLETE",
+            terminal_status=(
+                "REFUSED" if declined
+                else "FAILED" if digest.error or response_failed else "COMPLETE"
+            ),
             attempt_number=max(1, int(attempt_number or 1)) + offset,
             request_or_custom_id=getattr(response, "request_id", "") or request_or_custom_id,
+            model=(
+                (hop.model or (response.served_model if hop.served else None))
+                if hop is not None else None
+            ),
         ))
     # SheetDigest intentionally has no slots, so this stays a runtime-only
     # extension and cannot perturb existing cache/export schemas.
@@ -1490,7 +1513,9 @@ def submit_drawing_batch(
         )
         slot.cache_key = cache_key
         slot.level1_key = (level1_keys or {}).get((str(sheet.ref.pdf_path), sheet.ref.page_index))
-        hit = cache.get(cache_key) if cache is not None else recovery.recovered.get(cache_key)
+        hit = finished_digest_entry(
+            cache.get(cache_key) if cache is not None else recovery.recovered.get(cache_key)
+        )
         if hit is not None:
             slot.digest = SheetDigest(
                 ref=sheet.ref,
@@ -1921,22 +1946,24 @@ def _digest_from_message(
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
-    # Parity with the real-time path: a reply the model did not FINISH is not a
-    # complete digest, whether it came back empty or merely cut off. Treating a
-    # nonempty truncation as success accepted it AND cached it permanently,
-    # while ``_item_retry_params`` never saw an error to retry on.
-    if not raw_text:
-        error = f"empty digest (stop_reason={stop!r})"
-    elif stop == "max_tokens":
-        error = "truncated digest (stop_reason='max_tokens')"
-    else:
-        error = None
+    # Parity with the real-time path, through the one shared rule: a reply the
+    # model did not FINISH is not a complete digest, whether it came back empty,
+    # cut off, or declined. Treating a nonempty truncation as success accepted
+    # it AND cached it permanently, while ``_item_retry_params`` never saw an
+    # error to retry on. A declined item is not resubmitted (only a cut-off one
+    # is, at a raised cap): a batch item carries no refusal fallback — the
+    # Batches API rejects the parameter — and the identical request would be
+    # declined again. Its sheet reports the refusal and is re-read next run.
+    error = unfinished_reply_error("digest", raw_text, stop)
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(
         raw_text, slot.ref, getattr(slot, "rows", 0), getattr(slot, "cols", 0)
     )
-    if cache is not None and slot.cache_key and error is None and raw_text:
+    if (
+        cache is not None and slot.cache_key and error is None and raw_text
+        and fallback_served_model(message) is None
+    ):
         cache.put(
             slot.cache_key,
             {
@@ -2012,8 +2039,8 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
     )
     if digest.error is not None:
         _log.warning(
-            "item %s (%s): empty digest (stop_reason=%r)",
-            slot.custom_id, slot.ref.display_label, digest.stop_reason,
+            "item %s (%s): %s",
+            slot.custom_id, slot.ref.display_label, digest.error,
         )
     else:
         _log.debug(
