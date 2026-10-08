@@ -227,7 +227,8 @@ map lives in `src/drawing_analyzer/__init__.py`.
   error, retry a cut-off one once at `digest.MAX_TOKENS_RETRY_CEILING` (never a
   refusal: a capable model's real-time request already carried the fallback, a
   batch item has none), and refuse the cache write if it is still unfinished.
-  Partial text still ships (I-3). Real-time usage accumulates across both
+  Partial text still ships (I-3), in `combined_text` too, with the error
+  disclosed under it (`_combine`). Real-time usage accumulates across both
   attempts and falls back to the truncated first read if the raised-cap call
   cannot land or returns no text (`digest.stream_with_cap_retry`, shared with
   synthesis and focus). Every persistent digest-cache read (both levels, both

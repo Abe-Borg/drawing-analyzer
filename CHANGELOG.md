@@ -44,7 +44,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     that still carried partial text read as finished on both transports, so it
     was cached and served on every later run at zero cost, with no error. It
     now fails the sheet like a truncation: the partial prose still ships (I-3)
-    and the cache write is refused. A refusal is not re-sent: a real-time
+    and the cache write is refused. For both, the combined digest now carries
+    that prose with a note under it saying the sheet's digest is partial; it
+    used to show only the failure notice. A refusal is not re-sent: a real-time
     request already carried the server-side refusal fallback, and a batch item,
     which cannot carry one, would only be declined again. Digests an earlier
     version cached under `max_tokens` or `refusal` are now read as a miss at

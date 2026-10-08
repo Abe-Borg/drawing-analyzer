@@ -383,7 +383,20 @@ def test_pipeline_combines_per_sheet_digests(tmp_path):
     assert progress[-1] == (2, 2, "Done")
 
 
-def test_pipeline_records_per_sheet_error_and_continues(tmp_path):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("boom on sheet 2"),
+        # Declined part-way: the sheet fails, but its partial prose is real
+        # work and is not re-sent, so it must reach the combined digest.
+        FakeMessage(
+            content=[FakeTextBlock(text="Declined prose, cut off mid-")],
+            stop_reason="refusal",
+        ),
+    ],
+    ids=["call-failed", "declined-partial"],
+)
+def test_pipeline_records_per_sheet_error_and_continues(tmp_path, failure):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.pipeline import extract_drawing_context
 
@@ -399,7 +412,9 @@ def test_pipeline_records_per_sheet_error_and_continues(tmp_path):
             state["n"] += 1
             n = state["n"]
         if n == 2:
-            raise RuntimeError("boom on sheet 2")
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
         return FakeMessage(content=[FakeTextBlock(text="ok digest")])
 
     ctx = extract_drawing_context(
@@ -409,8 +424,16 @@ def test_pipeline_records_per_sheet_error_and_continues(tmp_path):
     assert ctx.sheet_count == 2
     assert ctx.ok_sheet_count == 1
     assert len(ctx.errors) == 1
-    assert "boom on sheet 2" in ctx.errors[0]
-    assert "[drawing analysis failed" in ctx.combined_text
+    (failed,) = [s for s in ctx.sheets if s.error]
+    assert failed.error in ctx.errors[0]
+    if isinstance(failure, Exception):
+        assert "boom on sheet 2" in ctx.errors[0]
+        assert "[drawing analysis failed" in ctx.combined_text
+    else:
+        # The partial prose ships in the combined digest (I-3), with its
+        # error disclosed under it rather than in place of it.
+        text = ctx.combined_text
+        assert text.index(failed.text) < text.index(failed.error)
 
 
 def test_pipeline_serves_second_run_from_injected_cache(tmp_path):

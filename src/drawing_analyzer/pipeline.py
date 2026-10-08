@@ -813,9 +813,11 @@ def _combine(
 
     ``overview_note`` / ``focus_report_note`` disclose a partial overview or
     report — a reply cut off at ``max_tokens`` or declined, whose text still
-    ships (I-3) — in a blockquote under its text, as a failed sheet's error is
-    shown in its section. This document is what a downstream spec reviewer
-    reads, with no run errors beside it, so a partial section must say so.
+    ships (I-3) — in a blockquote under its text. A sheet whose digest failed
+    but kept partial prose (cut off or declined) is shown the same way: its
+    prose, byte-exact (I-2), then its error. This document is what a
+    downstream spec reviewer reads, with no run errors beside it, so a partial
+    section must say so — and must not drop the prose the run already paid for.
     """
     total = len(sheets)
     lines: list[str] = [
@@ -860,10 +862,18 @@ def _combine(
     for i, sd in enumerate(sheets, start=1):
         lines.append(_sheet_header(i, total, sd.ref))
         lines.append("")
-        if sd.error:
+        text = sd.text.strip()
+        if sd.error and text:
+            # An unfinished read: the partial prose ships, disclosed under it
+            # (the report badges it and the per-sheet export heads it with its
+            # status; this document has neither).
+            lines.append(text)
+            lines.append("")
+            lines.append(f"> [this sheet's digest is partial: {sd.error}]")
+        elif sd.error:
             lines.append(f"> [drawing analysis failed for this sheet: {sd.error}]")
         else:
-            lines.append(sd.text.strip())
+            lines.append(text)
         lines.append("")
         lines.append("---")
         lines.append("")

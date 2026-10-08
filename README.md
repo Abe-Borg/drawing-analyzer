@@ -664,7 +664,9 @@ A reply the model did not finish is never treated as one it did. When a digest
 stops at `max_tokens` the request is retried once at a raised output cap; if it
 is still cut off, the sheet is reported as failed and the result is **not**
 cached — a stored truncation would otherwise be served on every later run,
-indistinguishable from a complete read. The partial prose still ships.
+indistinguishable from a complete read. The partial prose still ships,
+including in the combined digest, where a note under it says the sheet's
+digest is partial.
 
 A reply the model **declined** (`stop_reason="refusal"`, part-way through or
 before any output) is handled the same way, except that it is not re-sent. A
