@@ -157,6 +157,8 @@ _ITC = "PROVIDE INSPECTOR'S TEST CONN. AT REMOTE END OF EACH SYSTEM."
     ("high", "S002", "ITC VALVE AT RISER ROOM", None, ""),
     # Too short to show where anything is.
     ("high", "S002", "CONN.", None, ""),
+    # One word is too generic, however long: it is on the sheet named.
+    ("high", "S001", "SPRINKLER", None, ""),
 ])
 def test_found_moves_a_finding_only_when_its_quote_is_on_the_named_sheet(
     severity, sheet, quote, located_on, lowered_from,

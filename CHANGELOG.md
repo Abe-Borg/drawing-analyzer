@@ -20,8 +20,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the HTML report, and three new trailing `findings.csv` columns
   (`located_sheet`, `located_quote`, `located_lowered_from`). The stage rides
   the critique (`absence_check=False` is a debug override), is priced in the
-  pre-run estimate (about a cent for 40 sheets), caches complete replies, and
-  holds itself at `PARTIAL` when any absence goes unchecked.
+  pre-run estimate (one request per 25 assumed absences; about 2–4 cents for
+  40 sheets), caches complete replies, and holds itself at `PARTIAL` when any
+  absence goes unchecked.
 
 ### Changed
 

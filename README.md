@@ -1154,16 +1154,20 @@ it is not. So a model does the search and the host checks its answer:
 1. Every sheet-level absence in the ledger (`anchor_hint="SHEET"`, one sheet,
    absence wording) is sent, up to 25 per request, with the **verbatim text
    layers of every sheet in the set**, each under an opaque handle (`S001`) and
-   its sheet id. It is one text-only call on **Haiku 5.5** at medium effort
-   (`DRAWING_ANALYZER_ABSENCE_CHECK_MODEL`), about a cent for a 40-sheet set.
+   its sheet id. Each request is one text-only call on **Haiku 5.5** at medium
+   effort (`DRAWING_ANALYZER_ABSENCE_CHECK_MODEL`) and re-reads the whole set's
+   text, under a cent per request at 40 sheets. The pre-run estimate quotes
+   2–5 requests for a 40-sheet set (about 2–4 cents), assuming 15% of the
+   findings band are sheet-level absences.
 2. For each absence the model answers `FOUND` (a sheet handle and a verbatim
    quote) or `NOT_FOUND`. It is told that a note *requiring* a component does
    not show the component; only a missing note or requirement is answered by a
    note.
-3. The host accepts a `FOUND` only when the quote (at least six characters,
-   compared case- and whitespace-insensitively) is in the **named sheet's own
-   source text**. A quote that is on a different sheet, a handle that does not
-   exist, or an invented string is discarded and counted in a stage warning.
+3. The host accepts a `FOUND` only when the quote (at least two words and six
+   characters, compared case- and whitespace-insensitively) is in the **named
+   sheet's own source text**. A quote that is on a different sheet, a handle
+   that does not exist, a single generic word (*SPRINKLER*), or an invented
+   string is discarded and counted in a stage warning.
 4. An accepted hit is recorded on the finding (`located_elsewhere`: the sheet
    id, the quote, and whether it is the same sheet) and lowers a **high or
    medium** finding to **low**. Nothing is deleted: the reviewer still sees the

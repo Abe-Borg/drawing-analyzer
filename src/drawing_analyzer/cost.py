@@ -601,11 +601,14 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
 _ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
 _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
 _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS = 500
-# Absence cross-check: one request reading the set's text layers (budgeted at
-# ``absence_check._CORPUS_BUDGET`` characters) plus a short verdict per absence.
+# Absence cross-check: each request re-reads the set's text layers (budgeted at
+# ``absence_check._CORPUS_BUDGET`` characters) for up to 25 absences, plus a
+# short verdict per absence. How many of a run's findings are sheet-level
+# absences is an assumption, applied to both ends of the findings band below.
 _ASSUMED_ABSENCE_TEXT_CHARS_PER_SHEET = 6_000
 _ABSENCE_CHARS_PER_TOKEN = 3.5
-_ASSUMED_ABSENCE_OUTPUT_TOKENS = 2_000
+_ASSUMED_ABSENCE_OUTPUT_TOKENS = 2_000            # per request
+_ABSENCE_FINDINGS_FRACTION = 0.15
 _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
 # The verdict itself is ~150 tokens, but verification now runs adaptive thinking
 # at medium effort and thinking bills at the OUTPUT rate — so an estimate built
@@ -1146,17 +1149,31 @@ def estimate_exhaustive_run_cost(
              f"{friendly_model_name(harvest_model)}",
     ))
 
-    # Absence cross-check — one text read of the budgeted set text layers.
+    # Absence cross-check — every request of 25 absences re-reads the whole
+    # budgeted corpus, so the cost scales with the request count.
     from .absence_check import _CORPUS_BUDGET as _ABSENCE_CORPUS_BUDGET
+    from .absence_check import _MAX_ABSENCES_PER_REQUEST
 
     absence_model = stage_models.absence_check or harvest_model
-    absence_chars = min(
+    absence_corpus = int(min(
         sheet_count * _ASSUMED_ABSENCE_TEXT_CHARS_PER_SHEET, _ABSENCE_CORPUS_BUDGET,
-    )
+    ) / _ABSENCE_CHARS_PER_TOKEN)
+
+    def _absence_requests(findings_per_sheet: float) -> int:
+        absences = sheet_count * findings_per_sheet * _ABSENCE_FINDINGS_FRACTION
+        return math.ceil(absences / _MAX_ABSENCES_PER_REQUEST)
+
+    absence_low = _absence_requests(_FINDINGS_PER_SHEET_LOW)
+    absence_high = _absence_requests(_FINDINGS_PER_SHEET_HIGH)
     components.append(_component(
-        "Absence check", int(absence_chars / _ABSENCE_CHARS_PER_TOKEN),
-        _ASSUMED_ABSENCE_OUTPUT_TOKENS, model=absence_model, batch=False,
-        note=f"one text read per 25 \"not found on this sheet\" findings with "
+        "Absence check", absence_high * absence_corpus,
+        absence_high * _ASSUMED_ABSENCE_OUTPUT_TOKENS, model=absence_model, batch=False,
+        input_tokens_low=absence_low * absence_corpus,
+        output_tokens_low=absence_low * _ASSUMED_ABSENCE_OUTPUT_TOKENS,
+        request_inputs=[absence_corpus] * absence_high,
+        request_inputs_low=[absence_corpus] * absence_low,
+        note=f"{absence_low}–{absence_high} text read(s) of the set, one per 25 "
+             f"\"not found on this sheet\" findings, with "
              f"{friendly_model_name(absence_model)}",
     ))
 

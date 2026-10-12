@@ -488,8 +488,8 @@ consume ledger entries and nothing else.
   per 25 on Haiku 5.5 at medium effort (`PHASE_ABSENCE_CHECK`) over the set's
   capped `sheet_text` under opaque `S###` handles, budgeted by `_allowances`
   (`_CORPUS_BUDGET`, under Haiku's 100k-token tier; the cut is counted). A
-  FOUND counts only when `_ground` re-finds the quote (normalized, ≥6 chars) in
-  the **named** sheet's `sheet_evidence_text`; an accepted hit sets
+  FOUND counts only when `_ground` re-finds the quote (normalized, ≥2 words and
+  ≥6 chars) in the **named** sheet's `sheet_evidence_text`; an accepted hit sets
   `Finding.located_elsewhere` and lowers high/medium to low. Never deletes;
   NOT_FOUND changes nothing; specs are never searched. A reply missing a
   handle, unparsed, or unfinished leaves those absences UNCHECKED and the stage

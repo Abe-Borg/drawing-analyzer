@@ -77,8 +77,11 @@ _CORPUS_BUDGET = 280_000
 # Absences per request: one short verdict each, well inside the output cap.
 _MAX_ABSENCES_PER_REQUEST = 25
 # A quote shorter than this cannot show where an item is ("ITC" alone matches
-# too much), so it is never accepted as a hit.
+# too much), so it is never accepted as a hit. One word is too generic for the
+# same reason ("SPRINKLER" is on every fire protection sheet): the prompt asks
+# for "at least a few words", and the host holds the reply to two.
 _MIN_QUOTE_CHARS = 6
+_MIN_QUOTE_WORDS = 2
 _QUOTE_CAP = 300
 _ABSENCE_TEXT_CAP = 600
 # Bumped when host-side handling changes what a cached payload means (the
@@ -293,9 +296,12 @@ def _ground(reply: dict, corpus: _Corpus) -> "tuple[Any, str] | None":
         return None
     geom = corpus.geom_by_handle.get(reply.get("sheet", ""))
     quote = str(reply.get("quote", "") or "")
-    if geom is None or len(_norm(quote)) < _MIN_QUOTE_CHARS:
+    needle = _norm(quote)
+    if geom is None or len(needle) < _MIN_QUOTE_CHARS:
         return None
-    if _norm(quote) not in _norm(sheet_evidence_text(geom)):
+    if len(needle.split()) < _MIN_QUOTE_WORDS:
+        return None
+    if needle not in _norm(sheet_evidence_text(geom)):
         return None
     return geom, quote
 
@@ -334,6 +340,7 @@ def _cache_key(model: str, corpus_sha: str, chunk_lines: list[str]) -> str:
             "effort": effort_config_for(model=model, phase=PHASE_ABSENCE_CHECK),
             "corpus_budget": _CORPUS_BUDGET,
             "min_quote_chars": _MIN_QUOTE_CHARS,
+            "min_quote_words": _MIN_QUOTE_WORDS,
         },
     )
 

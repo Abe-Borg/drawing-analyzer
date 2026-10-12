@@ -460,6 +460,24 @@ def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
     assert models.distinct[0] == OPUS
 
 
+def test_absence_estimate_quotes_the_whole_corpus_once_per_request():
+    # Every 25 absences re-send the set's text, so a set expected to report
+    # more than 25 absences is quoted more than one corpus read at its high end.
+    from drawing_analyzer.absence_check import _CORPUS_BUDGET, absence_check_model
+    from drawing_analyzer.cost import _ABSENCE_CHARS_PER_TOKEN
+
+    corpus = int(_CORPUS_BUDGET / _ABSENCE_CHARS_PER_TOKEN)
+    absence = {c.stage: c for c in estimate_exhaustive_run_cost(80, model=OPUS).components}[
+        "Absence check"]
+    requests = absence.input_tokens // corpus
+    assert absence.input_tokens == requests * corpus and requests > 1
+    assert corpus <= absence.input_tokens_low < absence.input_tokens
+    assert absence.low_cost < absence.cost
+    assert absence.cost == pytest.approx(requests * estimate_request_cost(
+        corpus, absence.output_tokens // requests, model=absence_check_model(), batch=False,
+    ))
+
+
 def test_exhaustive_total_is_none_when_any_stage_is_unpriced(monkeypatch):
     """An unpriced stage must void the total, never quietly drop out of it.
 
