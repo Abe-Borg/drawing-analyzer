@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from drawing_analyzer.critique import CritiqueResult
 from drawing_analyzer.file_upload import ReusableSheetUpload
@@ -9,10 +13,10 @@ from drawing_analyzer.models import ImageTile, RenderedSheet, RunUsage, SheetRef
 import drawing_analyzer.pipeline as pipeline
 
 
-def _sheet(name: str, index: int) -> RenderedSheet:
+def _sheet(name: str, index: int, *, page_count: int = 3) -> RenderedSheet:
     ref = SheetRef(
         pdf_path=Path(f"{name}.pdf"), source_name=f"{name}.pdf",
-        page_index=index, page_count=3, source_id=f"SRC-{index + 1:04d}",
+        page_index=index, page_count=page_count, source_id=f"SRC-{index + 1:04d}",
     )
     return RenderedSheet(
         ref=ref,
@@ -46,6 +50,70 @@ def _run_realtime(monkeypatch, sheets, spool, renderer):
         render_spool=spool,
     )
     return seen
+
+
+@pytest.mark.parametrize("max_workers,env_workers,sheet_count,expected_peak", [
+    (None, None, 6, 4),
+    (None, "not-a-number", 6, 4),
+    (None, "6", 6, 6),
+    (6, "2", 6, 6),
+    (None, None, 2, 2),
+    (None, "1", 6, 1),
+    (0, None, 6, 1),
+])
+def test_realtime_critique_bounds_concurrent_reads(
+    monkeypatch, max_workers, env_workers, sheet_count, expected_peak,
+) -> None:
+    if env_workers is None:
+        monkeypatch.delenv("DRAWING_ANALYZER_MAX_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("DRAWING_ANALYZER_MAX_WORKERS", env_workers)
+    sheets = [_sheet(f"sheet-{i}", i, page_count=sheet_count)
+              for i in range(sheet_count)]
+    monkeypatch.setattr(pipeline, "list_sheets", lambda _paths: [s.ref for s in sheets])
+    monkeypatch.setattr(
+        pipeline, "iter_rendered_sheets", lambda _paths, **_kwargs: iter(sheets),
+    )
+    barrier = None
+
+    def _pool(*args, **kwargs):
+        nonlocal barrier
+        # Hold the first wave until every actual pool worker is reading. This
+        # measures the stage's concurrency without depending on thread timing.
+        barrier = threading.Barrier(kwargs["max_workers"], timeout=8)
+        return ThreadPoolExecutor(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "ThreadPoolExecutor", _pool)
+    lock = threading.Lock()
+    active = peak = 0
+    seen = []
+
+    def _critique(sheet, **_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            seen.append(sheet.ref.source_name)
+        try:
+            if sheet.ref.page_index < barrier.parties:
+                barrier.wait()
+            return _complete_result()
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(
+        "drawing_analyzer.critique.critique_sheet_self_consistent", _critique,
+    )
+    _findings, _claims, degraded = pipeline._run_critique_stage(
+        [Path("set.pdf")], rows=1, cols=1, overlap_frac=0.0,
+        client=object(), cache=None, progress=None, total=sheet_count,
+        max_workers=max_workers, run_usage=RunUsage(), use_batch=False,
+    )
+
+    assert degraded == []
+    assert sorted(seen) == sorted(s.ref.source_name for s in sheets)
+    assert peak == expected_peak
 
 
 def test_spool_hits_and_fresh_miss_are_consumed_in_page_order(monkeypatch) -> None:

@@ -16,6 +16,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hermetic suite passes unchanged. Models are already the current generation
   (Opus 5.5, Sonnet 5.5, Haiku 5.5).
 
+### Fixed
+
+- Keep default real-time critique concurrency at 4 workers independently of
+  the 6-worker digest default. Explicit worker arguments and the shared
+  environment override still apply to critique.
+
 ## [1.10.0] - 2026-10-08
 
 ### Added
