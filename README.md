@@ -735,9 +735,14 @@ severity: outright errors; likely code concerns (cited conservatively); RFI-wort
 ambiguities; internal inconsistencies; stale / copy-paste text; and — crucially —
 **absences**: content a complete sheet of that discipline should show but this one
 doesn't (a required test, drain, sign, clearance, note, or detail), each phrased
-*"expected X; not found on this sheet."* Absence and sheet-level findings carry an
-`anchor_hint` of `SHEET` instead of a quote, so the anchor resolver places them
-against the whole sheet.
+*"expected X; not found on this sheet."* The critique sees one sheet, and much of
+that content properly lives elsewhere: a fire protection plan sheet's test,
+signage and bracing requirements usually sit on the general-notes sheet, its
+details on the 500-series sheets. So an absence is reported at **low** severity
+unless the missing item belongs on that sheet in particular (part of what the
+sheet itself draws, schedules or details), and then the finding says why.
+Absence and sheet-level findings carry an `anchor_hint` of `SHEET` instead of a
+quote, so the anchor resolver places them against the whole sheet.
 
 The critique emits only the machine-readable findings block — no prose — so the
 prose digest (and `combined_text`) is untouched (I-2). The shared block parser is

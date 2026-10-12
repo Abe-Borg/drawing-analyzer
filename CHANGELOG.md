@@ -8,6 +8,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Absence findings default to low severity.** The critique reads one sheet at
+  a time, and content a sheet "should" show often lives elsewhere in the set: a
+  fire protection plan sheet's test, signage and bracing requirements usually
+  sit on the general-notes sheet, its details on the 500-series sheets. The
+  critique prompt now reports *"expected X; not found on this sheet"* at low
+  severity unless X belongs on that sheet in particular (part of what it draws,
+  schedules or details), and then says why. The synthesis prompt no longer
+  calls a tag missing from the digests "never drawn": the digests are
+  selective, so it says "not found in the digests". Both prompt edits re-key
+  their caches: **every sheet's critique re-runs once** (the most expensive
+  cache miss in the QC stack), and synthesis re-runs once.
+
 - **The citation check can answer "could not confirm".** Each claim now gets
   `CHECKED_SUPPORTS`, `CHECKED_MISMATCH` or `UNRESOLVABLE`. Before, the model had
   only the first two, and the instruction to report a mismatch only on concrete

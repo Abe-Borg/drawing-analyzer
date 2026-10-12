@@ -86,10 +86,12 @@ schedule on another; risers / mains / distribution continued across match-lines.
 - **Tag cross-references**: where the same tag appears on multiple sheets (e.g. \
 the same equipment or device tag on a plan sheet and in a schedule on another \
 sheet), reconcile them and name the authoritative source.
-- **Cross-sheet / cross-discipline conflicts**: a tag scheduled but never drawn \
-(or vice-versa), conflicting capacities or sizes, mismatched detail references, \
-disagreements between disciplines — flag these explicitly; they are the highest- \
-value output.
+- **Cross-sheet / cross-discipline conflicts**: a tag scheduled but found on no \
+plan digest (or vice-versa), conflicting capacities or sizes, mismatched detail \
+references, disagreements between disciplines — flag these explicitly; they are \
+the highest-value output. The digests are selective transcriptions, so a tag \
+missing from them is not proof it is missing from the drawings: say "not found \
+in the digests", never "never drawn".
 - **Set-wide scope**: which disciplines are present, roughly how many sheets per \
 discipline, and any general notes that apply set-wide.
 
