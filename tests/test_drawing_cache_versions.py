@@ -67,11 +67,18 @@ V10_POPULATED_KEYS = {
     "critique_level1": "83a7155019a59af2e237cf1abafbd1f866ae12213bd57a5cd1e0c295e23e95c0",
 }
 
+# Namespaces deliberately bumped past v10 (I-6), with the key each now uses.
+# identity 11: regex edition hits moved from adopted_codes to mentioned_codes.
+BUMPED_KEYS = {
+    "identity": "b9c1752f8e1d6069b7b3d3fa41fa224a3f96e660e190a3c1cac0c4352dff254a",
+}
+
 
 @pytest.mark.parametrize("populated", [False, True])
 def test_existing_v10_keys_are_byte_identical(populated):
-    assert all(cache_module.cache_schema_version(stage) == 10 for stage in NAMESPACES)
-    assert _keys(populated) == (V10_POPULATED_KEYS if populated else V10_KEYS)
+    # Every namespace not deliberately bumped keeps its paid v10 keys.
+    expected = {**(V10_POPULATED_KEYS if populated else V10_KEYS), **BUMPED_KEYS}
+    assert _keys(populated) == expected
 
 
 @pytest.mark.parametrize("namespace", NAMESPACES)
@@ -82,7 +89,8 @@ def test_schema_bump_misses_only_its_namespace(namespace, persistent, tmp_path, 
     before = _keys(populated=True)
     for name, key in before.items():
         cache.put(key, {"name": name})
-    monkeypatch.setattr(cache_module, f"_{namespace.upper()}_SCHEMA_VERSION", 11)
+    attr = f"_{namespace.upper()}_SCHEMA_VERSION"
+    monkeypatch.setattr(cache_module, attr, getattr(cache_module, attr) + 1)
     if persistent:
         cache.close()
         cache = DigestCache(path)
@@ -144,7 +152,8 @@ def test_v10_migration_after_critique_bump_preserves_all_paid_rows(
         assert cache.collect_garbage() == 0  # Even very old payloads get a full window.
         assert cache.stats()["size"] == len(entries)
         for name, key in _keys().items():
-            assert cache.get(key) == (None if name.startswith("critique") else entries[key])
+            missed = name.startswith("critique") or name in BUMPED_KEYS
+            assert cache.get(key) == (None if missed else entries[key])
         for key, entry in entries.items():
             assert cache.get(key) == entry
         if legacy_format == "sqlite":

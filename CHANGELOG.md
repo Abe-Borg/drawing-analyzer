@@ -40,6 +40,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A code edition the drawings only mention is no longer treated as adopted.**
+  The set-identity stage added every edition the text-layer regex found to
+  `adopted_codes`. The regex finds a code next to a year, so *NFPA 13 2016 is
+  not the governing edition* became an adopted code, and reached the review
+  planner and the citation check as the governing basis. Those hits now go to a
+  separate `mentioned_codes` list on the identity. Each consumer sees them
+  labelled *not stated to govern the work*: the *Set Identity* section and
+  cross-sheet QC preamble, `set_identity.json`, the planner's facts (a separate
+  `mentioned_not_adopted_codes` key) and the citation request (its own line;
+  with no identity, the adopted line reads *not established*). Only the
+  identity model, which reads the sentence, can call an edition adopted. The
+  identity cache schema is bumped (`_IDENTITY_SCHEMA_VERSION` 11), so each set
+  is re-identified once. A set whose text mentions an edition the model did not
+  adopt also re-plans, re-checks its citations and re-runs cross-sheet QC once.
 - **Prompt corrections in the QC stack.**
   - Cross-sheet QC told the model to "lower the severity to `question`", but
     `question` is a category, not a severity. An unconfirmed conflict is now
@@ -65,9 +79,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     harvest, verification (single and dual crop, through the version bump),
     the review plan and the citation check each re-run once. Digest and
     critique entries are untouched.
-
-### Fixed
-
 - Keep default real-time critique concurrency at 4 workers independently of
   the 6-worker digest default. Explicit worker arguments and the shared
   environment override still apply to critique.

@@ -476,8 +476,22 @@ def _review_scope(identity: Any) -> dict | None:
         {"code": code, "edition": edition, "amendment_note": amendment}
         for code, edition, amendment in codes
     ]
+    # Editions the drawings mention without stating they govern the work. The
+    # key says so, because the planner must not cite one as the adopted basis.
+    # Absent when empty, so a set with no such mention keeps its cached plan.
+    mentioned = sorted({
+        (normalize(c.get("code")), normalize(c.get("edition")))
+        for c in data.get("mentioned_codes", [])
+        if isinstance(c, dict) and normalize(c.get("code"))
+    })
+    if mentioned:
+        scope["mentioned_not_adopted_codes"] = [
+            {"code": code, "edition": edition} for code, edition in mentioned
+        ]
     if not scope["disciplines"] or not any(
-        scope[name] for name in ("project_type", "jurisdiction", "adopted_codes")
+        scope.get(name) for name in (
+            "project_type", "jurisdiction", "adopted_codes", "mentioned_not_adopted_codes",
+        )
     ):
         return None
     return scope
