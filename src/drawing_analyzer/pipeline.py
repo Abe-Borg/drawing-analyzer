@@ -96,6 +96,10 @@ StatusCallback = Callable[[str], None]
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
 DEFAULT_DIGEST_WORKERS = 6
 
+# Each critique worker performs two large vision reads. Keep its default
+# independent so increasing digest parallelism does not raise critique traffic.
+DEFAULT_CRITIQUE_WORKERS = 4
+
 # The Phase 23 temporary completeness gate is OPEN (Phase 26B §18.0, DA-010):
 # Phases 24–25 landed the cross-shard reconciliation, claim-complete citations,
 # complete evidence, and callout-overflow guarantees a COMPLETE exhaustive
@@ -486,12 +490,14 @@ def _record_usage(
     )
 
 
-def _resolve_workers(max_workers: int | None, total: int) -> int:
+def _resolve_workers(
+    max_workers: int | None, total: int, *, default_workers: int = DEFAULT_DIGEST_WORKERS,
+) -> int:
     """Resolve the effective worker count: arg > env > default, clamped sanely.
 
     Floored at 1 (0/negative would create an invalid pool) and capped at
     ``total`` (no point spinning up more workers than sheets). A malformed env
-    value falls back to the default rather than raising.
+    value falls back to the stage's default rather than raising.
     """
     if max_workers is None:
         env = os.environ.get("DRAWING_ANALYZER_MAX_WORKERS")
@@ -499,9 +505,9 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
             try:
                 max_workers = int(env.strip())
             except ValueError:
-                max_workers = DEFAULT_DIGEST_WORKERS
+                max_workers = default_workers
         else:
-            max_workers = DEFAULT_DIGEST_WORKERS
+            max_workers = default_workers
     return min(max(1, int(max_workers)), max(1, total))
 
 
@@ -1536,10 +1542,10 @@ def _run_critique_stage(
     before rasterizing, so a warm exhaustive re-run skips **both** the render and
     the critique API calls for a cached sheet — the level-2 (PNG-bytes) cache alone
     still had to rasterize to discover the hit. Only the sheets that miss level-1
-    are re-rendered (streamed on the calling thread) and critiqued on the same
-    bounded pool the digests use; each complete result is then stored under its
-    level-1 key too (store-under-both). Additive and non-fatal: a per-sheet failure
-    is logged and contributes no findings; the run continues.
+    are re-rendered (streamed on the calling thread) and critiqued on a bounded
+    pool with its own critique default; each complete result is then
+    stored under its level-1 key too (store-under-both). Additive and non-fatal:
+    a per-sheet failure is logged and contributes no findings; the run continues.
 
     Returns ``(critique_findings, claims, degraded)``; the findings are sorted
     deterministically so the pooled result is independent of completion order (I-7).
@@ -1622,7 +1628,9 @@ def _run_critique_stage(
                 continue
             only.discard(rk)
 
-    workers = _resolve_workers(max_workers, max(1, total))
+    workers = _resolve_workers(
+        max_workers, max(1, total), default_workers=DEFAULT_CRITIQUE_WORKERS,
+    )
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
     degraded: list[str] = prescan_degraded + recovery_degraded
