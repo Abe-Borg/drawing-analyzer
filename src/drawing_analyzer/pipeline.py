@@ -94,7 +94,7 @@ StatusCallback = Callable[[str], None]
 # limits (transient 429/5xx are retried per-sheet anyway — see digest.py).
 # Override per-call via ``max_workers=`` or globally via
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
-DEFAULT_DIGEST_WORKERS = 4
+DEFAULT_DIGEST_WORKERS = 6
 
 # The Phase 23 temporary completeness gate is OPEN (Phase 26B §18.0, DA-010):
 # Phases 24–25 landed the cross-shard reconciliation, claim-complete citations,

@@ -8,6 +8,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Increase default real-time digest and verification concurrency from 4 to 6
+  workers. Explicit `max_workers` arguments and `DRAWING_ANALYZER_MAX_WORKERS`
+  overrides still take precedence, and pools remain capped at the work-item count.
 - Update Anthropic SDK to 1.13.0 (runtime range `<1.14`, release lock, and
   `requirements.txt`). The 1.12/1.13 releases add no breaking changes; the
   hermetic suite passes unchanged. Models are already the current generation
