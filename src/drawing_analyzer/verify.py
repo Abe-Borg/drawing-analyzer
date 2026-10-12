@@ -98,7 +98,7 @@ DEFAULT_VERIFY_MAX_TOKENS = VERIFICATION_OUTPUT_CAP
 
 # Stamped into every evidence request.json so a saved trail is attributable to the
 # prompt/model that produced its verdict (bump on any verify-prompt change).
-VERIFY_PROMPT_VERSION = "verify-v2"
+VERIFY_PROMPT_VERSION = "verify-v3"
 
 # Context window around the anchor rect: grown to ~1.75x its size but never
 # smaller than this, so a tight single-word anchor still shows its surroundings.
@@ -224,6 +224,27 @@ issue and do not infer beyond the image. Decide one of:
 - CONTRADICTED: what is visible in the crop shows the finding is wrong.
 - NOT_VISIBLE: the crop does not contain enough to decide — e.g. the finding \
 depends on another sheet, a schedule, or content outside this crop. This is a \
+perfectly acceptable answer; do not guess.
+
+Respond with ONLY a JSON object and nothing else:
+{"verdict": "CONFIRMED" | "CONTRADICTED" | "NOT_VISIBLE", "note": "<= 25 words \
+on what you actually see"}"""
+
+# The dual-crop pass sends one labeled crop per sheet, so it cannot share the
+# single-crop prompt above: that one tells the model it sees ONE crop of ONE
+# sheet, which the request then contradicts.
+VERIFY_CROSS_SYSTEM_PROMPT = """\
+You are a senior design professional doing a \
+back-check before a construction drawing set is issued. You are shown one \
+labeled cropped region from EACH of two or more drawing sheets, and one \
+CROSS-SHEET FINDING a prior reviewer flagged: that what these sheets show \
+conflicts. Compare the crops and judge ONLY what is visible in them — do not \
+re-argue the whole issue and do not infer beyond the images. Decide one of:
+
+- CONFIRMED: the crops show the sheets conflict as the finding describes.
+- CONTRADICTED: the crops show the sheets are actually consistent.
+- NOT_VISIBLE: the crops do not contain enough to decide — e.g. the conflict \
+depends on a schedule, a note, or content outside these crops. This is a \
 perfectly acceptable answer; do not guess.
 
 Respond with ONLY a JSON object and nothing else:
@@ -1239,7 +1260,7 @@ def _build_dual_request(
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": phase_output_cap(PHASE_VERIFICATION, model=model),
-        "system": VERIFY_SYSTEM_PROMPT,
+        "system": VERIFY_CROSS_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
@@ -1261,7 +1282,7 @@ def _cross_verify_cache_key(
     return stage_cache_key(
         _VERIFY_CROSS_CACHE_STAGE,
         model=model,
-        prompt={"version": VERIFY_PROMPT_VERSION, "system": VERIFY_SYSTEM_PROMPT},
+        prompt={"version": VERIFY_PROMPT_VERSION, "system": VERIFY_CROSS_SYSTEM_PROMPT},
         inputs={
             "request_content": _cacheable_request_content(request, crop_hashes),
             "finding": {

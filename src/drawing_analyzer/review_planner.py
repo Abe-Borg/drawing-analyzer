@@ -111,7 +111,7 @@ the form "flag X when Y" (or, for required content, "expected X; flag when not \
 found"). Never refer back to "the adopted code" or "the identity" — name \
 things explicitly so the item stands alone.
 - An item that relies on a code requirement MUST name the code, section, and \
-edition it relies on (e.g. "NFPA 13 2016 §19.2.3.2.5") in its refs — and you \
+edition it relies on (e.g. "IBC 2024 §903.2") in its refs — and you \
 must NEVER invent a section number. If you are not certain of the exact \
 section, cite the code and edition only. Cite only codes the set adopts, or \
 clearly applicable national/international standards; every ref you emit will \

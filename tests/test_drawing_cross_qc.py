@@ -747,7 +747,10 @@ from drawing_analyzer.annotate import _expand_for_markup, count_annotations, wri
 from drawing_analyzer.anchor import resolve_anchors  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
-from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
+from drawing_analyzer.verify import (  # noqa: E402
+    VERIFY_CROSS_SYSTEM_PROMPT,
+    VERIFY_SYSTEM_PROMPT,
+)
 
 
 def _mkpdf(path, body, sid):
@@ -818,18 +821,20 @@ class _PipelineClient(BetaClientMixin):
         self.cross_calls = 0
         self.verify_calls = 0
         self.verify_image_counts = []
+        self.verify_systems = []
         outer = self
 
         class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
-                if system == VERIFY_SYSTEM_PROMPT:
+                if system in (VERIFY_SYSTEM_PROMPT, VERIFY_CROSS_SYSTEM_PROMPT):
                     outer.verify_calls += 1
                     imgs = sum(
                         1 for b in kw["messages"][0]["content"]
                         if isinstance(b, dict) and b.get("type") == "image"
                     )
                     outer.verify_image_counts.append(imgs)
+                    outer.verify_systems.append(system)
                     return FakeMessage(
                         content=[FakeTextBlock(text=f'{{"verdict":"{verify_verdict}","note":"x"}}')],
                         usage=FakeUsage(input_tokens=40, output_tokens=8))
@@ -866,8 +871,11 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     assert conflict.also_on[0].source_name == "F-A-01-1.pdf"
     assert conflict.verification.status == "VERIFIED"
     assert conflict.verification.evidence_png.startswith("evidence/")
-    # The verify call carried a crop for EACH sheet (dual crop), not just one.
+    # The verify call carried a crop for EACH sheet (dual crop), not just one,
+    # under the prompt that says so: the single-crop prompt tells the model it
+    # sees ONE crop of ONE sheet.
     assert client.verify_calls == 1 and client.verify_image_counts == [2]
+    assert client.verify_systems == [VERIFY_CROSS_SYSTEM_PROMPT]
     # DA-016: the evidence trail preserves EVERY leg crop, in request order, byte
     # for byte (each recorded sha256 = the hash of the file actually on disk), plus
     # a request.json — not just the primary crop.

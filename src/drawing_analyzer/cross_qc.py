@@ -175,13 +175,20 @@ sheets;
 
 Ground every conflict in the actual text: quote the exact conflicting string from \
 EACH sheet involved. Report only conflicts you can substantiate from the provided \
-text; when you are not certain two sheets truly conflict, lower the severity to \
-`question`. Judge across sheets only — a single-sheet issue is out of scope."""
+text; when you are not certain two sheets truly conflict, report it as category \
+`question` at low severity. Judge across sheets only — a single-sheet issue is out \
+of scope."""
 
 _CROSS_QC_TASK = (
     "Now report the cross-sheet conflicts in this set, following the FINDINGS "
     "format in your instructions. Output only the fenced json findings block."
 )
+
+# None of the cross-QC prompts asks for a ``tile_label``. This stage reads
+# digest prose and text layers only: it never sees a tile, nor the sheet's
+# (adaptive) grid, so any label it returned was a guess. A guessed tile both
+# rescues an unmatched quote through ``_tile_has_words`` and anchors its cloud
+# in the wrong place. The validators still bounds-check a volunteered label.
 
 _CROSS_QC_FINDINGS_INSTRUCTION = """\
 
@@ -195,11 +202,9 @@ involved); category (one of code, conflict, coordination, question); severity \
 sheets); recommended_action (one sentence, imperative: what the reviewer should \
 DO about it - e.g. "Confirm the correct rating with the engineer of record and \
 update both sheets"); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
-sheet's text layer); tile_label (the label printed on the primary sheet's tile \
-where you saw it — e.g. "r1c1" — or omit); also_on (an \
-array of the OTHER sheets in the conflict, each an object {"sheet_id", \
-"source_quote" (verbatim from THAT sheet), "tile_label"}); refs (optional array of \
-codes/specs). Every finding MUST list at least one also_on sheet — a conflict is \
+sheet's text layer); also_on (an array of the OTHER sheets in the conflict, each \
+an object {"sheet_id", "source_quote" (verbatim from THAT sheet)}); refs (optional \
+array of codes/specs). Every finding MUST list at least one also_on sheet — a conflict is \
 between sheets. Emit at most 60 findings, most important first; emit \
 "findings": [] if there are no cross-sheet conflicts.
 
@@ -225,14 +230,11 @@ Output a SINGLE fenced code block labeled json and nothing else, containing \
 sheet's handle); category (code, conflict, coordination, question); severity \
 (high, medium, low); text (<= 2 sentences); recommended_action (one sentence, \
 imperative: what the reviewer should DO about it); source_quote (VERBATIM from the \
-primary sheet); tile_label (the label printed on the primary sheet's tile where \
-you saw it, e.g. "r1c1"); also_on (array of {"sheet_handle", "source_quote" \
-verbatim from that sheet, "tile_label" on THAT sheet}); refs (optional). Every \
-finding lists >= 1 also_on. Emit [] if none.
+primary sheet); also_on (array of {"sheet_handle", "source_quote" verbatim from \
+that sheet}); refs (optional). Every finding lists >= 1 also_on. Emit [] if none.
 - Each fact is one comparable data point another shard could contradict: \
 sheet_handle; entity_or_tag (the tag / equipment / room / schedule key); attribute \
 (what about it); value (as printed); exact_quote (VERBATIM on-sheet string); \
-tile_label (the label printed on the tile where you saw it, e.g. "r1c1"); \
 context (<= 12 words). Emit facts for values likely to be REPEATED or REFERENCED \
 elsewhere (equipment tags and capacities, shared/general notes, schedule values, \
 code editions, phasing) so a reconciler can compare them across shards. Emit at \

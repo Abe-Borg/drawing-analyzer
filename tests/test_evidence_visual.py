@@ -218,13 +218,8 @@ def test_an_out_of_bounds_tile_label_degrades_to_none():
 
 
 # --------------------------------------------------------------------------- #
-# §8.4 Part 1 — the map path carries a location
+# §8.4 Part 1 — a location the map path does report still resolves per leg
 # --------------------------------------------------------------------------- #
-
-
-def test_map_prompt_requests_a_tile_label_for_facts_and_legs():
-    prompt = X.cross_qc_map_system_prompt()
-    assert prompt.count("tile_label") >= 3, "findings, also_on legs and facts"
 
 
 def test_sharded_finding_no_longer_hardcodes_no_tile():

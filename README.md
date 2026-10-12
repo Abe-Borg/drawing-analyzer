@@ -280,6 +280,13 @@ GUI) makes a large set easy to navigate:
   verification stage ran for it — the state of *every* finding on a standard run,
   where `verification` is `NOT_REQUESTED`. Collapsing the two would report a
   clean standard run as several hundred inconclusive verdicts.
+- **Overview and focus report are pre-QC narrative** — both are written from the
+  sheet digests *before* the QC stages run, and they ship as written. A conflict
+  the overview alleges can therefore outlive a finding that verification later
+  `Rejected`. On a QC run with findings, each card opens with a one-line note
+  pointing to the QC Findings table, and the **Ask AI** assistant is told the
+  same thing: where the narrative and a finding's status disagree, the status is
+  the later judgment.
 - **Grouped repeats** — a general note printed on every plan sheet is one real
   ledger finding *per sheet*, and correctly so: fifteen sheets carrying the same
   note are fifteen places to check. But fifteen identical table rows are noise —
@@ -2253,11 +2260,10 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   a hallucination.
 - **Evidence the host cannot check:** a scanned sheet has no text layer, and a
   hybrid sheet's pasted detail is invisible to a text search even though the
-  sheet has words. A cross-sheet quote from either is admitted at *reduced
-  trust* rather than discarded — labelled on the drawing with a plain-words
-  reason, flagged beside the quote in the report, anchored to the tile the model
-  reported so the crop check and the investigation loop can still look at it.
-  The label says which case it is: `[NO TEXT TO CHECK]` where the region carried
+  sheet has words. A cross-sheet quote the host cannot check is admitted at
+  *reduced trust* rather than discarded — labelled on the drawing with a
+  plain-words reason and flagged beside the quote in the report. The label says
+  which case it is: `[NO TEXT TO CHECK]` where the region carried
   no searchable text, `[NO QUOTE TO CHECK]` where the AI named no quote to look
   for. A quote that fails to match text the sheet's own region *does* have is
   unchanged: that stays the hallucination signal.
@@ -2277,9 +2283,18 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   question is asked of the **reported tile**, not the whole sheet: one selectable
   title block would otherwise answer "yes, there was text" for a detail pasted in
   as pixels, and the recovery would never fire on a real page.
+- **The cross-sheet pass reports no tile.** It reads digests and text layers
+  only, never a tile image or the sheet's grid, so a tile it named was a guess.
+  A guess could rescue a quote the text did not support (a wordless tile
+  answered "no text here") and put the cloud on the wrong part of the sheet, so
+  its prompts no longer ask for one. With no tile, a scanned sheet's quote is
+  still admitted at reduced trust; it is placed as a margin callout instead of
+  on a tile. A quote from a hybrid sheet's pasted raster detail is now dropped
+  as unmatched, because without a location nothing shows that the region had
+  no text. The host still bounds-checks a tile if a model volunteers one.
 - **Recovered evidence costs more downstream, by design.** Findings that used to
   be dropped now survive into the later stages, and those stages bill. A
-  reduced-trust finding is anchored to its reported tile precisely so the crop
+  reduced-trust finding with a reported tile is anchored to it so the crop
   re-check and the investigation loop can still look at it — so a set with
   scanned or hybrid sheets can show more verification calls, more investigation
   rounds, and a higher total than the same set produced before, with nothing

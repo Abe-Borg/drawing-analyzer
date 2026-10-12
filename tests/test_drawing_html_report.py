@@ -365,6 +365,26 @@ def test_focus_card_body_survives_the_focus_filter():
     assert "cat-conflict" in card
 
 
+@pytest.mark.parametrize(
+    ("qc_status", "has_findings", "notes"),
+    [
+        ("COMPLETE", True, 2),        # overview + focus card
+        ("FAILED", True, 2),
+        ("NOT_REQUESTED", True, 0),   # standard run: no QC judgment to defer to
+        ("COMPLETE", False, 0),       # nothing to point at
+    ],
+)
+def test_pre_qc_narrative_defers_to_finding_statuses(qc_status, has_findings, notes):
+    # The overview and focus report are written before QC and kept as written
+    # (I-2), so on a QC run with findings each points to the final statuses.
+    ctx = _findings_ctx(findings=[_finding()] if has_findings else [])
+    ctx.qc_status = qc_status
+    ctx.focus = FOCUS
+    ctx.focus_report_text = "**Room-by-room**\n- Rm 101: `WC-1`\n"
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert doc.count('class="muted pre-qc-note"') == notes
+
+
 # --------------------------------------------------------------------------- #
 # in-report Q&A assistant (present by default; key prompted at first use)
 # --------------------------------------------------------------------------- #

@@ -666,7 +666,7 @@ After searching, output a SINGLE fenced code block labeled json and nothing afte
 it, containing exactly: {"assessments": [{"claim": "<the claim's handle, e.g. C1>", \
 "status": "CHECKED_SUPPORTS" or "CHECKED_MISMATCH", "note": "<= 30 words on whether \
 the section supports THIS claim", "checked_edition": "<the code edition you \
-actually verified this claim against, e.g. NFPA 13 2016, or \\"\\" if unclear>", \
+actually verified this claim against, e.g. NFPA 13 2025, or \\"\\" if unclear>", \
 "current_edition": "<the current published edition you found while searching, or \
 \\"\\">", "evidence_url": "<the single best https URL supporting THIS verdict, or \
 \\"\\">"}], "edition_notes": "<= 40 words on edition/renumbering differences, or \
