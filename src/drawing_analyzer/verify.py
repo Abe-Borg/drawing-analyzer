@@ -886,9 +886,9 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
             try:
                 max_workers = int(env.strip())
             except ValueError:
-                max_workers = 4
+                max_workers = 6
         else:
-            max_workers = 4
+            max_workers = 6
     return min(max(1, int(max_workers)), max(1, total))
 
 
