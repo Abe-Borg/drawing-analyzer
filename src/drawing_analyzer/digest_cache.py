@@ -90,7 +90,11 @@ from typing import Any, Iterator
 # (I-6); digest and critique each share a version across their two key levels.
 _DIGEST_SCHEMA_VERSION = 10
 _CRITIQUE_SCHEMA_VERSION = 10
-_IDENTITY_SCHEMA_VERSION = 10
+# Identity 11: regex edition hits the model did not report moved out of
+# ``adopted_codes`` into ``mentioned_codes`` (a mention is not an adoption). A
+# v10 entry stores them as adopted, which every consumer would now trust as the
+# governing basis, so it must miss once and be re-identified.
+_IDENTITY_SCHEMA_VERSION = 11
 _REVIEW_PLAN_SCHEMA_VERSION = 10
 _CITATION_SCHEMA_VERSION = 10
 _INVESTIGATION_SCHEMA_VERSION = 10

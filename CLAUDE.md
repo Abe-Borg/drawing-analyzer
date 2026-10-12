@@ -369,8 +369,12 @@ verification, the citation check, the markup writer, the exports, and the report
 consume ledger entries and nothing else.
 
 - **Planning:** `set_identity.py` — one text-only call → advisory `SetIdentity`
-  (consumers take `SetIdentity | None` and never gate a finding on it). The
-  regex edition harvest unions in as `origin="regex"`. Runs on Haiku 5.5 at
+  (consumers take `SetIdentity | None` and never gate a finding on it). Regex
+  edition hits the model did not adopt go to `mentioned_codes`
+  (`origin="regex"`), never `adopted_codes`: the regex cannot tell a mention
+  from an adoption. Consumers label them (`context_block`, the planner's
+  `mentioned_not_adopted_codes`, the citation request's mentioned line, which
+  folds into its payload hash only when non-empty). Runs on Haiku 5.5 at
   medium effort. Coerce
   every list-shaped field through `set_identity._as_list` (a string must not be
   consumed per character). The international code-designation regex is
@@ -596,7 +600,9 @@ consume ledger entries and nothing else.
   `_CITATION_SCHEMA_VERSION` for citation verdicts, and
   `_INVESTIGATION_SCHEMA_VERSION` for investigation verdicts/traces. Shared
   serialized finding changes may require both digest and critique bumps. All
-  six start at 10 to preserve existing keys; `_LEGACY_SCHEMA_VERSION` stays
+  six started at 10 to preserve existing keys; identity is at 11 (regex
+  mentions left `adopted_codes`), and `tests/test_drawing_cache_versions.py`
+  records each bump's new golden key in `BUMPED_KEYS`. `_LEGACY_SCHEMA_VERSION` stays
   fixed at 10 for JSON migration. `_DB_FORMAT_VERSION` is storage-only:
   migrate tables in place, never wipe paid rows on a version mismatch. Unused
   rows expire after 180 idle days, at most 256 per open/hourly write sweep;

@@ -20,8 +20,8 @@ from drawing_analyzer.set_identity import (
     IDENTITY_SYSTEM_PROMPT,
     build_identity_user_text,
     identify_set,
+    add_regex_mentions,
     parse_identity_text,
-    union_regex_editions,
 )
 from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
@@ -259,34 +259,32 @@ def test_parse_bounds_hostile_payload():
 
 
 # --------------------------------------------------------------------------- #
-# Regex-union containment (I-7 ordering included)
+# Regex containment: mentions, never adoptions (I-7 ordering included)
 # --------------------------------------------------------------------------- #
 
 
-def test_union_appends_regex_only_hits_and_keeps_model_wins():
+def test_regex_hits_are_mentions_never_adoptions():
     si = parse_identity_text(_identity_reply())
     geoms = [
-        _Geom(ref=_ref(0), sheet_text="PER NFPA 13 2016 AND DIN EN 12845 2020"),
+        _Geom(ref=_ref(0), sheet_text=(
+            "NFPA 72 2022 FOR ALARMS. NFPA 13 2016 IS NOT THE GOVERNING EDITION. "
+            "DIN EN 12845 2020"
+        )),
     ]
-    # NFPA 13 2016 is regex-matchable and NOT in the model's list -> appended.
-    # DIN EN 12845 is not regex-matchable (non-US token) but the model has it.
-    merged = union_regex_editions(si, geoms)
-    by_display = {c.display: c for c in merged.adopted_codes}
-    assert "NFPA 13 2016" in by_display
-    assert by_display["NFPA 13 2016"].origin == "regex"
-    assert by_display["DIN EN 12845 2020"].origin == "model"
-    # Sorted at construction (I-7): stable order regardless of merge order.
-    assert [c.display for c in merged.adopted_codes] == sorted(
-        c.display for c in merged.adopted_codes
-    )
+    # The regex finds a code next to a year and cannot read "not the governing
+    # edition": its hits stay visible as mentions but are never adopted.
+    # DIN EN 12845 is not regex-matchable (non-US token); the model adopted it.
+    merged = add_regex_mentions(si, geoms)
+    assert merged.adopted_codes == si.adopted_codes
+    assert all(c.origin == "regex" for c in merged.mentioned_codes)
+    # Sorted at construction (I-7): stable order regardless of first-seen order.
+    assert [c.display for c in merged.mentioned_codes] == ["NFPA 13 2016", "NFPA 72 2022"]
 
 
-def test_union_dedupes_case_insensitively():
+def test_regex_hit_already_adopted_adds_no_mention():
     si = SetIdentity(adopted_codes=(AdoptedCode(code="NFPA 13", edition="2016"),))
     geoms = [_Geom(ref=_ref(0), sheet_text="nfpa 13 2016")]
-    merged = union_regex_editions(si, geoms)
-    assert len(merged.adopted_codes) == 1
-    assert merged.adopted_codes[0].origin == "model"      # the model entry wins
+    assert add_regex_mentions(si, geoms) == si          # the model entry stands
 
 
 # --------------------------------------------------------------------------- #
@@ -336,8 +334,9 @@ def test_identify_set_happy_path_unions_regex():
     assert res.input_tokens == 120 and res.output_tokens == 40
     # The system prompt is the verbatim constant (test routers key on this).
     assert client.calls[0]["system"] == IDENTITY_SYSTEM_PROMPT
-    # Regex union happened on the way out.
-    assert any(c.origin == "regex" for c in res.identity.adopted_codes)
+    # Regex containment happened on the way out, as a mention.
+    assert [c.display for c in res.identity.mentioned_codes] == ["NFPA 13 2016"]
+    assert all(c.origin == "model" for c in res.identity.adopted_codes)
 
 
 def test_identify_set_never_raises_on_client_failure():
@@ -389,28 +388,27 @@ def test_identify_set_failure_is_not_cached():
 # --------------------------------------------------------------------------- #
 
 
-def test_merged_editions_identity_first_regex_backstop():
-    from drawing_analyzer.citation_check import merged_editions
+def test_citation_editions_keep_mentions_out_of_the_adopted_line():
+    from drawing_analyzer.citation_check import adopted_editions_line, mentioned_editions_line
 
     si = parse_identity_text(_identity_reply())        # DIN EN 12845 2020 (model)
-    geoms = [_Geom(ref=_ref(0), sheet_text="PER NFPA 13 2016.")]
-    line = merged_editions(si, geoms)
-    # Identity entries lead; regex-only extras follow as the backstop.
-    assert line.index("DIN EN 12845 2020") < line.index("NFPA 13 2016")
-    # No identity -> byte-identical to the pre-Phase-A pure-regex line.
-    assert merged_editions(None, geoms) == "NFPA 13 2016"
-    assert merged_editions(SetIdentity(), geoms) == "NFPA 13 2016"
+    geoms = [_Geom(ref=_ref(0), sheet_text="NFPA 13 2016 is not the governing edition.")]
+    assert adopted_editions_line(si) == "DIN EN 12845 2020"
+    assert mentioned_editions_line(si, geoms) == "NFPA 13 2016"
+    # No identity: nothing is adopted; the scan still reaches the checker, as a mention.
+    assert adopted_editions_line(None) == adopted_editions_line(SetIdentity()) == ""
+    assert mentioned_editions_line(None, geoms) == "NFPA 13 2016"
 
 
-def test_merged_editions_dedupes_and_carries_amendments():
-    from drawing_analyzer.citation_check import merged_editions
+def test_citation_editions_carry_amendments_and_skip_adopted_mentions():
+    from drawing_analyzer.citation_check import adopted_editions_line, mentioned_editions_line
 
     si = SetIdentity(adopted_codes=(
         AdoptedCode(code="NFPA 13", edition="2016", amendment_note="LA amendments"),
     ))
     geoms = [_Geom(ref=_ref(0), sheet_text="NFPA 13 2016")]
-    line = merged_editions(si, geoms)
-    assert line == "NFPA 13 2016 (LA amendments)"       # regex duplicate folded in
+    assert adopted_editions_line(si) == "NFPA 13 2016 (LA amendments)"
+    assert mentioned_editions_line(si, geoms) == ""     # adopted, so not re-listed
 
 
 def test_citation_prompt_carries_jurisdiction_line():
@@ -425,6 +423,26 @@ def test_citation_prompt_carries_jurisdiction_line():
         "NFPA 13 §8.1.2", "NFPA 13 2016", [("C1", "relief valve at 150 psi")],
     )
     assert "JURISDICTION" not in without                # None -> byte-identical shape
+
+
+def test_citation_request_never_lists_a_mention_as_adopted():
+    from drawing_analyzer.citation_check import _build_citation_prompt, _citation_payload_hash
+
+    def adopted_line(text: str) -> str:
+        return next(ln for ln in text.splitlines() if ln.startswith("CODE EDITIONS THE SET ADOPTS:"))
+
+    claims = [("C1", "relief valve at 150 psi")]
+    req = _build_citation_prompt("NFPA 13 §8.1.2", "NFPA 13 2025", claims,
+                                 mentioned_line="NFPA 13 2016")
+    assert "NFPA 13 2016" in req and "2016" not in adopted_line(req)
+    # Nothing adopted: the mention still reaches the checker, never as the basis.
+    bare = _build_citation_prompt("NFPA 13 §8.1.2", "", claims, mentioned_line="NFPA 13 2016")
+    assert "NFPA 13 2016" in bare and "2016" not in adopted_line(bare)
+    # Cache contract (I-6): a set mentioning no unadopted edition keeps its key.
+    base = _citation_payload_hash("NFPA 13 §8.1.2", ["c"], "NFPA 13 2025", "")
+    assert _citation_payload_hash("NFPA 13 §8.1.2", ["c"], "NFPA 13 2025", "", "") == base
+    assert _citation_payload_hash(
+        "NFPA 13 §8.1.2", ["c"], "NFPA 13 2025", "", "NFPA 13 2016") != base
 
 
 def test_cross_qc_preamble_present_only_with_identity():

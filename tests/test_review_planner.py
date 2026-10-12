@@ -333,6 +333,24 @@ def test_planner_request_depends_only_on_canonical_review_facts():
     assert "Sheet FP-101" not in first_text and "adopt NFPA" not in first_text
 
 
+def test_mentioned_editions_reach_the_planner_apart_from_the_adopted_basis():
+    mention = AdoptedCode("NFPA 13", "2016", origin="regex")
+    identity = replace(_IDENTITY, adopted_codes=(
+        AdoptedCode("NFPA 13", "2025", quote="per NFPA 13 2025"),
+    ))
+    plain, _ = build_planner_user_text(identity, [_sheet(0)])
+    text, _ = build_planner_user_text(replace(identity, mentioned_codes=(mention,)), [_sheet(0)])
+    facts = json.loads(text.split("\n\n")[0].split("\n", 1)[1])
+    assert facts["adopted_codes"] == [{"code": "nfpa 13", "edition": "2025", "amendment_note": ""}]
+    assert facts["mentioned_not_adopted_codes"] == [{"code": "nfpa 13", "edition": "2016"}]
+    # No mention, no key: a set without one keeps its cached plan.
+    assert "mentioned_not_adopted_codes" not in plain
+    # A mention alone still counts as a usable review fact, as it did when the
+    # regex hit was (wrongly) filed as adopted.
+    only = SetIdentity(disciplines=("fire protection",), mentioned_codes=(mention,))
+    assert build_planner_user_text(only, [_sheet(0)])[0].startswith("SET REVIEW FACTS:")
+
+
 def test_scope_cache_reuses_plan_without_any_unchanged_sheet():
     cache = DigestCache(None, persist=False)
     first = author_review_plan(_IDENTITY, [_sheet(0)], client=_FakeClient(_reply()), cache=cache)

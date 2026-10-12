@@ -858,8 +858,14 @@ sheet → discipline map, the project's jurisdiction / country / region, its
 language and units, and the **adopted codes** (each with a verbatim evidence
 quote and source sheet). Codes may come from any country's system — NFPA, IBC,
 Eurocode/EN, BS, DIN, AS/NZS, GB, … — and the deterministic regex edition
-harvest is always unioned in as a backstop, so a stated edition can never be
-argued away. The identity is **advisory**: it steers the stages below but never
+harvest is kept as a backstop, so a stated edition can never be argued away.
+The regex finds a code next to a year and cannot tell an adoption from a
+mention: *NFPA 13 2016 is not the governing edition* matches as readily as
+*all work per NFPA 13 2016*. So an edition only the regex found is recorded as
+a **mentioned code** (`mentioned_codes`, `origin="regex"`), never an adopted
+one. Mentions stay visible, labelled *not stated to govern the work*, in
+`set_identity.json`, the *Set Identity* section, the review plan's facts and
+the citation check's request. The identity is **advisory**: it steers the stages below but never
 gates or suppresses a finding; a wrong detection is visible (not laundered) in
 `set_identity.json`, the run manifest, and the combined text's *Set Identity*
 section. The identity call runs on Haiku 5.5 at medium effort by default
@@ -882,10 +888,13 @@ machinery below (after any user checklists), snapshotted with
 warm re-runs rebuild it byte-identically (keeping the critique cache hot).
 
 The planner consumes and caches only canonical review facts: disciplines,
-project and set type, jurisdiction, country/region, language, units, and adopted
-code editions/amendments. Routine revisions retain the checklist whenever those
+project and set type, jurisdiction, country/region, language, units, adopted
+code editions/amendments, and editions the drawings only mention (under a
+separate `mentioned_not_adopted_codes` key, present only when there are some).
+Routine revisions retain the checklist whenever those
 facts match, even if no sheets remain unchanged. Reuse requires detected
-disciplines plus a project type, jurisdiction, or named adopted code. With an
+disciplines plus a project type, jurisdiction, or a named adopted or mentioned
+code. With an
 insufficient identity, the planner falls back to digest-based authoring without
 caching that plan.
 
@@ -906,7 +915,8 @@ expert `critique=True` / `citation_check=True`) and add two real-time text
 calls on a cold run, disclosed in the pre-run cost estimate; standard digest-only runs make
 neither call. Expert overrides: `identity=False` / `review_plan=False`
 (recorded debug overrides inside exhaustive QC). The identity also feeds the
-citation check (merged adopted-codes line + a jurisdiction/locale line) and
+citation check (an adopted-codes line, a separate line for editions only
+mentioned, and a jurisdiction/locale line) and
 cross-sheet QC (a set-context preamble that kills metric-vs-imperial false
 conflicts). Models are overridable via `DRAWING_ANALYZER_IDENTITY_MODEL` /
 `DRAWING_ANALYZER_REVIEW_PLAN_MODEL`.

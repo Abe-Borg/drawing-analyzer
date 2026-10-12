@@ -9,11 +9,15 @@ language and units, and — most importantly — the codes the set says it adopt
 each with a verbatim evidence quote.
 
 Containment contract: after parsing, the deterministic
-:func:`~drawing_analyzer.citation_check.harvest_code_editions` regex hits are
-**unioned** into ``adopted_codes`` (``origin="regex"``), so a code edition the
-text plainly states can never be hallucinated away — and, conversely, the model
-extraction reaches the worldwide codes the US-centric regex whitelist can never
-match (Eurocodes, BS, DIN, AS/NZS, GB, …).
+:func:`~drawing_analyzer.citation_check.harvest_code_editions` regex hits the
+model did not report are kept in ``mentioned_codes`` (``origin="regex"``), so a
+code edition the text plainly states can never be hallucinated away — and,
+conversely, the model extraction reaches the worldwide codes the US-centric
+regex whitelist can never match (Eurocodes, BS, DIN, AS/NZS, GB, …). They are
+mentions, not adoptions: the regex finds a code next to a year, so "NFPA 13
+2016 — not the governing edition" matches as readily as a general note saying
+the work is per NFPA 13 2016. Only the model, which reads the sentence, may
+call an edition adopted.
 
 The identity is **advisory**: every consumer (the review planner, the citation
 check, cross-sheet QC) accepts ``SetIdentity | None`` and behaves exactly as
@@ -439,13 +443,14 @@ def _norm_code_display(display: str) -> str:
     return " ".join(display.split()).upper()
 
 
-def union_regex_editions(identity: SetIdentity, geometries: list[Any]) -> SetIdentity:
-    """Union the deterministic regex edition harvest into ``adopted_codes``.
+def add_regex_mentions(identity: SetIdentity, geometries: list[Any]) -> SetIdentity:
+    """Record the regex edition harvest the model did not adopt as ``mentioned_codes``.
 
-    The model's entries win on a ``CODE EDITION`` collision (they carry quotes
-    and amendment notes); a regex-only hit is appended with ``origin="regex"``
-    so the containment backstop is visible in the record. Returns a new,
-    re-sorted :class:`SetIdentity` (frozen dataclasses are never mutated).
+    A hit the model already lists as adopted adds nothing (its entry carries the
+    quote and amendment notes); every other hit is kept with ``origin="regex"``
+    so the containment backstop is visible in the record, but never as an
+    adoption. Returns a new, re-sorted :class:`SetIdentity` (frozen dataclasses
+    are never mutated).
     """
     from .citation_check import harvest_code_editions
 
@@ -461,9 +466,7 @@ def union_regex_editions(identity: SetIdentity, geometries: list[Any]) -> SetIde
     if not extras:
         return identity
     data = identity.to_dict()
-    data["adopted_codes"] = [c.to_dict() for c in identity.adopted_codes] + [
-        c.to_dict() for c in extras
-    ]
+    data["mentioned_codes"] = [c.to_dict() for c in extras]
     return SetIdentity.from_dict(data)
 
 
@@ -589,14 +592,14 @@ def identify_set(
             omitted_chars=budget.omitted_chars,
             request_usage=request_usage,
         )
-    identity = union_regex_editions(identity, geometries)
+    identity = add_regex_mentions(identity, geometries)
     result = IdentityResult(
         identity=identity, input_tokens=in_tok, output_tokens=out_tok,
         model_used=model, omitted_chars=budget.omitted_chars,
         request_usage=request_usage,
     )
     if cache is not None and cache_key is not None and not any_fallback_served(request_usage):
-        # Store the finished (sanitized + regex-unioned) record — what a warm
+        # Store the finished (sanitized + regex mentions) record — what a warm
         # run must reproduce byte-for-byte.
         cache.put(cache_key, {
             "identity": identity.to_dict(),

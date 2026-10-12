@@ -1815,7 +1815,8 @@ class AdoptedCode:
     assertion, one with a quote is checkable against the source. ``origin`` is
     ``"model"`` for entries the identity call extracted and ``"regex"`` for
     entries only the deterministic :func:`citation_check.harvest_code_editions`
-    scan found (the regex backstop can never be hallucinated away).
+    scan found. Regex entries live in ``SetIdentity.mentioned_codes``: the scan
+    finds a code next to a year, and cannot tell an adoption from a mention.
     """
 
     code: str
@@ -1859,8 +1860,11 @@ class SetIdentity:
 
     Produced once per run by the identity stage from the digests + text layers:
     the disciplines present, where the project sits (jurisdiction / country /
-    region), its language and units, and the codes the set says it adopts. It is
-    **advisory context**: consumers (the review planner, citation check,
+    region), its language and units, and the codes the set says it adopts.
+    ``mentioned_codes`` holds the code editions the text-layer scan found that
+    are not among them: a mention is not an adoption (a superseded edition on a
+    detail, a historical reference), so consumers label them and never present
+    them as the governing basis. It is **advisory context**: consumers (the review planner, citation check,
     cross-sheet QC) accept ``SetIdentity | None`` and behave exactly as before
     when it is ``None`` — a misdetection can steer emphasis but can never gate
     or suppress a finding. ``sheet_disciplines`` maps sheet id → discipline and
@@ -1881,6 +1885,7 @@ class SetIdentity:
     language: str = ""
     units: str = ""
     adopted_codes: tuple["AdoptedCode", ...] = ()
+    mentioned_codes: tuple["AdoptedCode", ...] = ()
     confidence: str = ""
     evidence: tuple[str, ...] = ()
     notes: str = ""
@@ -1891,11 +1896,12 @@ class SetIdentity:
         object.__setattr__(
             self, "sheet_disciplines", tuple(sorted(tuple(p) for p in self.sheet_disciplines))
         )
-        object.__setattr__(
-            self,
-            "adopted_codes",
-            tuple(sorted(self.adopted_codes, key=lambda c: (c.code, c.edition, c.origin))),
-        )
+        for name in ("adopted_codes", "mentioned_codes"):
+            object.__setattr__(
+                self,
+                name,
+                tuple(sorted(getattr(self, name), key=lambda c: (c.code, c.edition, c.origin))),
+            )
         object.__setattr__(self, "evidence", tuple(self.evidence))
 
     @property
@@ -1904,7 +1910,7 @@ class SetIdentity:
         return bool(
             self.disciplines or self.sheet_disciplines or self.project_type
             or self.set_type or self.jurisdiction or self.country or self.region
-            or self.language or self.units or self.adopted_codes
+            or self.language or self.units or self.adopted_codes or self.mentioned_codes
         )
 
     def context_block(self) -> str:
@@ -1938,6 +1944,13 @@ class SetIdentity:
                 extra = f" ({c.amendment_note})" if c.amendment_note else ""
                 src = f" [per {c.source_sheet}]" if c.source_sheet else ""
                 lines.append(f"  - {c.display}{extra}{src}")
+        if self.mentioned_codes:
+            lines.append(
+                "- Other code editions mentioned on the drawings (not stated to "
+                "govern the work):"
+            )
+            for c in self.mentioned_codes:
+                lines.append(f"  - {c.display}")
         if self.confidence:
             lines.append(f"- Detection confidence: {self.confidence}")
         if self.notes:
@@ -1968,6 +1981,7 @@ class SetIdentity:
             "language": self.language,
             "units": self.units,
             "adopted_codes": [c.to_dict() for c in self.adopted_codes],
+            "mentioned_codes": [c.to_dict() for c in self.mentioned_codes],
             "confidence": self.confidence,
             "evidence": list(self.evidence),
             "notes": self.notes,
@@ -1997,6 +2011,10 @@ class SetIdentity:
             units=str(data.get("units", "") or ""),
             adopted_codes=tuple(
                 AdoptedCode.from_dict(c) for c in (data.get("adopted_codes") or [])
+                if isinstance(c, dict)
+            ),
+            mentioned_codes=tuple(
+                AdoptedCode.from_dict(c) for c in (data.get("mentioned_codes") or [])
                 if isinstance(c, dict)
             ),
             confidence=str(data.get("confidence", "") or ""),

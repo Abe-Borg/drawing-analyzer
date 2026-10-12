@@ -318,11 +318,12 @@ _EDITION_RE = re.compile(
 
 
 def harvest_code_editions(geometries: Iterable[Any]) -> list[str]:
-    """The set's adopted code-edition claims, harvested from the text layers.
+    """Every code edition the text layers mention, adopted or not.
 
     Returns deterministic, de-duplicated ``"<CODE> <YEAR>"`` strings (e.g.
-    ``"NFPA 13 2016"``) in first-seen order. Empty when no sheet states an
-    edition — the citation prompt then says the basis is unknown.
+    ``"NFPA 13 2016"``) in first-seen order. A match is a code next to a year:
+    the scan cannot tell "work per NFPA 13 2016" from "NFPA 13 2016 is not the
+    governing edition", so its hits are mentions, never the adopted basis.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -338,28 +339,41 @@ def harvest_code_editions(geometries: Iterable[Any]) -> list[str]:
     return out
 
 
-def merged_editions(identity: Any, geometries: Iterable[Any]) -> str:
-    """The editions line: model-detected adopted codes ∪ the regex harvest.
+def _norm_edition_display(display: str) -> str:
+    return " ".join(display.split()).upper()
 
-    The identity's entries lead (sorted; they carry amendments and reach the
-    worldwide codes the US-centric ``_CODE_TOKEN`` whitelist can never match);
-    regex-only extras follow in first-seen order as the deterministic backstop
-    — a code the text plainly states can never be argued away by the model.
-    With no identity this is byte-identical to the pre-Phase-A line.
+
+def adopted_editions_line(identity: Any) -> str:
+    """The editions the set adopts: the identity's ``adopted_codes`` only.
+
+    Sorted (they carry amendments and reach the worldwide codes the US-centric
+    ``_CODE_TOKEN`` whitelist can never match). ``""`` when there is no identity
+    or it found no adoption; the regex harvest never fills this line, because a
+    mention is not an adoption (see :func:`mentioned_editions_line`).
     """
-    regex_claims = harvest_code_editions(geometries)
-    identity_claims: list[str] = []
-    seen: set[str] = set()          # bare CODE EDITION, without amendment notes
+    claims: list[str] = []
     for code in getattr(identity, "adopted_codes", ()) or ():
         display = getattr(code, "display", "") or ""
         note = getattr(code, "amendment_note", "") or ""
         if display:
-            identity_claims.append(f"{display} ({note})" if note else display)
-            seen.add(" ".join(display.split()).upper())
-    if not identity_claims:
-        return "; ".join(regex_claims)
-    extras = [c for c in regex_claims if " ".join(c.split()).upper() not in seen]
-    return "; ".join(identity_claims + extras)
+            claims.append(f"{display} ({note})" if note else display)
+    return "; ".join(claims)
+
+
+def mentioned_editions_line(identity: Any, geometries: Iterable[Any]) -> str:
+    """The editions the text layers mention that are not adopted, first seen first.
+
+    The deterministic backstop: a code the text plainly states can never be
+    argued away by the model, but it reaches the checker labelled as a mention.
+    """
+    adopted = {
+        _norm_edition_display(getattr(c, "display", "") or "")
+        for c in getattr(identity, "adopted_codes", ()) or ()
+    }
+    return "; ".join(
+        c for c in harvest_code_editions(geometries)
+        if _norm_edition_display(c) not in adopted
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -725,18 +739,30 @@ def _normalize_claim(text: str) -> str:
     return " ".join((text or "").split()).lower()
 
 
+# Request-text label for the mentioned editions. Static framing outside the
+# hashed system prompt, so ``_citation_payload_hash`` folds it in (I-6).
+_MENTIONED_EDITIONS_LABEL = (
+    "OTHER CODE EDITIONS MENTIONED ON THE DRAWINGS (not stated to govern the work)"
+)
+
+
 def _build_citation_prompt(
     ref: str, editions_line: str, handled_claims: list[tuple[str, str]],
-    jurisdiction_line: str = "",
+    jurisdiction_line: str = "", mentioned_line: str = "",
 ) -> str:
-    ed = editions_line or "not stated on the drawings"
+    if editions_line:
+        ed = editions_line
+    elif mentioned_line:
+        ed = "not established"
+    else:
+        ed = "not stated on the drawings"
     lines = [f"CITATION TO CHECK: {ref}"]
     if jurisdiction_line:
         lines.append(f"PROJECT JURISDICTION/LOCALE: {jurisdiction_line}")
-    lines += [
-        f"CODE EDITIONS THE SET ADOPTS: {ed}",
-        "CLAIMS CITING IT (verify each; echo its handle):",
-    ]
+    lines.append(f"CODE EDITIONS THE SET ADOPTS: {ed}")
+    if mentioned_line:
+        lines.append(f"{_MENTIONED_EDITIONS_LABEL}: {mentioned_line}")
+    lines.append("CLAIMS CITING IT (verify each; echo its handle):")
     lines += [f"[{handle}] {text}" for handle, text in handled_claims]
     lines.append(_CITATION_TASK_INSTRUCTION)
     return "\n".join(lines)
@@ -957,13 +983,14 @@ def _check_one(
     max_retries: int,
     sleep: Any,
     jurisdiction_line: str = "",
+    mentioned_line: str = "",
 ) -> _CheckOutcome:
     """One citation request → :class:`_CheckOutcome`.
 
     Never raises. ``raw_text`` is ``None`` on a hard failure (``error`` set).
     """
     user_text = _build_citation_prompt(
-        ref, editions_line, handled_claims, jurisdiction_line
+        ref, editions_line, handled_claims, jurisdiction_line, mentioned_line
     )
     messages: list[dict] = [{"role": "user", "content": user_text}]
     total_in = total_out = 0
@@ -1147,11 +1174,18 @@ def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation
 
 
 def _citation_payload_hash(
-    ref: str, claim_texts: list[str], editions_line: str, jurisdiction_line: str
+    ref: str, claim_texts: list[str], editions_line: str, jurisdiction_line: str,
+    mentioned_line: str = "",
 ) -> str:
-    """Content hash of a chunk, with cosmetic reference variants folded."""
-    joined = "\x1f".join([normalize_reference(ref), *claim_texts, editions_line, jurisdiction_line])
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    """Content hash of a chunk, with cosmetic reference variants folded.
+
+    The mentioned-editions line (with its label) folds in only when present, so
+    a set whose text mentions no unadopted edition keeps its cached verdicts.
+    """
+    parts = [normalize_reference(ref), *claim_texts, editions_line, jurisdiction_line]
+    if mentioned_line:
+        parts.append(f"{_MENTIONED_EDITIONS_LABEL}: {mentioned_line}")
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 
 def check_citations(
@@ -1223,7 +1257,8 @@ def check_citations(
         return result
 
     model = model or citation_model()
-    editions_line = merged_editions(identity, geometries)
+    editions_line = adopted_editions_line(identity)
+    mentioned_line = mentioned_editions_line(identity, geometries)
     jurisdiction_line = (
         identity.citation_context_line()
         if identity is not None and hasattr(identity, "citation_context_line")
@@ -1295,7 +1330,7 @@ def check_citations(
         return citation_cache_key(
             _citation_payload_hash(
                 ref, [_normalize_claim(c["text"]) for _h, c in handled],
-                editions_line, jurisdiction_line,
+                editions_line, jurisdiction_line, mentioned_line,
             ),
             model=model,
             prompt_version=CITATION_PROMPT_VERSION,
@@ -1354,7 +1389,7 @@ def check_citations(
         outcome = _check_one(
             ref, editions_line, [(h, c["text"]) for h, c in handled],
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            jurisdiction_line=jurisdiction_line,
+            jurisdiction_line=jurisdiction_line, mentioned_line=mentioned_line,
         )
         return ref, rid, handled, outcome, None, key
 
