@@ -172,6 +172,9 @@ CITATION_OUTPUT_CAP = 8_000
 # The cross-sheet conflict hunt: a bounded findings/claims block per call
 # (whole-set, shard map, or reconcile), not a long-form document.
 CROSS_QC_OUTPUT_CAP = 16_000
+# The absence cross-check: one short verdict per absence finding in a request
+# (at most ``absence_check._MAX_ABSENCES_PER_REQUEST``), thinking included.
+ABSENCE_CHECK_OUTPUT_CAP = 8_000
 
 # Token threshold above which a review uses the larger batch cap.
 LARGE_REVIEW_INPUT_THRESHOLD = 200_000
@@ -189,6 +192,7 @@ PHASE_INVESTIGATION = "investigation"
 PHASE_HARVEST = "harvest"
 PHASE_CITATION = "citation"
 PHASE_CROSS_QC = "cross_qc"
+PHASE_ABSENCE_CHECK = "absence_check"
 
 
 def output_cap_for_model(model: str, *, requested: int) -> int:
@@ -222,6 +226,7 @@ _PHASE_OUTPUT_BUDGET: dict[str, int] = {
     PHASE_HARVEST: HARVEST_OUTPUT_CAP,
     PHASE_CITATION: CITATION_OUTPUT_CAP,
     PHASE_CROSS_QC: CROSS_QC_OUTPUT_CAP,
+    PHASE_ABSENCE_CHECK: ABSENCE_CHECK_OUTPUT_CAP,
 }
 
 
@@ -811,6 +816,10 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     # request today; it makes the value explicit and tunable in one place,
     # which is what §C asks for.
     PHASE_CROSS_QC: EFFORT_HIGH,
+    # Absence cross-check: searching a text corpus for the expected item under
+    # whatever wording or abbreviation the drawings use. Medium, like the other
+    # Haiku 5.5 text stages; the host re-checks every quote it returns.
+    PHASE_ABSENCE_CHECK: EFFORT_MEDIUM,
 }
 
 # Verification phases get the model-aware bump: Opus on verification is

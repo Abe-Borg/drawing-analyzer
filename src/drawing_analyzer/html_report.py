@@ -916,6 +916,19 @@ def _finding_row_html(
         text_cell += (
             f'<div class="finding-action">Action: {html.escape(action)}</div>'
         )
+    located = getattr(f, "located_elsewhere", None)
+    if located is not None:
+        # The absence cross-check found what this absence reported missing.
+        where = "this sheet" if located.same_sheet else (located.sheet_id or "another sheet")
+        lowered = (
+            f" (lowered from {html.escape(located.demoted_from)})"
+            if located.demoted_from else ""
+        )
+        text_cell += (
+            '<div class="finding-located muted">Shown on '
+            f"{html.escape(where)}: <code>{html.escape(located.quote)}</code>"
+            f"{lowered}</div>"
+        )
     sources = getattr(f, "sources", None) or []
     if sources:
         from .ledger import provenance_label

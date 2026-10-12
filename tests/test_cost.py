@@ -443,9 +443,16 @@ def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
 
     monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-haiku-4-5")
     monkeypatch.setenv("DRAWING_ANALYZER_CROSS_QC_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("DRAWING_ANALYZER_ABSENCE_CHECK_MODEL", "claude-sonnet-5")
     models = resolve_stage_models(model=OPUS)
     assert models.synthesis == "claude-haiku-4-5"
     assert models.cross_qc == "claude-sonnet-5"
+    assert models.absence_check == "claude-sonnet-5"
+    absence = {c.stage: c for c in estimate_exhaustive_run_cost(10, model=OPUS).components}[
+        "Absence check"]
+    assert absence.cost == pytest.approx(estimate_request_cost(
+        absence.input_tokens, absence.output_tokens, model="claude-sonnet-5", batch=False,
+    ))
     assert models.digest == OPUS  # the threaded review model stands in for digest
     # ``distinct`` is first-appearance order with no repeats — it drives the
     # header sentence, so a duplicate would read as a stutter.

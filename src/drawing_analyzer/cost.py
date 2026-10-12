@@ -601,6 +601,11 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
 _ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
 _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
 _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS = 500
+# Absence cross-check: one request reading the set's text layers (budgeted at
+# ``absence_check._CORPUS_BUDGET`` characters) plus a short verdict per absence.
+_ASSUMED_ABSENCE_TEXT_CHARS_PER_SHEET = 6_000
+_ABSENCE_CHARS_PER_TOKEN = 3.5
+_ASSUMED_ABSENCE_OUTPUT_TOKENS = 2_000
 _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
 # The verdict itself is ~150 tokens, but verification now runs adaptive thinking
 # at medium effort and thinking bills at the OUTPUT rate — so an estimate built
@@ -706,6 +711,7 @@ class StageModels:
     citation: str
     verification: str
     investigation: str
+    absence_check: str = ""
 
     @property
     def distinct(self) -> list[str]:
@@ -714,7 +720,7 @@ class StageModels:
         for m in (
             self.digest, self.critique, self.identity, self.review_plan,
             self.synthesis, self.focus, self.cross_qc, self.harvest,
-            self.citation, self.verification, self.investigation,
+            self.absence_check, self.citation, self.verification, self.investigation,
         ):
             if m and m not in seen:
                 seen.append(m)
@@ -735,6 +741,7 @@ def resolve_stage_models(
     ``REVIEW_MODEL_DEFAULT``) and stands in for the digest, whose model is a
     threaded parameter rather than an env-var resolver.
     """
+    from .absence_check import absence_check_model
     from .citation_check import citation_model
     from .critique import critique_model
     from .cross_qc import cross_qc_model
@@ -758,6 +765,7 @@ def resolve_stage_models(
         citation=citation_model(),
         verification=verification_model or default_verify_model(),
         investigation=investigation_model(),
+        absence_check=absence_check_model(),
     )
 
 
@@ -1138,6 +1146,20 @@ def estimate_exhaustive_run_cost(
              f"{friendly_model_name(harvest_model)}",
     ))
 
+    # Absence cross-check — one text read of the budgeted set text layers.
+    from .absence_check import _CORPUS_BUDGET as _ABSENCE_CORPUS_BUDGET
+
+    absence_model = stage_models.absence_check or harvest_model
+    absence_chars = min(
+        sheet_count * _ASSUMED_ABSENCE_TEXT_CHARS_PER_SHEET, _ABSENCE_CORPUS_BUDGET,
+    )
+    components.append(_component(
+        "Absence check", int(absence_chars / _ABSENCE_CHARS_PER_TOKEN),
+        _ASSUMED_ABSENCE_OUTPUT_TOKENS, model=absence_model, batch=False,
+        note=f"one text read per 25 \"not found on this sheet\" findings with "
+             f"{friendly_model_name(absence_model)}",
+    ))
+
     # Verification & citation scale with volume — quoted as a low–high band below.
     def _verify(findings: float) -> CostComponent:
         n = max(0, round(findings))
@@ -1282,8 +1304,9 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         f"{where} with {with_models} — digest, set identity + "
         f"model review plan, {est.critique_runs} critique read(s) per sheet, "
         "cross-sheet QC, "
-        "deterministic auditors, prose harvest, verification, the uncertain-"
-        "finding investigation loop, and citation checks.",
+        "deterministic auditors, prose harvest, the absence cross-check, "
+        "verification, the uncertain-finding investigation loop, and citation "
+        "checks.",
         "",
         _basis_line(est.shape_aware, est.unmeasured_pages),
         _OUTPUT_BAND_NOTE,

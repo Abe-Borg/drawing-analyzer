@@ -781,6 +781,18 @@ def _with_evidence_reason(finding: Finding, note: str, *, status: str) -> str:
     return f"{reason} {note}".strip()
 
 
+def _located_phrase(finding: Finding) -> str:
+    """Where the absence cross-check found what this absence reported missing."""
+    located = getattr(finding, "located_elsewhere", None)
+    if located is None:
+        return ""
+    where = "this sheet" if located.same_sheet else (located.sheet_id or "another sheet")
+    phrase = f'Shown on {where}: "{located.quote}"'
+    if located.demoted_from:
+        phrase += f" (lowered from {located.demoted_from})"
+    return phrase
+
+
 def _citation_phrase(finding: Finding) -> str:
     """The citation-check verdict as one reviewer sentence ("" when unchecked)."""
     citation = getattr(finding, "citation", None)
@@ -841,6 +853,9 @@ def _annot_content(
         lines.append(pointer)
     if finding.refs:
         lines.append("Refs: " + ", ".join(str(r) for r in finding.refs))
+    located = _located_phrase(finding)
+    if located:
+        lines.append(located)
     cite = _citation_phrase(finding)
     if cite:
         lines.append(cite)

@@ -267,9 +267,9 @@ def test_findings_csv_header_and_row_flattening():
     assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
     assert '"2,3"' in row                          # internal zero-based tile column
     assert ",r3c4," in row                         # human tile_label column (§17.1)
-    # recommended_action precedes the Phase B provenance tail (four cells,
-    # empty here — this finding carries no citation assessments).
-    assert row.rstrip().endswith("Verify the clearance on site.,,,,")
+    # recommended_action precedes the Phase B provenance tail (four cells) and
+    # the absence cross-check's three — all empty here.
+    assert row.rstrip().endswith("Verify the clearance on site.,,,,,,,")
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id
@@ -298,7 +298,7 @@ def test_findings_csv_provenance_columns_appended_at_tail():
 
     from drawing_analyzer.models import CitationAssessment
 
-    assert dx.FINDINGS_CSV_HEADER[-4:] == [
+    assert dx.FINDINGS_CSV_HEADER[-7:-3] == [
         "citation_adopted_edition", "citation_checked_edition",
         "citation_current_edition", "citation_evidence_url",
     ]
@@ -325,7 +325,18 @@ def test_findings_csv_provenance_columns_appended_at_tail():
     )
     # A finding with no assessments leaves the columns empty.
     bare = list(_csv.reader(_io.StringIO(dx.build_findings_csv([_finding()]))))[1]
-    assert bare[-4:] == ["", "", "", ""]
+    assert bare[-7:] == ["", "", "", "", "", "", ""]
+    # The absence cross-check's columns carry where the item was found.
+    from drawing_analyzer.models import LocatedElsewhere
+
+    located = _finding()
+    located.located_elsewhere = LocatedElsewhere(
+        "FP-001", quote="ITC SEE 4/FP-501", demoted_from="high",
+    )
+    row = list(_csv.reader(_io.StringIO(dx.build_findings_csv([located]))))[1]
+    cells = dict(zip(header, row))
+    assert (cells["located_sheet"], cells["located_quote"],
+            cells["located_lowered_from"]) == ("FP-001", "ITC SEE 4/FP-501", "high")
 
 
 def test_findings_csv_framing_is_crlf_and_the_file_has_a_bom(tmp_path):

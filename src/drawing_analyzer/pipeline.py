@@ -2302,6 +2302,80 @@ def _run_qc_stages(
 
     all_findings = entries
 
+    # --- absence cross-check: is "expected X; not found on this sheet" shown
+    # elsewhere in the set? A host-verified hit records where and lowers the
+    # finding to low; nothing is removed. Absences have no rectangle, so the
+    # crop verifier never sees them — this is their only check.
+    absence_stage = StageResult(
+        stage="absence_check", expected=bool(config.run_absence_check),
+    )
+    if config.run_absence_check:
+        from .absence_check import absence_check_model, check_absences, is_sheet_absence
+
+        candidates = [f for f in entries if is_sheet_absence(f)]
+        if not candidates or not geometries:
+            absence_stage.status = "SKIPPED_VALID"
+        else:
+            cancellation.check()
+            if progress is not None:
+                progress(total, total, "Checking reported absences")
+            _emit("STAGE_START", stage="absence_check", absences=len(candidates))
+            try:
+                ares = check_absences(
+                    candidates, geometries, client=client, cache=cache,
+                )
+                if ares.requests:
+                    _record_usage(
+                        run_usage, family="absence_check", instance="absence_check",
+                        model=absence_check_model(),
+                        input_tokens=ares.input_tokens, output_tokens=ares.output_tokens,
+                        request_usage=ares.request_usage,
+                        terminal_status="PARTIAL" if ares.partial else "COMPLETE",
+                    )
+                if ares.cached_requests:
+                    _record_usage(
+                        run_usage, family="absence_check", instance="absence_check_cache",
+                        model=absence_check_model(), transport="CACHE",
+                        cache_hit=True, parent="absence_check",
+                        terminal_status="PARTIAL" if ares.partial else "COMPLETE",
+                    )
+                absence_stage.calls_planned = ares.requests + ares.failed_requests
+                absence_stage.calls_succeeded = ares.requests
+                absence_stage.calls_failed = ares.failed_requests
+                absence_stage.items_in = ares.checked
+                absence_stage.items_out = ares.located
+                if ares.located:
+                    absence_stage.warnings.append(
+                        f"{ares.located} reported absence(s) shown in the set's text; "
+                        f"{ares.demoted} lowered to low severity"
+                    )
+                if ares.ungrounded:
+                    absence_stage.warnings.append(
+                        f"{ares.ungrounded} claimed location(s) discarded: the quote "
+                        "was not on the named sheet"
+                    )
+                if ares.omitted_chars:
+                    absence_stage.warnings.append(
+                        f"{ares.omitted_chars:,} text-layer character(s) did not fit "
+                        "the cross-check budget"
+                    )
+                if ares.partial:
+                    if ares.error:
+                        errors.append(f"Absence check: {ares.error}")
+                        absence_stage.errors.append(str(ares.error))
+                    absence_stage.warnings.append(
+                        f"{ares.unchecked} absence(s) left unchecked"
+                    )
+                    absence_stage.status = "PARTIAL"
+                else:
+                    absence_stage.status = "COMPLETE"
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Absence check: {exc}")
+                absence_stage.status = "FAILED"
+                absence_stage.errors.append(str(exc))
+                _log.warning("absence check failed: %s", exc)
+    _finish_stage(stage_results, journal, absence_stage)
+
     # A stop is honored at each paid stage's start (and inside it, at the
     # request gate) — see :mod:`~drawing_analyzer.cancellation`.
     cancellation.check()
@@ -2947,6 +3021,7 @@ def extract_drawing_context(
     identity: bool | None = None,
     review_plan: bool | None = None,
     investigate: bool | None = None,
+    absence_check: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     save_tile_artifacts: bool | None = None,
@@ -3150,6 +3225,7 @@ def extract_drawing_context(
         identity=identity,
         review_plan=review_plan,
         investigate=investigate,
+        absence_check=absence_check,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,

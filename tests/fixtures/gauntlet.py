@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from drawing_analyzer.absence_check import ABSENCE_CHECK_SYSTEM_PROMPT
 from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT
 from drawing_analyzer.cross_qc import (
@@ -470,6 +471,7 @@ class ScriptedQCClient(BetaClientMixin):
         self.plan_calls = 0
         self.plan_request_texts: list[str] = []
         self.investigate_calls = 0
+        self.absence_request_texts: list[str] = []
         # (request text, image bytes, whether a tool call was permitted) per turn.
         self.investigate_requests: list[tuple[str, list[bytes], bool]] = []
 
@@ -516,6 +518,8 @@ class ScriptedQCClient(BetaClientMixin):
             return self._plan(text)
         if system == INVESTIGATE_SYSTEM_PROMPT:
             return self._investigate(kw, text)
+        if system == ABSENCE_CHECK_SYSTEM_PROMPT:
+            return self._absence(text)
         return _msg("ok", 1, 1)
 
     # -- per-stage behaviors ------------------------------------------------ #
@@ -619,6 +623,16 @@ class ScriptedQCClient(BetaClientMixin):
                 verdict = v
                 break
         return _msg(json.dumps({"verdict": verdict, "note": "investigated"}), 60, 12)
+
+    def _absence(self, text: str) -> FakeMessage:
+        # Every reported absence is answered NOT_FOUND: the oracle set shows
+        # none of them elsewhere, so the stage must leave each finding as is.
+        self.absence_request_texts.append(text)
+        results = [
+            {"absence": handle, "verdict": "NOT_FOUND", "sheet": "", "quote": ""}
+            for handle in re.findall(r"^\[(A\d+)\] ", text, re.MULTILINE)
+        ]
+        return _msg(_fenced({"results": results}), 300, 30)
 
     def _identity(self, text: str) -> FakeMessage:
         self.identity_calls += 1

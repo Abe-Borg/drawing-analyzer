@@ -902,8 +902,15 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     statuses = {s.stage: s.status for s in ctx.stage_results}
     for stage in ("identity", "review_plan", "critique", "cross_qc", "synthesis",
                   "auditors", "prose_harvest", "edition_audit", "verification",
-                  "investigation", "citation", "markup"):
+                  "investigation", "citation", "absence_check", "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
+    # The two prose-harvested absences on M-101 were checked against the set's
+    # text layers; nothing shows them, so neither is lowered or relocated.
+    absence_texts = "\n".join(oracle.client.absence_request_texts)
+    assert G.PROSE_STRUCTURED in absence_texts and G.PROSE_DEGRADED in absence_texts
+    absences = [f for f in ctx.all_findings
+                if f.text in (G.PROSE_STRUCTURED, G.PROSE_DEGRADED)]
+    assert absences and all(e.located_elsewhere is None for e in absences)
     # Usage totals are the exact sum of the append-only ledger.
     assert ctx.total_input_tokens == sum(r.input_tokens for r in ctx.run_usage.records)
     assert ctx.total_output_tokens == sum(r.output_tokens for r in ctx.run_usage.records)

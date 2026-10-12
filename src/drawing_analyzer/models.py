@@ -1179,6 +1179,50 @@ class CitationAssessment:
 
 
 @dataclass
+class LocatedElsewhere:
+    """Where the absence cross-check found content a finding reported missing.
+
+    Set only for a sheet-level absence ("expected X; not found on this sheet")
+    whose expected content the cross-check located, with a quote the host
+    re-found verbatim in that sheet's own text. ``same_sheet`` means the text was
+    on the sheet the absence was reported on. ``demoted_from`` is the severity
+    the finding carried before the check lowered it to low ("" when it was
+    already low).
+    """
+
+    sheet_id: str
+    source_id: str = ""
+    source_name: str = ""
+    page_index: int = 0
+    quote: str = ""
+    same_sheet: bool = False
+    demoted_from: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "sheet_id": self.sheet_id,
+            "source_id": self.source_id,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+            "quote": self.quote,
+            "same_sheet": self.same_sheet,
+            "demoted_from": self.demoted_from,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LocatedElsewhere":
+        return cls(
+            sheet_id=str(d.get("sheet_id", "") or ""),
+            source_id=str(d.get("source_id", "") or ""),
+            source_name=str(d.get("source_name", "") or ""),
+            page_index=int(d.get("page_index", 0) or 0),
+            quote=str(d.get("quote", "") or ""),
+            same_sheet=bool(d.get("same_sheet", False)),
+            demoted_from=str(d.get("demoted_from", "") or ""),
+        )
+
+
+@dataclass
 class Finding:
     """One QC finding: a single reviewable issue anchored to a sheet.
 
@@ -1260,6 +1304,9 @@ class Finding:
     # "" = not assessed (older payload, or a channel that does not classify).
     # Appended last — see the positional-order note on RenderedSheet.
     evidence_state: str = ""
+    # Set by the absence cross-check when content this sheet-level absence
+    # reported missing was found, with a host-verified quote (post-seal only).
+    located_elsewhere: "LocatedElsewhere | None" = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -1309,6 +1356,8 @@ class Finding:
         }
         if self.citation is not None:
             out["citation"] = self.citation.to_dict()
+        if self.located_elsewhere is not None:
+            out["located_elsewhere"] = self.located_elsewhere.to_dict()
         return out
 
     @classmethod
@@ -1348,6 +1397,10 @@ class Finding:
                 for a in (d.get("citations") or [])
                 if isinstance(a, dict)
             ],
+            located_elsewhere=(
+                LocatedElsewhere.from_dict(d["located_elsewhere"])
+                if isinstance(d.get("located_elsewhere"), dict) else None
+            ),
             id=d.get("id", ""),
         )
 
@@ -1736,7 +1789,7 @@ CONFIGURATION_KINDS = ("NORMAL", "DEBUG_OVERRIDE")
 # exhaustive QC and are not individually overridable here.
 _OVERRIDABLE_EXHAUSTIVE_STAGES = (
     "synthesis", "critique", "cross_qc", "verification", "citation",
-    "identity", "review_plan", "investigation",
+    "identity", "review_plan", "investigation", "absence_check",
 )
 
 
@@ -2063,6 +2116,9 @@ class RunConfiguration:
     # Phase C (universal reviewer): the agentic investigation loop that escalates
     # UNCERTAIN verification verdicts. Rides the verification stage it escalates.
     run_investigation: bool = False
+    # The absence cross-check: is content a sheet-level absence reported missing
+    # shown elsewhere in the set? Rides the critique, which reports absences.
+    run_absence_check: bool = False
     # Markup gating / transport, carried through verbatim (not product-derived).
     markup_verified_only: bool = False
     ink_rejected: bool = False
@@ -2115,6 +2171,7 @@ class RunConfiguration:
             "run_identity": self.run_identity,
             "run_review_plan": self.run_review_plan,
             "run_investigation": self.run_investigation,
+            "run_absence_check": self.run_absence_check,
             "markup_verified_only": self.markup_verified_only,
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
@@ -2137,6 +2194,7 @@ def resolve_run_configuration(
     identity: "bool | None" = None,
     review_plan: "bool | None" = None,
     investigate: "bool | None" = None,
+    absence_check: "bool | None" = None,
     markup_verified_only: bool = False,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
@@ -2210,6 +2268,14 @@ def resolve_run_configuration(
     else:
         run_investigation = _exhaustive_switch(investigate, "investigation")
 
+    # The absence cross-check checks the critique's sheet-level absences, so
+    # unspecified it runs exactly when the critique does (the same tri-state
+    # contract as investigation).
+    if absence_check is None:
+        run_absence_check = run_critique
+    else:
+        run_absence_check = _exhaustive_switch(absence_check, "absence_check")
+
     # ``deterministic_audit_only`` is the "free battery, zero incremental API"
     # promise (DA-013): true ONLY when reference_audit is on, QC is not exhaustive,
     # and no expert flag enabled a model-calling stage. An expert who combines
@@ -2220,10 +2286,12 @@ def resolve_run_configuration(
     # Investigation is deliberately absent here: like verification (whose gate
     # it rides), the stage runs only inside markup runs, so an explicit
     # ``investigate=True`` outside markup never places a call and cannot break
-    # the zero-API promise.
+    # the zero-API promise. The absence check is not gated on markup: an
+    # explicit ``absence_check=True`` can send any sheet-level absence the
+    # digest reported, so it is a paid stage like the rest.
     any_paid_expert = (
         run_synthesis or run_critique or run_cross_qc or run_citation
-        or run_identity or run_review_plan
+        or run_identity or run_review_plan or run_absence_check
     )
     audit_only = bool(reference_audit) and not exhaustive and not any_paid_expert
 
@@ -2250,6 +2318,7 @@ def resolve_run_configuration(
         run_identity=run_identity,
         run_review_plan=run_review_plan,
         run_investigation=run_investigation,
+        run_absence_check=run_absence_check,
         markup_verified_only=bool(markup_verified_only),
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
@@ -2321,7 +2390,7 @@ def roll_up_qc_status(
 USAGE_TRANSPORTS = ("REAL_TIME", "BATCH", "CACHE")
 USAGE_STAGE_FAMILIES = (
     "digest", "critique", "synthesis", "focus", "harvest", "cross_qc", "verify", "citation",
-    "identity", "review_plan", "investigate",
+    "identity", "review_plan", "investigate", "absence_check",
 )
 USAGE_TERMINAL_STATUSES = ("COMPLETE", "PARTIAL", "FAILED")
 
