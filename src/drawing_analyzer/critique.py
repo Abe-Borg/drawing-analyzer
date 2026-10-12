@@ -178,7 +178,12 @@ contradicts another on THIS sheet.
 sheet (a giveaway that it was copied from another sheet and not updated).
 - absences — content that a complete sheet of this discipline is expected to \
 show but this one does not (a required test, drain, sign, clearance, note, tag, \
-or detail). Phrase each as "expected X; not found on this sheet."
+or detail). Phrase each as "expected X; not found on this sheet." You see only \
+this sheet, and such content often lives elsewhere in the set (a general-notes, \
+detail, or schedule sheet) or in the specifications. So report an absence at low \
+severity unless X belongs on THIS sheet in particular — part of what this sheet \
+itself draws, schedules, or details, such as a component missing from the riser \
+it draws — and then say why in the finding text.
 
 Ground every finding in what is (or is provably not) on the sheet: quote the \
 exact supporting string from the SHEET TEXT LAYER when there is one, and never \
