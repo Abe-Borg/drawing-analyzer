@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Update Anthropic SDK to 1.13.0 (runtime range `<1.14`, release lock, and
+  `requirements.txt`). The 1.12/1.13 releases add no breaking changes; the
+  hermetic suite passes unchanged. Models are already the current generation
+  (Opus 5.5, Sonnet 5.5, Haiku 5.5).
+
 ## [1.10.0] - 2026-10-08
 
 ### Added
