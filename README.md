@@ -1685,7 +1685,10 @@ only on concrete evidence pushed every gap toward "supports". A support with no
 https evidence link is recorded as `UNRESOLVABLE`, with the reason in its note.
 `UNRESOLVABLE` is a concluded check, not a failure: it is cached like any other
 verdict, does not hold the stage at `PARTIAL`, and is counted in a stage
-warning. On the drawing it reads *Code ref not confirmed*.
+warning. On the drawing it reads *Code ref not confirmed*. In the derived
+summary a mismatch outranks an unconfirmed reference, which outranks a support,
+so a finding citing two references never reads "supports" while one of them
+went unconfirmed.
 
 The **adopted editions** are harvested offline from the sheet text layers (the
 general-notes "NFPA 13, 2016 EDITION" claims), merged with the identity-detected

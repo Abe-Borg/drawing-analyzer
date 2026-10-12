@@ -732,19 +732,21 @@ def test_check_citations_verdict_only_covers_the_request_that_included_the_claim
     assert f_gamma.citation.status == "CHECKED_SUPPORTS"
 
 
-def test_check_citations_multi_reference_finding_keeps_each_assessment():
+@pytest.mark.parametrize("ibc_verdict", ["CHECKED_MISMATCH", "UNRESOLVABLE"])
+def test_check_citations_multi_reference_finding_keeps_each_assessment(ibc_verdict):
     f = _f("cites two codes", refs=["NFPA 13 §8.1", "IBC 903.3"])
-    # Route by REFERENCE (each request is for one ref): IBC mismatches, NFPA supports.
+    # Route by REFERENCE (each request is for one ref): IBC fails, NFPA supports.
     client = _PerClaimClient(
-        lambda h, body: "CHECKED_MISMATCH" if "IBC 903.3" in body else "CHECKED_SUPPORTS"
+        lambda h, body: ibc_verdict if "IBC 903.3" in body else "CHECKED_SUPPORTS"
     )
     check_citations([f], [], client=client, sleep=lambda *_: None)
     # DA-017: per-reference assessments are retained, not collapsed into one status.
     assert len(f.citations) == 2
     refs = {a.reference: a.status for a in f.citations}
-    assert refs == {"NFPA 13 §8.1": "CHECKED_SUPPORTS", "IBC 903.3": "CHECKED_MISMATCH"}
-    # The combined summary reports the dominant (mismatch) reference, attributed.
-    assert f.citation.status == "CHECKED_MISMATCH"
+    assert refs == {"NFPA 13 §8.1": "CHECKED_SUPPORTS", "IBC 903.3": ibc_verdict}
+    # The combined summary (what the markup and CSV show) reports the reference
+    # the support must not hide, attributed.
+    assert f.citation.status == ibc_verdict
     assert "IBC 903.3" in f.citation.note
 
 

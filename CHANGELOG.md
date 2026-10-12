@@ -17,8 +17,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   evidence page: a `CHECKED_SUPPORTS` with no https evidence URL is recorded as
   `UNRESOLVABLE`. `UNRESOLVABLE` is a concluded check: it is cached, it does not
   hold the stage at `PARTIAL` (only `UNCHECKED` does), the stage table counts it
-  in a warning, and the markup reads *Code ref not confirmed*. The citation
-  prompt edit re-keys the verdict cache, so each citation is re-checked once.
+  in a warning, and the markup reads *Code ref not confirmed*. On a finding
+  citing several references, an unconfirmed one outranks a support in the
+  summary the markup and CSV show, so one confirmed reference cannot vouch for
+  another. The citation prompt edit re-keys the verdict cache, so each citation
+  is re-checked once.
 
 - Increase default real-time digest and verification concurrency from 4 to 6
   workers. Explicit `max_workers` arguments and `DRAWING_ANALYZER_MAX_WORKERS`

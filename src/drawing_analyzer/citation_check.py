@@ -1116,9 +1116,11 @@ class CitationCheckResult:
 def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation | None:
     """One back-compat :class:`Citation` for a finding from its per-ref assessments.
 
-    A single mismatch dominates (that's the signal worth ink); else a support; else
-    unchecked. Notes are prefixed with their reference when a finding cites more than
-    one, so the popup stays attributable.
+    A single mismatch dominates (that's the signal worth ink); else an unconfirmed
+    reference, which a support on another reference must not hide (the markup and
+    CSV read only this summary); else a support; else unchecked. Notes are prefixed
+    with their reference when a finding cites more than one, so the popup stays
+    attributable.
     """
     if not assessments:
         return None
@@ -1132,7 +1134,7 @@ def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation
                 parts.append(f"{a.reference}: {v}" if multi else v)
         return " | ".join(parts)[:400]
 
-    for wanted in ("CHECKED_MISMATCH", "CHECKED_SUPPORTS", "UNRESOLVABLE", "UNCHECKED"):
+    for wanted in ("CHECKED_MISMATCH", "UNRESOLVABLE", "CHECKED_SUPPORTS", "UNCHECKED"):
         hits = [a for a in assessments if a.status == wanted]
         if hits:
             status = wanted if wanted in _VALID_VERDICTS else "UNCHECKED"
