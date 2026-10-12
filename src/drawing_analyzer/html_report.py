@@ -972,7 +972,9 @@ def _finding_row_html(
         # Legacy single-verdict summary (a finding from an older cached run).
         citation = getattr(f, "citation", None)
         if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
-            cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
+            cite_label = {
+                "CHECKED_SUPPORTS": "supports", "UNRESOLVABLE": "not confirmed",
+            }.get(citation.status, "mismatch")
             cite_note = (getattr(citation, "note", "") or "").strip()
             css = ("citation-note citation-mismatch"
                    if citation.status == "CHECKED_MISMATCH" else "muted citation-note")

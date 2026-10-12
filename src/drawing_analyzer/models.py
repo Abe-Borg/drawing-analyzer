@@ -1081,10 +1081,12 @@ class Citation:
     found a discrepancy (a stale section number, a renumbered edition, a section
     that says something else). A MISMATCH downgrades nothing automatically — it is
     surfaced for the engineer; sometimes the stale citation *is* the finding.
+    ``UNRESOLVABLE`` — the check ran but found no authoritative text to decide.
     ``UNCHECKED`` — the check didn't run or couldn't reach a verdict.
     """
 
-    status: str = "UNCHECKED"           # CHECKED_SUPPORTS | CHECKED_MISMATCH | UNCHECKED
+    # CHECKED_SUPPORTS | CHECKED_MISMATCH | UNRESOLVABLE | UNCHECKED
+    status: str = "UNCHECKED"
     note: str = ""
     edition_notes: str = ""
 
@@ -1104,9 +1106,11 @@ class Citation:
         )
 
 
-# Per-claim citation verdict statuses. ``UNRESOLVABLE`` marks a reference the
-# checker could not evaluate at all; ``UNCHECKED`` a claim whose request/parser
-# failed. Both make the citation stage PARTIAL but never downgrade the finding.
+# Per-claim citation verdict statuses. ``UNRESOLVABLE`` marks a claim the
+# checker searched for but could not decide (no authoritative text found, or a
+# support given with no evidence link); ``UNCHECKED`` a claim whose request or
+# parser failed, or that was never sent. Only ``UNCHECKED`` makes the citation
+# stage PARTIAL. Neither downgrades the finding.
 CITATION_ASSESSMENT_STATUSES = (
     "CHECKED_SUPPORTS", "CHECKED_MISMATCH", "UNCHECKED", "UNRESOLVABLE",
 )

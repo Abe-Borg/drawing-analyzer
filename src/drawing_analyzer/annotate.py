@@ -208,6 +208,7 @@ _UNANCHORED_QUOTE_CAUTION = (
 _CITATION_PHRASE = {
     "CHECKED_SUPPORTS": "Code ref checked - it supports this finding.",
     "CHECKED_MISMATCH": "Code ref may be outdated",  # "- note (editions: X)" appended
+    "UNRESOLVABLE": "Code ref not confirmed - no authoritative text found.",
 }
 # Index-page status column, in reviewer words (raw statuses are pipeline jargon).
 _INDEX_STATUS_LABEL = {

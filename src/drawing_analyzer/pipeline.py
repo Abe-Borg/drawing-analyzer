@@ -2609,9 +2609,10 @@ def _run_qc_stages(
                 # request whose responses did not carry the field contributes
                 # the pre-Phase-B lower bound of 1 (each issued request runs
                 # >=1 search). Tokens are exact either way.
-                # A run is PARTIAL when any claim was left UNCHECKED/UNRESOLVABLE
-                # (DA-017 §16.5) — not only on a hard error — so a request/parser/
-                # tool failure for a cited claim can never masquerade as COMPLETE.
+                # A run is PARTIAL when any claim was left UNCHECKED (DA-017
+                # §16.5) — not only on a hard error — so a request/parser/tool
+                # failure for a cited claim can never masquerade as COMPLETE. An
+                # UNRESOLVABLE claim was checked; it is reported, not PARTIAL.
                 partial = bool(cires.error) or bool(getattr(cires, "partial", False))
                 # ``web_search_requests`` already embeds the per-request lower
                 # bound for responses that carried no server count — and is
@@ -2668,6 +2669,15 @@ def _run_qc_stages(
                         f"{capped_refs} normalized reference(s) left unchecked beyond "
                         f"the per-run citation budget ({cires.ref_budget}); "
                         "raise DRAWING_ANALYZER_CITATION_MAX_REFS to check more"
+                    )
+                unresolvable_claims = sum(
+                    1 for a in (getattr(cires, "assessments", None) or [])
+                    if getattr(a, "status", "") == "UNRESOLVABLE"
+                )
+                if unresolvable_claims:
+                    citation_stage.warnings.append(
+                        f"{unresolvable_claims} cited claim(s) could not be confirmed "
+                        "from available sources (UNRESOLVABLE)"
                     )
                 if partial:
                     if cires.error:

@@ -311,10 +311,11 @@ class _CitationClient(BetaClientMixin):
         self.messages = _Msgs()
 
 
-def _verdict_block(status, note="n", editions="e"):
-    return "searched...\n```json\n" + json.dumps(
-        {"status": status, "note": note, "edition_notes": editions}
-    ) + "\n```"
+def _verdict_block(status, note="n", editions="e", url="https://example.org/clause"):
+    verdict = {"status": status, "note": note, "edition_notes": editions}
+    if url:
+        verdict["evidence_url"] = url
+    return "searched...\n```json\n" + json.dumps(verdict) + "\n```"
 
 
 def test_check_citations_attaches_verdicts_per_unique_ref():
@@ -374,11 +375,11 @@ def test_check_citations_old_shape_reply_defaults_new_fields():
     # A pre-Phase-B reply (no new keys) still parses; provenance stays "".
     f = _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
     res = check_citations(
-        [f], [], client=_CitationClient([_verdict_block("CHECKED_SUPPORTS")]),
+        [f], [], client=_CitationClient([_verdict_block("CHECKED_MISMATCH", url="")]),
         sleep=lambda *_: None,
     )
     (a,) = f.citations
-    assert a.status == "CHECKED_SUPPORTS"
+    assert a.status == "CHECKED_MISMATCH"
     assert a.checked_edition == "" and a.current_edition == "" and a.evidence_url == ""
     assert not res.partial
 
@@ -453,7 +454,8 @@ def test_citation_ttl_days_env(monkeypatch):
     assert citation_ttl_days() == 30
 
 
-def test_citation_cache_hit_reconstructs_and_expires():
+@pytest.mark.parametrize("verdict", ["CHECKED_MISMATCH", "UNRESOLVABLE"])
+def test_citation_cache_hit_reconstructs_and_expires(verdict):
     from drawing_analyzer.digest_cache import DigestCache
 
     cache = DigestCache(None, persist=False)
@@ -461,10 +463,12 @@ def test_citation_cache_hit_reconstructs_and_expires():
     clock = lambda: t["now"]  # noqa: E731 - injectable test clock (I-4)
 
     f1 = _cited_finding()
-    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    c1 = _CitationClient([_verdict_block(verdict, note="moved", url="")])
     r1 = check_citations([f1], [], client=c1, sleep=lambda *_: None,
                          cache=cache, now=clock)
-    assert r1.requests == 1 and r1.cached_requests == 0
+    # "No authoritative text found" is a concluded check, not a failure: it
+    # neither holds the stage at PARTIAL nor skips the cache.
+    assert r1.requests == 1 and r1.cached_requests == 0 and not r1.partial
 
     # Warm within the TTL: served from cache, no API call, verdict identical —
     # a cached MISMATCH still reads mismatched.
@@ -475,7 +479,7 @@ def test_citation_cache_hit_reconstructs_and_expires():
     assert c2.captured == []
     assert r2.cached_requests == 1 and r2.requests == 0
     assert r2.web_search_requests == 0 and not r2.partial
-    assert f2.citation.status == "CHECKED_MISMATCH"
+    assert f2.citation.status == verdict
     assert f2.citations[0].note == "moved"
 
     # 31 days later the entry is stale: a live re-check runs and overwrites.
@@ -646,7 +650,8 @@ class _PerClaimClient(BetaClientMixin):
                 body = kw["messages"][0]["content"]
                 handles = _re.findall(r"\[(C\d+)\]", body)
                 entries = [
-                    {"claim": h, "status": outer._status_for(h, body), "note": "n"}
+                    {"claim": h, "status": outer._status_for(h, body), "note": "n",
+                     "evidence_url": "https://example.org/clause"}
                     for h in handles
                 ]
                 text = "searched...\n```json\n" + json.dumps(
@@ -727,19 +732,21 @@ def test_check_citations_verdict_only_covers_the_request_that_included_the_claim
     assert f_gamma.citation.status == "CHECKED_SUPPORTS"
 
 
-def test_check_citations_multi_reference_finding_keeps_each_assessment():
+@pytest.mark.parametrize("ibc_verdict", ["CHECKED_MISMATCH", "UNRESOLVABLE"])
+def test_check_citations_multi_reference_finding_keeps_each_assessment(ibc_verdict):
     f = _f("cites two codes", refs=["NFPA 13 §8.1", "IBC 903.3"])
-    # Route by REFERENCE (each request is for one ref): IBC mismatches, NFPA supports.
+    # Route by REFERENCE (each request is for one ref): IBC fails, NFPA supports.
     client = _PerClaimClient(
-        lambda h, body: "CHECKED_MISMATCH" if "IBC 903.3" in body else "CHECKED_SUPPORTS"
+        lambda h, body: ibc_verdict if "IBC 903.3" in body else "CHECKED_SUPPORTS"
     )
     check_citations([f], [], client=client, sleep=lambda *_: None)
     # DA-017: per-reference assessments are retained, not collapsed into one status.
     assert len(f.citations) == 2
     refs = {a.reference: a.status for a in f.citations}
-    assert refs == {"NFPA 13 §8.1": "CHECKED_SUPPORTS", "IBC 903.3": "CHECKED_MISMATCH"}
-    # The combined summary reports the dominant (mismatch) reference, attributed.
-    assert f.citation.status == "CHECKED_MISMATCH"
+    assert refs == {"NFPA 13 §8.1": "CHECKED_SUPPORTS", "IBC 903.3": ibc_verdict}
+    # The combined summary (what the markup and CSV show) reports the reference
+    # the support must not hide, attributed.
+    assert f.citation.status == ibc_verdict
     assert "IBC 903.3" in f.citation.note
 
 
@@ -1214,7 +1221,8 @@ def test_citation_verdict_parses_without_a_fence():
     from drawing_analyzer.citation_check import _parse_assessments
 
     verdict = {
-        "assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok"}],
+        "assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok",
+                         "evidence_url": "https://example.org/clause"}],
         "edition_notes": "2025 edition",
     }
     per, notes, parsed = _parse_assessments(
@@ -1223,6 +1231,31 @@ def test_citation_verdict_parses_without_a_fence():
     assert parsed is True
     assert per["C1"]["status"] == "CHECKED_SUPPORTS"
     assert notes == "2025 edition"
+
+
+@pytest.mark.parametrize(
+    ("status", "url", "expected"),
+    [
+        ("CHECKED_SUPPORTS", "https://example.org/clause", "CHECKED_SUPPORTS"),
+        # A support the model cannot point to is no assurance at all.
+        ("CHECKED_SUPPORTS", "", "UNRESOLVABLE"),
+        ("CHECKED_SUPPORTS", "http://insecure.example.org/x", "UNRESOLVABLE"),
+        ("CHECKED_MISMATCH", "", "CHECKED_MISMATCH"),
+        ("UNRESOLVABLE", "", "UNRESOLVABLE"),
+        ("UNCHECKED", "", None),      # never a model verdict: the claim stays unparsed
+    ],
+)
+def test_citation_support_needs_an_evidence_link(status, url, expected):
+    import json as _json
+
+    from drawing_analyzer.citation_check import _parse_assessments
+
+    reply = _json.dumps({"assessments": [
+        {"claim": "C1", "status": status, "note": "n", "evidence_url": url},
+    ]})
+    per, _notes, parsed = _parse_assessments(reply, ["C1"])
+    assert parsed is True
+    assert (per["C1"]["status"] if "C1" in per else None) == expected
 
 
 def test_overflow_review_note_contents_stays_truncated(tmp_path):

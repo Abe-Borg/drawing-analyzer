@@ -25,8 +25,11 @@ REJECTED are left UNCHECKED, as are refs beyond the severity-first per-run budge
 
 The verdict is informational: ``CHECKED_MISMATCH`` downgrades nothing
 automatically (sometimes the stale citation *is* the finding); it is surfaced to
-the engineer. Failures degrade to ``UNCHECKED`` and make the stage PARTIAL — the
-run never dies (I-3) and the engineering finding is never suppressed.
+the engineer. ``UNRESOLVABLE`` is the model's "no authoritative text found either
+way" (a paywalled code), and a support with no evidence URL is recorded as one;
+it is a concluded check, not a failure. Failures degrade to ``UNCHECKED`` and make
+the stage PARTIAL — the run never dies (I-3) and the engineering finding is never
+suppressed.
 
 The set's **adopted editions** are harvested offline from the sheet text layers
 (general-notes sheets state them: "NFPA 13, 2016 EDITION") and included in the
@@ -142,7 +145,11 @@ _MAX_CLAIMS_PER_REQUEST = 8
 
 _DEFAULT_WEB_SEARCH_TOOL_TYPE = WEB_SEARCH_TOOL_TYPE
 
-_VALID_VERDICTS = frozenset({"CHECKED_SUPPORTS", "CHECKED_MISMATCH"})
+# The verdicts a reply may carry. ``UNRESOLVABLE`` is the honest "could not
+# find authoritative text": without it the model had to pick a side, and the
+# prompt's "mismatch only on concrete evidence" pushed every gap to SUPPORTS.
+# It is a concluded check (cached, stage COMPLETE), unlike ``UNCHECKED``.
+_VALID_VERDICTS = frozenset({"CHECKED_SUPPORTS", "CHECKED_MISMATCH", "UNRESOLVABLE"})
 
 
 def citation_model() -> str:
@@ -650,9 +657,17 @@ drawing set, the code editions the set says it adopts, and a numbered list of th
 distinct CLAIMS on the drawings that cite it. Using web search, check whether that \
 section — in the ADOPTED edition (if stated) and in the CURRENT edition — exists \
 and actually supports EACH claim. Watch for renumbering between editions (a section \
-number valid in one edition may have moved in a later one). Be conservative: report \
-a mismatch only when you found concrete evidence of one. Judge each claim on its own \
-— different claims citing the same section can have different verdicts.
+number valid in one edition may have moved in a later one). Judge each claim on \
+its own — different claims citing the same section can have different verdicts:
+
+- CHECKED_SUPPORTS: you found the section's text, or an authoritative excerpt of \
+it, and it supports the claim. Give that page as evidence_url; a support with no \
+evidence_url is recorded as UNRESOLVABLE.
+- CHECKED_MISMATCH: you found concrete evidence that the section does not support \
+the claim (it says something else, does not exist, or was renumbered).
+- UNRESOLVABLE: you could not find authoritative text to decide either way — e.g. \
+the code is not freely published and no reliable excerpt turned up. This is an \
+acceptable answer; do not guess.
 
 Prefer section-specific or clause-level publisher/AHJ pages when fetching text;
 whole code books may be truncated before the relevant clause.
@@ -664,12 +679,12 @@ your search evidence contradicts it, follow the evidence and say so in the note.
 
 After searching, output a SINGLE fenced code block labeled json and nothing after \
 it, containing exactly: {"assessments": [{"claim": "<the claim's handle, e.g. C1>", \
-"status": "CHECKED_SUPPORTS" or "CHECKED_MISMATCH", "note": "<= 30 words on whether \
-the section supports THIS claim", "checked_edition": "<the code edition you \
+"status": "CHECKED_SUPPORTS" or "CHECKED_MISMATCH" or "UNRESOLVABLE", "note": "<= 30 \
+words on whether the section supports THIS claim", "checked_edition": "<the code edition you \
 actually verified this claim against, e.g. NFPA 13 2025, or \\"\\" if unclear>", \
 "current_edition": "<the current published edition you found while searching, or \
-\\"\\">", "evidence_url": "<the single best https URL supporting THIS verdict, or \
-\\"\\">"}], "edition_notes": "<= 40 words on edition/renumbering differences, or \
+\\"\\">", "evidence_url": "<the single best https URL supporting THIS verdict \
+(required for CHECKED_SUPPORTS), or \\"\\">"}], "edition_notes": "<= 40 words on edition/renumbering differences, or \
 \\"\\""}. Include exactly one entry per claim handle."""
 
 
@@ -765,13 +780,24 @@ def _norm_evidence_url(raw: Any) -> str:
 
 
 def _verdict_fields(a: dict, status: str) -> dict:
-    """One claim's bounded verdict record (Phase B structured provenance)."""
+    """One claim's bounded verdict record (Phase B structured provenance).
+
+    A ``CHECKED_SUPPORTS`` with no usable evidence URL is recorded as
+    ``UNRESOLVABLE``: a support the model cannot point to is an assurance the
+    reviewer cannot check. Applied here, before caching, so a warm run serves
+    the same verdict.
+    """
+    note = str(a.get("note", "") or "").strip()
+    evidence_url = _norm_evidence_url(a.get("evidence_url"))
+    if status == "CHECKED_SUPPORTS" and not evidence_url:
+        status = "UNRESOLVABLE"
+        note = "Support claimed with no evidence link. " + note
     return {
         "status": status,
-        "note": str(a.get("note", "") or "").strip()[:_NOTE_CAP],
+        "note": note.strip()[:_NOTE_CAP],
         "checked_edition": _norm_edition_field(a.get("checked_edition")),
         "current_edition": _norm_edition_field(a.get("current_edition")),
-        "evidence_url": _norm_evidence_url(a.get("evidence_url")),
+        "evidence_url": evidence_url,
     }
 
 
@@ -1054,8 +1080,9 @@ class CitationCheckResult:
     claims dominates). ``assessments`` is the flat list of per-claim
     :class:`~drawing_analyzer.models.CitationAssessment` records, each bound to the
     exact findings whose claim it covered (DA-017). ``partial`` is True when any
-    claim was left UNCHECKED / UNRESOLVABLE (including rejected/budget skips) so the
-    pipeline can mark the stage PARTIAL, never a clean COMPLETE.
+    claim was left UNCHECKED (including rejected/budget skips) so the pipeline can
+    mark the stage PARTIAL, never a clean COMPLETE. An UNRESOLVABLE claim was
+    checked and could not be decided; it does not make the stage partial.
     """
 
     checked: int = 0                 # normalized refs admitted (including cache hits)
@@ -1089,9 +1116,11 @@ class CitationCheckResult:
 def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation | None:
     """One back-compat :class:`Citation` for a finding from its per-ref assessments.
 
-    A single mismatch dominates (that's the signal worth ink); else a support; else
-    unchecked. Notes are prefixed with their reference when a finding cites more than
-    one, so the popup stays attributable.
+    A single mismatch dominates (that's the signal worth ink); else an unconfirmed
+    reference, which a support on another reference must not hide (the markup and
+    CSV read only this summary); else a support; else unchecked. Notes are prefixed
+    with their reference when a finding cites more than one, so the popup stays
+    attributable.
     """
     if not assessments:
         return None
@@ -1105,7 +1134,7 @@ def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation
                 parts.append(f"{a.reference}: {v}" if multi else v)
         return " | ".join(parts)[:400]
 
-    for wanted in ("CHECKED_MISMATCH", "CHECKED_SUPPORTS", "UNRESOLVABLE", "UNCHECKED"):
+    for wanted in ("CHECKED_MISMATCH", "UNRESOLVABLE", "CHECKED_SUPPORTS", "UNCHECKED"):
         hits = [a for a in assessments if a.status == wanted]
         if hits:
             status = wanted if wanted in _VALID_VERDICTS else "UNCHECKED"
