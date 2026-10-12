@@ -15,6 +15,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `requirements.txt`). The 1.12/1.13 releases add no breaking changes; the
   hermetic suite passes unchanged. Models are already the current generation
   (Opus 5.5, Sonnet 5.5, Haiku 5.5).
+- **The overview and focus report say they predate QC.** Both are written from
+  the digests before the QC stages run and ship as written, so a conflict they
+  allege can outlive a finding verification later rejected. On a QC run with
+  findings, each card in the HTML report now opens with a one-line note
+  pointing to the QC Findings table. The **Ask AI** system prompt gains the
+  matching rule: where the narrative and a finding's status disagree, the
+  status is the later judgment.
+
+### Fixed
+
+- **Prompt corrections in the QC stack.**
+  - Cross-sheet QC told the model to "lower the severity to `question`", but
+    `question` is a category, not a severity. An unconfirmed conflict is now
+    reported as category `question` at low severity.
+  - Cross-sheet QC no longer asks for `tile_label` (the whole-set and shard
+    prompts did; the reconcile prompt never had it). It reads digests and text layers only and is never shown a tile
+    or the sheet's grid, so a label it returned was a guess. A guessed tile
+    could rescue a quote the text did not support and put the cloud on the
+    wrong part of the sheet. Without one, a scanned sheet's quote is still
+    admitted at reduced trust and placed as a margin callout. A quote from a
+    hybrid sheet's pasted raster detail is now dropped as unmatched.
+  - Prose harvest now asks for `recommended_action`, as the digest, critique
+    and cross-sheet prompts already did; the structured-outputs schema mirrors
+    it. Harvested findings used to ship with no action.
+  - Dual-crop (cross-sheet) verification sends one crop per sheet but used the
+    single-crop system prompt, which tells the model it sees one crop of one
+    sheet. It now has its own prompt. `VERIFY_PROMPT_VERSION` is `verify-v3`.
+  - The review planner's example citation was `NFPA 13 2016 §19.2.3.2.5`,
+    which looks like a 2019-numbered section under a 2016 label: the error the
+    same prompt forbids. It is now `IBC 2024 §903.2`. The citation prompt's
+    example edition is now `NFPA 13 2025`.
+  - Each edited prompt rides its stage's cache key, so cross-sheet QC, prose
+    harvest, verification (single and dual crop, through the version bump),
+    the review plan and the citation check each re-run once. Digest and
+    critique entries are untouched.
 
 ### Fixed
 

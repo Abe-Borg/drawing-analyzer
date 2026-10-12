@@ -56,7 +56,7 @@ from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
 from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
-from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
+from drawing_analyzer.verify import VERIFY_CROSS_SYSTEM_PROMPT, VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import (
     BetaClientMixin,
     StreamingMessagesMixin,
@@ -493,7 +493,7 @@ class ScriptedQCClient(BetaClientMixin):
         system = _system_text(kw.get("system", ""))
         text = _joined_text(kw.get("messages", []))
 
-        if system == VERIFY_SYSTEM_PROMPT:
+        if system in (VERIFY_SYSTEM_PROMPT, VERIFY_CROSS_SYSTEM_PROMPT):
             return self._verify(kw, text)
         if system == HARVEST_SYSTEM_PROMPT:
             return self._harvest(text)

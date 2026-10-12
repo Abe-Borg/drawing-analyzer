@@ -406,9 +406,11 @@ one machine-readable finding. You are given the item and the sheet's verbatim \
 text layer. Output ONLY a fenced code block labeled json containing a single \
 object with: sheet_id; category (one of code, conflict, coordination, \
 question); severity (one of high, medium, low); text (the finding, at most two \
-sentences); source_quote (COPY VERBATIM a supporting string from the SHEET TEXT \
-LAYER — exact characters — or "" if no on-sheet string supports it); tile \
-(null); refs (an array, usually empty). Never invent quotes, tags, or values."""
+sentences); recommended_action (one sentence, imperative: what the reviewer should \
+DO about it — "" if the item implies no action); source_quote (COPY VERBATIM a \
+supporting string from the SHEET TEXT LAYER — exact characters — or "" if no \
+on-sheet string supports it); tile (null); refs (an array, usually empty). Never \
+invent quotes, tags, or values."""
 
 # Structured-outputs variant of the harvest prompt (opt-in,
 # ``DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS``). ONE substitution on the
@@ -445,11 +447,15 @@ HARVEST_FINDING_SCHEMA: dict = {
         "category": {"type": "string", "enum": sorted(_MODEL_FINDING_CATEGORIES)},
         "severity": {"type": "string", "enum": sorted(_FINDING_SEVERITIES)},
         "text": {"type": "string"},
+        "recommended_action": {"type": "string"},
         "source_quote": {"type": "string"},
         "tile": {"type": "null"},
         "refs": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["sheet_id", "category", "severity", "text", "source_quote", "tile", "refs"],
+    "required": [
+        "sheet_id", "category", "severity", "text", "recommended_action",
+        "source_quote", "tile", "refs",
+    ],
     "additionalProperties": False,
 }
 

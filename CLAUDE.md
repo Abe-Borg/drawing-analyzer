@@ -443,7 +443,9 @@ consume ledger entries and nothing else.
   truncated sheet**. Grounding is three-state (`classify_quote_evidence`):
   `TEXT_GROUNDED` / `NOT_MATCHED_IN_TEXT` / `TEXT_EVIDENCE_UNAVAILABLE`. Ask the
   **reported tile** (`_tile_has_words`) before classification; an unknown tile
-  answers that there was text. A quote unmatched where the sheet has text is a
+  answers that there was text. No cross-QC prompt asks for a `tile_label`: the
+  stage never sees a tile or the sheet's grid, so a label would be a guess. A
+  volunteered one is still bounds-checked. A quote unmatched where the sheet has text is a
   discard. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`. Reduced trust carries
   `evidence_state` and must reach verification: `anchor._anchor_one` falls back
   to the tile **only** for that state. `fact_tile_lookup` rejoins a leg by
@@ -481,7 +483,9 @@ consume ledger entries and nothing else.
   floor), and each span position is consumed once. The sub-phrase tier uses
   `_numbers_agree`. The 0.85 threshold stays as asserted. `verify.py` is the
   high-DPI crop re-check (VERIFIED / REJECTED / UNCERTAIN) at medium effort
-  inside an 8k envelope. Count every live call that returns no verdict
+  inside an 8k envelope. The dual-crop cross-sheet call sends
+  `VERIFY_CROSS_SYSTEM_PROMPT`, not the single-crop prompt; routing fakes match
+  both, and a verify prompt edit bumps `VERIFY_PROMPT_VERSION`. Count every live call that returns no verdict
   (`malformed` / `truncated` / `failed` via `_degrade_kind`); `degradation_note()`
   is one observational stage warning. Opt-in
   `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`: decide once at submit time and
@@ -557,7 +561,9 @@ consume ledger entries and nothing else.
   commit inside `step`; Stop is a turn latch (`stopRequested`) checked before
   and after tools; `stripDanglingToolUse` drops an unanswered `tool_use`; a
   turn's note is DOM-only unless that turn owns the last `displays` entry;
-  `activeStream` is released by identity. Request shape (`thinking`,
+  `activeStream` is released by identity. The overview and focus cards open
+  with `_pre_qc_note` (QC ran and left findings): that prose predates QC, and
+  the chat system prompt ranks a finding's status above it. Request shape (`thinking`,
   `webSearch`, `webFetch`) comes from the capability registry. A reader-supplied
   key outranks the embedded one, and the key row renders in both modes.
 
