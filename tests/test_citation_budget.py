@@ -34,6 +34,7 @@ class _Client(BetaClientMixin):
                     return outer.responses[len(outer.calls) - 1]
                 return FakeMessage(content=[FakeTextBlock(text=json.dumps({
                     "status": "CHECKED_SUPPORTS", "note": "clause supports claim",
+                    "evidence_url": "https://example.org/clause",
                 }))])
 
         self.messages = _Messages()

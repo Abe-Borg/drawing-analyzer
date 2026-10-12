@@ -518,7 +518,11 @@ consume ledger entries and nothing else.
   Sonnet 5.5 at medium effort (`web_search` + `web_fetch` per unique code ref;
   web fetch is unavailable on Opus 5, available on Opus 5.5, so Sonnet is a cost
   choice). Both tools carry the shared source-quality blocklist.
-  The resolved tool set rides the verdict cache key.
+  The resolved tool set rides the verdict cache key. Model verdicts are
+  `CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNRESOLVABLE` (`_VALID_VERDICTS`);
+  `_verdict_fields` records a support with no https evidence URL as
+  `UNRESOLVABLE`. That is a concluded check (cached, stage COMPLETE); only
+  `UNCHECKED` holds the stage at PARTIAL.
   The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
   ledger, including `pause_turn` resumes and error or still-paused exits.
   `digest._message_cache_usage` is the shared dict-tolerant reader.

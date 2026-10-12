@@ -748,8 +748,8 @@ _WHY_TRUST_IT = HelpDocument(
                 "On a QC run the model writes the review plan for this particular set, and "
                 "every code-based item on it has to name its code, section, and edition. "
                 "Those references are then put through the citation check like any other — "
-                "a section the model invented comes back as a mismatch instead of quietly "
-                "becoming the standard you were reviewed against."
+                "a section the model invented comes back as a mismatch or as not confirmed, "
+                "instead of quietly becoming the standard you were reviewed against."
             ),
         ),
         _section(
@@ -1277,6 +1277,12 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "A mismatch never silently downgrades a finding. It is surfaced with which "
                 "edition the verdict was checked against, what the current edition is, and "
                 "a link — because sometimes the stale citation IS the finding."
+            ),
+            _bullet(
+                "When no authoritative text turns up — common for codes that are not "
+                "freely published, such as NFPA standards — the verdict is NOT CONFIRMED "
+                "(UNRESOLVABLE), not a guess. A \"supports\" has to come with the link "
+                "that shows it, or it is recorded as not confirmed."
             ),
             _bullet(
                 "Verdicts are cached for 30 days by default; a partial or failed check is "

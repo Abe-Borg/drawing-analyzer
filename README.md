@@ -1671,8 +1671,21 @@ there are many), the model returns a **per-claim** verdict, and
 each `CitationAssessment` is bound to exactly the findings whose claim it covered.
 A finding that cites several references keeps one assessment **per reference**
 (`finding.citations`), and `finding.citation` is a derived summary
-(`CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNCHECKED`) shown in the markup popup,
-the CSV, and the report.
+(`CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNRESOLVABLE` / `UNCHECKED`) shown in
+the markup popup, the CSV, and the report.
+
+**Each claim gets one of three verdicts.** `CHECKED_SUPPORTS` means the model
+found the section's text (or an authoritative excerpt) and it supports the
+claim; it must name that page as its evidence link. `CHECKED_MISMATCH` means it
+found concrete evidence the section does not. `UNRESOLVABLE` means it could not
+find authoritative text to decide either way. That is common for codes that are
+not freely published, such as the NFPA standards. Before this third answer
+existed, the model had to pick a side, and the instruction to report a mismatch
+only on concrete evidence pushed every gap toward "supports". A support with no
+https evidence link is recorded as `UNRESOLVABLE`, with the reason in its note.
+`UNRESOLVABLE` is a concluded check, not a failure: it is cached like any other
+verdict, does not hold the stage at `PARTIAL`, and is counted in a stage
+warning. On the drawing it reads *Code ref not confirmed*.
 
 The **adopted editions** are harvested offline from the sheet text layers (the
 general-notes "NFPA 13, 2016 EDITION" claims), merged with the identity-detected

@@ -8,6 +8,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The citation check can answer "could not confirm".** Each claim now gets
+  `CHECKED_SUPPORTS`, `CHECKED_MISMATCH` or `UNRESOLVABLE`. Before, the model had
+  only the first two, and the instruction to report a mismatch only on concrete
+  evidence pushed every claim it could not settle toward "supports". That is
+  most claims citing codes that are not freely published, such as the NFPA
+  standards. The prompt now defines all three, and a "supports" must name its
+  evidence page: a `CHECKED_SUPPORTS` with no https evidence URL is recorded as
+  `UNRESOLVABLE`. `UNRESOLVABLE` is a concluded check: it is cached, it does not
+  hold the stage at `PARTIAL` (only `UNCHECKED` does), the stage table counts it
+  in a warning, and the markup reads *Code ref not confirmed*. The citation
+  prompt edit re-keys the verdict cache, so each citation is re-checked once.
+
 - Increase default real-time digest and verification concurrency from 4 to 6
   workers. Explicit `max_workers` arguments and `DRAWING_ANALYZER_MAX_WORKERS`
   overrides still take precedence, and pools remain capped at the work-item count.
