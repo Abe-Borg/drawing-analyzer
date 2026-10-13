@@ -443,14 +443,39 @@ def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
 
     monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-haiku-4-5")
     monkeypatch.setenv("DRAWING_ANALYZER_CROSS_QC_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("DRAWING_ANALYZER_ABSENCE_CHECK_MODEL", "claude-sonnet-5")
     models = resolve_stage_models(model=OPUS)
     assert models.synthesis == "claude-haiku-4-5"
     assert models.cross_qc == "claude-sonnet-5"
+    assert models.absence_check == "claude-sonnet-5"
+    absence = {c.stage: c for c in estimate_exhaustive_run_cost(10, model=OPUS).components}[
+        "Absence check"]
+    assert absence.cost == pytest.approx(estimate_request_cost(
+        absence.input_tokens, absence.output_tokens, model="claude-sonnet-5", batch=False,
+    ))
     assert models.digest == OPUS  # the threaded review model stands in for digest
     # ``distinct`` is first-appearance order with no repeats — it drives the
     # header sentence, so a duplicate would read as a stutter.
     assert len(models.distinct) == len(set(models.distinct))
     assert models.distinct[0] == OPUS
+
+
+def test_absence_estimate_quotes_the_whole_corpus_once_per_request():
+    # Every 25 absences re-send the set's text, so a set expected to report
+    # more than 25 absences is quoted more than one corpus read at its high end.
+    from drawing_analyzer.absence_check import _CORPUS_BUDGET, absence_check_model
+    from drawing_analyzer.cost import _ABSENCE_CHARS_PER_TOKEN
+
+    corpus = int(_CORPUS_BUDGET / _ABSENCE_CHARS_PER_TOKEN)
+    absence = {c.stage: c for c in estimate_exhaustive_run_cost(80, model=OPUS).components}[
+        "Absence check"]
+    requests = absence.input_tokens // corpus
+    assert absence.input_tokens == requests * corpus and requests > 1
+    assert corpus <= absence.input_tokens_low < absence.input_tokens
+    assert absence.low_cost < absence.cost
+    assert absence.cost == pytest.approx(requests * estimate_request_cost(
+        corpus, absence.output_tokens // requests, model=absence_check_model(), batch=False,
+    ))
 
 
 def test_exhaustive_total_is_none_when_any_stage_is_unpriced(monkeypatch):

@@ -227,9 +227,9 @@ map lives in `src/drawing_analyzer/__init__.py`.
   nothing. **Every call site wraps its request in
   `call_telemetry.scope(stage, item)`**, with `stage` = the usage family
   (`digest`, `critique`, `verify`, `investigate`, `citation`, `harvest`,
-  `identity`, `review_plan`, `cross_qc`, `synthesis`, `focus`) and `item` =
-  `sheet_item(ref)`, a finding id, a code ref, or `SET_ITEM` for one-per-run
-  stages (a shared item is what lets a raised-cap resend read as recovered).
+  `absence_check`, `identity`, `review_plan`, `cross_qc`, `synthesis`, `focus`)
+  and `item` = `sheet_item(ref)`, a finding id, a code ref, a chunk label
+  (`absences-<n>`), or `SET_ITEM` for one-per-run stages (a shared item is what lets a raised-cap resend read as recovered).
   Item allotments the request does not carry ride the scope
   (`evidence_rounds=`, `pause_resumes=`). An unscoped call is recorded as
   `unattributed (<module>)`; the gauntlet asserts one record per billed
@@ -480,6 +480,21 @@ consume ledger entries and nothing else.
   fraction slash, division slash, and multiplication sign. Invisible code points
   in `anchor.py` and `auditors/sheet_ids.py` are `\uXXXX` escapes, never
   literals.
+- **Absence cross-check** (`absence_check.py`): after numbering, before
+  verification; rides `run_critique` (`absence_check=False` is a debug
+  override; an explicit `True` counts in `any_paid_expert`, since it is not
+  gated on markup). Candidates are `is_sheet_absence` (`anchor_hint="SHEET"`,
+  no `also_on`, a source page, `critique._ABSENCE_RE` text). One text-only call
+  per 25 on Haiku 5.5 at medium effort (`PHASE_ABSENCE_CHECK`) over the set's
+  capped `sheet_text` under opaque `S###` handles, budgeted by `_allowances`
+  (`_CORPUS_BUDGET`, under Haiku's 100k-token tier; the cut is counted). A
+  FOUND counts only when `_ground` re-finds the quote (normalized, ≥2 words and
+  ≥6 chars) in the **named** sheet's `sheet_evidence_text`; an accepted hit sets
+  `Finding.located_elsewhere` and lowers high/medium to low. Never deletes;
+  NOT_FOUND changes nothing; specs are never searched. A reply missing a
+  handle, unparsed, or unfinished leaves those absences UNCHECKED and the stage
+  PARTIAL; only complete, non-fallback replies cache (`stage=absence_check`,
+  `_CACHE_CONTRACT`), and cached replies are re-grounded on every read.
 - **Disposition:** `anchor.py` maps a quote to a PDF rect: EXACT / FUZZY / TILE
   / UNANCHORED (UNANCHORED is the hallucination signal). Both fuzzy tiers carry
   the numeric veto: each digit-bearing token must sit at its own position in

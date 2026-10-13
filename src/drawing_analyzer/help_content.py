@@ -856,6 +856,7 @@ deterministic auditors          your PC   free
 arithmetic re-check (Decimal)   your PC   free
 edition audit                   your PC   free
 anchor quotes -> rectangles     your PC   free
+absence check  (1 call/25)      Anthropic paid
 verify         (1 call/finding) Anthropic paid
 investigate    (<=40, by size)  Anthropic paid
 citation check (per code ref)   Anthropic paid
@@ -1250,6 +1251,29 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "cached against the content of the whole set — so a warm re-run replays "
                 "the same evidence with no API calls, and any edit to a drawing throws the "
                 "cached answer away."
+            ),
+        ),
+        _section(
+            "A reported absence is checked against the rest of the set",
+            _para(
+                "The critique reads one sheet at a time, so \"expected X; not found on "
+                "this sheet\" can be wrong when X sits on the general-notes or details "
+                "sheet. Before such a finding is marked up, one text-only call per 25 "
+                "of them reads the set's text layers and says where, if anywhere, the "
+                "item appears."
+            ),
+            _bullet(
+                "A location counts only when its quote is found, exactly, on the sheet "
+                "it names. The finding is then lowered to low severity and says where "
+                "the item is shown. It is never deleted."
+            ),
+            _bullet(
+                "No match changes nothing. A text layer misses anything drawn only as "
+                "graphics, so its silence proves nothing either way."
+            ),
+            _bullet(
+                "Specifications are not searched: a spec that requires an item does not "
+                "show it on a drawing."
             ),
         ),
         _section(

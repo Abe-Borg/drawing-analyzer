@@ -42,6 +42,8 @@ Module layout::
     cross_qc.py       cross-sheet conflict hunt (text-only, dual anchors)
     prose_harvest.py  prose Coordination/Conflict/synthesis items -> ledger entries
     anchor.py         finding quote -> PDF rectangle resolution (offline)
+    absence_check.py  "not found on this sheet" findings searched for in the
+                      set's text layers (text-only; host-grounded hits)
     verify.py         per-finding crop verification pass
     citation_check.py web-search check of cited code sections
     annotate.py       reviewed-PDF markup writer + reopen/reconcile receipts

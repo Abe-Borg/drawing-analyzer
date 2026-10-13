@@ -6,6 +6,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Absence cross-check.** Before markup, every sheet-level absence (*"expected
+  X; not found on this sheet"*) is checked against the verbatim text layers of
+  the whole set. One text-only call on Haiku 5.5 at medium effort per 25
+  absences (`DRAWING_ANALYZER_ABSENCE_CHECK_MODEL`) answers each with `FOUND`
+  (a sheet and a verbatim quote) or `NOT_FOUND`. The host accepts a `FOUND`
+  only when the quote is in the named sheet's own source text. An accepted hit
+  is recorded on the finding as `located_elsewhere` and lowers a high or medium
+  finding to low; nothing is deleted, and `NOT_FOUND` changes nothing.
+  Specifications are not searched. The location shows in the drawing popup,
+  the HTML report, and three new trailing `findings.csv` columns
+  (`located_sheet`, `located_quote`, `located_lowered_from`). The stage rides
+  the critique (`absence_check=False` is a debug override), is priced in the
+  pre-run estimate (one request per 25 assumed absences; about 2–4 cents for
+  40 sheets), caches complete replies, and holds itself at `PARTIAL` when any
+  absence goes unchecked.
+
 ### Changed
 
 - **Absence findings default to low severity.** The critique reads one sheet at

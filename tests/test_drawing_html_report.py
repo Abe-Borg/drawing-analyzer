@@ -807,6 +807,22 @@ def test_finding_action_renders_and_is_escaped():
     assert 'class="finding-action"' not in bare
 
 
+def test_located_absence_renders_escaped():
+    from drawing_analyzer.models import LocatedElsewhere
+
+    f = _finding()
+    f.located_elsewhere = LocatedElsewhere(
+        sheet_id="FP-<001>", quote="PROVIDE ITC & <DRAIN>", demoted_from="high",
+    )
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert "Shown on FP-&lt;001&gt;: <code>PROVIDE ITC &amp; &lt;DRAIN&gt;</code>" in doc
+    assert "<DRAIN>" not in doc
+    bare = hr.build_html_report(
+        _findings_ctx(findings=[_finding()]), source_names=[SRC], now=NOW
+    )
+    assert 'class="finding-located' not in bare
+
+
 def test_evidence_thumbnail_only_with_link_evidence():
     ctx = _findings_ctx(findings=[_finding(evidence="evidence/abc123.png")])
     plain = hr.build_html_report(ctx, source_names=[SRC], now=NOW)

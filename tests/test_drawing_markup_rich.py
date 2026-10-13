@@ -15,6 +15,7 @@ from drawing_analyzer.models import (
     Anchor,
     Citation,
     Finding,
+    LocatedElsewhere,
     Verification,
     assign_qc_ids,
 )
@@ -38,15 +39,21 @@ def _f(text, *, source="a.pdf", page=0, rect=None, hint="", sev="medium",
 def test_qc_id_round_trips_through_dict():
     f = _f("x", rect=[1, 2, 3, 4], refs=["NFPA 13"])
     f.citation = Citation(status="CHECKED_SUPPORTS", note="ok", edition_notes="2019+")
+    f.located_elsewhere = LocatedElsewhere(
+        sheet_id="FP-001", source_id="SRC-0002", source_name="notes.pdf",
+        page_index=3, quote="PROVIDE ITC", demoted_from="high",
+    )
     assign_qc_ids([f])
     d = f.to_dict()
     back = Finding.from_dict(d)
     assert back.qc_id == f.qc_id == "QC-001"
     assert back.citation is not None and back.citation.status == "CHECKED_SUPPORTS"
+    assert back.located_elsewhere == f.located_elsewhere
     # A finding without a citation omits the key entirely (compact JSON).
     bare = _f("y")
     assert "citation" not in bare.to_dict()
     assert Finding.from_dict(bare.to_dict()).citation is None
+    assert Finding.from_dict(bare.to_dict()).located_elsewhere is None
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +149,18 @@ def test_popup_single_read_folds_into_the_unverified_note():
     assert content.rstrip().endswith(
         "Not yet verified (seen in one AI read) - double-check on the sheet."
     )
+
+
+@pytest.mark.parametrize("same_sheet, where", [(False, "FP-001"), (True, "this sheet")])
+def test_popup_says_where_a_reported_absence_is_shown(same_sheet, where):
+    f = _f("Inspector's test connection not shown.", hint="SHEET", sev="low")
+    f.located_elsewhere = LocatedElsewhere(
+        sheet_id="FP-001", source_name="notes.pdf", quote="PROVIDE ITC AT REMOTE END",
+        same_sheet=same_sheet, demoted_from="medium",
+    )
+    content = _annot_content(f, unverified=True)
+    assert f'Shown on {where}: "PROVIDE ITC AT REMOTE END" (lowered from medium)' in content
+    assert "Shown on" not in _annot_content(_f("x", hint="SHEET"), unverified=True)
 
 
 def test_popup_conflict_pointer_is_ascii():

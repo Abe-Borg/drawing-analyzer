@@ -1000,6 +1000,10 @@ FINDINGS_CSV_HEADER = [
     # "ref: value | …") — appended so existing column positions are unchanged.
     "citation_adopted_edition", "citation_checked_edition",
     "citation_current_edition", "citation_evidence_url",
+    # Absence cross-check: where content a sheet-level absence reported missing
+    # was found, and the severity it carried before being lowered — appended so
+    # existing column positions are unchanged.
+    "located_sheet", "located_quote", "located_lowered_from",
 ]
 
 
@@ -1113,6 +1117,21 @@ def _finding_row(finding: Any) -> list[str]:
         _excel_safe(_citation_provenance_cell(finding, "checked_edition")),
         _excel_safe(_citation_provenance_cell(finding, "current_edition")),
         _excel_safe(_citation_provenance_cell(finding, "evidence_url")),
+        *_located_cells(getattr(finding, "located_elsewhere", None)),
+    ]
+
+
+def _located_cells(located: Any) -> list[str]:
+    """The absence cross-check's three columns ("" when nothing was located)."""
+    if located is None:
+        return ["", "", ""]
+    sheet = "(this sheet)" if getattr(located, "same_sheet", False) else str(
+        getattr(located, "sheet_id", "") or ""
+    )
+    return [
+        _excel_safe(sheet),
+        _excel_safe(str(getattr(located, "quote", "") or "")),
+        str(getattr(located, "demoted_from", "") or ""),
     ]
 
 

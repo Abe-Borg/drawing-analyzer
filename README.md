@@ -207,8 +207,8 @@ Two **QC review** checkboxes sit beside the focus:
 
 - **QC Markups** — the **full exhaustive review** (DA-010). Checking it runs the
   entire stack: synthesis, **two critique reads per sheet**, cross-sheet QC, the
-  deterministic auditors, prose harvest, anchoring, verification, citation checks,
-  markup, and coverage reconciliation — then produces a **marked-up PDF + findings
+  deterministic auditors, prose harvest, anchoring, the absence cross-check,
+  verification, citation checks, markup, and coverage reconciliation — then produces a **marked-up PDF + findings
   CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)). By
   default **every ledger entry gets ink except the ones the verifier proved wrong**
   ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified findings
@@ -323,7 +323,8 @@ ctx = extract_drawing_context(
     focus="the rooms, and what types of plumbing fixtures each has",  # optional
     # One product switch turns on the exhaustive stack (DA-010): synthesis, two
     # critique reads/sheet, cross-sheet QC, the deterministic auditors, prose
-    # harvest, anchoring, verification, citation checks, markup, and coverage.
+    # harvest, anchoring, the absence cross-check, verification, citation checks,
+    # markup, and coverage.
     qc_markups=True,
     profiles=["my-office-checklist"], # optional user checklists (added to the model plan)
     markup_verified_only=False,       # opt-in conservative ink gate (§18 default: ink all but REJECTED)
@@ -334,7 +335,7 @@ ctx = extract_drawing_context(
     # an explicit True/False overrides it. Disabling a required exhaustive stage
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
-    #   synthesize=False, identity=False, review_plan=False,
+    #   synthesize=False, identity=False, review_plan=False, absence_check=False,
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
 )
@@ -742,7 +743,9 @@ details on the 500-series sheets. So an absence is reported at **low** severity
 unless the missing item belongs on that sheet in particular (part of what the
 sheet itself draws, schedules or details), and then the finding says why.
 Absence and sheet-level findings carry an `anchor_hint` of `SHEET` instead of a
-quote, so the anchor resolver places them against the whole sheet.
+quote, so the anchor resolver places them against the whole sheet. After the
+critique, the [absence cross-check](#absence-cross-check) searches the rest of
+the set's text for each one.
 
 The critique emits only the machine-readable findings block — no prose — so the
 prose digest (and `combined_text`) is untouched (I-2). The shared block parser is
@@ -1135,6 +1138,57 @@ index and notes pages also pin an explicit `CropBox` equal to their own
 `MediaBox`, because `/CropBox` is an **inheritable** page-tree attribute and a set
 whose `/Pages` node carries one made a new 612×792 page render as 512×712.
 
+## Absence cross-check
+
+An absence is the one kind of finding the crop verifier never sees: it has no
+quote and no rectangle, only a sheet. And the critique reads one sheet at a
+time, so "expected an inspector's test connection; not found on this sheet" is
+often answered by a note on the general-notes sheet two pages away. The absence
+cross-check closes that gap before markup. It runs with the critique (so with
+**QC Markups**), and `absence_check=False` turns it off as a debug override.
+
+A keyword search cannot do this job. Drawings abbreviate (*ITC*, *INSPECTOR'S
+TEST CONN.*), and a false match would tell the reviewer an item is covered when
+it is not. So a model does the search and the host checks its answer:
+
+1. Every sheet-level absence in the ledger (`anchor_hint="SHEET"`, one sheet,
+   absence wording) is sent, up to 25 per request, with the **verbatim text
+   layers of every sheet in the set**, each under an opaque handle (`S001`) and
+   its sheet id. Each request is one text-only call on **Haiku 5.5** at medium
+   effort (`DRAWING_ANALYZER_ABSENCE_CHECK_MODEL`) and re-reads the whole set's
+   text, under a cent per request at 40 sheets. The pre-run estimate quotes
+   2–5 requests for a 40-sheet set (about 2–4 cents), assuming 15% of the
+   findings band are sheet-level absences.
+2. For each absence the model answers `FOUND` (a sheet handle and a verbatim
+   quote) or `NOT_FOUND`. It is told that a note *requiring* a component does
+   not show the component; only a missing note or requirement is answered by a
+   note.
+3. The host accepts a `FOUND` only when the quote (at least two words and six
+   characters, compared case- and whitespace-insensitively) is in the **named
+   sheet's own source text**. A quote that is on a different sheet, a handle
+   that does not exist, a single generic word (*SPRINKLER*), or an invented
+   string is discarded and counted in a stage warning.
+4. An accepted hit is recorded on the finding (`located_elsewhere`: the sheet
+   id, the quote, and whether it is the same sheet) and lowers a **high or
+   medium** finding to **low**. Nothing is deleted: the reviewer still sees the
+   finding, now saying where the content is.
+
+`NOT_FOUND` changes nothing. A text layer cannot show content drawn only as
+graphics, so its silence proves no absence. **Specifications are not searched**:
+a spec that requires an item is not evidence that a drawing shows it.
+
+The located sheet and quote appear in the popup on the drawing (*Shown on
+FP-001: "PROVIDE ITC AT REMOTE END" (lowered from medium)*), in the HTML
+report's findings table, and in three `findings.csv` columns (`located_sheet`,
+`located_quote`, `located_lowered_from`). Each request's corpus is held to
+280,000 characters, under Haiku 5.5's long-context price tier; a larger set
+keeps short sheets whole and trims the longest ones equally from the end, and
+the trimmed character count is a stage warning. A reply that does not parse,
+is cut off, or skips an absence leaves that absence unchecked and holds the
+stage at `PARTIAL`. Complete replies are cached on the set's text and the
+absences sent, and a cached hit is re-checked against the sheet text on every
+read.
+
 ## Verification pass
 
 Coverage proposes; precision disposes. Before any finding is clouded onto an
@@ -1384,7 +1438,8 @@ and a `coverage_status`.
 
 Every finding — inked or not — is also written to **`findings.csv`**, one row per
 finding with every field flattened (`qc_id` first; provenance in the `sources`
-column; citation columns at the end), UTF-8 with a BOM and CRLF line endings so
+column; citation columns, then the [absence cross-check](#absence-cross-check)'s
+three `located_*` columns, at the end), UTF-8 with a BOM and CRLF line endings so
 Excel on Windows opens it cleanly. Model/drawing-controlled text cells are
 **formula-injection safe** (Phase 26B, DA-031): a cell starting with `=`, `+`,
 `-`, `@`, a tab, or a carriage return — even behind leading whitespace — is
@@ -1993,6 +2048,7 @@ quality decision.
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5.5 | Review-plan authoring model, text-only (Phase A, high effort). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Haiku 5.5 | Prose-harvest structuring model (one small call per straggler, at medium effort on Haiku 5.5; existing model overrides retain low effort). |
+| `DRAWING_ANALYZER_ABSENCE_CHECK_MODEL` | Haiku 5.5 | [Absence cross-check](#absence-cross-check) model, text-only, at medium effort: one call per 25 sheet-level absences. Every hit it reports is re-checked by the host before it changes anything. |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5.5 | The HTML report's in-browser **Ask AI** assistant (billed to the reader's key). Needs adaptive thinking plus the web-search **and web-fetch** server tools; a model without web fetch (such as Opus 5) degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |

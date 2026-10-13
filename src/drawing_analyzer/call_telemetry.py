@@ -108,7 +108,7 @@ UNATTRIBUTED = "unattributed"
 # alphabetically. Names are the usage ledger's stage families.
 _STAGE_ORDER = (
     "identity", "review_plan", "digest", "critique", "cross_qc", "harvest",
-    "verify", "investigate", "citation", "synthesis", "focus",
+    "absence_check", "verify", "investigate", "citation", "synthesis", "focus",
 )
 
 # ResourcePressure budget notes use their retry-loop stage names; map them onto
