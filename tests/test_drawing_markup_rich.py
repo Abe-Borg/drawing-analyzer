@@ -105,21 +105,27 @@ from drawing_analyzer.annotate import (  # noqa: E402
 
 
 @pytest.mark.parametrize(
-    "status,origin,unverified,rejected,expected",
+    "status,origin,unverified,rejected,expected,cat",
     [
-        ("VERIFIED", "", False, False, "AI-verified against the drawing."),
-        ("UNCERTAIN", "", True, False, "Not yet verified - double-check on the sheet."),
-        ("REJECTED", "", False, True, "Rejected on AI re-check - kept for the record only."),
+        ("VERIFIED", "", False, False, "AI-verified against the drawing.", "coordination"),
+        # A crop confirms what a code finding's drawing shows, not the violation.
+        ("VERIFIED", "", False, False,
+         "AI-verified that the drawing shows this - whether it breaks the code is "
+         "not settled by that check.", "code"),
+        ("UNCERTAIN", "", True, False, "Not yet verified - double-check on the sheet.", "code"),
+        ("REJECTED", "", False, True, "Rejected on AI re-check - kept for the record only.",
+         "code"),
         ("DETERMINISTIC", "TEXT_EXTRACTED", False, False,
-         "Math checked by computer from the sheet's own printed numbers."),
+         "Math checked by computer from the sheet's own printed numbers.", "code"),
         ("UNCERTAIN", "MODEL_TRANSCRIBED", True, False,
-         "Computed from numbers as read by the AI - re-check the math against the sheet."),
+         "Computed from numbers as read by the AI - re-check the math against the sheet.",
+         "code"),
         ("DETERMINISTIC", "", False, False,
-         "Found by an exact text check of the drawings - not an AI judgment."),
+         "Found by an exact text check of the drawings - not an AI judgment.", "code"),
     ],
 )
-def test_popup_trust_note_speaks_plain_words(status, origin, unverified, rejected, expected):
-    f = _f("an issue", status=status)
+def test_popup_trust_note_speaks_plain_words(status, origin, unverified, rejected, expected, cat):
+    f = _f("an issue", status=status, cat=cat)
     f.verification.operand_origin = origin
     content = _annot_content(f, unverified=unverified, rejected=rejected)
     assert content.rstrip().endswith(expected)
@@ -176,7 +182,8 @@ def test_popup_conflict_pointer_is_ascii():
 
 
 def test_index_status_labels_are_reviewer_words():
-    assert _status_label(_f("x", status="VERIFIED")) == "Verified"
+    assert _status_label(_f("x", status="VERIFIED", cat="conflict")) == "Verified"
+    assert _status_label(_f("x", status="VERIFIED", cat="code")) == "Fact confirmed"
     assert _status_label(_f("x", status="DETERMINISTIC")) == "Computed"
     assert _status_label(_f("x", status="UNCERTAIN")) == "Check"
     assert _status_label(_f("x", status="SKIPPED")) == "Check"
@@ -938,7 +945,7 @@ def test_popup_carries_the_lean_template(tmp_path):
         assert 'Look for: "VAV-3"' in content
         assert "Refs: CMC 310" in content
         assert "Code ref may be outdated - renumbered (2019+ editions)" in content
-        assert "AI-verified against the drawing." in content
+        assert "AI-verified that the drawing shows this" in content
         # Machine detail must NOT reach the PDF popup.
         for machine in ("Finding ID:", "Sources:", "Verification:",
                         "Citation check:", "Reproduced:", "Evidence:",

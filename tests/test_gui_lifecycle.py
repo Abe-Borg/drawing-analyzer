@@ -202,6 +202,7 @@ def _cost_preview_app(gui, tk, monkeypatch):
         _ink_rejected_var=var(value=False), _reference_audit_var=var(value=False),
         _save_tiles_var=var(value=False),
         _current_focus=lambda: "", _current_specs_text=lambda: "",
+        _current_governing=lambda: "",
         _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,
         summary_label=types.SimpleNamespace(configure=lambda **kw: summaries.append(kw["text"])),
         after=lambda delay, callback: callbacks.append(callback),

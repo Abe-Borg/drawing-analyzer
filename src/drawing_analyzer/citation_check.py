@@ -105,6 +105,7 @@ from .digest import (
     transient_retry_wait,
 )
 from .models import (
+    ORIGIN_OPERATOR,
     Citation,
     CitationAssessment,
     Finding,
@@ -422,9 +423,8 @@ def _basis_edition_claims(geometries: Iterable[Any]) -> list[str]:
     Same scan as :func:`harvest_code_editions` (which stays loose — for the
     citation PROMPT a passing mention is still useful context), but mentions
     followed by a section marker are excluded here: they are citations, not
-    adoptions. A citation-shaped mention without a section marker still slips
-    in — the conservative direction (it can only SUPPRESS a divergence
-    finding, never fabricate one).
+    adoptions. Any other mention is a candidate only: where the identity adopts
+    the family, :func:`_adopted_basis_map` keeps just the adopted years.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -481,18 +481,65 @@ class _AdoptedBasis:
     basis_label: str                 # human wording for the finding text
 
 
+def _identity_basis_entries(identity: Any, folded_texts: list[str]) -> list[tuple]:
+    """``(family, code, year, corroborated, label)`` for each usable adoption.
+
+    An identity entry contributes only when its edition carries a 4-digit year
+    AND it has a non-empty evidence quote; its corroboration is decided by
+    re-finding that quote verbatim (whitespace-folded) in a sheet text layer —
+    converting the model's containment claim into a checked fact. A governing
+    edition the reviewer set (``origin="operator"``) needs no quote: it is the
+    reviewer's statement of the basis, trusted like text.
+    """
+    out: list[tuple] = []
+    for ac in getattr(identity, "adopted_codes", ()) or ():
+        code = str(getattr(ac, "code", "") or "").strip()
+        edition = str(getattr(ac, "edition", "") or "")
+        quote = str(getattr(ac, "quote", "") or "").strip()
+        origin = str(getattr(ac, "origin", "model") or "model")
+        if origin == "regex":
+            # Redundant here: identity's regex-union entries are the LOOSE
+            # harvest (Phase A containment for the prompt line), which would
+            # re-launder citation-shaped mentions into the basis. This audit's
+            # regex ground truth is the citation-shape-filtered
+            # ``_basis_edition_claims`` scan.
+            continue
+        m = _YEAR_TOKEN_RE.search(edition)
+        if not code or m is None:
+            continue                      # no basis year → never assert divergence
+        if origin == ORIGIN_OPERATOR:
+            out.append((_norm_family(code), code, m.group(1), True, "set by the reviewer"))
+            continue
+        if not quote:
+            continue                      # bare model assertion → no finding basis
+        corroborated = False
+        label = "model-detected basis — advisory"
+        folded = _fold_text(quote)
+        if folded and any(folded in t for t in folded_texts):
+            corroborated = True
+            src = str(getattr(ac, "source_sheet", "") or "")
+            label = f"stated on {src}" if src else "stated in the drawing text"
+        out.append((_norm_family(code), code, m.group(1), corroborated, label))
+    return out
+
+
 def _adopted_basis_map(identity: Any, geometries: list) -> dict:
     """``{normalized_family: _AdoptedBasis}`` from identity ∪ regex harvest.
 
-    Regex-harvest entries are text facts (always corroborated). An identity
-    entry contributes only when its edition carries a 4-digit year AND it has
-    a non-empty evidence quote (or ``origin="regex"``); its corroboration is
-    decided by re-finding that quote verbatim (whitespace-folded) in a sheet
-    text layer — converting the model's containment claim into a checked fact.
+    Regex-harvest entries are text facts (always corroborated), but a text
+    mention is not an adoption. For a family the identity adopts, a mention
+    counts only at a year the identity adopts (it then corroborates that year);
+    another year is a mention ("NFPA 13 2016 IS NOT THE GOVERNING EDITION")
+    and stays out of the basis, so a citation of it is still audited. For a
+    family the identity does not cover, the scan alone is the basis.
     """
     folded_texts = [
         _fold_text(getattr(g, "sheet_text", "") or "") for g in (geometries or [])
     ]
+    identity_entries = _identity_basis_entries(identity, folded_texts)
+    identity_years: dict[str, set[str]] = {}
+    for fam, _code, year, _corr, _label in identity_entries:
+        identity_years.setdefault(fam, set()).add(year)
     raw: dict[str, dict] = {}
 
     def _bucket(fam: str, display: str) -> dict:
@@ -505,38 +552,18 @@ def _adopted_basis_map(identity: Any, geometries: list) -> dict:
         code, _, year = claim.rpartition(" ")
         if not code or not _YEAR_TOKEN_RE.fullmatch(year):
             continue
-        b = _bucket(_norm_family(code), code)
+        fam = _norm_family(code)
+        if fam in identity_years and year not in identity_years[fam]:
+            continue                      # a mention of an edition not adopted
+        b = _bucket(fam, code)
         b["years"].add(year)
         b["corroborated"] = True
         b["advisory_only"] = False
         b["label"] = b["label"] or "stated in the drawing text"
 
-    for ac in getattr(identity, "adopted_codes", ()) or ():
-        code = str(getattr(ac, "code", "") or "").strip()
-        edition = str(getattr(ac, "edition", "") or "")
-        quote = str(getattr(ac, "quote", "") or "").strip()
-        origin = str(getattr(ac, "origin", "model") or "model")
-        if origin == "regex":
-            # Redundant here: identity's regex-union entries are the LOOSE
-            # harvest (Phase A containment for the prompt line), which would
-            # re-launder citation-shaped mentions into the basis. This audit's
-            # regex ground truth is the citation-shape-filtered
-            # ``_basis_edition_claims`` scan above.
-            continue
-        m = _YEAR_TOKEN_RE.search(edition)
-        if not code or m is None:
-            continue                      # no basis year → never assert divergence
-        if not quote:
-            continue                      # bare model assertion → no finding basis
-        corroborated = False
-        label = "model-detected basis — advisory"
-        folded = _fold_text(quote)
-        if folded and any(folded in t for t in folded_texts):
-            corroborated = True
-            src = str(getattr(ac, "source_sheet", "") or "")
-            label = f"stated on {src}" if src else "stated in the drawing text"
-        b = _bucket(_norm_family(code), code)
-        b["years"].add(m.group(1))
+    for fam, code, year, corroborated, label in identity_entries:
+        b = _bucket(fam, code)
+        b["years"].add(year)
         if corroborated:
             b["corroborated"] = True
             b["advisory_only"] = False

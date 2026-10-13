@@ -552,7 +552,7 @@ def test_exhaustive_estimate_batch_critique_beats_half_once_a_prefix_is_cached(m
 
 def test_exhaustive_prompt_is_labeled_an_estimate_and_names_stages():
     prompt = format_exhaustive_cost_prompt(estimate_exhaustive_run_cost(5, file_count=1))
-    assert "exhaustive" in prompt.lower()
+    assert "full qc" in prompt.lower()
     assert "Critique" in prompt and "Citation" in prompt
     assert "rough" in prompt.lower() and PRICING_EFFECTIVE_DATE in prompt
     # Phase A: the pre-run dialog discloses the two planning calls.

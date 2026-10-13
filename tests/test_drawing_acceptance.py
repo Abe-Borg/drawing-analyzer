@@ -284,7 +284,9 @@ def test_acceptance_fresh_run_produces_full_qc_deliverable(tmp_path):
     html = build_html_report(ctx, source_names=names)
     assert "QC Findings" in html
     assert "VAV-3" in html and "F-D-01-0" in html
-    assert "Verified" in html and "Deterministic" in html
+    # The verified finding is a code finding: its chip names a confirmed drawing
+    # fact, not a confirmed violation.
+    assert "Drawing fact confirmed" in html and "Deterministic" in html
 
     # 2. Appearance-stream proxy for the Revu/Acrobat/Chromium spot-check: each
     # cloudable finding was inked, and every annotation carries an /AP appearance
@@ -896,7 +898,7 @@ def test_gauntlet_combined_text_is_sacred(oracle):
 def test_gauntlet_exhaustive_status_complete(oracle):
     ctx = oracle.ctx
     assert ctx.qc_status == "COMPLETE"
-    assert ctx.qc_status_label == "Exhaustive QC complete"
+    assert ctx.qc_status_label == "All QC stages complete"
     assert ctx.configuration_kind == "NORMAL"
     assert ctx.coverage_status == "COMPLETE"
     statuses = {s.stage: s.status for s in ctx.stage_results}

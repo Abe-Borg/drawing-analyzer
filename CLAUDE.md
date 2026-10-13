@@ -391,6 +391,15 @@ consume ledger entries and nothing else.
   manifest `set_identity` key, and an additive combined-text section (I-2).
   Identity feeds
   `check_citations(identity=)` and `cross_sheet_qc(identity=)`.
+  Reviewer-set governing editions (`governing_editions=`, parsed once into
+  `RunConfiguration.governing_editions` by `models.parse_governing_editions`;
+  an unreadable entry raises `ValueError`) are applied by
+  `models.apply_governing_editions` right after the identity stage, outside its
+  cache, only when a consumer runs (`RunConfiguration.reads_adopted_editions`:
+  identity, citation, auditors, cross-QC or review plan). For each named code
+  they replace the detected adoption (`origin="operator"`, no quote needed; the
+  edition audit trusts them like text) and move the overruled edition to
+  `mentioned_codes`.
 - **Finders:** the digest findings block; `critique.py` (a second full-coverage
   vision read, twice; self-consistency sets `reproduced`). On the real-time path
   the two reads prompt-cache their shared image prefix when `runs>=2`; the batch
@@ -470,8 +479,10 @@ consume ledger entries and nothing else.
 - **Edition audit:** `citation_check.reconcile_cited_editions` is zero-API and
   **strictly pre-seal** (gated `run_citation or run_auditors`; stage
   `edition_audit`). Basis = identity `adopted_codes` (model entries need a
-  quote; regex-union entries are ignored) ∪ a citation-shaped regex harvest (a
-  mention followed by a section marker is a citation, never an adoption). Both
+  quote; regex-union entries are ignored) ∪ a regex harvest that drops
+  citation-shaped mentions (followed by a section marker) and, for a family the
+  identity adopts, every year the identity does not adopt (a mention, never an
+  adoption); a family the identity does not cover keeps the scan. Both
   operands re-found in sheet text → medium + `DETERMINISTIC`; otherwise low,
   advisory-labeled, and crop-verified. Anchor to the stale-edition span, never
   the citing finding's quote.
@@ -575,7 +586,9 @@ consume ledger entries and nothing else.
   (`_publish_backoff`, 0.1s/0.4s) and never sleeps after the last attempt.
 - **HTML report** (`html_report.py`): `_finding_display_status` keeps `UNCERTAIN`
   distinct from `UNVERIFIED` / *Not checked*. `_STATUS_RANK` stays
-  integer-valued. Repeated quotes collapse in the browser only
+  integer-valued. A `VERIFIED` code finding is worded as a confirmed drawing
+  fact (`models.verified_drawing_fact_only`, the one rule the report chip and
+  `annotate`'s popup and index share); its stored status stays `VERIFIED`. Repeated quotes collapse in the browser only
   (`data-repeat-key` is a sha256 of the normalized quote, never the quote text);
   grouping recomputes after every sort or filter. Journal timestamps render
   through `_local_stamp`. The chat widget wraps the report in a byte-stable

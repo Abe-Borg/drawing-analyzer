@@ -8,6 +8,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Governing code editions.** A new field in the QC section (and
+  `governing_editions=` in the library) names the code editions that govern the
+  project, e.g. `NFPA 13 2022; IBC 2021`. Use it when the AHJ adopted an older
+  edition than the drawings state, or the notes are wrong. For each code
+  named, the reviewer's edition replaces the detected one for the citation
+  check, review plan, cross-sheet QC and edition audit; the drawing's edition
+  is kept as a mention, and the audit treats the reviewer's edition as
+  text-grounded. Entries need a code and a 4-digit year (`NFPA 2001 2022`
+  parses as NFPA 2001, 2022 edition; one code may be listed at two editions);
+  an unreadable entry stops the run before anything is spent. Applied after
+  the identity cache, recorded in the run manifest's configuration, and
+  ignored by a run with no QC. Setting or changing it rewrites the review
+  plan, so every sheet's critique re-runs once.
+
 - **Absence cross-check.** Before markup, every sheet-level absence (*"expected
   X; not found on this sheet"*) is checked against the verbatim text layers of
   the whole set. One text-only call on Haiku 5.5 at medium effort per 25
@@ -25,6 +39,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absence goes unchecked.
 
 ### Changed
+
+- **No more "exhaustive" claims.** QC Markups is described as the full QC
+  stack, not an "exhaustive engineering review" (the help also said, rightly,
+  that it is not exhaustive). The `COMPLETE` status now reads "All QC stages
+  complete" instead of "Exhaustive QC complete": it means every stage ran, not
+  that the set was fully reviewed. The cost dialog, completion line, run.log
+  and report banner use the same words.
+
+- **A verified code finding says what was verified.** A crop can confirm what
+  the drawing shows ("18 in."), not that it breaks the code. A `VERIFIED` code
+  finding now reads *Drawing fact confirmed* in the report, *Fact confirmed* on
+  the index page, and says so in its popup; the stored status is still
+  `VERIFIED`, and the report's Ask AI tool description says the same.
 
 - **Absence findings default to low severity.** The critique reads one sheet at
   a time, and content a sheet "should" show often lives elsewhere in the set: a
@@ -69,6 +96,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   status is the later judgment.
 
 ### Fixed
+
+- **The edition audit no longer treats a mentioned edition as adopted.** Its
+  adopted basis took every edition the text layers named outside a section
+  citation. A note reading "NFPA 13 2016 is not the governing edition" made
+  2016 adopted, so a finding citing NFPA 13 2016 on a set adopting 2025 was
+  never flagged. Where the identity adopts a code, a mention of another year
+  now stays out of the basis; with no identity, the text scan is still the
+  basis. Zero-API; no cache key changes.
 
 - **A code edition the drawings only mention is no longer treated as adopted.**
   The set-identity stage added every edition the text-layer regex found to

@@ -56,6 +56,7 @@ from .models import (
     SheetRef,
     StageResult,
     UsageRecord,
+    apply_governing_editions,
     resolve_run_configuration,
     roll_up_qc_status,
     source_page_key,
@@ -749,7 +750,7 @@ class DrawingContext:
         """A human three-state label for the GUI completion dialog / report (§3.3)."""
         return {
             "NOT_REQUESTED": "Completed",
-            "COMPLETE": "Exhaustive QC complete",
+            "COMPLETE": "All QC stages complete",
             "PARTIAL": "Completed with QC warnings",
             "FAILED": "QC incomplete",
         }.get(self.qc_status, "Completed")
@@ -2151,7 +2152,7 @@ def _run_qc_stages(
             if hres.missing:
                 errors.append(
                     f"Prose harvest: {hres.missing} enumerated prose item(s) could not "
-                    "be accounted for in the ledger — exhaustive QC is incomplete."
+                    "be accounted for in the ledger — QC is incomplete."
                 )
                 harvest_stage.status = "PARTIAL"
                 harvest_stage.errors.append(f"{hres.missing} prose item(s) unaccounted")
@@ -2297,7 +2298,7 @@ def _run_qc_stages(
         # presented as ordinary, fully-numbered output (§12.3).
         errors.append(
             f"Ledger: {ledger.post_seal_adds} finding(s) ingested after seal — "
-            "exhaustive QC is incomplete (a stage produced findings too late)."
+            "QC is incomplete (a stage produced findings too late)."
         )
 
     all_findings = entries
@@ -3022,6 +3023,7 @@ def extract_drawing_context(
     review_plan: bool | None = None,
     investigate: bool | None = None,
     absence_check: bool | None = None,
+    governing_editions: "str | list[str] | None" = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     save_tile_artifacts: bool | None = None,
@@ -3176,6 +3178,13 @@ def extract_drawing_context(
     there, and an open batch keeps its receipt either way, so the next run
     collects whatever it finished before the cancel landed. The last stop point is the start of markup writing: by then every
     paid request is done, so a later stop lets the run finish.
+
+    ``governing_editions`` ("NFPA 13 2022; IBC 2021") names the code editions
+    that govern this project when detection gets them wrong or the AHJ adopted
+    an older edition. For each code named, it replaces the identity stage's
+    adopted edition for the citation check, review plan, cross-sheet QC and
+    edition audit. An entry without a code and a 4-digit year raises
+    ``ValueError`` before anything is spent.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -3226,6 +3235,7 @@ def extract_drawing_context(
         review_plan=review_plan,
         investigate=investigate,
         absence_check=absence_check,
+        governing_editions=governing_editions,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
@@ -3313,7 +3323,7 @@ def extract_drawing_context(
     # be a deliberate latency choice, so this only informs.
     if config.exhaustive_qc and not use_batch and not critique_use_batch:
         _batch_hint = (
-            "Running the exhaustive QC stack in Fast mode — the most expensive "
+            "Running the full QC stack in Fast mode — the most expensive "
             "transport. Economy is ~50% cheaper for identical review inputs and "
             "outputs: pass "
             "use_batch=True (or set DRAWING_ANALYZER_USE_BATCH=1) if the batch "
@@ -3988,6 +3998,15 @@ def extract_drawing_context(
                 confidence=set_identity_obj.confidence or "unstated",
             )
     _finish_stage(stage_results, journal, identity_stage)
+    # The reviewer's governing editions outrank detection for the codes they
+    # name. Applied after the identity cache, and whether or not the stage ran,
+    # so every consumer below (cross-QC, review plan, citation check, edition
+    # audit) sees the same adopted basis. A run with none of those consumers
+    # (the standard path) leaves the identity alone.
+    if config.governing_editions and config.reads_adopted_editions:
+        set_identity_obj = apply_governing_editions(
+            set_identity_obj, config.governing_editions,
+        )
 
     if stage_executor is not None and config.run_cross_qc:
         if progress is not None:

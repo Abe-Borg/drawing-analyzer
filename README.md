@@ -205,7 +205,7 @@ shows them in the report, and exports `findings.json` / `findings.csv` / `sheet_
 
 Two **QC review** checkboxes sit beside the focus:
 
-- **QC Markups** — the **full exhaustive review** (DA-010). Checking it runs the
+- **QC Markups** — the **full QC stack** (DA-010). Checking it runs the
   entire stack: synthesis, **two critique reads per sheet**, cross-sheet QC, the
   deterministic auditors, prose harvest, anchoring, the absence cross-check,
   verification, citation checks, markup, and coverage reconciliation — then produces a **marked-up PDF + findings
@@ -252,10 +252,13 @@ dialog, the export index, and an HTML report banner all lead with it. A stage th
 failed or a coverage that came back `INCOMPLETE` makes the run `PARTIAL`/`FAILED`;
 disabling a normally-required stage from the advanced API (e.g. `qc_markups=True,
 critique=False`) marks the configuration `DEBUG_OVERRIDE` and likewise caps it at
-`PARTIAL`. A clean NORMAL exhaustive run earns **`COMPLETE` — "Exhaustive QC
-complete"** (the Phase 23 completeness gate opened in Phase 26B once cross-set
-reconciliation, claim-complete citations, complete evidence, and callout-overflow
-handling landed). That claim is guarded, not assumed: a failed reconciliation, an
+`PARTIAL`. A clean NORMAL exhaustive run earns **`COMPLETE` — "All QC stages
+complete"**. That means every stage ran to completion, not that the set has been
+fully reviewed: the tool still misses things a good reviewer catches. (The
+label used to read "Exhaustive QC complete", which overstated it.) The Phase 23
+completeness gate opened in Phase 26B once cross-set reconciliation,
+claim-complete citations, complete evidence, and callout-overflow handling
+landed. That claim is guarded, not assumed: a failed reconciliation, an
 unchecked cited claim, a missing verification crop, or a source that changed
 mid-run each hold a required stage at `PARTIAL`, and the roll-up can never call
 such a run `COMPLETE`.
@@ -336,6 +339,8 @@ ctx = extract_drawing_context(
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
     #   synthesize=False, identity=False, review_plan=False, absence_check=False,
+    # governing_editions="NFPA 13 2022; IBC 2021" names the code editions that
+    # govern when the drawings state the wrong one (see Set identity below).
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
 )
@@ -881,6 +886,30 @@ section. The identity call runs on Haiku 5.5 at medium effort by default
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
 
+**Governing code editions (your override).** Detection reads what the drawings
+say, and the drawings can be wrong or silent: a general note copied from an
+older job, or an AHJ that adopted NFPA 13 a cycle or two behind the current
+edition. Type the editions that actually govern in the QC section's
+**Governing code editions** field (`governing_editions="NFPA 13 2022; IBC 2021"`
+from the library). Separate entries with semicolons or new lines; each needs a
+code and a 4-digit year, with an optional note in parentheses
+(`NFPA 13 2022 (state amendments)`). The year is read from the end of the
+entry, so `NFPA 2001 2022` is NFPA 2001, 2022 edition, and one code may be
+listed at two editions (`NFPA 13 2016 (existing system)`). An entry without a
+year stops the run before anything is spent. For each code you name, your
+edition replaces the detected one as the adopted edition seen by the citation
+check, the review plan, cross-sheet QC and the edition audit; the edition the
+drawings stated is kept as a mention, and codes you don't name keep the
+detected record. The audit treats your edition as text-grounded, so a citation
+of any other edition of that code is flagged at medium severity when the cited
+edition is in the sheet text. Your entries are marked *set by the reviewer* in
+`set_identity.json` and the *Set Identity* section, and recorded in the run
+manifest's configuration. They are applied after the identity cache, so the
+identity call itself is not repeated. On a QC Markups run, though, setting or
+changing them rewrites the review plan, and the plan is part of the critique
+prompt, so **every sheet's critique re-runs once** (later runs with the same
+entries read from cache). A run with no QC ignores them.
+
 **Model-authored review plan.** From the identity's canonical review facts, a second
 text-only call authors the per-discipline checklist a specialist for *this* set
 would apply — one-line "flag X when Y" items in the exact review-profile style,
@@ -1213,7 +1242,7 @@ finding status:
 
 | Status | Source | Meaning |
 |---|---|---|
-| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
+| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct. For a **code** finding that means the drawing fact it rests on, not the violation: the popup says so, the index reads *Fact confirmed*, and the report chip reads *Drawing fact confirmed* (the citation check is what tests the code reference) |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
 | `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when its operands are text-extracted from the quote — a model-transcribed mismatch is `UNCERTAIN` and crop-verified) |
@@ -1795,6 +1824,10 @@ ink. When both the adopted and the cited edition are re-found verbatim in the
 sheet text, the finding earns the deterministic tier (auto-ink, like the
 offline auditors); a basis only the identity detected ships as a low-severity,
 explicitly-labeled advisory that is crop-verified and web-checked downstream.
+An edition the drawings only *mention* is not an adoption: when the identity
+adopts NFPA 13 2025, a note reading "NFPA 13 2016 is not the governing edition"
+does not make 2016 adopted, so a finding citing NFPA 13 2016 is still flagged.
+(With no identity, as in the free battery, the text scan alone is the basis.)
 Runs with the citation check *or* the free deterministic battery
 (`reference_audit=True` gains it at zero cost, regex basis only).
 

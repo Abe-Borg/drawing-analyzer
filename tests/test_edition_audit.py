@@ -127,6 +127,12 @@ def test_identity_entry_without_quote_contributes_no_basis():
     identity = _identity(AdoptedCode(code="BS 9251", edition="2021", quote=""))
     f = _finding(refs=["BS 9251 2014 §6"], quote="TO BS 9251 2014")
     assert reconcile_cited_editions([f], identity, []) == []
+    # The same entry set by the reviewer needs no quote: it is the basis.
+    geoms = [_Geom(_ref(), "SPRINKLERS TO BS 9251 2014 §6")]
+    reviewer = _identity(AdoptedCode(code="BS 9251", edition="2021", origin="operator"))
+    (d,) = reconcile_cited_editions([f], reviewer, geoms)
+    assert d.severity == "medium" and d.verification.status == "DETERMINISTIC"
+    assert "(set by the reviewer)" in d.text
 
 
 def test_adopted_entry_without_year_never_asserts_divergence():
@@ -218,6 +224,17 @@ def test_citation_shaped_mentions_never_enter_the_basis():
     # ...while an adoption-shaped second edition still counts (multi-edition).
     geoms2 = [_Geom(_ref(), _STATED + "\nEXISTING PER NFPA 13 2010 EDITION.")]
     assert set(_adopted_basis_map(None, geoms2)["NFPA 13"].years) == {"2016", "2010"}
+    # Where the identity adopts the family, a mention of another year is not an
+    # adoption: it stays out of the basis, so a citation of it is still audited.
+    geoms3 = [_Geom(_ref(), "ALL WORK PER NFPA 13 2025.\n"
+                            "NFPA 13 2016 IS NOT THE GOVERNING EDITION.")]
+    identity = _identity(AdoptedCode(code="NFPA 13", edition="2025",
+                                     quote="ALL WORK PER NFPA 13 2025"))
+    assert _adopted_basis_map(identity, geoms3)["NFPA 13"].years == frozenset({"2025"})
+    f = _finding(refs=["NFPA 13 2016 §8.15.1"], quote="NFPA 13 2016")
+    (d,) = reconcile_cited_editions([f], identity, geoms3)
+    assert d.severity == "medium" and d.verification.status == "DETERMINISTIC"
+    assert "adopts NFPA 13 2025" in d.text
 
 
 def test_punctuated_section_markers_are_still_citation_shaped():

@@ -10,9 +10,17 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.digest_cache import DigestCache
-from drawing_analyzer.models import AdoptedCode, SetIdentity, SheetRef
+from drawing_analyzer.models import (
+    AdoptedCode,
+    SetIdentity,
+    SheetRef,
+    apply_governing_editions,
+    parse_governing_editions,
+)
 from drawing_analyzer.set_identity import (
     _FULL_SLICE_SHEETS,
     _HEADER_SLICE,
@@ -563,3 +571,58 @@ def test_genuine_designations_still_match():
 
     missed = [s for s in _GENUINE_DESIGNATIONS if not _INTL_CODE_WINDOW_RE.search(s)]
     assert not missed, f"genuine designations no longer match: {missed}"
+
+
+# --------------------------------------------------------------------------- #
+# Governing editions set by the reviewer
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("text, displays, notes, unreadable", [
+    ("NFPA 13 2022; IBC 2021", ["IBC 2021", "NFPA 13 2022"], ["", ""], []),
+    # A standard whose number looks like a year: the trailing year is the edition.
+    ("NFPA 2001 2022", ["NFPA 2001 2022"], [""], []),
+    ("2021 IBC", ["IBC 2021"], [""], []),
+    ("nfpa-13, 2022 edition", ["NFPA 13 2022"], [""], []),
+    ("NFPA 13-2022 (state amendments)\nNFPA 72 2022",
+     ["NFPA 13 2022", "NFPA 72 2022"], ["state amendments", ""], []),
+    # One code at two editions (an existing system under the older one).
+    ("NFPA 13 2022; NFPA 13 2016 (existing)", ["NFPA 13 2016", "NFPA 13 2022"],
+     ["existing", ""], []),
+    # No 4-digit year: rejected, never guessed.
+    ("NFPA 13; ASCE 7-22; IBC 2021", ["IBC 2021"], [""], ["NFPA 13", "ASCE 7-22"]),
+    (["NFPA 72 2022", ""], ["NFPA 72 2022"], [""], []),
+    (None, [], [], []),
+])
+def test_governing_editions_parse(text, displays, notes, unreadable):
+    codes, rejected = parse_governing_editions(text)
+    assert [c.display for c in codes] == displays
+    assert [c.amendment_note for c in codes] == notes
+    assert all(c.origin == "operator" for c in codes)
+    assert list(rejected) == unreadable
+
+
+def test_governing_editions_outrank_detection_for_the_codes_named():
+    detected = SetIdentity(
+        disciplines=("fire protection",),
+        adopted_codes=(
+            AdoptedCode(code="NFPA 13", edition="2025", quote="PER NFPA 13 2025"),
+            AdoptedCode(code="IBC", edition="2024", quote="IBC 2024"),
+        ),
+        mentioned_codes=(AdoptedCode(code="NFPA 13", edition="2022", origin="regex"),),
+    )
+    codes, _ = parse_governing_editions("NFPA 13 2022")
+    merged = apply_governing_editions(detected, codes)
+    assert [(c.display, c.origin) for c in merged.adopted_codes] == [
+        ("IBC 2024", "model"), ("NFPA 13 2022", "operator"),
+    ]
+    # The overruled detection is now a mention; the old mention of the chosen
+    # edition is gone (it is adopted).
+    assert [c.display for c in merged.mentioned_codes] == ["NFPA 13 2025"]
+    assert "NFPA 13 2022 [set by the reviewer for this run]" in merged.context_block()
+    # Nothing set: the detected identity passes through untouched.
+    assert apply_governing_editions(detected, ()) is detected
+    # No identity at all (stage off or failed): just the reviewer's editions.
+    alone = apply_governing_editions(None, codes)
+    assert [c.display for c in alone.adopted_codes] == ["NFPA 13 2022"]
+    assert alone.mentioned_codes == () and alone.disciplines == ()

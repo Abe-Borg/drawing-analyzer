@@ -1116,7 +1116,7 @@ def test_provenance_is_restored_per_finding_not_across_colliding_ids():
     # elsewhere. So the snapshot is keyed by object identity: keying it by
     # ``finding.id`` would hand an ordinary model-authored finding the
     # arithmetic caveat of an unrelated one, and vice versa.
-    from drawing_analyzer.annotate import _trust_note
+    from drawing_analyzer.annotate import _TRUST_NOTE_CODE_VERIFIED, _trust_note
 
     computed = _finding("same-quote", verif=_arithmetic_verification())
     plain = _finding("same-quote")
@@ -1128,9 +1128,8 @@ def test_provenance_is_restored_per_finding_not_across_colliding_ids():
     assert computed.verification.operand_origin == "MODEL_TRANSCRIBED"
     assert plain.verification.computation_method == ""
     assert plain.verification.operand_origin == ""
-    assert _trust_note(plain, unverified=False, rejected=False) == (
-        "AI-verified against the drawing."
-    )
+    # The plain verified code finding's own note, with no arithmetic caveat.
+    assert _trust_note(plain, unverified=False, rejected=False) == _TRUST_NOTE_CODE_VERIFIED
 
 
 def test_cross_verify_carries_arithmetic_provenance():
