@@ -470,8 +470,10 @@ consume ledger entries and nothing else.
 - **Edition audit:** `citation_check.reconcile_cited_editions` is zero-API and
   **strictly pre-seal** (gated `run_citation or run_auditors`; stage
   `edition_audit`). Basis = identity `adopted_codes` (model entries need a
-  quote; regex-union entries are ignored) ∪ a citation-shaped regex harvest (a
-  mention followed by a section marker is a citation, never an adoption). Both
+  quote; regex-union entries are ignored) ∪ a regex harvest that drops
+  citation-shaped mentions (followed by a section marker) and, for a family the
+  identity adopts, every year the identity does not adopt (a mention, never an
+  adoption); a family the identity does not cover keeps the scan. Both
   operands re-found in sheet text → medium + `DETERMINISTIC`; otherwise low,
   advisory-labeled, and crop-verified. Anchor to the stale-edition span, never
   the citing finding's quote.

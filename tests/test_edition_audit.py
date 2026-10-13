@@ -218,6 +218,17 @@ def test_citation_shaped_mentions_never_enter_the_basis():
     # ...while an adoption-shaped second edition still counts (multi-edition).
     geoms2 = [_Geom(_ref(), _STATED + "\nEXISTING PER NFPA 13 2010 EDITION.")]
     assert set(_adopted_basis_map(None, geoms2)["NFPA 13"].years) == {"2016", "2010"}
+    # Where the identity adopts the family, a mention of another year is not an
+    # adoption: it stays out of the basis, so a citation of it is still audited.
+    geoms3 = [_Geom(_ref(), "ALL WORK PER NFPA 13 2025.\n"
+                            "NFPA 13 2016 IS NOT THE GOVERNING EDITION.")]
+    identity = _identity(AdoptedCode(code="NFPA 13", edition="2025",
+                                     quote="ALL WORK PER NFPA 13 2025"))
+    assert _adopted_basis_map(identity, geoms3)["NFPA 13"].years == frozenset({"2025"})
+    f = _finding(refs=["NFPA 13 2016 §8.15.1"], quote="NFPA 13 2016")
+    (d,) = reconcile_cited_editions([f], identity, geoms3)
+    assert d.severity == "medium" and d.verification.status == "DETERMINISTIC"
+    assert "adopts NFPA 13 2025" in d.text
 
 
 def test_punctuated_section_markers_are_still_citation_shaped():

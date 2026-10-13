@@ -1795,6 +1795,10 @@ ink. When both the adopted and the cited edition are re-found verbatim in the
 sheet text, the finding earns the deterministic tier (auto-ink, like the
 offline auditors); a basis only the identity detected ships as a low-severity,
 explicitly-labeled advisory that is crop-verified and web-checked downstream.
+An edition the drawings only *mention* is not an adoption: when the identity
+adopts NFPA 13 2025, a note reading "NFPA 13 2016 is not the governing edition"
+does not make 2016 adopted, so a finding citing NFPA 13 2016 is still flagged.
+(With no identity, as in the free battery, the text scan alone is the basis.)
 Runs with the citation check *or* the free deterministic battery
 (`reference_audit=True` gains it at zero cost, regex basis only).
 

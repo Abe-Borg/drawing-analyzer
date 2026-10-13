@@ -70,6 +70,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The edition audit no longer treats a mentioned edition as adopted.** Its
+  adopted basis took every edition the text layers named outside a section
+  citation. A note reading "NFPA 13 2016 is not the governing edition" made
+  2016 adopted, so a finding citing NFPA 13 2016 on a set adopting 2025 was
+  never flagged. Where the identity adopts a code, a mention of another year
+  now stays out of the basis; with no identity, the text scan is still the
+  basis. Zero-API; no cache key changes.
+
 - **A code edition the drawings only mention is no longer treated as adopted.**
   The set-identity stage added every edition the text-layer regex found to
   `adopted_codes`. The regex finds a code next to a year, so *NFPA 13 2016 is
