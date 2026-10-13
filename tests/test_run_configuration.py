@@ -155,6 +155,18 @@ def test_carry_through_options_are_verbatim():
     assert c.ink_rejected and c.focus_findings_to_markups and c.use_batch
 
 
+@pytest.mark.parametrize("kwargs, reads", [
+    ({}, False),                                   # standard path: nothing reads them
+    ({"reference_audit": True}, True),             # the edition audit
+    ({"citation_check": True}, True),
+    ({"cross_qc": True}, True),                    # expert cross-QC, identity off
+    ({"critique": True, "identity": False}, True),  # the review plan, identity off
+    ({"synthesize": True}, False),
+])
+def test_governing_editions_reach_every_stage_that_reads_editions(kwargs, reads):
+    assert resolve_run_configuration(**kwargs).reads_adopted_editions is reads
+
+
 def test_governing_editions_are_recorded_and_validated_up_front():
     c = resolve_run_configuration(qc_markups=True, governing_editions="NFPA 13 2022 (WA)")
     assert c.to_dict()["governing_editions"] == ["NFPA 13 2022 (WA)"]

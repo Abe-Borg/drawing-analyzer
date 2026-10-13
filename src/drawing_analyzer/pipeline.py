@@ -4003,9 +4003,7 @@ def extract_drawing_context(
     # so every consumer below (cross-QC, review plan, citation check, edition
     # audit) sees the same adopted basis. A run with none of those consumers
     # (the standard path) leaves the identity alone.
-    if config.governing_editions and (
-        config.run_identity or config.run_citation or config.run_auditors
-    ):
+    if config.governing_editions and config.reads_adopted_editions:
         set_identity_obj = apply_governing_editions(
             set_identity_obj, config.governing_editions,
         )

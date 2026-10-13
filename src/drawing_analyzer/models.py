@@ -2262,6 +2262,19 @@ class RunConfiguration:
         return "DEBUG_OVERRIDE" if self.debug_overrides else "NORMAL"
 
     @property
+    def reads_adopted_editions(self) -> bool:
+        """True when a stage reads the set's adopted code editions.
+
+        The set identity, citation check, edition audit (the auditors), cross-
+        sheet QC and review plan each read them; any one of them, alone or with
+        the identity stage off, is where governing editions must apply.
+        """
+        return bool(
+            self.run_identity or self.run_citation or self.run_auditors
+            or self.run_cross_qc or self.run_review_plan
+        )
+
+    @property
     def qc_requested(self) -> bool:
         """True only for exhaustive QC — the mode the roll-up scores (§3.1).
 

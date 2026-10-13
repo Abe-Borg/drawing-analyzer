@@ -395,10 +395,11 @@ consume ledger entries and nothing else.
   `RunConfiguration.governing_editions` by `models.parse_governing_editions`;
   an unreadable entry raises `ValueError`) are applied by
   `models.apply_governing_editions` right after the identity stage, outside its
-  cache, only when a consumer runs (`run_identity or run_citation or
-  run_auditors`). For each named code they replace the detected adoption
-  (`origin="operator"`, no quote needed; the edition audit trusts them like
-  text) and move the overruled edition to `mentioned_codes`.
+  cache, only when a consumer runs (`RunConfiguration.reads_adopted_editions`:
+  identity, citation, auditors, cross-QC or review plan). For each named code
+  they replace the detected adoption (`origin="operator"`, no quote needed; the
+  edition audit trusts them like text) and move the overruled edition to
+  `mentioned_codes`.
 - **Finders:** the digest findings block; `critique.py` (a second full-coverage
   vision read, twice; self-consistency sets `reproduced`). On the real-time path
   the two reads prompt-cache their shared image prefix when `runs>=2`; the batch
