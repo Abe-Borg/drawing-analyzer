@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 
 @dataclass(frozen=True)
@@ -1887,6 +1888,8 @@ class AdoptedCode:
     entries only the deterministic :func:`citation_check.harvest_code_editions`
     scan found. Regex entries live in ``SetIdentity.mentioned_codes``: the scan
     finds a code next to a year, and cannot tell an adoption from a mention.
+    ``"operator"`` marks a governing edition the reviewer set for the run
+    (:func:`apply_governing_editions`); it outranks detection and needs no quote.
     """
 
     code: str
@@ -1894,7 +1897,7 @@ class AdoptedCode:
     amendment_note: str = ""
     quote: str = ""
     source_sheet: str = ""
-    origin: str = "model"               # "model" | "regex"
+    origin: str = "model"               # "model" | "regex" | "operator"
 
     @property
     def display(self) -> str:
@@ -2012,7 +2015,10 @@ class SetIdentity:
             lines.append("- Adopted codes:")
             for c in self.adopted_codes:
                 extra = f" ({c.amendment_note})" if c.amendment_note else ""
-                src = f" [per {c.source_sheet}]" if c.source_sheet else ""
+                if c.origin == ORIGIN_OPERATOR:
+                    src = " [set by the reviewer for this run]"
+                else:
+                    src = f" [per {c.source_sheet}]" if c.source_sheet else ""
                 lines.append(f"  - {c.display}{extra}{src}")
         if self.mentioned_codes:
             lines.append(
@@ -2093,6 +2099,100 @@ class SetIdentity:
         )
 
 
+ORIGIN_OPERATOR = "operator"
+
+_GOVERNING_YEAR = r"(?:19|20)\d{2}"
+_GOVERNING_TRAILING_RE = re.compile(
+    rf"^(?P<code>.*?)[\s,:-]*\b(?P<year>{_GOVERNING_YEAR})\b"
+    r"(?:\s*(?:edition|ed\.?))?\s*$",
+    re.IGNORECASE,
+)
+_GOVERNING_LEADING_RE = re.compile(
+    rf"^(?P<year>{_GOVERNING_YEAR})\b[\s,:-]*(?:edition\s+(?:of\s+)?)?(?P<code>.+)$",
+    re.IGNORECASE,
+)
+
+
+def _code_family(code: str) -> str:
+    return " ".join(re.sub(r"[\s-]+", " ", str(code or "")).split()).upper()
+
+
+def parse_governing_editions(value: Any) -> "tuple[tuple[AdoptedCode, ...], tuple[str, ...]]":
+    """The reviewer's governing editions: ``(codes, entries that did not parse)``.
+
+    ``value`` is text ("NFPA 13 2022; IBC 2021", one per line also works) or a
+    sequence of entries. Each entry is a code and a 4-digit edition year, with
+    an optional parenthesized note ("NFPA 13 2022 (state amendments)"). The
+    year is taken from the END of the entry first, so a standard whose number
+    looks like a year still parses ("NFPA 2001 2022" is NFPA 2001, 2022
+    edition). Codes are upper-cased. One code may govern at two editions (an
+    existing system under an older one); a repeated code + year keeps its
+    last note. Deterministic (I-7).
+    """
+    if value is None:
+        return (), ()
+    if isinstance(value, str):
+        parts = re.split(r"[;\n]+", value)
+    else:
+        parts = [str(v or "") for v in value]
+    chosen: dict[tuple[str, str], AdoptedCode] = {}
+    rejected: list[str] = []
+    for raw in parts:
+        entry = " ".join(raw.split())
+        if not entry:
+            continue
+        note = ""
+        paren = re.search(r"\(([^)]*)\)", entry)
+        if paren:
+            note = " ".join(paren.group(1).split())
+            entry = " ".join((entry[:paren.start()] + " " + entry[paren.end():]).split())
+        m = _GOVERNING_TRAILING_RE.match(entry) or _GOVERNING_LEADING_RE.match(entry)
+        code = _code_family((m.group("code") if m else "").strip(" ,:-."))
+        if m is None or not code:
+            rejected.append(" ".join(raw.split()))
+            continue
+        chosen[(code, m.group("year"))] = AdoptedCode(
+            code=code, edition=m.group("year"), amendment_note=note,
+            origin=ORIGIN_OPERATOR,
+        )
+    return tuple(chosen[k] for k in sorted(chosen)), tuple(rejected)
+
+
+def apply_governing_editions(
+    identity: "SetIdentity | None", codes: "Iterable[AdoptedCode]",
+) -> "SetIdentity | None":
+    """The identity with the reviewer's governing editions in charge.
+
+    For every code the reviewer named, their edition replaces whatever the
+    identity stage adopted; an overruled detection moves to
+    ``mentioned_codes`` (the drawings name it, the reviewer says it does not
+    govern), and a mention of the chosen edition is dropped as redundant. Codes
+    the reviewer did not name keep the detected record. With no identity (the
+    stage was off or failed) the result carries just these adoptions.
+    Applied after the identity cache, so cached identities stay pure detection.
+    """
+    codes = tuple(codes or ())
+    if not codes:
+        return identity
+    base = identity if identity is not None else SetIdentity()
+    named = {_code_family(c.code) for c in codes}
+    chosen = {(_code_family(c.code), c.edition) for c in codes}
+    kept = [c for c in base.adopted_codes if _code_family(c.code) not in named]
+    overruled = [
+        c for c in base.adopted_codes
+        if _code_family(c.code) in named
+        and (_code_family(c.code), c.edition) not in chosen
+    ]
+    mentioned = [
+        c for c in base.mentioned_codes
+        if (_code_family(c.code), c.edition) not in chosen
+    ]
+    return replace(
+        base, adopted_codes=tuple(kept) + codes,
+        mentioned_codes=tuple(mentioned) + tuple(overruled),
+    )
+
+
 @dataclass(frozen=True)
 class RunConfiguration:
     """One immutable, normalized description of what a run will do (§15.1).
@@ -2153,6 +2253,9 @@ class RunConfiguration:
     # Names of normally-required exhaustive stages an explicit flag disabled. A
     # non-empty tuple makes this a DEBUG_OVERRIDE configuration (§3.3 / §15.1).
     debug_overrides: tuple[str, ...] = ()
+    # Code editions the reviewer says govern this run, overriding detection for
+    # those codes (:func:`apply_governing_editions`). Not a debug override.
+    governing_editions: tuple["AdoptedCode", ...] = ()
 
     @property
     def configuration_kind(self) -> str:
@@ -2196,6 +2299,10 @@ class RunConfiguration:
             "critique_use_batch": self.critique_use_batch,
             "save_tile_artifacts": self.save_tile_artifacts,
             "debug_overrides": list(self.debug_overrides),
+            "governing_editions": [
+                c.display + (f" ({c.amendment_note})" if c.amendment_note else "")
+                for c in self.governing_editions
+            ],
         }
 
 
@@ -2218,6 +2325,7 @@ def resolve_run_configuration(
     use_batch: bool = False,
     critique_use_batch: "bool | None" = None,
     save_tile_artifacts: bool = False,
+    governing_editions: Any = None,
 ) -> RunConfiguration:
     """Resolve the raw run options into one normalized :class:`RunConfiguration`.
 
@@ -2235,7 +2343,17 @@ def resolve_run_configuration(
     billed. The per-stage keyword arguments are ``bool | None`` — ``None`` means
     "not specified, use the product default"; an explicit ``True``/``False`` is an
     override honored verbatim.
+
+    ``governing_editions`` ("NFPA 13 2022; IBC 2021", or a list of entries) is
+    parsed by :func:`parse_governing_editions`; an entry without a code and a
+    4-digit year raises ``ValueError`` before anything is spent.
     """
+    governing, rejected = parse_governing_editions(governing_editions)
+    if rejected:
+        raise ValueError(
+            "Each governing edition needs a code and a 4-digit edition year "
+            "(e.g. NFPA 13 2022); could not read: " + "; ".join(rejected)
+        )
     exhaustive = bool(qc_markups)
 
     overrides: list[str] = []
@@ -2346,6 +2464,7 @@ def resolve_run_configuration(
         ),
         save_tile_artifacts=bool(save_tile_artifacts),
         debug_overrides=tuple(overrides),
+        governing_editions=governing,
     )
 
 

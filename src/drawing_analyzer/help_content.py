@@ -287,6 +287,16 @@ _HOW_TO_USE = HelpDocument(
                 "sees. Your manual choice always wins. No profiles ship with the app — "
                 "on a QC run the model writes the review plan for this set itself."
             ),
+            _bullet(
+                "Governing code editions (optional): type the editions that actually "
+                "govern, separated by semicolons — e.g. NFPA 13 2022; IBC 2021. For each "
+                "code you name, your edition replaces the one detected on the drawings "
+                "for the citation check, the review plan, cross-sheet QC and the edition "
+                "audit; the drawing's own edition is kept as a mention. Use it when the "
+                "AHJ adopted an older edition than the notes state, or the notes are "
+                "wrong. Setting or changing it rewrites the review plan, so every "
+                "sheet's critique re-runs once."
+            ),
             _para(
                 "Even with neither box checked a run is not throwaway: it still keeps each "
                 "sheet's extracted text and the digest's parsed findings, anchors them "

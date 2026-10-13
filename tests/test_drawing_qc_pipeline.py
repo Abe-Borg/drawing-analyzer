@@ -913,13 +913,26 @@ def test_edition_audit_runs_in_free_battery_with_zero_api_calls(tmp_path):
     stages = {s.stage: s.status for s in ctx.stage_results}
     assert stages.get("edition_audit") == "COMPLETE"
 
-    # Standard run: the stage stays NOT_REQUESTED.
+    # Standard run: the stage stays NOT_REQUESTED, and governing editions have
+    # no consumer there, so no identity is invented.
     ctx2 = extract_drawing_context(
         [src], client=_CountingClient([_STALE_EDITION_FINDING]), rows=2, cols=2,
+        governing_editions="CMC 2019",
     )
     stages2 = {s.stage: s.status for s in ctx2.stage_results}
     assert stages2.get("edition_audit") == "NOT_REQUESTED"
     assert not [f for f in ctx2.findings if "edition_audit" in (f.sources or [])]
+    assert ctx2.set_identity is None
+
+    # The reviewer says CMC 2019 governs: the 2019 citation is on the adopted
+    # basis, and the drawing's own "CMC 2022 EDITION" line is only a mention.
+    ctx3 = extract_drawing_context(
+        [src], client=_CountingClient([_STALE_EDITION_FINDING]), rows=2, cols=2,
+        reference_audit=True, qc_work_dir=tmp_path / "qc3",
+        governing_editions="CMC 2019",
+    )
+    assert not [f for f in ctx3.findings if "edition_audit" in (f.sources or [])]
+    assert [c.display for c in ctx3.set_identity.adopted_codes] == ["CMC 2019"]
 
 
 def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):

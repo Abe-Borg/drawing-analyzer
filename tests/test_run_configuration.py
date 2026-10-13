@@ -7,6 +7,8 @@ unit-testable in isolation from the pipeline.
 """
 from __future__ import annotations
 
+import pytest
+
 from drawing_analyzer.models import (
     CONFIGURATION_KINDS,
     QC_STATUSES,
@@ -151,6 +153,15 @@ def test_carry_through_options_are_verbatim():
         use_batch=True,
     )
     assert c.ink_rejected and c.focus_findings_to_markups and c.use_batch
+
+
+def test_governing_editions_are_recorded_and_validated_up_front():
+    c = resolve_run_configuration(qc_markups=True, governing_editions="NFPA 13 2022 (WA)")
+    assert c.to_dict()["governing_editions"] == ["NFPA 13 2022 (WA)"]
+    # Overriding the detected edition is a normal run, not a debug override.
+    assert c.configuration_kind == "NORMAL"
+    with pytest.raises(ValueError, match="NFPA 13"):
+        resolve_run_configuration(qc_markups=True, governing_editions="NFPA 13")
 
 
 def test_to_dict_round_trips_the_switches():

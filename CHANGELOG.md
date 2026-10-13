@@ -8,6 +8,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Governing code editions.** A new field in the QC section (and
+  `governing_editions=` in the library) names the code editions that govern the
+  project, e.g. `NFPA 13 2022; IBC 2021`. Use it when the AHJ adopted an older
+  edition than the drawings state, or the notes are wrong. For each code
+  named, the reviewer's edition replaces the detected one for the citation
+  check, review plan, cross-sheet QC and edition audit; the drawing's edition
+  is kept as a mention, and the audit treats the reviewer's edition as
+  text-grounded. Entries need a code and a 4-digit year (`NFPA 2001 2022`
+  parses as NFPA 2001, 2022 edition; one code may be listed at two editions);
+  an unreadable entry stops the run before anything is spent. Applied after
+  the identity cache, recorded in the run manifest's configuration, and
+  ignored by a run with no QC. Setting or changing it rewrites the review
+  plan, so every sheet's critique re-runs once.
+
 - **Absence cross-check.** Before markup, every sheet-level absence (*"expected
   X; not found on this sheet"*) is checked against the verbatim text layers of
   the whole set. One text-only call on Haiku 5.5 at medium effort per 25

@@ -56,6 +56,7 @@ from .models import (
     SheetRef,
     StageResult,
     UsageRecord,
+    apply_governing_editions,
     resolve_run_configuration,
     roll_up_qc_status,
     source_page_key,
@@ -3022,6 +3023,7 @@ def extract_drawing_context(
     review_plan: bool | None = None,
     investigate: bool | None = None,
     absence_check: bool | None = None,
+    governing_editions: "str | list[str] | None" = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     save_tile_artifacts: bool | None = None,
@@ -3176,6 +3178,13 @@ def extract_drawing_context(
     there, and an open batch keeps its receipt either way, so the next run
     collects whatever it finished before the cancel landed. The last stop point is the start of markup writing: by then every
     paid request is done, so a later stop lets the run finish.
+
+    ``governing_editions`` ("NFPA 13 2022; IBC 2021") names the code editions
+    that govern this project when detection gets them wrong or the AHJ adopted
+    an older edition. For each code named, it replaces the identity stage's
+    adopted edition for the citation check, review plan, cross-sheet QC and
+    edition audit. An entry without a code and a 4-digit year raises
+    ``ValueError`` before anything is spent.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -3226,6 +3235,7 @@ def extract_drawing_context(
         review_plan=review_plan,
         investigate=investigate,
         absence_check=absence_check,
+        governing_editions=governing_editions,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
@@ -3988,6 +3998,17 @@ def extract_drawing_context(
                 confidence=set_identity_obj.confidence or "unstated",
             )
     _finish_stage(stage_results, journal, identity_stage)
+    # The reviewer's governing editions outrank detection for the codes they
+    # name. Applied after the identity cache, and whether or not the stage ran,
+    # so every consumer below (cross-QC, review plan, citation check, edition
+    # audit) sees the same adopted basis. A run with none of those consumers
+    # (the standard path) leaves the identity alone.
+    if config.governing_editions and (
+        config.run_identity or config.run_citation or config.run_auditors
+    ):
+        set_identity_obj = apply_governing_editions(
+            set_identity_obj, config.governing_editions,
+        )
 
     if stage_executor is not None and config.run_cross_qc:
         if progress is not None:

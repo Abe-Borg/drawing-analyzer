@@ -339,6 +339,8 @@ ctx = extract_drawing_context(
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
     #   synthesize=False, identity=False, review_plan=False, absence_check=False,
+    # governing_editions="NFPA 13 2022; IBC 2021" names the code editions that
+    # govern when the drawings state the wrong one (see Set identity below).
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
 )
@@ -883,6 +885,30 @@ section. The identity call runs on Haiku 5.5 at medium effort by default
 (`DRAWING_ANALYZER_IDENTITY_MODEL`): it is structured extraction, it is
 **advisory only** — nothing gates a finding on it — and the deterministic regex
 edition harvest is the backstop the model cannot argue away.
+
+**Governing code editions (your override).** Detection reads what the drawings
+say, and the drawings can be wrong or silent: a general note copied from an
+older job, or an AHJ that adopted NFPA 13 a cycle or two behind the current
+edition. Type the editions that actually govern in the QC section's
+**Governing code editions** field (`governing_editions="NFPA 13 2022; IBC 2021"`
+from the library). Separate entries with semicolons or new lines; each needs a
+code and a 4-digit year, with an optional note in parentheses
+(`NFPA 13 2022 (state amendments)`). The year is read from the end of the
+entry, so `NFPA 2001 2022` is NFPA 2001, 2022 edition, and one code may be
+listed at two editions (`NFPA 13 2016 (existing system)`). An entry without a
+year stops the run before anything is spent. For each code you name, your
+edition replaces the detected one as the adopted edition seen by the citation
+check, the review plan, cross-sheet QC and the edition audit; the edition the
+drawings stated is kept as a mention, and codes you don't name keep the
+detected record. The audit treats your edition as text-grounded, so a citation
+of any other edition of that code is flagged at medium severity when the cited
+edition is in the sheet text. Your entries are marked *set by the reviewer* in
+`set_identity.json` and the *Set Identity* section, and recorded in the run
+manifest's configuration. They are applied after the identity cache, so the
+identity call itself is not repeated. On a QC Markups run, though, setting or
+changing them rewrites the review plan, and the plan is part of the critique
+prompt, so **every sheet's critique re-runs once** (later runs with the same
+entries read from cache). A run with no QC ignores them.
 
 **Model-authored review plan.** From the identity's canonical review facts, a second
 text-only call authors the per-discipline checklist a specialist for *this* set

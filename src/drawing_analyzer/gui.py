@@ -106,6 +106,7 @@ from .help_content import (
     transport_hint,
 )
 from .html_report import build_html_report
+from .models import parse_governing_editions
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
 from .spec_documents import SpecBudget, SpecDocument
@@ -656,6 +657,24 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._reference_audit_hint.pack(anchor="w", padx=(28, 0))
         self._on_qc_toggle()   # set the sub-toggle's initial enabled state
+
+        # Governing code editions: the reviewer's word on which editions govern
+        # (the AHJ's adoption), outranking what the identity stage detects for
+        # the codes named. Used by the citation check, review plan, cross-sheet
+        # QC and edition audit; ignored by a standard run.
+        ctk.CTkLabel(
+            qc_row, text="Governing code editions (optional)",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(8, 0))
+        self.governing_entry = ctk.CTkEntry(
+            qc_row, width=520, height=30,
+            placeholder_text="e.g. NFPA 13 2022; IBC 2021 (replaces the detected edition)",
+            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        )
+        self.governing_entry.pack(anchor="w", pady=(2, 0))
 
         # Review-profile selector (Phase 24 §16.4): a checkbox per available
         # profile, showing its title/version/discipline/source. Applicable profiles
@@ -1669,13 +1688,27 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         One call covers all three surfaces so a run's start/finish never
         leaves the pop-out editable while the header box (and everything
-        that reads it) is locked, or vice versa.
+        that reads it) is locked, or vice versa. The governing-editions field
+        is a run input too, so it locks and unlocks with them.
         """
         state = "normal" if enabled else "disabled"
         self.focus_box.configure(state=state)
         self.focus_expand_btn.configure(state=state)
         if self.focus_popout_box is not None:
             self.focus_popout_box.configure(state=state)
+        governing = getattr(self, "governing_entry", None)
+        if governing is not None:
+            governing.configure(state=state)
+
+    def _current_governing(self) -> str:
+        """The governing-editions text currently in the field ("" when empty)."""
+        entry = getattr(self, "governing_entry", None)
+        if entry is None:
+            return ""
+        try:
+            return entry.get().strip()
+        except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
+            return ""
 
     def _on_transport_toggle(self, _selection: str | None = None) -> None:
         # Keep the muted hint under the Processing checkbox in sync with the
@@ -1706,7 +1739,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 self._ink_rejected_var, self._reference_audit_var,
             )
         )
-        return f"{on} on" if on else ""
+        parts = [f"{on} on"] if on else []
+        if self._current_governing():
+            parts.append("editions set")
+        return " · ".join(parts)
 
     def _log_summary(self) -> str:
         """Collapsed activity-log header hint: the latest log line.
@@ -1823,6 +1859,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         # Snapshot the focus + specs + QC options with the file list, so mid-run
         # edits can't change what a running analysis was asked to do.
+        governing_editions = self._current_governing()
+        governing_codes, unreadable = parse_governing_editions(governing_editions)
+        if unreadable:
+            messagebox.showerror(
+                "Governing code editions",
+                "Each entry needs a code and a 4-digit edition year, separated "
+                "by semicolons (e.g. NFPA 13 2022; IBC 2021). Could not read: "
+                + "; ".join(unreadable),
+            )
+            return
         focus = self._current_focus()
         project_specifications = self._current_specs_text() or None
         qc_markups = self._qc_markups_var.get()
@@ -1891,6 +1937,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "re-analyzed.",
                 level="muted",
             )
+        if governing_editions and (qc_markups or reference_audit):
+            self._log(
+                "Governing code editions set: "
+                + "; ".join(c.display for c in governing_codes)
+                + " (they replace the editions detected on the drawings).",
+                level="accent",
+            )
         if project_specifications:
             self._log(
                 f"Project specifications attached: {len(project_specifications):,} "
@@ -1929,7 +1982,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             target=self._worker,
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
-                  use_batch, critique_use_batch, save_tiles, self._run_cancel),
+                  use_batch, critique_use_batch, save_tiles, self._run_cancel,
+                  governing_editions),
             daemon=True,
         ).start()
 
@@ -1947,6 +2001,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         critique_use_batch: bool | None = None,
         save_tiles: bool = False,
         cancel: CancelToken | None = None,
+        governing_editions: str = "",
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -1967,6 +2022,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 ink_rejected=ink_rejected,
                 profiles=profiles or None,
                 save_tile_artifacts=save_tiles,
+                governing_editions=governing_editions or None,
                 cancel=cancel,
             )
         except RunCancelled:

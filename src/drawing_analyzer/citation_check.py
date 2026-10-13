@@ -105,6 +105,7 @@ from .digest import (
     transient_retry_wait,
 )
 from .models import (
+    ORIGIN_OPERATOR,
     Citation,
     CitationAssessment,
     Finding,
@@ -486,7 +487,9 @@ def _identity_basis_entries(identity: Any, folded_texts: list[str]) -> list[tupl
     An identity entry contributes only when its edition carries a 4-digit year
     AND it has a non-empty evidence quote; its corroboration is decided by
     re-finding that quote verbatim (whitespace-folded) in a sheet text layer —
-    converting the model's containment claim into a checked fact.
+    converting the model's containment claim into a checked fact. A governing
+    edition the reviewer set (``origin="operator"``) needs no quote: it is the
+    reviewer's statement of the basis, trusted like text.
     """
     out: list[tuple] = []
     for ac in getattr(identity, "adopted_codes", ()) or ():
@@ -504,6 +507,9 @@ def _identity_basis_entries(identity: Any, folded_texts: list[str]) -> list[tupl
         m = _YEAR_TOKEN_RE.search(edition)
         if not code or m is None:
             continue                      # no basis year → never assert divergence
+        if origin == ORIGIN_OPERATOR:
+            out.append((_norm_family(code), code, m.group(1), True, "set by the reviewer"))
+            continue
         if not quote:
             continue                      # bare model assertion → no finding basis
         corroborated = False

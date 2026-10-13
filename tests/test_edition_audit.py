@@ -127,6 +127,12 @@ def test_identity_entry_without_quote_contributes_no_basis():
     identity = _identity(AdoptedCode(code="BS 9251", edition="2021", quote=""))
     f = _finding(refs=["BS 9251 2014 §6"], quote="TO BS 9251 2014")
     assert reconcile_cited_editions([f], identity, []) == []
+    # The same entry set by the reviewer needs no quote: it is the basis.
+    geoms = [_Geom(_ref(), "SPRINKLERS TO BS 9251 2014 §6")]
+    reviewer = _identity(AdoptedCode(code="BS 9251", edition="2021", origin="operator"))
+    (d,) = reconcile_cited_editions([f], reviewer, geoms)
+    assert d.severity == "medium" and d.verification.status == "DETERMINISTIC"
+    assert "(set by the reviewer)" in d.text
 
 
 def test_adopted_entry_without_year_never_asserts_divergence():
