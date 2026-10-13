@@ -577,7 +577,9 @@ consume ledger entries and nothing else.
   (`_publish_backoff`, 0.1s/0.4s) and never sleeps after the last attempt.
 - **HTML report** (`html_report.py`): `_finding_display_status` keeps `UNCERTAIN`
   distinct from `UNVERIFIED` / *Not checked*. `_STATUS_RANK` stays
-  integer-valued. Repeated quotes collapse in the browser only
+  integer-valued. A `VERIFIED` code finding is worded as a confirmed drawing
+  fact (`models.verified_drawing_fact_only`, the one rule the report chip and
+  `annotate`'s popup and index share); its stored status stays `VERIFIED`. Repeated quotes collapse in the browser only
   (`data-repeat-key` is a sha256 of the normalized quote, never the quote text);
   grouping recomputes after every sort or filter. Journal timestamps render
   through `_local_stamp`. The chat widget wraps the report in a byte-stable

@@ -283,7 +283,7 @@ def test_report_qc_status_banner_partial_names_the_debug_override_cause():
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert 'class="qc-status-banner" data-status="PARTIAL"' in doc
     assert "QC status: PARTIAL" in doc
-    assert "deliberately weakened the exhaustive contract" in doc
+    assert "deliberately turned a required stage off" in doc
     assert "withheld pending later remediation" not in doc
 
 
@@ -787,9 +787,17 @@ def test_findings_card_renders_table_chips_and_sheet_link():
     assert "fchip-verified" in doc
     assert "fchip-deterministic" in doc
     assert "fchip-unanchored" in doc
+    # A verified CODE finding names what the crop confirmed: the drawing fact.
+    assert ">Drawing fact confirmed</span>" in doc and ">Verified</span>" not in doc
     # Rows carry the filter/sort hooks the JS keys on.
     assert 'class="finding-row"' in doc
     assert 'data-severity="3"' in doc and 'data-status="VERIFIED"' in doc
+    # Any other verified finding keeps the plain chip.
+    other = hr.build_html_report(
+        _findings_ctx(findings=[_finding(category="coordination")]),
+        source_names=[SRC], now=NOW,
+    )
+    assert ">Verified</span>" in other and "Drawing fact confirmed" not in other
     # The sheet cell links to the card for the sheet the finding sits on.
     assert 'href="#sheet-1"' in doc
 

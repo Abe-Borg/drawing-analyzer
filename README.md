@@ -205,7 +205,7 @@ shows them in the report, and exports `findings.json` / `findings.csv` / `sheet_
 
 Two **QC review** checkboxes sit beside the focus:
 
-- **QC Markups** — the **full exhaustive review** (DA-010). Checking it runs the
+- **QC Markups** — the **full QC stack** (DA-010). Checking it runs the
   entire stack: synthesis, **two critique reads per sheet**, cross-sheet QC, the
   deterministic auditors, prose harvest, anchoring, the absence cross-check,
   verification, citation checks, markup, and coverage reconciliation — then produces a **marked-up PDF + findings
@@ -252,10 +252,13 @@ dialog, the export index, and an HTML report banner all lead with it. A stage th
 failed or a coverage that came back `INCOMPLETE` makes the run `PARTIAL`/`FAILED`;
 disabling a normally-required stage from the advanced API (e.g. `qc_markups=True,
 critique=False`) marks the configuration `DEBUG_OVERRIDE` and likewise caps it at
-`PARTIAL`. A clean NORMAL exhaustive run earns **`COMPLETE` — "Exhaustive QC
-complete"** (the Phase 23 completeness gate opened in Phase 26B once cross-set
-reconciliation, claim-complete citations, complete evidence, and callout-overflow
-handling landed). That claim is guarded, not assumed: a failed reconciliation, an
+`PARTIAL`. A clean NORMAL exhaustive run earns **`COMPLETE` — "All QC stages
+complete"**. That means every stage ran to completion, not that the set has been
+fully reviewed: the tool still misses things a good reviewer catches. (The
+label used to read "Exhaustive QC complete", which overstated it.) The Phase 23
+completeness gate opened in Phase 26B once cross-set reconciliation,
+claim-complete citations, complete evidence, and callout-overflow handling
+landed. That claim is guarded, not assumed: a failed reconciliation, an
 unchecked cited claim, a missing verification crop, or a source that changed
 mid-run each hold a required stage at `PARTIAL`, and the roll-up can never call
 such a run `COMPLETE`.
@@ -1213,7 +1216,7 @@ finding status:
 
 | Status | Source | Meaning |
 |---|---|---|
-| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
+| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct. For a **code** finding that means the drawing fact it rests on, not the violation: the popup says so, the index reads *Fact confirmed*, and the report chip reads *Drawing fact confirmed* (the citation check is what tests the code reference) |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
 | `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when its operands are text-extracted from the quote — a model-transcribed mismatch is `UNCERTAIN` and crop-verified) |

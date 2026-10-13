@@ -257,7 +257,7 @@ def test_render_outcome_lines_match_gui_three_state():
     assert "QC incomplete" in outcome(qc_status="PARTIAL", markup_incomplete=True)
     # Label wording matches DrawingContext.qc_status_label exactly (§3.3).
     assert "PARTIAL — Completed with QC warnings" in outcome(qc_status="PARTIAL")
-    assert "Exhaustive QC complete" in outcome(qc_status="COMPLETE")
+    assert "All QC stages complete" in outcome(qc_status="COMPLETE")
     assert "no QC requested" in outcome(qc_status="NOT_REQUESTED")
     # And the run-level outcome distinguishes a clean standard run (COMPLETE)
     # from one with errors (PARTIAL) even though QC was never requested.

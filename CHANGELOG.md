@@ -26,6 +26,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **No more "exhaustive" claims.** QC Markups is described as the full QC
+  stack, not an "exhaustive engineering review" (the help also said, rightly,
+  that it is not exhaustive). The `COMPLETE` status now reads "All QC stages
+  complete" instead of "Exhaustive QC complete": it means every stage ran, not
+  that the set was fully reviewed. The cost dialog, completion line, run.log
+  and report banner use the same words.
+
+- **A verified code finding says what was verified.** A crop can confirm what
+  the drawing shows ("18 in."), not that it breaks the code. A `VERIFIED` code
+  finding now reads *Drawing fact confirmed* in the report, *Fact confirmed* on
+  the index page, and says so in its popup; the stored status is still
+  `VERIFIED`, and the report's Ask AI tool description says the same.
+
 - **Absence findings default to low severity.** The critique reads one sheet at
   a time, and content a sheet "should" show often lives elsewhere in the set: a
   fire protection plan sheet's test, signage and bracing requirements usually

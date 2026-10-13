@@ -590,7 +590,7 @@ def _outcome_line(ctx: Any) -> str:
     # and deliberately repeats that property's exact strings.
     label = str(getattr(ctx, "qc_status_label", "") or "") or {
         "PARTIAL": "Completed with QC warnings",
-        "COMPLETE": "Exhaustive QC complete",
+        "COMPLETE": "All QC stages complete",
     }.get(qc_status, qc_status)
     if qc_status in ("PARTIAL", "COMPLETE"):
         return f"{outcome} — {label}"
@@ -618,7 +618,7 @@ def _config_lines(ctx: Any) -> list[str]:
     to_dict = getattr(cfg, "to_dict", None)
     d = to_dict() if callable(to_dict) else {}
     if getattr(cfg, "exhaustive_qc", False):
-        mode = "exhaustive QC (QC Markups)"
+        mode = "full QC (QC Markups)"
     elif getattr(cfg, "deterministic_audit_only", False):
         mode = "deterministic audit only (no additional API calls)"
     else:
@@ -919,7 +919,7 @@ def _prose_lines(ctx: Any) -> list[str]:
     parts += [f"{k} {acc[k]}" for k in sorted(extra)]
     line = "  " + " · ".join(parts)
     if acc.get("missing"):
-        line += "   << unaccounted items — exhaustive QC is incomplete (§14.9)"
+        line += "   << unaccounted items — QC is incomplete (§14.9)"
     return [line]
 
 

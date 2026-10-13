@@ -109,6 +109,7 @@ from .models import (
     leg_identity,
     name_is_taken,
     record_name,
+    verified_drawing_fact_only,
 )
 from .source_registry import assign_source_ids
 
@@ -173,6 +174,13 @@ _TRUST_NOTE = {
     "REJECTED": "Rejected on AI re-check - kept for the record only.",
 }
 _TRUST_NOTE_UNVERIFIED = "Not yet verified - double-check on the sheet."
+# A verified code finding (``models.verified_drawing_fact_only``): the crop
+# confirmed the drawing fact, not the code violation. ASCII only.
+_TRUST_NOTE_CODE_VERIFIED = (
+    "AI-verified that the drawing shows this - whether it breaks the code is "
+    "not settled by that check."
+)
+_INDEX_STATUS_CODE_VERIFIED = "Fact confirmed"
 # WP-03B §8.3: a finding standing on evidence the host could not check in text
 # (a scanned sheet, or the pasted raster region of a hybrid one) must not read
 # like a text-corroborated conflict. Said in plain words, on the drawing, where
@@ -762,6 +770,8 @@ def _trust_note(finding: Finding, *, unverified: bool, rejected: bool) -> str:
         )
         return _with_evidence_reason(finding, note, status="")
     status = (v.status if v is not None else "") or ""
+    if verified_drawing_fact_only(finding):
+        return _with_evidence_reason(finding, _TRUST_NOTE_CODE_VERIFIED, status=status)
     return _with_evidence_reason(finding, _TRUST_NOTE.get(status, ""), status=status)
 
 
@@ -1607,6 +1617,8 @@ def _add_margin_callouts(
 
 def _status_label(finding: Finding) -> str:
     # Reviewer words on the index page, never raw pipeline statuses.
+    if verified_drawing_fact_only(finding):
+        return _INDEX_STATUS_CODE_VERIFIED
     return _INDEX_STATUS_LABEL.get(_status(finding), _status(finding))
 
 

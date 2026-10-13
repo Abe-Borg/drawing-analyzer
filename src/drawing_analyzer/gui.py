@@ -621,7 +621,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         qc_row = self._qc_sec.body
         self._qc_markups_check = ctk.CTkCheckBox(
-            qc_row, text="QC Markups — exhaustive engineering review + marked-up PDFs",
+            qc_row, text="QC Markups — full QC stack + marked-up PDFs",
             variable=self._qc_markups_var, command=self._on_qc_toggle,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
@@ -1381,7 +1381,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         hint = getattr(self, "_reference_audit_hint", None)
         if hint is not None:
             hint.configure(
-                text="Already included in QC Markups' exhaustive stack." if on else ""
+                text="Already included in QC Markups." if on else ""
             )
         self._refresh_summary()
 
@@ -1854,7 +1854,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 bases=bases,
             )
             prompt = format_exhaustive_cost_prompt(exh)
-            dialog_title = "Confirm exhaustive QC review"
+            dialog_title = "Confirm full QC run"
         else:
             estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
@@ -1906,7 +1906,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
         elif processing_mode == PROCESSING_MODE_HYBRID:
             self._log(
-                "Hybrid mode: initial sheet analysis runs now; exhaustive-QC critique "
+                "Hybrid mode: initial sheet analysis runs now; QC critique "
                 "reads use the half-rate Batch queue and may take hours.",
                 level="muted",
             )
@@ -2160,7 +2160,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Completion states (§3.3 / §15.5): when exhaustive QC ran, the state leads
         # with its normalized ``qc_status`` — FAILED / a receipt-derived INCOMPLETE
         # coverage is "QC incomplete"; PARTIAL is "Completed with QC warnings";
-        # COMPLETE is "Exhaustive QC complete" (reachable since the §18.0 gate
+        # COMPLETE is "All QC stages complete" (reachable since the §18.0 gate
         # opened). A run that did not request exhaustive QC keeps the simple
         # errors-based states.
         qc_status = getattr(ctx, "qc_status", "NOT_REQUESTED")
@@ -2169,7 +2169,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         elif qc_status == "PARTIAL":
             state, level = "Completed with QC warnings", "warning"
         elif qc_status == "COMPLETE":
-            state, level = "Exhaustive QC complete", "success"
+            state, level = "All QC stages complete", "success"
         elif ctx.errors:
             state, level = "Completed with QC warnings", "warning"
         else:
@@ -2243,7 +2243,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 )
             elif qc_status == "PARTIAL":
                 self._log(
-                    "Exhaustive QC ran with an explicit debug override "
+                    "Full QC ran with an explicit debug override "
                     "(a normally-required stage was disabled), so the run is "
                     "PARTIAL by definition — not a production-complete review.",
                     level="muted",

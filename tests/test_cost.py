@@ -630,7 +630,7 @@ def test_exhaustive_dialog_copy_follows_the_digest_transport(batch, critique_bat
         assert phrase in text, phrase
     for phrase in absent:
         assert phrase not in text, phrase
-    assert text.rstrip().endswith("Proceed with the exhaustive review?")
+    assert text.rstrip().endswith("Proceed with the full QC run?")
 
 
 def test_specifications_add_the_same_charge_to_both_band_ends():

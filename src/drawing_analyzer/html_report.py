@@ -167,6 +167,7 @@ from .models import (
     TRUST_REASON_NO_TEXT,
     TRUST_REASON_NOT_FOUND,
     reduced_trust_reason,
+    verified_drawing_fact_only,
 )
 from .run_journal import redact_for_display
 
@@ -862,6 +863,9 @@ def _finding_row_html(
 ) -> str:
     status = _finding_display_status(f)
     label, cls = _FINDING_STATUS_CHIP.get(status, ("Not checked", "unverified"))
+    if status == "VERIFIED" and verified_drawing_fact_only(f):
+        # Same chip and filter state; the words say what a crop can confirm.
+        label = "Drawing fact confirmed"
     category = getattr(f, "category", "") or "other"
     severity = (getattr(f, "severity", "") or "").lower()
     sev_rank = _SEVERITY_RANK.get(severity, 0)
@@ -1725,11 +1729,11 @@ def _qc_status_banner_html(ctx: Any) -> str:
         # Gate open (§18.0): the one no-degraded-stage PARTIAL cause is an
         # explicit debug override — named below; never a vague withholding.
         detail = (
-            "Every exhaustive-QC stage completed; the run is PARTIAL because "
-            "the configuration deliberately weakened the exhaustive contract."
+            "Every QC stage completed; the run is PARTIAL because the "
+            "configuration deliberately turned a required stage off."
         )
     else:
-        detail = "Every required exhaustive-QC stage completed."
+        detail = "Every required QC stage completed."
     if kind == "DEBUG_OVERRIDE":
         detail += " Configuration: DEBUG_OVERRIDE (an explicit flag disabled a normally-required stage)."
     return (
@@ -3896,7 +3900,9 @@ _CHAT_JS = r"""
        description: 'Search the structured QC findings ledger — the machine-checked findings ' +
          'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/FAILED/' +
          'UNVERIFIED/UNANCHORED/REJECTED — UNVERIFIED means no verification stage ran for it, ' +
-         'UNCERTAIN means one ran and could not settle it; FAILED means the verifier could not run) and source quote. A cross-sheet ' +
+         'UNCERTAIN means one ran and could not settle it; FAILED means the verifier could not run; ' +
+         'VERIFIED on a code finding confirms what the drawing shows, not that it breaks the code) ' +
+         'and source quote. A cross-sheet ' +
          'finding also carries "also_on" ' +
          '(the other sheet ids it spans); a code finding may carry "refs" (the cited section ' +
          'numbers) and "citation" (the web-search check status/verdict). The prose report does ' +

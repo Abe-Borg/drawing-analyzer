@@ -137,7 +137,7 @@ def transport_hint(realtime: bool | str) -> str:
             )
         if not digest_batch and critique_batch:
             return (
-                "The initial sheet analysis runs immediately; the two exhaustive-QC "
+                "The initial sheet analysis runs immediately; the two QC "
                 "critique reads use the half-rate Batch queue. Standard analysis is "
                 "fast; a QC run can still wait hours for its critique batch."
             )
@@ -264,7 +264,7 @@ _HOW_TO_USE = HelpDocument(
             "5 · Choose a QC level",
             _para("The QC review section holds two checkboxes:"),
             _bullet(
-                "QC Markups — the full exhaustive engineering review: the set's identity "
+                "QC Markups — the full QC stack: the set's identity "
                 "and a model-authored review plan, synthesis, two critique reads per sheet, "
                 "cross-sheet QC, the deterministic auditors, the prose harvest, anchoring, "
                 "verification, citation checks, marked-up PDFs, and coverage "
@@ -513,7 +513,7 @@ _HOW_IT_WORKS = HelpDocument(
             _bullet(
                 "Fast skips the queue: every sheet is analyzed immediately and "
                 f"concurrently ({REALTIME_TIME_PER_SHEET}) — {REALTIME_COST_PER_SHEET}. "
-                "Roughly double the batch rate, and running the exhaustive stack "
+                "Roughly double the batch rate, and running the full QC stack "
                 "real-time is the most expensive configuration — but you get results now. "
                 "Choose it when you're in a rush."
             ),
@@ -709,11 +709,18 @@ _WHY_TRUST_IT = HelpDocument(
                 "A budget cap or a garbled reply can never mark a finding wrong — it stays "
                 "UNCERTAIN, never REJECTED."
             ),
+            _bullet(
+                "On a code finding, VERIFIED confirms the drawing fact the finding rests "
+                "on, not the code violation: a crop can show \"18 in.\", not that 18 in. "
+                "breaks the code. Those findings read \"Drawing fact confirmed\"; whether "
+                "the cited section says what the finding claims is the citation check's "
+                "job."
+            ),
         ),
         _section(
             "Nothing is silently dropped",
             _para(
-                "On an exhaustive run every ledger entry gets ink except the ones the "
+                "On a QC Markups run every ledger entry gets ink except the ones the "
                 "verifier proved wrong — and even those get a reconciled index row with "
                 "page links. A finding is either on the paper or accounted for in the "
                 "index; it is never simply invisible."
@@ -755,10 +762,12 @@ _WHY_TRUST_IT = HelpDocument(
         _section(
             "One honest, guarded status",
             _para(
-                "An exhaustive run carries a single rolled-up QC status — NOT_REQUESTED, "
+                "A QC Markups run carries a single rolled-up QC status — NOT_REQUESTED, "
                 "COMPLETE, PARTIAL, or FAILED. A failed reconciliation, an unchecked cited "
                 "claim, a missing verification crop, or a source that changed mid-run holds "
-                "the run below COMPLETE. A clean review is a guarded claim, not an assumption."
+                "the run below COMPLETE. COMPLETE means every QC stage ran to completion, "
+                "not that the set has been fully reviewed: it is a guarded claim about the "
+                "run, not about the drawings."
             ),
         ),
         _section(

@@ -671,6 +671,23 @@ def reduced_trust_reason(obj: Any) -> str:
     return TRUST_REASON_NO_TEXT
 
 
+def verified_drawing_fact_only(finding: Any) -> bool:
+    """A VERIFIED code finding: the crop confirmed what the drawing shows, no more.
+
+    Verification re-reads a crop of the sheet. It can confirm "the drawing
+    shows 18 in." but not "18 in. violates the code", so a code finding it
+    verified is a confirmed drawing fact, not a confirmed code violation. The
+    markup popup, the index page and the HTML report all word it that way; the
+    stored status stays ``VERIFIED``. Whether the cited section says what the
+    finding claims is the citation check's question.
+    """
+    v = getattr(finding, "verification", None)
+    return (
+        str(getattr(v, "status", "") or "") == "VERIFIED"
+        and str(getattr(finding, "category", "") or "").lower() == "code"
+    )
+
+
 def sheet_evidence_text(sheet: Any) -> str:
     """The text a **host-side** check may treat as this sheet's source evidence.
 

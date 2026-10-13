@@ -1317,7 +1317,7 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     else:
         with_models = f"{', '.join(used[:-1])} and {used[-1]} (per stage, below)"
     lines = [
-        f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
+        f"About to run the full QC stack on {est.sheet_count} sheet(s)"
         f"{where} with {with_models} — digest, set identity + "
         f"model review plan, {est.critique_runs} critique read(s) per sheet, "
         "cross-sheet QC, "
@@ -1391,7 +1391,7 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     elif not est.batch and est.critique_batch:
         lines += [
             "",
-            "Hybrid mode: digest reads run immediately; the two exhaustive-QC "
+            "Hybrid mode: digest reads run immediately; the two QC "
             "critique reads use the half-rate shared queue and can still take hours.",
         ]
     elif est.batch and not est.critique_batch:
@@ -1406,5 +1406,5 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             "Fast mode: no queue — expect roughly 4–6 minutes per sheet, at the "
             "full (un-discounted) API rate. Choose this when you need results now.",
         ]
-    lines += ["", "Proceed with the exhaustive review?"]
+    lines += ["", "Proceed with the full QC run?"]
     return "\n".join(lines)

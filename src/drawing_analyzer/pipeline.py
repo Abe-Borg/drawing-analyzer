@@ -749,7 +749,7 @@ class DrawingContext:
         """A human three-state label for the GUI completion dialog / report (§3.3)."""
         return {
             "NOT_REQUESTED": "Completed",
-            "COMPLETE": "Exhaustive QC complete",
+            "COMPLETE": "All QC stages complete",
             "PARTIAL": "Completed with QC warnings",
             "FAILED": "QC incomplete",
         }.get(self.qc_status, "Completed")
@@ -2151,7 +2151,7 @@ def _run_qc_stages(
             if hres.missing:
                 errors.append(
                     f"Prose harvest: {hres.missing} enumerated prose item(s) could not "
-                    "be accounted for in the ledger — exhaustive QC is incomplete."
+                    "be accounted for in the ledger — QC is incomplete."
                 )
                 harvest_stage.status = "PARTIAL"
                 harvest_stage.errors.append(f"{hres.missing} prose item(s) unaccounted")
@@ -2297,7 +2297,7 @@ def _run_qc_stages(
         # presented as ordinary, fully-numbered output (§12.3).
         errors.append(
             f"Ledger: {ledger.post_seal_adds} finding(s) ingested after seal — "
-            "exhaustive QC is incomplete (a stage produced findings too late)."
+            "QC is incomplete (a stage produced findings too late)."
         )
 
     all_findings = entries
@@ -3313,7 +3313,7 @@ def extract_drawing_context(
     # be a deliberate latency choice, so this only informs.
     if config.exhaustive_qc and not use_batch and not critique_use_batch:
         _batch_hint = (
-            "Running the exhaustive QC stack in Fast mode — the most expensive "
+            "Running the full QC stack in Fast mode — the most expensive "
             "transport. Economy is ~50% cheaper for identical review inputs and "
             "outputs: pass "
             "use_batch=True (or set DRAWING_ANALYZER_USE_BATCH=1) if the batch "
