@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-13
+
 ### Added
 
 - **Governing code editions.** A new field in the QC section (and
