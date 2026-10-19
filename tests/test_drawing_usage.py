@@ -237,7 +237,7 @@ def test_cache_read_write_and_web_search_pricing():
 @pytest.mark.parametrize("model,read,write_5m,write_1h", [
     ("claude-opus-5-5", "0.20", "5", "8"),
     ("claude-opus-5-5-fast", "0.20", "5", "8"),
-    ("claude-sonnet-5-5", "0.20", "2.5", "4"),
+    ("claude-sonnet-5-5", "0.10", "2.5", "4"),
     ("claude-haiku-5-5", "0.05", "0.625", "1"),  # 1M prompt uses 5x tier
     ("claude-opus-5", "0.50", "6.25", "10"),
 ])

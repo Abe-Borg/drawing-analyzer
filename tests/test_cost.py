@@ -108,7 +108,7 @@ def test_haiku_request_tier_prices_all_tokens_at_the_prompt_boundary(input_token
 
 @pytest.mark.parametrize("model,reuse,no_reuse", [
     ("claude-opus-5-5", 5.20, 10.00),
-    ("claude-sonnet-5-5", 2.70, 5.00),
+    ("claude-sonnet-5-5", 2.60, 5.00),
     ("claude-haiku-5-5", 0.675, 1.25),
     ("claude-opus-5", 6.75, 12.50),
 ])

@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-10-07. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-10-19. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,14 +20,14 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-10-07"
+PRICING_EFFECTIVE_DATE = "2026-10-19"
 
 # Batch API bills at half of standard, per Anthropic's published pricing. The
 # caching multipliers below stack with it (Anthropic pricing, "These multipliers
 # stack with other pricing modifiers, including the Batch API discount").
 BATCH_DISCOUNT = 0.5
 # Prompt-caching multipliers on the base *input* rate. Cache READ rates are
-# per model: 0.05x on Opus 5.5, 0.1x on the other registered models. A cache
+# per model: 0.05x on Opus 5.5 and Sonnet 5.5, 0.1x on the other registered models. A cache
 # WRITE depends on the requested TTL —
 # 1.25x for the default 5-minute entry, 2x for a ``ttl: "1h"`` entry — so the
 # two are separate constants and the write rate is chosen per record by
@@ -74,8 +74,8 @@ class ModelPrice:
     input_per_mtok: float
     output_per_mtok: float
     label: str  # human-friendly name for dialogs
-    # Cache-read rate as a multiple of base input. Opus 5.5 reads at 0.05x
-    # ($0.20 on $4); every other model in the table reads at 0.10x.
+    # Cache-read rate as a multiple of base input. Opus 5.5 ($0.20 on $4) and
+    # Sonnet 5.5 ($0.10 on $2) read at 0.05x; every other model reads at 0.10x.
     cache_read_multiplier: float = CACHE_READ_MULTIPLIER
     # Applied to all token rates when one request's full prompt exceeds the
     # threshold. Cached reads/writes count toward the prompt, output does not.
@@ -107,10 +107,10 @@ class ModelPrice:
 # defaults have since moved to Sonnet 5.5 (citation, verification, chat) and
 # Haiku 5.5 (identity, harvest).
 MODEL_PRICING: dict[str, ModelPrice] = {
-    # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-07).
-    # Opus/Sonnet 5.5 read at $0.20/MTok, with different base input rates.
+    # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-19).
+    # Opus 5.5 reads at $0.20/MTok and Sonnet 5.5 at $0.10/MTok (0.05x of base).
     "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
-    "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5"),
+    "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5", cache_read_multiplier=0.05),
     "claude-haiku-5-5": ModelPrice(
         0.10, 0.50, "Haiku 5.5", long_context_threshold=100_000,
         long_context_multiplier=5.0,

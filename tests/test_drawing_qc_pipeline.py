@@ -230,7 +230,7 @@ def _annot_count(pdf_path: Path) -> int:
 
 @pytest.mark.parametrize("model,digest_cost", [
     ("claude-opus-5-5", "0.2036"),
-    ("claude-sonnet-5-5", "0.2018"),
+    ("claude-sonnet-5-5", "0.1018"),
 ])
 def test_5_5_pipeline_request_policy_and_priced_ledger(tmp_path, monkeypatch, model, digest_cost):
     from decimal import Decimal
