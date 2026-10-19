@@ -572,7 +572,7 @@ consume ledger entries and nothing else.
   stamp. GOTO destinations, CropBox, and occupancy sampling are in the PyMuPDF
   gotchas. `export.py` writes `markup_manifest.json`; `html_report.py` renders
   the report. Opt-in `save_tile_artifacts` (`DRAWING_ANALYZER_SAVE_TILES`,
-  `tile_artifacts.py`) bypasses the level-1 render skip so tiles exist on warm
+  `tile_artifacts.py`; deliberately no GUI control — kwarg or env var only) bypasses the level-1 render skip so tiles exist on warm
   runs; the level-2 cache still serves the digests.
 - **Export** (`export.py`): every write inside the atomic publish goes through
   `long_path(folder)`, derived **once** in `write_drawing_export`.

@@ -200,7 +200,6 @@ def _cost_preview_app(gui, tk, monkeypatch):
         _processing_mode_var=tk.StringVar(value="Fast"),
         _qc_markups_var=var(value=False), _qc_verified_only_var=var(value=False),
         _ink_rejected_var=var(value=False), _reference_audit_var=var(value=False),
-        _save_tiles_var=var(value=False),
         _current_focus=lambda: "", _current_specs_text=lambda: "",
         _current_governing=lambda: "",
         _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,

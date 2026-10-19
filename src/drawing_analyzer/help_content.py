@@ -318,10 +318,6 @@ _HOW_TO_USE = HelpDocument(
                 "batch queue."
             ),
             _bullet(f"Fast — nothing queues ({REALTIME_TIME_PER_SHEET}); the most expensive option."),
-            _bullet(
-                "Save tile images + per-tile notes adds a tiles/ folder to the export. It "
-                "re-renders cached sheets but costs no extra API money."
-            ),
         ),
         _section(
             "7 · Analyze & confirm the cost",

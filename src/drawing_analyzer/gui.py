@@ -314,10 +314,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # digests now and batches critique, Fast runs both now. The GUI passes
         # both resolved values explicitly, so the choice is auditable.
         self._processing_mode_var = StringVar(value=PROCESSING_MODE_ECONOMY)
-        # Opt-in tile artifact dump: every rendered tile PNG + mirrored per-tile
-        # notes land in a tiles/ folder inside the export. Passed explicitly, so
-        # it shadows DRAWING_ANALYZER_SAVE_TILES (same contract as use_batch).
-        self._save_tiles_var = BooleanVar(value=False)
         # Review-profile selection (Phase 24 §16.4): name -> checkbox var, plus the
         # sets of profiles the user manually forced on/off — a manual override always
         # wins and survives a later preflight auto-suggest refresh. Preflight PyMuPDF
@@ -684,10 +680,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Processing transport.
         self._transport_sec = CollapsibleSection(
             outer, "Processing", expanded=False,
-            summary_provider=lambda: (
-                self._processing_mode_var.get().lower()
-                + (" + tiles" if self._save_tiles_var.get() else "")
-            ),
+            summary_provider=lambda: self._processing_mode_var.get().lower(),
         )
         transport_row = self._transport_sec.body
         ctk.CTkLabel(
@@ -713,17 +706,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_muted"], justify="left", wraplength=780,
         )
         self._transport_hint.pack(anchor="w", pady=(2, 0))
-        # Opt-in tile artifact dump — independent of the QC mode (works in
-        # standard / audit-only / exhaustive), so no _on_qc_toggle coupling.
-        self._save_tiles_check = ctk.CTkCheckBox(
-            transport_row,
-            text="Save tile images + per-tile notes (adds a tiles/ folder to "
-                 "exports; re-renders cached sheets — no extra API cost)",
-            variable=self._save_tiles_var,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=COLORS["text_primary"],
-        )
-        self._save_tiles_check.pack(anchor="w", pady=(8, 0))
 
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -1878,7 +1860,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         profiles = self._selected_profiles()
         processing_mode = self._processing_mode_var.get()
         use_batch, critique_use_batch = processing_transports(processing_mode)
-        save_tiles = self._save_tiles_var.get()
 
         # Cost-confirm gate — show the estimated spend before anything is sent.
         # For an exhaustive QC run (DA-010) show the full per-stage estimate with a
@@ -1969,12 +1950,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "(~4–6 min/sheet; batch is ~50% cheaper).",
                 level="muted",
             )
-        if save_tiles:
-            self._log(
-                "Tile images + per-tile notes will be included in the export; "
-                "cached sheets are re-rendered (no extra API cost).",
-                level="accent",
-            )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
 
         pdfs = list(self._pdfs)
@@ -1982,7 +1957,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             target=self._worker,
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
-                  use_batch, critique_use_batch, save_tiles, self._run_cancel,
+                  use_batch, critique_use_batch, self._run_cancel,
                   governing_editions),
             daemon=True,
         ).start()
@@ -1999,7 +1974,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         profiles: list[str] | None = None,
         use_batch: bool = True,
         critique_use_batch: bool | None = None,
-        save_tiles: bool = False,
         cancel: CancelToken | None = None,
         governing_editions: str = "",
     ) -> None:
@@ -2021,7 +1995,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 markup_verified_only=markup_verified_only,
                 ink_rejected=ink_rejected,
                 profiles=profiles or None,
-                save_tile_artifacts=save_tiles,
+                # No GUI control for the tile-artifact dump: omitting
+                # save_tile_artifacts leaves DRAWING_ANALYZER_SAVE_TILES in charge.
                 governing_editions=governing_editions or None,
                 cancel=cancel,
             )
