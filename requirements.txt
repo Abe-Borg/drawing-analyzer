@@ -12,7 +12,7 @@
 
 # --- engine (drawing_analyzer core) ---
 annotated-types==0.8.0
-anthropic==1.13.0
+anthropic==1.15.0
 anyio==4.15.1
 docstring_parser==0.18.0
 h11==0.16.0
@@ -22,40 +22,40 @@ idna==3.20
 jiter==0.17.0
 lxml==6.1.3
 packaging==26.3
-platformdirs==4.12.2
-pydantic==2.13.5
-pydantic_core==2.46.5
+platformdirs==4.13.3
+pydantic==2.14.1
+pydantic_core==2.50.1
 pymupdf==1.28.2
-pypdf==6.19.0
+pypdf==6.20.1
 python-docx==1.2.0
 sniffio==1.3.1
-truststore==0.10.4
+truststore==0.10.5
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 
 # --- gui extra (`pip install -e ".[gui]"`) ---
 customtkinter==6.0.0
 darkdetect==0.8.0
-tkinterdnd2==0.6.3
+tkinterdnd2==0.6.4
 
 # keyring (credential-safe API-key store) and its transitive deps
 keyring==25.7.0
 jaraco.classes==3.4.0
 jaraco.context==6.1.2
 jaraco.functools==4.6.0
-more-itertools==11.1.0
+more-itertools==11.2.1
 
 # keyring's Secret Service backend (Linux only)
 SecretStorage==3.5.0; sys_platform == "linux"
 jeepney==0.9.0; sys_platform == "linux"
 cryptography==50.0.2; sys_platform == "linux"
 cffi==2.1.1; sys_platform == "linux"
-pycparser==3.0; sys_platform == "linux"
+pycparser==3.11; sys_platform == "linux"
 
 # keyring's Windows Credential Manager backend (Windows only)
 pywin32-ctypes==0.2.3; sys_platform == "win32"
 
 # importlib.metadata backport, needed on Python < 3.12
 importlib_metadata==9.0.1; python_version < "3.12"
-zipp==4.1.0; python_version < "3.12"
+zipp==4.1.1; python_version < "3.12"
 backports.tarfile==1.2.0; python_version < "3.12"
