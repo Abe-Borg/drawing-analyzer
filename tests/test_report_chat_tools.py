@@ -2428,3 +2428,282 @@ def test_control_tool_turn_really_makes_two_requests(page, tmp_path):
           queue=[_tool_use_turn(), _text_turn("second round ran")])
     _ask(page, "search for something")
     assert len(page.evaluate("window.__REQ")) == 2, page.evaluate("window.__REQ.length")
+
+
+# --------------------------------------------------------------------------- #
+# Inline artifacts (create_artifact) and the Files panel. The artifact lives in
+# the thread itself — its tool_use input — so a reload, Load, and New chat are
+# what prove it durable; downloads are read back byte for byte.
+# --------------------------------------------------------------------------- #
+
+_CHART = {"kind": "chart", "title": "Findings by sheet", "caption": "From query_findings.",
+          "chart": {"type": "bar", "stacked": True, "categories": ["M-101", "M-102", "M-501"],
+                    "series": [{"name": "High", "values": [3, 0, 4]},
+                               {"name": "Low", "values": [1, 2, None]}]}}
+_TABLE = {"kind": "table", "title": "High findings",
+          "table": {"columns": ["QC id", "Sheet", "Note", "Count"],
+                    "rows": [["QC-001", "M-501", '=HYPERLINK("http://x","y")', 3],
+                             ["QC-002", "M-101", "-12.5", -2],
+                             {"QC id": "QC-003", "Sheet": "M-102", "Note": "ok", "Count": 10}]}}
+_MEMO = {"kind": "memo", "title": "RFI draft",
+         "markdown": "## Question\nConfirm **VAV-3** clearance.\n\n- Detail 4/M-501"}
+
+
+def _tool_round(*calls):
+    """One assistant round that makes every (id, name, input) call, in order."""
+    frames = []
+    for i, (tool_id, name, tool_input) in enumerate(calls):
+        frames += [
+            {"type": "content_block_start", "index": i,
+             "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}},
+            {"type": "content_block_delta", "index": i,
+             "delta": {"type": "input_json_delta", "partial_json": json.dumps(tool_input)}},
+            {"type": "content_block_stop", "index": i},
+        ]
+    frames.append({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    return _sse(frames)
+
+
+def _tool_results(page):
+    """The tool_results the turn's second request carried, keyed by tool_use id."""
+    msg = page.evaluate("window.__REQ")[1]["messages"][-1]
+    return {b["tool_use_id"]: b for b in msg["content"] if b.get("type") == "tool_result"}
+
+
+def _download(page, selector):
+    with page.expect_download(timeout=5000) as dl:
+        page.click(selector)
+    got = dl.value
+    return got.suggested_filename, pathlib.Path(got.path()).read_bytes()
+
+
+def _make_three(page, tmp_path, doc=None):
+    _load(page, doc or _chat_doc(), tmp_path, queue=[
+        _tool_round(("a1", "create_artifact", _CHART), ("a2", "create_artifact", _TABLE),
+                    ("a3", "create_artifact", _MEMO)),
+        _text_turn("Here they are: A1, A2 and A3."),
+    ])
+    _ask(page, "chart, table and memo please")
+
+
+def test_artifacts_render_inline_and_survive_a_reload(page, tmp_path):
+    _make_three(page, tmp_path)
+    results = _tool_results(page)
+    assert not any(r.get("is_error") for r in results.values()), results
+    assert [("A%d" % (i + 1)) in results["a%d" % (i + 1)]["content"] for i in range(3)] == [True] * 3
+
+    def cards():
+        return page.eval_on_selector_all(".da-ai .da-art", "els => els.map(e => e.id)")
+
+    assert cards() == ["da-art-A1", "da-art-A2", "da-art-A3"]
+    # One mark per non-empty value (the zero and the null draw nothing), and a
+    # legend naming both series.
+    assert page.eval_on_selector_all("#da-art-A1 svg path[data-i]", "els => els.length") == 4
+    legend = page.eval_on_selector("#da-art-A1 svg", "el => el.textContent")
+    assert "High" in legend and "Low" in legend
+    # A row given as {column: value} is read by header.
+    rows = page.eval_on_selector_all(
+        "#da-art-A2 tbody tr", "els => els.map(r => Array.from(r.cells).map(c => c.textContent))")
+    assert rows[2] == ["QC-003", "M-102", "ok", "10"]
+    assert page.eval_on_selector_all("#da-art-A3 strong", "els => els.length") == 1
+    assert page.text_content("#da-files-badge") == "3"
+
+    page.reload()
+    page.click("#da-chat-fab")
+    assert cards() == ["da-art-A1", "da-art-A2", "da-art-A3"]
+    assert page.evaluate("window.__REQ.length") == 0          # rebuilt, not re-asked
+    assert page.text_content("#da-files-badge") == "3"
+    # Numbering continues from the restored thread, so ids stay what the model was told.
+    page.evaluate("q => { window.__SSE_QUEUE = q; }", [
+        _tool_round(("a4", "create_artifact", _MEMO)), _text_turn("And A4."),
+    ])
+    _ask(page, "one more memo")
+    assert "A4" in _tool_results(page)["a4"]["content"]
+    assert cards()[-1] == "da-art-A4"
+
+    page.click("#da-chat-clear")                              # New chat takes them with it
+    assert cards() == []
+    assert page.is_hidden("#da-files-badge")
+    page.click("#da-chat-files")
+    assert "Nothing yet" in page.text_content("#da-files")
+    assert "single file" in page.text_content("#da-files")   # no export folder listed
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_sorting_a_table_artifact_orders_numbers_numerically(page, tmp_path):
+    _make_three(page, tmp_path)
+
+    def counts():
+        return page.eval_on_selector_all("#da-art-A2 tbody tr td:last-child", "els => els.map(e => e.textContent)")
+
+    assert counts() == ["3", "-2", "10"]
+    page.click("#da-art-A2 thead th:last-child button")
+    assert counts() == ["-2", "3", "10"]
+    page.click("#da-art-A2 thead th:last-child button")
+    assert counts() == ["10", "3", "-2"]
+    page.click("#da-art-A2 thead th:last-child button")      # third click: original order
+    assert counts() == ["3", "-2", "10"]
+
+
+def test_artifact_downloads_are_real_files(page, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    _make_three(page, tmp_path)
+    btn = '#da-art-{} .da-art-actions button:has-text("{}")'
+
+    name, svg = _download(page, btn.format("A1", "SVG"))
+    assert name == "A1-findings-by-sheet.svg"
+    root = ET.fromstring(svg)
+    assert root.tag == "{http://www.w3.org/2000/svg}svg"
+    assert "Findings by sheet" in "".join(root.itertext())      # the file stands alone
+
+    name, png = _download(page, btn.format("A1", "PNG"))
+    assert name == "A1-findings-by-sheet.png" and png[:8] == b"\x89PNG\r\n\x1a\n"
+
+    _, chart_csv = _download(page, btn.format("A1", "CSV"))
+    assert chart_csv.decode("utf-8-sig").split("\r\n")[:4] == [
+        "Category,High,Low", "M-101,3,1", "M-102,0,2", "M-501,4,"]
+
+    _, table_csv = _download(page, btn.format("A2", "CSV"))
+    lines = table_csv.decode("utf-8-sig").split("\r\n")
+    # A formula sigil is neutralized the way findings.csv does it; a plain
+    # negative number, string or not, is left alone.
+    assert lines[1] == "QC-001,M-501,\"'=HYPERLINK(\"\"http://x\"\",\"\"y\"\")\",3"
+    assert lines[2] == "QC-002,M-101,-12.5,-2"
+
+    name, md = _download(page, btn.format("A3", ".md"))
+    assert name == "A3-rfi-draft.md" and md.decode("utf-8").startswith("# RFI draft\n")
+    _, html_doc = _download(page, btn.format("A3", ".html"))
+    text = html_doc.decode("utf-8")
+    assert 'http-equiv="Content-Security-Policy"' in text and "<script" not in text
+    assert "<strong>VAV-3</strong>" in text
+
+
+@pytest.mark.parametrize(("spec", "needle"), [
+    ({"kind": "chart", "title": "t", "chart": {"type": "bar", "categories": ["a", "b"],
+                                               "series": [{"name": "s", "values": [1]}]}},
+     "match one to one"),
+    ({"kind": "chart", "title": "t", "chart": {"type": "pie", "categories": ["a"],
+                                               "series": [{"name": "s", "values": [1]},
+                                                          {"name": "u", "values": [2]}]}},
+     "exactly one series"),
+    ({"kind": "table", "title": "t", "table": {"columns": ["a"], "rows": [["1", "2"]]}},
+     "2 cells for 1 columns"),
+    ({"kind": "poster", "title": "t"}, "kind must be"),
+])
+def test_an_invalid_artifact_is_an_error_the_model_can_fix(page, tmp_path, spec, needle):
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_tool_round(("bad", "create_artifact", spec)), _text_turn("fixed it.")])
+    _ask(page, "make something")
+    result = _tool_results(page)["bad"]
+    assert result.get("is_error") is True and needle in result["content"], result
+    assert page.eval_on_selector_all(".da-art", "els => els.length") == 0
+    assert page.eval_on_selector_all(".da-tool-err", "els => els.length") == 1
+    assert page.is_hidden("#da-files-badge")
+
+
+def test_download_all_zips_every_artifact_and_the_transcript(page, tmp_path):
+    import io
+    import zipfile
+
+    _make_three(page, tmp_path)
+    page.click("#da-chat-files")
+    name, data = _download(page, '#da-files button:has-text("Download all")')
+    assert name == "chat_files.zip"
+    archive = zipfile.ZipFile(io.BytesIO(data))
+    assert archive.testzip() is None                            # every CRC checks out
+    assert sorted(archive.namelist()) == sorted([
+        "A1-findings-by-sheet.svg", "A1-findings-by-sheet.png", "A1-findings-by-sheet.csv",
+        "A2-high-findings.csv", "A3-rfi-draft.md", "A3-rfi-draft.html", "chat_history.json",
+    ])
+    assert archive.read("A1-findings-by-sheet.png")[:4] == b"\x89PNG"
+    transcript = json.loads(archive.read("chat_history.json"))
+    assert transcript["kind"] == "drawing_analyzer_chat_transcript"
+    assert transcript["turns"][0]["display"]["text"] == "chart, table and memo please"
+
+
+_EXPORTS = {"files": [
+    {"path": "M-101_reviewed.pdf", "group": "Marked-up drawings", "description": "Marked-up drawing"},
+    {"path": "diagnostics/api calls.csv", "group": "Diagnostics", "description": ""},
+    {"path": "javascript:window.__pwned=1", "group": "Other", "description": ""},
+    {"path": "run.log", "group": "Run record", "description": "Sanitized per-run log"},
+], "omitted": 0}
+
+
+def test_export_files_are_relative_links_and_share_file_puts_one_in_the_chat(page, tmp_path):
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True,
+        export_files=_EXPORTS,
+    )
+    _load(page, doc, tmp_path, queue=[
+        _tool_round(("l1", "list_files", {}), ("s1", "share_file", {"target": "run.log"}),
+                    ("s2", "share_file", {"target": "nope.txt"})),
+        _text_turn("Linked it."),
+    ])
+    _ask(page, "where is the run log?")
+    results = _tool_results(page)
+    listing = json.loads(results["l1"]["content"])
+    assert [f["path"] for f in listing["export_folder"]["files"]] == [f["path"] for f in _EXPORTS["files"]]
+    assert not results["s1"].get("is_error")
+    assert results["s2"].get("is_error") is True and "list_files" in results["s2"]["content"]
+
+    def chip_href():
+        return page.eval_on_selector(".da-ai .da-file-chip a", "a => a.getAttribute('href')")
+
+    assert chip_href() == "run.log"
+    page.click("#da-chat-files")
+    links = dict(page.eval_on_selector_all(
+        "#da-files a", "els => els.map(a => [a.textContent, [a.getAttribute('href'), a.href]])"))
+    # Every segment is percent-encoded, so no filename reads as a scheme; each
+    # one resolves beside the report.
+    assert links["diagnostics/api calls.csv"][0] == "diagnostics/api%20calls.csv"
+    assert links["javascript:window.__pwned=1"][0] == "javascript%3Awindow.__pwned%3D1"
+    folder = tmp_path.as_uri() + "/"
+    assert all(resolved.startswith(folder) for _href, resolved in links.values()), links
+
+    page.reload()                                              # the chip is part of the thread
+    page.click("#da-chat-fab")
+    assert chip_href() == "run.log"
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_a_hostile_artifact_stays_inert_on_screen_and_in_its_files(page, tmp_path):
+    attack = '<img src=x onerror="window.__pwned=1">'
+    breakout = "</script><script>window.__pwned=1</script>"
+    chart = {"kind": "chart", "title": attack, "caption": attack,
+             "chart": {"type": "line", "categories": [attack, breakout],
+                       "series": [{"name": attack, "values": [1, 2]}, {"name": breakout, "values": [2, 1]}],
+                       "x_label": attack, "y_label": attack, "unit": attack}}
+    table = {"kind": "table", "title": attack,
+             "table": {"columns": [attack], "rows": [[breakout], ["[x](javascript:window.__pwned=1)"]]}}
+    memo = {"kind": "memo", "title": attack,
+            "markdown": "[x](javascript:window.__pwned=1) " + attack + "\n\n<svg onload=window.__pwned=1>"}
+    _load(page, _chat_doc(), tmp_path, queue=[
+        _tool_round(("h1", "create_artifact", chart), ("h2", "create_artifact", table),
+                    ("h3", "create_artifact", memo), ("h4", "share_file", {"target": "A1"})),
+        _text_turn("done."),
+    ])
+    _ask(page, "go")
+    assert page.eval_on_selector_all(".da-art", "els => els.length") == 3
+    # Hover every mark, open the data view, and fire the events payloads use.
+    page.hover("#da-art-A1 .da-art-plot")
+    page.click('#da-art-A1 .da-art-actions button:has-text("Data")')
+    page.evaluate(
+        """() => document.querySelectorAll('#da-chat-panel *').forEach(el => {
+             ['mouseover', 'focus', 'pointermove'].forEach(t => {
+               try { el.dispatchEvent(new Event(t, {bubbles: true})); } catch(e){}
+             });
+           })"""
+    )
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__pwned") is False
+    assert page.evaluate(
+        "!!document.querySelector('#da-chat-panel img, #da-chat-panel script, "
+        "#da-chat-panel iframe, #da-chat-panel foreignObject, #da-chat-panel a[href^=\"javascript\"]')"
+    ) is False
+    assert attack in page.text_content("#da-art-A2")             # shown as text, never dropped
+    _, svg = _download(page, '#da-art-A1 .da-art-actions button:has-text("SVG")')
+    assert b"<img" not in svg and b"<script" not in svg
+    _, memo_html = _download(page, '#da-art-A3 .da-art-actions button:has-text(".html")')
+    assert b"<img" not in memo_html and b"<script" not in memo_html and b"<svg" not in memo_html
+    assert b'href="javascript' not in memo_html

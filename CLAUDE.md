@@ -574,7 +574,11 @@ consume ledger entries and nothing else.
   the report. Opt-in `save_tile_artifacts` (`DRAWING_ANALYZER_SAVE_TILES`,
   `tile_artifacts.py`; deliberately no GUI control — kwarg or env var only) bypasses the level-1 render skip so tiles exist on warm
   runs; the level-2 cache still serves the digests.
-- **Export** (`export.py`): every write inside the atomic publish goes through
+- **Export** (`export.py`): `write_drawing_export` writes `report.html` after the
+  other ordinary artifacts (`include_report=False`, then `build_report_document`
+  with `build_export_file_list(staging)`), so its Files panel lists the folder
+  as published; `run.log` / `run_manifest.json` are named up front because they
+  are written next. Every write inside the atomic publish goes through
   `long_path(folder)`, derived **once** in `write_drawing_export`.
   `_long_path_text` turns UNC into `\\?\UNC\…` (never a bare prefix; idempotent;
   device paths untouched). `long_path` is an identity off Windows. `_unique_dir`
@@ -602,6 +606,20 @@ consume ledger entries and nothing else.
   the chat system prompt ranks a finding's status above it. Request shape (`thinking`,
   `webSearch`, `webFetch`) comes from the capability registry. A reader-supplied
   key outranks the embedded one, and the key row renders in both modes.
+  **Inline artifacts** (`create_artifact`: chart / table / memo cards) have no
+  storage of their own: an artifact *is* its recorded `tool_use` input in
+  `history`, so transcripts carry it. `artifactSpec` is the one validator, live
+  and on replay; ids (`A1`…) are the order of successful calls, and replay
+  re-registers in order — a recorded success that no longer validates still
+  takes its id. Replay re-renders `create_artifact` / `share_file` from their
+  input only when the recorded `tool_result` is not `is_error`; every other
+  recorded tool stays a chip. Chart colours come from the fixed
+  `SERIES_COLORS`, never the spec; serialization (SVG, memo `.html`) uses
+  `XMLSerializer` (no `innerHTML`, not even a read). The Files panel derives
+  from `artifacts` plus the inert, chat-gated `#da-exports` block
+  (`_exports_data_block` drops unsafe paths); `exportLinkEl` is the only
+  non-https link (host-listed relative paths, every segment percent-encoded).
+  `TX_PREFIX_VERSION` bumps whenever tools or system blocks change shape.
 
 ## Binding invariants (cited by number in code comments)
 

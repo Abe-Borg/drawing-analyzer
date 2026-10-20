@@ -121,6 +121,20 @@ And a turn aborted before any
 content reached ``history`` leaves text on screen that the transcript does not
 contain — ``history`` is the replayable truth, and the transcript follows it.
 
+**Charts, tables and memos (artifacts).** The ``create_artifact`` client tool
+lets the assistant put a chart (SVG, drawn at the panel's width, with a hover
+readout and a data-table view), a sortable table, or a Markdown memo into the
+chat as a numbered card (``A1``, ``A2``, …) with its own downloads — SVG/PNG/CSV,
+CSV, Markdown/standalone HTML — and a print-just-this-one button. An artifact
+has no storage of its own: it is its recorded ``tool_use`` input, so it rides
+the transcript, and replay re-validates and re-draws it with the same id.
+
+**The Files panel** (header **Files**) derives everything it lists: the
+conversation's artifacts (each format, or all of them plus the transcript as a
+zip) and, in a folder export, the export folder's files from the inert
+``#da-exports`` block as relative links. ``list_files`` / ``share_file`` give the
+assistant the same list and let it drop a clickable file into an answer.
+
 **Save as PDF** is unchanged: it reformats the already-rendered message DOM for
 print and hands off to the browser's native print dialog (no new script, host,
 or dependency — "Save as PDF" is just a print destination there). The
@@ -203,6 +217,13 @@ _EVIDENCE_NOTE = {
 #     travels the same path: replay drives the very renderers streaming uses,
 #     and a recorded tool_use is drawn as a chip, never dispatched to TOOLS
 #     (otherwise "open a JSON file" would let a file drive the reader's page).
+#     The only recorded calls replay draws beyond a chip are create_artifact
+#     (re-validated, then drawn like a live artifact) and share_file (a link
+#     only to an entry on this report's own export list) — drawing drives
+#     nothing on the page.
+#   - The Files panel's export links are the one non-https link: their targets
+#     come from the host-built #da-exports list (unsafe paths dropped here), and
+#     the browser percent-encodes every segment of the relative path.
 #     Serialization scrubs the whole document through scrubSecrets, and the
 #     schema carries no key field at any depth.
 #   - Defense in depth: a Content-Security-Policy <meta> allows exactly the
@@ -640,8 +661,10 @@ def _csp_meta(*, script_sources: list[str], chat_enabled: bool) -> str:
 
     Saving and loading a chat transcript adds **no** directive: a file input and
     an ``<a download href="blob:…">`` click are same-document operations, not
-    fetches, so ``connect-src`` stays Anthropic-only. A test pins the whole
-    policy string so a future widening cannot slip in unnoticed.
+    fetches, so ``connect-src`` stays Anthropic-only. Artifact downloads are
+    the same blob clicks, and the chart PNG is rasterized from a ``data:``
+    SVG image, which ``img-src`` already admits. A test pins the whole policy
+    string so a future widening cannot slip in unnoticed.
     """
     hashes = " ".join(f"'{_script_hash(source)}'" for source in script_sources)
     connect = "https://api.anthropic.com" if chat_enabled else "'none'"
@@ -1807,6 +1830,7 @@ def build_html_report(
     link_evidence: bool = False,
     include_chat: bool = True,
     pdf_links: "dict[str, dict] | None" = None,
+    export_files: "dict | None" = None,
 ) -> str:
     """Render a :class:`DrawingContext` to one self-contained HTML document.
 
@@ -1840,6 +1864,12 @@ def build_html_report(
     inked cloud + QC tag already on that page put the reader on the mark. Absent
     (single-file reports, non-markup runs) → the cell renders as today's plain
     text.
+
+    ``export_files`` — the folder export's inventory
+    (:func:`~drawing_analyzer.export.build_export_file_list`), listed in the
+    assistant's Files panel as links relative to the report. Absent (the
+    single-file report, which has no folder beside it) → the panel lists only
+    what the conversation itself produced.
     """
     now = now or datetime.now()
     sheets = list(getattr(ctx, "sheets", None) or [])
@@ -1924,6 +1954,7 @@ def build_html_report(
             + "\n" + _starters_data_block(
                 ctx, sheets, source_names, ambiguous=ambiguous
             )
+            + "\n" + _exports_data_block(export_files)
         )
 
     # CSP hashes are computed over the *exact* inline script bodies emitted
@@ -2861,6 +2892,64 @@ def _starters_data_block(
     )
 
 
+_EXPORT_PATH_BAD_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _export_path(raw: Any) -> str | None:
+    """``raw`` as a safe export-relative POSIX path, or ``None``.
+
+    The Files panel turns each path into a relative link, so anything that could
+    leave the export folder or be read as something other than a path is
+    refused here: absolute and drive-qualified paths, ``.``/``..`` and empty
+    segments, and control characters. Backslashes are folded to ``/`` first.
+    The browser side still percent-encodes every segment, so a ``:`` in a name
+    can never be taken for a URL scheme.
+    """
+    if not isinstance(raw, str):
+        return None
+    path = raw.replace("\\", "/")
+    if not path or path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+        return None
+    if _EXPORT_PATH_BAD_RE.search(path):
+        return None
+    if any(seg in ("", ".", "..") for seg in path.split("/")):
+        return None
+    return path
+
+
+def _exports_data_block(export_files: "dict | None") -> str:
+    """An inert ``#da-exports`` JSON block: the export folder's files for the
+    assistant's Files panel (see :func:`build_html_report`).
+
+    Entries keep the caller's order (the export sorts them, I-7); any path
+    :func:`_export_path` refuses is dropped, and every string is serialized
+    through :func:`_json_for_script`, so a hostile filename can neither leave
+    the folder as a link nor close the script element. ``""`` when there is
+    nothing to list — the single-file report has no folder beside it.
+    """
+    if not export_files:
+        return ""
+    files = []
+    for entry in export_files.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        path = _export_path(entry.get("path"))
+        if path is None:
+            continue
+        files.append({
+            "path": path,
+            "group": str(entry.get("group") or "Other")[:60],
+            "description": str(entry.get("description") or "")[:200],
+        })
+    if not files:
+        return ""
+    payload = {"files": files, "omitted": int(export_files.get("omitted") or 0)}
+    return (
+        f'<script id="da-exports" type="application/json">'
+        f"{_json_for_script(payload)}</script>"
+    )
+
+
 def _report_identity(
     *, title: str, generated: str, source_names: list[str], run_id: str = ""
 ) -> str:
@@ -3044,6 +3133,7 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
+    <button id="da-chat-files" type="button" class="ghost-btn" aria-pressed="false" title="Charts, tables and memos from this conversation, with downloads — plus the files saved with this report">Files<span class="da-files-badge" id="da-files-badge" hidden></span></button>
     <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">PDF</button>
     <button id="da-chat-save" type="button" class="ghost-btn" title="Save this conversation as a JSON file — keep it beside the report and load it back later">Save</button>
     <button id="da-chat-load" type="button" class="ghost-btn" title="Load a previously saved conversation and carry on asking questions">Load</button>
@@ -3057,6 +3147,7 @@ _CHAT_HTML = """
     this report; the assistant can also search the web for codes, standards, and product data.
     <div class="da-starters" id="da-starters-row" aria-label="Suggested questions"></div></div>
   </div>
+  <section id="da-files" hidden aria-label="Files"></section>
   <div id="da-chat-key">
     <div id="da-chat-key-form">
       <div class="da-key-row">
@@ -3113,7 +3204,7 @@ _CHAT_CSS = """
   box-shadow:0 12px 40px rgba(15,25,45,.25);
 }
 #da-chat-panel[hidden]{display:none}
-/* The head carries five controls; the model chip is the only elastic item, so
+/* The head carries six controls; the model chip is the only elastic item, so
    it collapses first (min-width:0 lets a flex item shrink past its text) and
    wrap is the last resort at the 320px minimum panel width. */
 /* `flex:0 0 auto` here and on the other fixed rows (#da-chat-key, .da-chat-foot,
@@ -3122,12 +3213,14 @@ _CHAT_CSS = """
    the transcript is the ONE row that gives. Let a fixed row shrink under
    pressure and the measurement chases itself. */
 .da-chat-head{
-  display:flex; align-items:center; gap:8px; padding:10px 12px; flex-wrap:wrap;
+  display:flex; align-items:center; gap:6px; padding:10px 12px; flex-wrap:wrap;
   flex:0 0 auto; border-bottom:1px solid var(--line); background:#fbfcfe;
 }
 .da-chat-title{font-weight:700; font-size:14px; flex:1 1 auto; min-width:0}
-.da-chat-head .ghost-btn{flex:0 0 auto}
-/* The five controls fill the top row, so the model/capability line takes a row
+/* Slimmer than the page's ghost buttons so all six still share one row at the
+   default 430px width — a second header row would come out of the transcript. */
+.da-chat-head .ghost-btn{flex:0 0 auto; padding-left:8px; padding-right:8px}
+/* The six controls fill the top row, so the model/capability line takes a row
    of its own (order last + a full-width basis forces the break). Sharing the
    row would crush it to an ellipsis, and which model answered — and whether it
    can search — is exactly what a reader checking the answer wants to see. */
@@ -3342,6 +3435,123 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
 /* ---- report-navigation flash (scroll_to_report / query targets) ---- */
 @keyframes daFlash{0%{background:#fff6d6}100%{background:transparent}}
 .da-flash{animation:daFlash 1.6s ease-out}
+/* ---- inline artifacts (create_artifact): chart / table / memo cards ---- */
+.da-art{
+  margin:8px 0; border:1px solid var(--line); border-radius:10px; background:#fcfcfb;
+  overflow:hidden; animation:da-rise .22s ease-out both; scroll-margin:24px 0 12px;
+}
+.da-art-head{
+  display:flex; align-items:baseline; gap:8px; padding:8px 11px 6px; border-bottom:1px solid var(--line);
+  background:#fff;
+}
+.da-art-id{
+  flex:0 0 auto; font-size:11px; font-weight:700; color:var(--accent); background:var(--accent-soft);
+  border-radius:5px; padding:1px 6px; font-variant-numeric:tabular-nums;
+}
+.da-art-title{flex:1 1 auto; min-width:0; font-weight:600; font-size:13.5px; overflow-wrap:anywhere}
+.da-art-kind{flex:0 0 auto; font-size:11px; color:var(--muted)}
+.da-art-body{padding:8px 10px}
+.da-art-missing{color:var(--muted); font-style:italic; font-size:12.5px}
+/* The plot is the tooltip's positioning context; the SVG is drawn at the
+   plot's own width (no scaling), so its text stays at its set size. */
+.da-art-plot{position:relative}
+.da-art-plot svg{display:block; max-width:100%; height:auto}
+.da-art-plot .da-viz-hot{filter:brightness(1.12)}
+.da-art-tip{
+  position:absolute; z-index:2; pointer-events:none; min-width:110px; max-width:240px;
+  background:#fff; border:1px solid var(--line); border-radius:8px; padding:6px 9px;
+  box-shadow:0 4px 14px rgba(15,25,45,.16); font-size:12px; line-height:1.4;
+}
+.da-art-tip[hidden]{display:none}
+.da-art-tip-title{color:var(--muted); margin-bottom:3px; overflow-wrap:anywhere}
+.da-art-tip-row{display:flex; align-items:center; gap:6px; white-space:nowrap}
+.da-art-tip-row strong{font-variant-numeric:tabular-nums; color:var(--ink)}
+.da-art-tip-row span:last-child{color:var(--muted); overflow:hidden; text-overflow:ellipsis}
+.da-art-tip-key{flex:0 0 12px; width:12px; height:2px; border-radius:1px}
+.da-art-tablewrap{max-height:340px; overflow:auto; margin-top:4px; border:1px solid var(--line); border-radius:7px; background:#fff}
+.da-art-table{border-collapse:collapse; width:100%; font-size:12.5px}
+.da-art-table th,.da-art-table td{border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; vertical-align:top}
+.da-art-table thead th{position:sticky; top:0; background:#f3f5f9; z-index:1; padding:0}
+.da-art-table th button{
+  all:unset; box-sizing:border-box; display:block; width:100%; padding:5px 8px; cursor:pointer;
+  font-weight:600; color:var(--ink);
+}
+.da-art-table th button:hover{color:var(--accent)}
+.da-art-table th button:focus-visible{outline:2px solid var(--accent); outline-offset:-2px}
+.da-art-table th[aria-sort="ascending"] button::after{content:" \25B2"; font-size:9px; color:var(--accent)}
+.da-art-table th[aria-sort="descending"] button::after{content:" \25BC"; font-size:9px; color:var(--accent)}
+.da-art-table .da-num{text-align:right; font-variant-numeric:tabular-nums}
+.da-art-table th.da-num button{text-align:right}
+.da-art-table tbody tr:hover{background:var(--accent-soft)}
+.da-art-memo{font-size:13.5px}
+.da-art-cap{padding:0 11px 6px; font-size:12px; color:var(--muted)}
+.da-art-actions{display:flex; flex-wrap:wrap; gap:5px; padding:7px 10px 9px; border-top:1px solid var(--line); background:#fff}
+.da-art-btn{
+  border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:6px;
+  padding:3px 9px; font:12px/1.4 inherit; font-family:inherit; cursor:pointer; white-space:nowrap;
+}
+.da-art-btn:hover{border-color:var(--accent); color:var(--accent)}
+.da-art-btn[aria-pressed="true"]{background:var(--accent-soft); border-color:var(--accent); color:var(--accent)}
+.da-art-status{font-size:11.5px; color:var(--muted); padding:0 11px 7px}
+.da-art-status:empty{display:none}
+/* ---- shared files (share_file) ---- */
+.da-file-chip{
+  display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; margin:6px 0; padding:7px 10px;
+  border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12.5px;
+  animation:da-rise .18s ease-out both;
+}
+.da-file-chip .da-file-main{flex:1 1 140px; min-width:0; font-weight:600; overflow-wrap:anywhere}
+.da-file-chip .da-file-desc{flex:1 0 100%; color:var(--muted); font-size:11.5px}
+.da-file-chip a{text-decoration:underline}
+.da-file-chip-gone{color:var(--muted); background:#f7f8fa}
+.da-file-chip-gone .da-file-main{font-weight:400; font-style:italic}
+.da-file-ico{flex:0 0 auto; width:18px; text-align:center; color:var(--muted)}
+/* ---- Files panel (header "Files" button) ---- */
+.da-files-badge{
+  display:inline-block; min-width:16px; margin-left:5px; padding:0 4px; border-radius:999px;
+  background:var(--accent); color:#fff; font-size:10px; line-height:16px; text-align:center;
+  font-variant-numeric:tabular-nums;
+}
+.da-files-badge[hidden]{display:none}
+#da-chat-files[aria-pressed="true"]{background:var(--accent-soft); border-color:var(--accent)}
+#da-chat-msgs[hidden]{display:none}
+#da-files{flex:1 1 auto; overflow-y:auto; padding:12px 14px 16px; font-size:13px}
+#da-files[hidden]{display:none}
+.da-files-top{display:flex; align-items:center; gap:8px; margin-bottom:6px}
+.da-files-title{flex:1 1 auto; font-weight:700; font-size:14px}
+.da-files-sec{margin-top:12px}
+.da-files-sec h3{
+  display:flex; align-items:center; gap:6px; margin:0 0 6px; font-size:11.5px; font-weight:700;
+  text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+}
+.da-files-count{
+  font-size:10.5px; letter-spacing:0; text-transform:none; background:#eef1f6; color:var(--ink);
+  border-radius:999px; padding:0 6px; font-variant-numeric:tabular-nums;
+}
+.da-files-note{margin:4px 0 8px; color:var(--muted); font-size:12.5px; line-height:1.5}
+.da-files-bar{margin:2px 0 8px}
+.da-files-search{
+  width:100%; margin:0 0 8px; padding:6px 9px; border:1px solid var(--line); border-radius:7px;
+  font-size:12.5px; font-family:inherit; background:#fff; color:var(--ink);
+}
+.da-files-search:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+.da-file-row{
+  display:flex; align-items:center; gap:8px; padding:6px 4px; border-bottom:1px solid var(--line);
+}
+.da-file-row:last-child{border-bottom:none}
+.da-file-row .da-file-main{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px}
+.da-file-row .da-file-desc{font-size:11.5px; color:var(--muted)}
+.da-file-row-export a{overflow-wrap:anywhere}
+.da-file-name{
+  all:unset; cursor:pointer; font-weight:600; color:var(--ink); overflow-wrap:anywhere;
+}
+.da-file-name:hover{color:var(--accent); text-decoration:underline}
+.da-file-name:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.da-file-acts{flex:0 0 auto; display:flex; flex-wrap:wrap; gap:4px; justify-content:flex-end; max-width:55%}
+.da-files-group{margin:2px 0 6px}
+.da-files-group summary{cursor:pointer; font-weight:600; padding:4px 0; color:var(--ink)}
+.da-files-group .da-file-row{padding-left:14px}
+#da-art-print{display:none}
 @media (max-width:600px){
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
   .da-rz{display:none}
@@ -3378,6 +3588,24 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
   body.da-print-chat .da-user{background:#eef2fb !important; color:#000 !important}
   body.da-print-chat .da-ai{background:#fff !important}
   body.da-print-chat .da-chat-foot{display:none !important}
+  body.da-print-chat #da-chat-files,
+  body.da-print-chat #da-files,
+  body.da-print-chat .da-art-actions,
+  body.da-print-chat .da-art-status,
+  body.da-print-chat .da-file-chip button{display:none !important}
+  body.da-print-chat .da-art{page-break-inside:avoid}
+  body.da-print-chat .da-art-tablewrap{max-height:none !important; overflow:visible !important}
+  /* ---- one artifact on its own (its Print button) ---- */
+  body.da-print-art > *:not(#da-art-print){display:none !important}
+  body.da-print-art{display:block !important; background:#fff !important}
+  body.da-print-art #da-art-print{display:block; color:#000; font-size:12px}
+  #da-art-print h1{font-size:18px; margin:0 0 4px}
+  #da-art-print .da-art-print-cap{color:#555; margin:0 0 10px}
+  #da-art-print svg{display:block; max-width:100%; height:auto; margin:6px 0 12px}
+  #da-art-print .da-art-tablewrap{max-height:none; overflow:visible; border:none}
+  #da-art-print .da-art-table th button{padding:4px 6px}
+  #da-art-print .da-art-table thead th{position:static}
+  #da-art-print .da-art-print-foot{margin-top:14px; color:#777; font-size:10px}
 }
 """
 
@@ -3407,6 +3635,11 @@ _CHAT_JS = r"""
   var TX_KIND = 'drawing_analyzer_chat_transcript';
   var TX_SCHEMA = 1;
   var TX_NAME = 'chat_history.json';
+  // What the saved thinking was signed against: bumped whenever the tools or
+  // system blocks change shape (2: artifact and file tools), so a transcript
+  // from an older build resumes with its reasoning reset instead of replaying
+  // signatures over a prefix that no longer matches.
+  var TX_PREFIX_VERSION = 2;
   var TX_KEY = 'da-chat-tx-' + (CFG.reportId || 'report');
   // localStorage quotas are ~5MB of UTF-16 per origin, and a double-clicked
   // report shares ONE file:// origin with every other local page — so a fat
@@ -3689,6 +3922,13 @@ _CHAT_JS = r"""
       'data, definitions) or when the user asks you to — not for questions the report already answers.\n' +
       '- Write for a construction / MEP engineering reader: concise, specific, markdown formatting, ' +
       'tables for enumerable facts.\n' +
+      '- When the reader asks for a chart, table, schedule, memo, RFI, email or summary to keep — or a ' +
+      'comparison across many sheets or findings reads better as a chart or a grid than as prose — make ' +
+      'it with create_artifact. It renders in the chat with download buttons and stays in the Files ' +
+      'panel. Take its numbers from the report, query_findings, get_report_summary or calculate; never ' +
+      'estimate them. Afterwards refer to it by its id (A1, A2, …) instead of repeating it.\n' +
+      '- The run\'s exported files (marked-up PDFs, findings.csv, run.log, …) are listed by list_files. ' +
+      'When the reader should open one, link it with share_file rather than describing where it is.\n' +
       '- Answer at the length the question needs. A lookup gets a sentence or two; save the long ' +
       'form for questions that genuinely require it. Do not restate the question or recap what ' +
       'you are about to do.';
@@ -3948,7 +4188,66 @@ _CHAT_JS = r"""
          'guaranteed correct. Example: "(12.5 + 3.25) * 2".',
        input_schema: {type: 'object', properties: {
          expression: {type: 'string', description: 'The arithmetic expression to evaluate.'}
-       }, required: ['expression']}}
+       }, required: ['expression']}},
+      // Nullable values are written as anyOf rather than a type array: anyOf
+      // is accepted everywhere tool schemas are, strict mode included, and a
+      // schema the API rejects would fail every question, not just this tool.
+      {name: 'create_artifact',
+       description: 'Put a chart, a table, or a memo into the chat as a rendered artifact the reader ' +
+         'can keep. It appears under your message with download buttons (chart: SVG, PNG, CSV; ' +
+         'table: CSV; memo: Markdown, HTML) and is listed in the Files panel, saved with the ' +
+         'conversation. Use it when the reader asks for a chart, table, schedule, memo, RFI, email or ' +
+         'summary to keep, or when a comparison across many sheets or findings reads better as a ' +
+         'chart or grid than as prose. Every number must come from the report, query_findings, ' +
+         'get_report_summary or calculate. Returns the artifact id (A1, A2, …); an invalid spec ' +
+         'returns an error saying what to fix.',
+       input_schema: {type: 'object', properties: {
+         kind: {type: 'string', enum: ['chart', 'table', 'memo']},
+         title: {type: 'string', description: 'Short title, e.g. "Findings by sheet and severity".'},
+         caption: {type: 'string', description: 'Optional one-line note shown under it, e.g. where ' +
+           'the numbers come from.'},
+         chart: {type: 'object', description: 'Required for kind "chart".', properties: {
+           type: {type: 'string', enum: ['bar', 'hbar', 'line', 'pie'], description: 'bar = vertical ' +
+             'columns; hbar = horizontal bars (best for long labels such as sheet names); line = a ' +
+             'trend across ordered categories; pie = parts of one whole (one series, at most 8 slices).'},
+           categories: {type: 'array', items: {type: 'string'},
+             description: 'The category (or slice) labels, at most 60.'},
+           series: {type: 'array', description: 'At most 8 series, each with exactly one value per ' +
+             'category (null for a gap).', items: {type: 'object', properties: {
+               name: {type: 'string'},
+               values: {type: 'array', items: {anyOf: [{type: 'number'}, {type: 'null'}]}}
+             }, required: ['name', 'values']}},
+           stacked: {type: 'boolean', description: 'Stack the series (bar and hbar only).'},
+           x_label: {type: 'string', description: 'What the categories are.'},
+           y_label: {type: 'string', description: 'What the values measure.'},
+           unit: {type: 'string', description: 'Unit shown with values, e.g. "%", "CFM", "ft".'}
+         }, required: ['type', 'categories', 'series']},
+         table: {type: 'object', description: 'Required for kind "table".', properties: {
+           columns: {type: 'array', items: {type: 'string'}, description: 'Column headers, at most 30.'},
+           rows: {type: 'array', description: 'At most 1000 rows, each an array of cells in column order.',
+             items: {type: 'array', items: {anyOf: [{type: 'string'}, {type: 'number'}, {type: 'null'}]}}}
+         }, required: ['columns', 'rows']},
+         markdown: {type: 'string', description: 'Required for kind "memo": the body in Markdown ' +
+           '(headings, lists, tables, bold). The title is shown above it, so do not repeat it.'}
+       }, required: ['kind', 'title']}},
+      {name: 'list_files',
+       description: 'List the files the reader can download: the artifacts made in this conversation ' +
+         '(id, title, formats) and, when the report sits in its export folder, every file saved beside ' +
+         'it (marked-up PDFs, findings.csv, run.log, diagnostics/, evidence crops…) ' +
+         'with its path and what it is. Filter with match / group; omit both to get the overview.',
+       input_schema: {type: 'object', properties: {
+         match: {type: 'string', description: 'Substring of the path or description, e.g. "reviewed".'},
+         group: {type: 'string', description: 'A section name as list_files reports it, e.g. "Findings".'},
+         limit: {type: 'integer', description: 'Max export files to return (default 100, cap 300).'}
+       }}},
+      {name: 'share_file',
+       description: 'Put a clickable file into the chat for the reader: an export file (its exact ' +
+         'path from list_files) opens from the export folder, and an artifact id ("A2") gets its ' +
+         'download buttons. Use it whenever the reader should open or keep a file.',
+       input_schema: {type: 'object', properties: {
+         target: {type: 'string', description: 'An export file path from list_files, or an artifact id like "A1".'},
+         format: {type: 'string', description: 'For an artifact, just one format: svg, png, csv, md or html.'}
+       }, required: ['target']}}
     );
     // tool_choice alone forces the text close. Do NOT drop `tools` — tool
     // definitions render at prompt position 0, so removing them invalidates the
@@ -3971,7 +4270,10 @@ _CHAT_JS = r"""
     filter_report: '⚙ Filtering the report…',
     get_report_summary: '⚙ Reading the run summary…',
     highlight_term: '⚙ Highlighting…',
-    calculate: '⚙ Calculating…'
+    calculate: '⚙ Calculating…',
+    create_artifact: '⚙ Building an artifact…',
+    list_files: '⚙ Listing files…',
+    share_file: '⚙ Linking a file…'
   };
   function readJsonBlock(id){
     var el = document.getElementById(id);
@@ -4235,22 +4537,1240 @@ _CHAT_JS = r"""
     }
   }
 
+
+  // ------------------------------------------------------------- artifacts
+  // The assistant can drop a chart, a table, or a memo straight into the chat
+  // (create_artifact) instead of describing one in prose or pointing at a file
+  // the reader would have to go and find. Each one renders inline as a card with
+  // its own downloads, and is listed in the Files panel.
+  //
+  // DURABLE BY CONSTRUCTION. An artifact has no storage of its own: its whole
+  // definition is the create_artifact tool_use input, which already lives in
+  // `history` — so the transcript machinery (localStorage, Save/Load) carries it
+  // for free, and a reload rebuilds every card from the recorded input. Ids
+  // ("A1", "A2", …) are the order of successful calls in the thread, so the live
+  // path and replay number them identically and the id the model was told in
+  // its tool_result still names the same card after a reload.
+  //
+  // UNTRUSTED INPUT. The spec is model output (or, on Load, a file), so it is
+  // validated into a fresh object before anything is drawn, and drawn with the
+  // same safe-DOM discipline as answers: createElement / createElementNS /
+  // textContent / numeric setAttribute only. Colours come from a fixed palette,
+  // never from the spec, so no model string ever reaches a style or an
+  // attribute that could carry markup or a URL.
+  var ART_KINDS = {chart: 'Chart', table: 'Table', memo: 'Memo'};
+  var CHART_TYPES = {bar: 'bar chart', hbar: 'horizontal bar chart', line: 'line chart', pie: 'donut chart'};
+  var ART_MAX = {title: 160, caption: 400, label: 80, series: 8, categories: 60,
+                 columns: 30, rows: 1000, cell: 2000, memo: 100000};
+  // Categorical slots in fixed order (the dataviz reference palette, light
+  // surface; the report has no dark theme). Colour follows the series' position
+  // in the spec, so a series keeps its hue across re-renders and downloads.
+  var SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100',
+                       '#e87ba4', '#008300', '#6250d6', '#e34948'];
+  var VIZ = {surface: '#fcfcfb', ink: '#0b0b0b', ink2: '#52514e', muted: '#898781',
+             grid: '#e1e0d9', axis: '#c3c2b7'};
+  var VIZ_FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  // Width the downloaded / printed chart is laid out at, independent of how
+  // narrow the chat panel happens to be.
+  var EXPORT_CHART_W = 960;
+
+  var artifacts = [];   // [{id, spec, toolUseId, card}] — the thread's artifacts, in order
+
+  function cleanStr(v, cap){
+    var s = (typeof v === 'string') ? v
+      : (typeof v === 'number' && isFinite(v)) || typeof v === 'boolean' ? String(v) : '';
+    s = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    return s.length > cap ? s.slice(0, cap - 1) + '…' : s;
+  }
+  function oneLine(v, cap){ return cleanStr(v, cap).replace(/\s+/g, ' ').trim(); }
+  var PLAIN_NUMBER_RE = /^[-+]?(\d[\d,]*(\.\d*)?|\.\d+)(e[-+]?\d+)?$/i;
+  function chartNumber(v){
+    if(v === null || v === undefined || v === '') return null;
+    if(typeof v === 'number') return isFinite(v) ? v : NaN;
+    if(typeof v === 'string' && PLAIN_NUMBER_RE.test(v.trim())) return Number(v.trim().replace(/,/g, ''));
+    return NaN;
+  }
+
+  function chartSpec(c){
+    if(!c || typeof c !== 'object') throw new Error('a chart artifact needs a "chart" object');
+    var type = String(c.type || 'bar').toLowerCase();
+    if(!CHART_TYPES[type]) throw new Error('chart.type must be one of: bar, hbar, line, pie');
+    if(!Array.isArray(c.categories) || !c.categories.length){
+      throw new Error('chart.categories must be a non-empty array of labels');
+    }
+    if(c.categories.length > ART_MAX.categories){
+      throw new Error('a chart takes at most ' + ART_MAX.categories + ' categories — fold the tail '
+        + 'into "Other", or use a table artifact for the full list');
+    }
+    var cats = c.categories.map(function(x){ return oneLine(x, ART_MAX.label) || '(blank)'; });
+    if(!Array.isArray(c.series) || !c.series.length){
+      throw new Error('chart.series must be a non-empty array of {name, values}');
+    }
+    if(c.series.length > ART_MAX.series){
+      throw new Error('a chart takes at most ' + ART_MAX.series + ' series — fold the rest into '
+        + '"Other" or split it into two charts');
+    }
+    var series = c.series.map(function(s, k){
+      var name = oneLine(s && s.name, ART_MAX.label) || ('Series ' + (k + 1));
+      if(!s || !Array.isArray(s.values)) throw new Error('series "' + name + '" needs a "values" array');
+      if(s.values.length !== cats.length){
+        throw new Error('series "' + name + '" has ' + s.values.length + ' values for '
+          + cats.length + ' categories — they must match one to one (use null for a gap)');
+      }
+      var values = s.values.map(function(v, j){
+        var n = chartNumber(v);
+        if(n !== null && !isFinite(n)){
+          throw new Error('series "' + name + '" value ' + (j + 1) + ' is not a number');
+        }
+        return n;
+      });
+      return {name: name, values: values};
+    });
+    var any = series.some(function(s){ return s.values.some(function(v){ return v !== null; }); });
+    if(!any) throw new Error('the chart has no values');
+    var negative = series.some(function(s){
+      return s.values.some(function(v){ return v !== null && v < 0; });
+    });
+    var stacked = !!c.stacked && (type === 'bar' || type === 'hbar') && series.length > 1;
+    if(stacked && negative) throw new Error('a stacked chart cannot show negative values — set stacked:false');
+    if(type === 'pie'){
+      if(series.length !== 1) throw new Error('a pie chart takes exactly one series');
+      if(cats.length > 8) throw new Error('a pie chart takes at most 8 slices — use a bar chart for more');
+      if(negative) throw new Error('a pie chart cannot show negative values');
+      if(!series[0].values.some(function(v){ return v > 0; })){
+        throw new Error('a pie chart needs at least one positive value');
+      }
+    }
+    return {type: type, categories: cats, series: series, stacked: stacked,
+            x_label: oneLine(c.x_label, ART_MAX.label), y_label: oneLine(c.y_label, ART_MAX.label),
+            unit: oneLine(c.unit, 16)};
+  }
+
+  function tableSpec(t){
+    if(!t || typeof t !== 'object') throw new Error('a table artifact needs a "table" object');
+    if(!Array.isArray(t.columns) || !t.columns.length){
+      throw new Error('table.columns must be a non-empty array of column headers');
+    }
+    if(t.columns.length > ART_MAX.columns) throw new Error('a table takes at most ' + ART_MAX.columns + ' columns');
+    var keys = t.columns.slice();
+    var cols = keys.map(function(c, i){ return oneLine(c, 120) || ('Column ' + (i + 1)); });
+    var raw = Array.isArray(t.rows) ? t.rows : [];
+    if(!raw.length) throw new Error('table.rows is empty');
+    if(raw.length > ART_MAX.rows){
+      throw new Error('a table takes at most ' + ART_MAX.rows + ' rows — filter it, or point the '
+        + 'reader at findings.csv with share_file');
+    }
+    var rows = raw.map(function(r, i){
+      // A row given as {column: value} is read by header — a common shape, and
+      // there is only one sensible reading of it.
+      if(r && typeof r === 'object' && !Array.isArray(r)){
+        r = keys.map(function(k){ return r[typeof k === 'string' ? k : String(k)]; });
+      }
+      if(!Array.isArray(r)) throw new Error('row ' + (i + 1) + ' is not an array');
+      if(r.length > cols.length){
+        throw new Error('row ' + (i + 1) + ' has ' + r.length + ' cells for ' + cols.length + ' columns');
+      }
+      var out = r.map(function(cell){
+        return (typeof cell === 'number' && isFinite(cell)) ? cell : cleanStr(cell, ART_MAX.cell);
+      });
+      while(out.length < cols.length) out.push('');
+      return out;
+    });
+    return {columns: cols, rows: rows};
+  }
+
+  function memoSpec(md){
+    var text = cleanStr(md, ART_MAX.memo + 1);
+    if(!text.trim()) throw new Error('a memo artifact needs "markdown" text');
+    if(text.length > ART_MAX.memo) throw new Error('a memo takes at most ' + ART_MAX.memo + ' characters');
+    return text;
+  }
+
+  // The one gate between a create_artifact input and the page. Pure: the live
+  // call and replay both go through it, so a recorded input draws exactly what
+  // it drew the first time.
+  function artifactSpec(inp){
+    if(!inp || typeof inp !== 'object') throw new Error('expected an object');
+    var kind = String(inp.kind || '').toLowerCase();
+    if(!ART_KINDS[kind]) throw new Error('kind must be "chart", "table" or "memo"');
+    var title = oneLine(inp.title, ART_MAX.title);
+    if(!title) throw new Error('a title is required');
+    var spec = {kind: kind, title: title, caption: oneLine(inp.caption, ART_MAX.caption)};
+    if(kind === 'chart') spec.chart = chartSpec(inp.chart);
+    else if(kind === 'table') spec.table = tableSpec(inp.table);
+    else spec.markdown = memoSpec(inp.markdown);
+    return spec;
+  }
+
+  function artKindLabel(spec){
+    return spec.kind === 'chart' ? CHART_TYPES[spec.chart.type] : ART_KINDS[spec.kind].toLowerCase();
+  }
+  function artSlug(text){
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/, '') || 'artifact';
+  }
+  function artFileBase(art){ return art.id + '-' + artSlug(art.spec.title); }
+  function artIcon(spec){
+    if(!spec) return '∅';
+    return spec.kind === 'chart' ? '📊' : spec.kind === 'table' ? '📋' : '📝';
+  }
+
+  // ------------------------------------------------- artifacts: numbers & text
+  function fmtValue(v, unit){
+    if(v === null || v === undefined) return '—';
+    var s = Number(v).toLocaleString('en-US', {maximumFractionDigits: 4});
+    return unit ? s + (/^[%°]/.test(unit) ? '' : ' ') + unit : s;
+  }
+  // Axis ticks: clean round numbers, compact from 1,000 up (0 / 1K / 2K).
+  function fmtTick(v){
+    var a = Math.abs(v), s;
+    if(a >= 1e9) s = (v / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+    else if(a >= 1e6) s = (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    else if(a >= 1e3) s = (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+    else s = String(parseFloat(v.toPrecision(6)));
+    return s;
+  }
+  function niceScale(lo, hi, count){
+    if(lo === hi){
+      if(hi === 0) hi = 1;
+      else if(hi > 0) lo = 0;
+      else hi = 0;
+    }
+    var raw = (hi - lo) / Math.max(1, count);
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / mag;
+    var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+    var min = Math.floor(lo / step + 1e-9) * step, max = Math.ceil(hi / step - 1e-9) * step;
+    var ticks = [];
+    for(var v = min; v <= max + step / 2; v += step) ticks.push(parseFloat(v.toPrecision(12)));
+    return {min: ticks[0], max: ticks[ticks.length - 1], ticks: ticks};
+  }
+  var measureCtx = null;
+  function textWidth(text, size, weight){
+    try {
+      if(!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
+      measureCtx.font = (weight || 'normal') + ' ' + size + 'px ' + VIZ_FONT;
+      return measureCtx.measureText(String(text)).width;
+    } catch(e){ return String(text).length * size * 0.56; }
+  }
+  // Shorten to fit, never clip: the full label stays in the tooltip and table.
+  function fitText(text, size, maxW){
+    text = String(text);
+    if(textWidth(text, size) <= maxW) return text;
+    var lo = 0, hi = text.length;
+    while(lo < hi){
+      var mid = (lo + hi + 1) >> 1;
+      if(textWidth(text.slice(0, mid) + '…', size) <= maxW) lo = mid; else hi = mid - 1;
+    }
+    return lo ? text.slice(0, lo) + '…' : '…';
+  }
+
+  // ------------------------------------------------------ artifacts: SVG chart
+  function svgEl(parent, tag, attrs, text){
+    var el = document.createElementNS(SVG_NS, tag);
+    if(attrs) Object.keys(attrs).forEach(function(k){ el.setAttribute(k, attrs[k]); });
+    if(text !== undefined) el.textContent = text;
+    if(parent) parent.appendChild(el);
+    return el;
+  }
+  // A bar with a 4px rounded data end and a square foot on the baseline.
+  // (x0,y0) is the baseline corner, the bar grows toward (x1,y1); `vertical`
+  // says which axis carries the value.
+  function barPath(x, y, w, h, vertical, end){
+    var r = Math.max(0, Math.min(4, (vertical ? w : h) / 2, (vertical ? Math.abs(h) : Math.abs(w))));
+    if(!end) r = 0;
+    var f = function(n){ return Math.round(n * 100) / 100; };
+    if(vertical){
+      var top = h >= 0 ? y - h : y, bot = h >= 0 ? y : y - h;   // h>0 grows upward
+      if(h >= 0){
+        return 'M' + f(x) + ',' + f(bot) + 'V' + f(top + r) + 'Q' + f(x) + ',' + f(top) + ' ' + f(x + r) + ',' + f(top)
+          + 'H' + f(x + w - r) + 'Q' + f(x + w) + ',' + f(top) + ' ' + f(x + w) + ',' + f(top + r) + 'V' + f(bot) + 'Z';
+      }
+      return 'M' + f(x) + ',' + f(top) + 'V' + f(bot - r) + 'Q' + f(x) + ',' + f(bot) + ' ' + f(x + r) + ',' + f(bot)
+        + 'H' + f(x + w - r) + 'Q' + f(x + w) + ',' + f(bot) + ' ' + f(x + w) + ',' + f(bot - r) + 'V' + f(top) + 'Z';
+    }
+    var left = w >= 0 ? x : x + w, right = w >= 0 ? x + w : x;
+    if(w >= 0){
+      return 'M' + f(left) + ',' + f(y) + 'H' + f(right - r) + 'Q' + f(right) + ',' + f(y) + ' ' + f(right) + ',' + f(y + r)
+        + 'V' + f(y + h - r) + 'Q' + f(right) + ',' + f(y + h) + ' ' + f(right - r) + ',' + f(y + h) + 'H' + f(left) + 'Z';
+    }
+    return 'M' + f(right) + ',' + f(y) + 'H' + f(left + r) + 'Q' + f(left) + ',' + f(y) + ' ' + f(left) + ',' + f(y + r)
+      + 'V' + f(y + h - r) + 'Q' + f(left) + ',' + f(y + h) + ' ' + f(left + r) + ',' + f(y + h) + 'H' + f(right) + 'Z';
+  }
+
+  // Legend rows (always for >= 2 series; the slice list for a pie). Returns the
+  // height used. Swatch mirrors the mark: a rounded square for bars, a short
+  // stroke for lines.
+  function drawLegend(g, items, x0, y0, maxW, lineKey){
+    var x = x0, y = y0, rowH = 18;
+    items.forEach(function(it){
+      var label = fitText(it.name, 12, Math.max(60, maxW - 24));
+      var w = 18 + textWidth(label, 12) + 14;
+      if(x > x0 && x + w > x0 + maxW){ x = x0; y += rowH; }
+      if(lineKey) svgEl(g, 'line', {x1: x, y1: y + 6, x2: x + 12, y2: y + 6, stroke: it.color,
+                                    'stroke-width': 2, 'stroke-linecap': 'round'});
+      else svgEl(g, 'rect', {x: x, y: y + 1, width: 10, height: 10, rx: 2, fill: it.color});
+      svgEl(g, 'text', {x: x + 18, y: y + 10, 'font-size': 12, fill: VIZ.ink2}, label);
+      x += w;
+    });
+    return items.length ? (y - y0) + rowH : 0;
+  }
+
+  // Build the chart at width W. Returns {svg, tips, height}: `tips[i]` is what
+  // hovering a mark tagged data-i shows. Pure layout from the validated spec —
+  // the inline card and the downloads share it, `opts.standalone` adds the
+  // title, caption and a surface so the file stands on its own.
+  function buildChartSvg(spec, W, opts){
+    opts = opts || {};
+    var c = spec.chart, n = c.categories.length, ns = c.series.length;
+    var svg = svgEl(null, 'svg', {xmlns: SVG_NS, 'font-family': VIZ_FONT, role: 'img'});
+    svg.setAttribute('aria-label', spec.title);
+    var g = svgEl(svg, 'g');
+    var tips = [];
+    var pad = 12, top = pad;
+    if(opts.standalone){
+      svgEl(svg, 'rect', {x: 0, y: 0, width: '100%', height: '100%', fill: VIZ.surface});
+      svg.appendChild(g);   // keep the surface underneath
+      var tl = fitText(spec.title, 16, W - 2 * pad);
+      svgEl(g, 'text', {x: pad, y: top + 14, 'font-size': 16, 'font-weight': 600, fill: VIZ.ink}, tl);
+      top += 28;
+    }
+    var colors = c.series.map(function(_s, k){ return SERIES_COLORS[k % SERIES_COLORS.length]; });
+    var height;
+    if(c.type === 'pie'){
+      height = drawPie(g, c, colors, W, top, tips);
+    } else {
+      if(ns > 1){
+        top += drawLegend(g, c.series.map(function(s, k){ return {name: s.name, color: colors[k]}; }),
+                          pad, top, W - 2 * pad, c.type === 'line') + 6;
+      }
+      height = (c.type === 'hbar' ? drawHBars : drawColumns)(g, c, colors, W, top, tips);
+    }
+    if(opts.standalone && spec.caption){
+      var cap = fitText(spec.caption, 12, W - 2 * pad);
+      svgEl(g, 'text', {x: pad, y: height + 14, 'font-size': 12, fill: VIZ.ink2}, cap);
+      height += 22;
+    }
+    height = Math.ceil(height + 4);
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + height);
+    svg.setAttribute('width', W);
+    svg.setAttribute('height', height);
+    return {svg: svg, tips: tips, height: height};
+  }
+
+  function valueDomain(c){
+    var lo = 0, hi = 0;
+    if(c.stacked){
+      c.categories.forEach(function(_x, i){
+        var sum = 0;
+        c.series.forEach(function(s){ if(s.values[i] !== null) sum += s.values[i]; });
+        hi = Math.max(hi, sum);
+      });
+    } else {
+      c.series.forEach(function(s){
+        s.values.forEach(function(v){ if(v !== null){ lo = Math.min(lo, v); hi = Math.max(hi, v); } });
+      });
+    }
+    return {lo: lo, hi: hi};
+  }
+  function tipFor(c, i, k, colors){
+    var rows = (k === null ? c.series.map(function(_s, j){ return j; }) : [k]).map(function(j){
+      return {color: colors[j], name: c.series[j].name, value: fmtValue(c.series[j].values[i], c.unit)};
+    });
+    return {title: c.categories[i], rows: rows};
+  }
+
+  // Vertical columns and lines share one frame: categories along x, one value
+  // axis, hairline gridlines.
+  function drawColumns(g, c, colors, W, top, tips){
+    var n = c.categories.length, ns = c.series.length;
+    var dom = valueDomain(c), sc = niceScale(dom.lo, dom.hi, 5);
+    var tickW = 0;
+    sc.ticks.forEach(function(t){ tickW = Math.max(tickW, textWidth(fmtTick(t), 11)); });
+    var left = 12 + (c.y_label ? 18 : 0) + tickW + 8, right = W - 14;
+    var pw = Math.max(40, right - left), band = pw / n;
+    // Category labels: level when they fit their band, otherwise angled (and
+    // thinned to every k-th when even that would collide).
+    var maxLab = 0;
+    c.categories.forEach(function(x){ maxLab = Math.max(maxLab, textWidth(x, 11)); });
+    var angled = maxLab > band - 6;
+    if(angled){
+      // An angled label runs down and to the left of its tick, so the first
+      // one needs that much room inside the frame or it is cut off.
+      var reach = Math.min(110, maxLab) * Math.cos(40 * Math.PI / 180) + 6 - band / 2;
+      if(reach > left){ left = reach; pw = Math.max(40, right - left); band = pw / n; }
+    }
+    var every = angled ? Math.max(1, Math.ceil(16 / band)) : 1;
+    var labH = angled ? Math.min(110, maxLab) * 0.64 + 14 : 18;
+    var ph = 240, plotTop = top + 6, base = plotTop + ph;
+    var y = function(v){ return base - (v - sc.min) / (sc.max - sc.min) * ph; };
+    sc.ticks.forEach(function(t){
+      svgEl(g, 'line', {x1: left, x2: right, y1: y(t), y2: y(t), stroke: t === 0 ? VIZ.axis : VIZ.grid,
+                        'stroke-width': 1, 'shape-rendering': 'crispEdges'});
+      svgEl(g, 'text', {x: left - 8, y: y(t) + 4, 'font-size': 11, fill: VIZ.muted,
+                        'text-anchor': 'end'}, fmtTick(t));
+    });
+    if(c.y_label){
+      var yl = svgEl(g, 'text', {x: 0, y: 0, 'font-size': 11, fill: VIZ.ink2, 'text-anchor': 'middle',
+                                 transform: 'translate(' + (12 + 9) + ',' + (plotTop + ph / 2) + ') rotate(-90)'},
+                     fitText(c.y_label, 11, ph));
+      yl.setAttribute('class', 'da-viz-ylabel');
+    }
+    c.categories.forEach(function(label, i){
+      if(i % every) return;
+      var cx = left + band * (i + 0.5);
+      if(angled){
+        svgEl(g, 'text', {x: 0, y: 0, 'font-size': 11, fill: VIZ.muted, 'text-anchor': 'end',
+                          transform: 'translate(' + cx + ',' + (base + 12) + ') rotate(-40)'},
+              fitText(label, 11, 110));
+      } else {
+        svgEl(g, 'text', {x: cx, y: base + 15, 'font-size': 11, fill: VIZ.muted, 'text-anchor': 'middle'},
+              fitText(label, 11, band - 4));
+      }
+    });
+    var bottom = base + labH;
+    if(c.x_label){
+      svgEl(g, 'text', {x: left + pw / 2, y: bottom + 14, 'font-size': 11, fill: VIZ.ink2,
+                        'text-anchor': 'middle'}, fitText(c.x_label, 11, pw));
+      bottom += 20;
+    }
+    var marks = svgEl(g, 'g');
+    if(c.type === 'line'){
+      drawLines(marks, g, c, colors, left, band, y, plotTop, base, tips);
+      return bottom;
+    }
+    var zero = y(Math.max(sc.min, Math.min(0, sc.max)));
+    var label = ns === 1 || c.stacked;
+    c.categories.forEach(function(_x, i){
+      var x0 = left + band * i;
+      if(c.stacked){
+        var bw = Math.min(24, band * 0.7), bx = x0 + (band - bw) / 2, acc = 0, lastK = -1;
+        c.series.forEach(function(s, k){ if(s.values[i]) lastK = k; });
+        c.series.forEach(function(s, k){
+          var v = s.values[i];
+          if(!v) return;
+          var y0 = y(acc), y1 = y(acc + v), h = y0 - y1;
+          // 2px surface gap between stacked segments: each segment gives up
+          // its top 2px except the one carrying the rounded data end.
+          var gap = (k === lastK) ? 0 : Math.min(2, h / 2);
+          var p = svgEl(marks, 'path', {d: barPath(bx, y0, bw, h - gap, true, k === lastK), fill: colors[k]});
+          p.setAttribute('data-i', tips.length);
+          tips.push(tipFor(c, i, null, colors));
+          acc += v;
+        });
+        if(acc && n <= 24) svgEl(g, 'text', {x: bx + bw / 2, y: y(acc) - 6, 'font-size': 11, fill: VIZ.ink2,
+                                             'text-anchor': 'middle'}, fmtTick(acc));
+        return;
+      }
+      var gap = 2, slot = Math.min(24, (band * 0.76 - gap * (ns - 1)) / ns);
+      slot = Math.max(2, slot);
+      var groupW = slot * ns + gap * (ns - 1), gx = x0 + (band - groupW) / 2;
+      c.series.forEach(function(s, k){
+        var v = s.values[i];
+        if(v === null) return;
+        var h = zero - y(v);
+        var p = svgEl(marks, 'path', {d: barPath(gx + k * (slot + gap), zero, slot, h, true, true), fill: colors[k]});
+        p.setAttribute('data-i', tips.length);
+        tips.push(tipFor(c, i, k, colors));
+        if(label && n <= 24){
+          svgEl(g, 'text', {x: gx + k * (slot + gap) + slot / 2, y: v >= 0 ? y(v) - 6 : y(v) + 14,
+                            'font-size': 11, fill: VIZ.ink2, 'text-anchor': 'middle'}, fmtTick(v));
+        }
+      });
+    });
+    return bottom;
+  }
+
+  function drawLines(marks, g, c, colors, left, band, y, plotTop, base, tips){
+    var n = c.categories.length;
+    var xAt = function(i){ return left + band * (i + 0.5); };
+    var cross = svgEl(g, 'line', {x1: 0, x2: 0, y1: plotTop, y2: base, stroke: VIZ.axis,
+                                  'stroke-width': 1, visibility: 'hidden'});
+    cross.setAttribute('class', 'da-viz-cross');
+    c.series.forEach(function(s, k){
+      var d = '', pen = false;
+      s.values.forEach(function(v, i){
+        if(v === null){ pen = false; return; }
+        d += (pen ? 'L' : 'M') + xAt(i).toFixed(2) + ',' + y(v).toFixed(2);
+        pen = true;
+      });
+      if(d) svgEl(marks, 'path', {d: d, fill: 'none', stroke: colors[k], 'stroke-width': 2,
+                                  'stroke-linejoin': 'round', 'stroke-linecap': 'round'});
+      // Markers on every point while they stay legible, otherwise only the
+      // last one; each wears a 2px surface ring where lines cross.
+      s.values.forEach(function(v, i){
+        if(v === null) return;
+        var last = true;
+        for(var j = i + 1; j < n; j++) if(s.values[j] !== null){ last = false; break; }
+        if(n > 24 && !last) return;
+        svgEl(marks, 'circle', {cx: xAt(i), cy: y(v), r: 4, fill: colors[k], stroke: VIZ.surface, 'stroke-width': 2});
+      });
+    });
+    // The crosshair finds the X: one transparent hit column per category,
+    // whose tooltip lists every series there.
+    for(var i = 0; i < n; i++){
+      var hit = svgEl(marks, 'rect', {x: left + band * i, y: plotTop, width: Math.max(1, band),
+                                      height: base - plotTop, fill: 'transparent'});
+      hit.setAttribute('data-i', tips.length);
+      hit.setAttribute('data-cx', xAt(i).toFixed(2));
+      tips.push(tipFor(c, i, null, colors));
+    }
+  }
+
+  function drawHBars(g, c, colors, W, top, tips){
+    var n = c.categories.length, ns = c.series.length;
+    var dom = valueDomain(c), sc = niceScale(dom.lo, dom.hi, 4);
+    var maxLab = 0;
+    c.categories.forEach(function(x){ maxLab = Math.max(maxLab, textWidth(x, 12)); });
+    var labW = Math.min(maxLab, W * 0.36);
+    var valW = (ns === 1 || c.stacked) ? 44 : 10;
+    var left = 12 + labW + 10, right = W - 12 - valW, pw = Math.max(40, right - left);
+    var grouped = ns > 1 && !c.stacked;
+    var bar = grouped ? Math.min(14, 24) : 18, gap = 2;
+    var band = grouped ? ns * bar + (ns - 1) * gap + 12 : 28;
+    var plotTop = top + 4, ph = band * n;
+    var x = function(v){ return left + (v - sc.min) / (sc.max - sc.min) * pw; };
+    sc.ticks.forEach(function(t){
+      svgEl(g, 'line', {x1: x(t), x2: x(t), y1: plotTop, y2: plotTop + ph,
+                        stroke: t === 0 ? VIZ.axis : VIZ.grid, 'stroke-width': 1, 'shape-rendering': 'crispEdges'});
+      svgEl(g, 'text', {x: x(t), y: plotTop + ph + 15, 'font-size': 11, fill: VIZ.muted,
+                        'text-anchor': 'middle'}, fmtTick(t));
+    });
+    var bottom = plotTop + ph + 22;
+    if(c.y_label){
+      svgEl(g, 'text', {x: left + pw / 2, y: bottom + 12, 'font-size': 11, fill: VIZ.ink2,
+                        'text-anchor': 'middle'}, fitText(c.y_label, 11, pw));
+      bottom += 18;
+    }
+    var zero = x(Math.max(sc.min, Math.min(0, sc.max)));
+    var marks = svgEl(g, 'g');
+    c.categories.forEach(function(label, i){
+      var y0 = plotTop + band * i;
+      svgEl(g, 'text', {x: left - 10, y: y0 + band / 2 + 4, 'font-size': 12, fill: VIZ.ink2,
+                        'text-anchor': 'end'}, fitText(label, 12, labW));
+      if(c.stacked){
+        var acc = 0, lastK = -1, by = y0 + (band - bar) / 2;
+        c.series.forEach(function(s, k){ if(s.values[i]) lastK = k; });
+        c.series.forEach(function(s, k){
+          var v = s.values[i];
+          if(!v) return;
+          var w = x(acc + v) - x(acc), gp = (k === lastK) ? 0 : Math.min(2, w / 2);
+          var p = svgEl(marks, 'path', {d: barPath(x(acc), by, w - gp, bar, false, k === lastK), fill: colors[k]});
+          p.setAttribute('data-i', tips.length);
+          tips.push(tipFor(c, i, null, colors));
+          acc += v;
+        });
+        if(acc) svgEl(g, 'text', {x: x(acc) + 6, y: by + bar / 2 + 4, 'font-size': 11, fill: VIZ.ink2}, fmtTick(acc));
+        return;
+      }
+      var gy = y0 + (band - (ns * bar + (ns - 1) * gap)) / 2;
+      c.series.forEach(function(s, k){
+        var v = s.values[i];
+        if(v === null) return;
+        var by2 = gy + k * (bar + gap), w = x(v) - zero;
+        var p = svgEl(marks, 'path', {d: barPath(zero, by2, w, bar, false, true), fill: colors[k]});
+        p.setAttribute('data-i', tips.length);
+        tips.push(tipFor(c, i, k, colors));
+        if(ns === 1){
+          svgEl(g, 'text', {x: v >= 0 ? x(v) + 6 : x(v) - 6, y: by2 + bar / 2 + 4, 'font-size': 11,
+                            fill: VIZ.ink2, 'text-anchor': v >= 0 ? 'start' : 'end'}, fmtTick(v));
+        }
+      });
+    });
+    return bottom;
+  }
+
+  function drawPie(g, c, colors, W, top, tips){
+    var vals = c.series[0].values, total = 0;
+    vals.forEach(function(v){ if(v > 0) total += v; });
+    var R = Math.min(110, (W - 24) / 4), cx = 12 + R, cy = top + R + 6, r0 = R * 0.6;
+    var colorsBySlice = c.categories.map(function(_x, i){ return SERIES_COLORS[i % SERIES_COLORS.length]; });
+    var marks = svgEl(g, 'g'), a = -Math.PI / 2;
+    vals.forEach(function(v, i){
+      if(!(v > 0)) return;
+      var sweep = v / total * Math.PI * 2, a1 = a + sweep;
+      var pt = function(rad, ang){ return (cx + rad * Math.cos(ang)).toFixed(2) + ',' + (cy + rad * Math.sin(ang)).toFixed(2); };
+      var d;
+      if(sweep >= Math.PI * 2 - 1e-6){
+        d = 'M' + pt(R, 0) + 'A' + R + ',' + R + ' 0 1 1 ' + pt(R, Math.PI) + 'A' + R + ',' + R + ' 0 1 1 ' + pt(R, 0)
+          + 'M' + pt(r0, 0) + 'A' + r0 + ',' + r0 + ' 0 1 0 ' + pt(r0, Math.PI) + 'A' + r0 + ',' + r0 + ' 0 1 0 ' + pt(r0, 0) + 'Z';
+      } else {
+        var big = sweep > Math.PI ? 1 : 0;
+        d = 'M' + pt(R, a) + 'A' + R + ',' + R + ' 0 ' + big + ' 1 ' + pt(R, a1)
+          + 'L' + pt(r0, a1) + 'A' + r0 + ',' + r0 + ' 0 ' + big + ' 0 ' + pt(r0, a) + 'Z';
+      }
+      // The 2px surface stroke is the gap between slices, not a border.
+      var p = svgEl(marks, 'path', {d: d, fill: colorsBySlice[i], stroke: VIZ.surface, 'stroke-width': 2,
+                                    'fill-rule': 'evenodd'});
+      p.setAttribute('data-i', tips.length);
+      tips.push({title: c.categories[i], rows: [{color: colorsBySlice[i], name: c.series[0].name,
+        value: fmtValue(v, c.unit) + ' (' + (v / total * 100).toFixed(1).replace(/\.0$/, '') + '%)'}]});
+      a = a1;
+    });
+    svgEl(g, 'text', {x: cx, y: cy + 2, 'font-size': 18, 'font-weight': 600, fill: VIZ.ink,
+                      'text-anchor': 'middle'}, fmtTick(total));
+    svgEl(g, 'text', {x: cx, y: cy + 18, 'font-size': 11, fill: VIZ.muted, 'text-anchor': 'middle'}, 'total');
+    // Slice list beside the ring: swatch, name, value, share — so no slice is
+    // read by colour alone.
+    var lx = cx + R + 22, ly = top + 8, lw = W - lx - 12;
+    c.categories.forEach(function(label, i){
+      var v = vals[i];
+      svgEl(g, 'rect', {x: lx, y: ly + 2, width: 10, height: 10, rx: 2, fill: colorsBySlice[i]});
+      var share = v > 0 ? ' · ' + (v / total * 100).toFixed(1).replace(/\.0$/, '') + '%' : '';
+      var tail = fmtValue(v, c.unit) + share;
+      var tailW = textWidth(tail, 12);
+      svgEl(g, 'text', {x: lx + 16, y: ly + 11, 'font-size': 12, fill: VIZ.ink2},
+            fitText(label, 12, Math.max(30, lw - tailW - 26)));
+      svgEl(g, 'text', {x: lx + lw, y: ly + 11, 'font-size': 12, fill: VIZ.ink, 'text-anchor': 'end'}, tail);
+      ly += 20;
+    });
+    return Math.max(cy + R + 10, ly + 6);
+  }
+
+  function chartSvgText(art){
+    var built = buildChartSvg(art.spec, EXPORT_CHART_W, {standalone: true});
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(built.svg) + '\n';
+  }
+  // PNG via the browser's own rasterizer: the standalone SVG is drawn into a
+  // canvas at 2x. data: images are within the report's img-src policy.
+  function chartPngBlob(art){
+    return new Promise(function(resolve, reject){
+      var built = buildChartSvg(art.spec, EXPORT_CHART_W, {standalone: true});
+      var text = new XMLSerializer().serializeToString(built.svg);
+      var img = new Image();
+      img.onload = function(){
+        try {
+          var scale = 2, cv = document.createElement('canvas');
+          cv.width = EXPORT_CHART_W * scale; cv.height = built.height * scale;
+          var g2 = cv.getContext('2d');
+          g2.fillStyle = VIZ.surface; g2.fillRect(0, 0, cv.width, cv.height);
+          g2.drawImage(img, 0, 0, cv.width, cv.height);
+          cv.toBlob(function(b){ if(b) resolve(b); else reject(new Error('PNG encoding failed')); }, 'image/png');
+        } catch(e){ reject(e); }
+      };
+      img.onerror = function(){ reject(new Error('the chart could not be rasterized')); };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(text);
+    });
+  }
+
+  // ----------------------------------------------- artifacts: tables & files
+  // Spreadsheet-safe text: a cell that opens with a formula sigil gets Excel's
+  // own "treat as text" apostrophe (the same rule as findings.csv), unless it
+  // is just a plain number like "-12.5", which no spreadsheet runs.
+  function sheetSafe(v){
+    if(typeof v === 'number') return isFinite(v) ? String(v) : '';
+    var s = v == null ? '' : String(v);
+    if((/^[ \t\r\n\f\v\u0000]*[=+\-@]/.test(s) || /^[\t\r]/.test(s)) && !PLAIN_NUMBER_RE.test(s.trim())){
+      s = "'" + s;
+    }
+    return s;
+  }
+  function toCsv(columns, rows){
+    var cell = function(v){
+      var s = sheetSafe(v);
+      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    var lines = [columns.map(cell).join(',')];
+    rows.forEach(function(r){ lines.push(r.map(cell).join(',')); });
+    return '﻿' + lines.join('\r\n') + '\r\n';   // BOM + CRLF: Excel on Windows reads it cleanly
+  }
+  function toTsv(columns, rows){
+    var cell = function(v){ return sheetSafe(v).replace(/[\t\r\n]+/g, ' '); };
+    return [columns.map(cell).join('\t')].concat(rows.map(function(r){
+      return r.map(cell).join('\t');
+    })).join('\n');
+  }
+  function chartTable(spec){
+    var c = spec.chart;
+    return {
+      columns: [c.x_label || 'Category'].concat(c.series.map(function(s){ return s.name; })),
+      rows: c.categories.map(function(x, i){
+        return [x].concat(c.series.map(function(s){ return s.values[i] === null ? '' : s.values[i]; }));
+      })
+    };
+  }
+  function escHtml(s){
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  // A memo as a standalone HTML file (opens in a browser or in Word). The body
+  // is the same safe-DOM render the chat shows, serialized — never assembled
+  // from model strings — and the file carries its own no-script CSP.
+  var MEMO_CSS = 'body{font:15px/1.6 ' + VIZ_FONT + ';color:#1c2430;max-width:760px;margin:40px auto;padding:0 24px}'
+    + 'h1{font-size:22px;margin:0 0 4px}h3,h4,h5,h6{margin:18px 0 6px}.cap{color:#6b7686}'
+    + 'table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border:1px solid #d5dae3;padding:5px 8px;'
+    + 'text-align:left;vertical-align:top}th{background:#f3f5f9}code{background:#eef1f6;padding:1px 4px;'
+    + 'border-radius:4px}pre{background:#f3f5f9;padding:10px;overflow:auto}'
+    + 'blockquote{margin:8px 0;padding:4px 12px;border-left:3px solid #d5dae3;color:#6b7686}'
+    + 'footer{margin-top:28px;padding-top:8px;border-top:1px solid #e3e7ee;color:#6b7686;font-size:12px}';
+  function memoHtml(art){
+    var holder = document.createElement('div');
+    renderMdInto(holder, art.spec.markdown, 0);
+    var ser = new XMLSerializer(), body = '';
+    Array.prototype.forEach.call(holder.childNodes, function(n){ body += ser.serializeToString(n) + '\n'; });
+    var foot = 'Drafted by the Ask AI assistant from "' + CFG.title + '"'
+      + (CFG.generated ? ' (report generated ' + CFG.generated + ')' : '') + ' — verify against the drawings.';
+    return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+      + '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">\n'
+      + '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+      + '<title>' + escHtml(art.spec.title) + '</title>\n<style>' + MEMO_CSS + '</style>\n</head>\n<body>\n<article>\n'
+      + '<h1>' + escHtml(art.spec.title) + '</h1>\n'
+      + (art.spec.caption ? '<p class="cap">' + escHtml(art.spec.caption) + '</p>\n' : '')
+      + body + '<footer>' + escHtml(foot) + '</footer>\n</article>\n</body>\n</html>\n';
+  }
+
+  // Every download an artifact offers: {ext, label, make() -> Promise<Blob>}.
+  // One list feeds the card's buttons, the Files panel, and the zip.
+  function textBlob(text, mime){ return new Blob([text], {type: mime + ';charset=utf-8'}); }
+  function artifactFormats(art){
+    var s = art.spec;
+    if(!s) return [];
+    if(s.kind === 'chart'){
+      return [
+        {ext: 'svg', label: 'SVG', make: function(){ return Promise.resolve(textBlob(chartSvgText(art), 'image/svg+xml')); }},
+        {ext: 'png', label: 'PNG', make: function(){ return chartPngBlob(art); }},
+        {ext: 'csv', label: 'CSV', make: function(){
+          var t = chartTable(s);
+          return Promise.resolve(textBlob(toCsv(t.columns, t.rows), 'text/csv'));
+        }}
+      ];
+    }
+    if(s.kind === 'table'){
+      return [{ext: 'csv', label: 'CSV', make: function(){
+        return Promise.resolve(textBlob(toCsv(s.table.columns, s.table.rows), 'text/csv'));
+      }}];
+    }
+    return [
+      {ext: 'md', label: '.md', make: function(){
+        return Promise.resolve(textBlob('# ' + s.title + '\n\n' + (s.caption ? '_' + s.caption + '_\n\n' : '')
+          + s.markdown.replace(/\s*$/, '') + '\n', 'text/markdown'));
+      }},
+      {ext: 'html', label: '.html', make: function(){ return Promise.resolve(textBlob(memoHtml(art), 'text/html')); }}
+    ];
+  }
+  function downloadBlob(blob, name){
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  }
+  function downloadArtifact(art, fmt, statusEl){
+    return fmt.make().then(function(blob){
+      downloadBlob(blob, artFileBase(art) + '.' + fmt.ext);
+    }, function(err){
+      var msg = 'Could not make the ' + fmt.label + ' file: ' + ((err && err.message) || err);
+      if(statusEl) statusEl.textContent = msg;
+      else addMsg('da-err', msg);
+    });
+  }
+  function copyText(text, statusEl, okMsg){
+    var done = function(ok){
+      if(statusEl) statusEl.textContent = ok ? okMsg : 'Copy is blocked here — use a download instead.';
+    };
+    try {
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(function(){ done(true); }, function(){ done(false); });
+        return;
+      }
+    } catch(e){}
+    done(false);
+  }
+
+  // A sortable table (numbers numerically, text naturally; a third click puts
+  // the original order back). Used for table artifacts and a chart's data view.
+  function buildTable(columns, rows){
+    var wrap = document.createElement('div');
+    wrap.className = 'da-art-tablewrap';
+    var table = child(wrap, 'table');
+    table.className = 'da-art-table';
+    var headRow = child(child(table, 'thead'), 'tr');
+    var tbody = child(table, 'tbody');
+    var numeric = columns.map(function(_c, j){
+      return rows.length > 0 && rows.every(function(r){ return typeof r[j] === 'number' || r[j] === ''; })
+        && rows.some(function(r){ return typeof r[j] === 'number'; });
+    });
+    var order = rows.map(function(_r, i){ return i; }), sortCol = -1, sortDir = 0;
+    function paint(){
+      while(tbody.firstChild) tbody.removeChild(tbody.firstChild);
+      order.forEach(function(ri){
+        var tr = child(tbody, 'tr');
+        rows[ri].forEach(function(v, j){
+          var td = child(tr, 'td');
+          // As given: a table is transcribed values, and regrouping digits
+          // would turn a year or a tag number into "2,026".
+          td.textContent = String(v);
+          if(numeric[j]) td.className = 'da-num';
+        });
+      });
+    }
+    columns.forEach(function(name, j){
+      var th = child(headRow, 'th');
+      if(numeric[j]) th.className = 'da-num';
+      var b = child(th, 'button');
+      b.type = 'button';
+      b.textContent = name;
+      b.title = 'Sort by ' + name;
+      b.addEventListener('click', function(){
+        sortDir = sortCol === j ? (sortDir === 1 ? -1 : sortDir === -1 ? 0 : 1) : 1;
+        sortCol = j;
+        order = rows.map(function(_r, i){ return i; });
+        if(sortDir){
+          order.sort(function(a, b2){
+            var x = rows[a][j], y = rows[b2][j], d;
+            if(typeof x === 'number' && typeof y === 'number') d = x - y;
+            else if(x === '' || y === '') d = (x === '') - (y === '');   // blanks last
+            else d = String(x).localeCompare(String(y), undefined, {numeric: true, sensitivity: 'base'});
+            return d * (x === '' || y === '' ? 1 : sortDir) || a - b2;
+          });
+        }
+        Array.prototype.forEach.call(headRow.children, function(h, k){
+          h.setAttribute('aria-sort', k === j && sortDir ? (sortDir > 0 ? 'ascending' : 'descending') : 'none');
+        });
+        paint();
+      });
+    });
+    paint();
+    return wrap;
+  }
+
+  // -------------------------------------------------- artifacts: the card
+  function artButton(parent, label, title, onClick){
+    var b = child(parent, 'button');
+    b.type = 'button';
+    b.className = 'da-art-btn';
+    b.textContent = label;
+    if(title) b.title = title;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // The live chart: rebuilt at the card's own width whenever the panel is
+  // resized (text in a scaled-down SVG would shrink below legibility), with a
+  // hover readout per mark — the crosshair column on a line chart.
+  function mountChart(plot, art){
+    var tip = document.createElement('div');
+    tip.className = 'da-art-tip';
+    tip.hidden = true;
+    var current = null, lastW = 0;
+    function render(){
+      var w = Math.floor(plot.clientWidth) || 400;
+      if(Math.abs(w - lastW) < 8 && current) return;
+      lastW = w;
+      var built = buildChartSvg(art.spec, Math.max(260, w));
+      if(current) plot.replaceChild(built.svg, current.svg); else plot.insertBefore(built.svg, tip);
+      current = built;
+    }
+    plot.appendChild(tip);
+    render();
+    function hide(){
+      tip.hidden = true;
+      if(current){
+        var cross = current.svg.querySelector('.da-viz-cross');
+        if(cross) cross.setAttribute('visibility', 'hidden');
+        var lit = current.svg.querySelector('.da-viz-hot');
+        if(lit) lit.classList.remove('da-viz-hot');
+      }
+    }
+    plot.addEventListener('pointermove', function(e){
+      var t = e.target && e.target.closest ? e.target.closest('[data-i]') : null;
+      if(!t || !current){ hide(); return; }
+      var data = current.tips[+t.getAttribute('data-i')];
+      if(!data){ hide(); return; }
+      var lit = current.svg.querySelector('.da-viz-hot');
+      if(lit && lit !== t) lit.classList.remove('da-viz-hot');
+      if(t.tagName.toLowerCase() === 'path') t.classList.add('da-viz-hot');
+      var cross = current.svg.querySelector('.da-viz-cross');
+      if(cross && t.getAttribute('data-cx')){
+        cross.setAttribute('x1', t.getAttribute('data-cx'));
+        cross.setAttribute('x2', t.getAttribute('data-cx'));
+        cross.setAttribute('visibility', 'visible');
+      }
+      while(tip.firstChild) tip.removeChild(tip.firstChild);
+      // Values lead, labels follow; each row keyed with a short stroke of its
+      // series colour (the swatch is the only thing that wears the colour).
+      child(tip, 'div').className = 'da-art-tip-title';
+      tip.firstChild.textContent = data.title;
+      data.rows.forEach(function(r){
+        var row = child(tip, 'div');
+        row.className = 'da-art-tip-row';
+        var key = child(row, 'span');
+        key.className = 'da-art-tip-key';
+        key.style.background = r.color;   // a palette constant, never spec text
+        var v = child(row, 'strong');
+        v.textContent = r.value;
+        var nm = child(row, 'span');
+        nm.textContent = ' ' + r.name;
+      });
+      tip.hidden = false;
+      var box = plot.getBoundingClientRect();
+      var px = e.clientX - box.left, py = e.clientY - box.top;
+      var tw = tip.offsetWidth, th = tip.offsetHeight;
+      tip.style.left = Math.max(0, Math.min(px + 12, box.width - tw)) + 'px';
+      tip.style.top = Math.max(0, py - th - 10) + 'px';
+    });
+    plot.addEventListener('pointerleave', hide);
+    if(window.ResizeObserver){
+      var pending = 0;
+      new ResizeObserver(function(){
+        if(pending) return;
+        pending = requestAnimationFrame(function(){ pending = 0; render(); });
+      }).observe(plot);
+    }
+  }
+
+  function renderArtifactCard(art){
+    var s = art.spec;
+    var fig = document.createElement('figure');
+    fig.className = 'da-art';
+    fig.id = 'da-art-' + art.id;
+    var head = child(fig, 'figcaption');
+    head.className = 'da-art-head';
+    var idEl = child(head, 'span');
+    idEl.className = 'da-art-id';
+    idEl.textContent = art.id;
+    var titleEl = child(head, 'span');
+    titleEl.className = 'da-art-title';
+    titleEl.textContent = s ? s.title : 'Artifact';
+    var kindEl = child(head, 'span');
+    kindEl.className = 'da-art-kind';
+    kindEl.textContent = s ? artKindLabel(s) : '';
+    if(!s){
+      var gone = child(fig, 'div');
+      gone.className = 'da-art-body da-art-missing';
+      gone.textContent = 'This artifact could not be restored from the saved conversation.';
+      return fig;
+    }
+    var body = child(fig, 'div');
+    body.className = 'da-art-body';
+    var status = document.createElement('div');
+    status.className = 'da-art-status';
+    status.setAttribute('aria-live', 'polite');
+    if(s.kind === 'chart'){
+      var plot = child(body, 'div');
+      plot.className = 'da-art-plot';
+      mountChart(plot, art);
+    } else if(s.kind === 'table'){
+      body.appendChild(buildTable(s.table.columns, s.table.rows));
+    } else {
+      var memo = child(body, 'div');
+      memo.className = 'da-md da-art-memo';
+      renderMdInto(memo, s.markdown, 0);
+    }
+    if(s.caption){
+      var cap = child(fig, 'div');
+      cap.className = 'da-art-cap';
+      cap.textContent = s.caption;
+    }
+    var acts = child(fig, 'div');
+    acts.className = 'da-art-actions';
+    if(s.kind === 'chart'){
+      var dataView = null;
+      var tbtn = artButton(acts, 'Data', 'Show the numbers behind this chart as a table', function(){
+        if(dataView){ dataView.remove(); dataView = null; tbtn.setAttribute('aria-pressed', 'false'); return; }
+        var t = chartTable(s);
+        dataView = buildTable(t.columns, t.rows);
+        body.appendChild(dataView);
+        tbtn.setAttribute('aria-pressed', 'true');
+      });
+      tbtn.setAttribute('aria-pressed', 'false');
+    }
+    if(s.kind === 'table'){
+      artButton(acts, 'Copy', 'Copy as tab-separated text — pastes into Excel as cells', function(){
+        copyText(toTsv(s.table.columns, s.table.rows), status, 'Copied — paste into a spreadsheet.');
+      });
+    } else if(s.kind === 'memo'){
+      artButton(acts, 'Copy', 'Copy the memo text', function(){
+        copyText(s.markdown, status, 'Copied the memo text.');
+      });
+    }
+    artifactFormats(art).forEach(function(fmt){
+      artButton(acts, '⬇ ' + fmt.label, 'Download ' + artFileBase(art) + '.' + fmt.ext, function(){
+        downloadArtifact(art, fmt, status);
+      });
+    });
+    artButton(acts, 'Print', 'Print this ' + ART_KINDS[s.kind].toLowerCase() + ' on its own — or save it as a PDF', function(){
+      printArtifact(art);
+    });
+    fig.appendChild(status);
+    return fig;
+  }
+
+  // Put a card (or a file chip) in the bubble right after the tool chip that
+  // made it, so it sits where the model called for it in the answer.
+  function placeAfter(node, anchor, bubble){
+    if(anchor && anchor.parentNode){
+      anchor.parentNode.insertBefore(node, anchor.nextSibling);
+    } else if(bubble){
+      bubble.appendChild(node);
+    }
+  }
+
+  function registerArtifact(spec, toolUseId, anchor, bubble){
+    var art = {id: 'A' + (artifacts.length + 1), spec: spec, toolUseId: toolUseId || '', card: null};
+    artifacts.push(art);
+    art.card = renderArtifactCard(art);
+    placeAfter(art.card, anchor, bubble);
+    refreshFiles();
+    return art;
+  }
+
+  // Print one artifact on its own (Save as PDF is a print destination): a
+  // throwaway container at body level is the only thing the print rules show.
+  function printArtifact(art){
+    var old = document.getElementById('da-art-print');
+    if(old) old.remove();
+    var holder = document.createElement('div');
+    holder.id = 'da-art-print';
+    var h = child(holder, 'h1');
+    h.textContent = art.spec.title;
+    if(art.spec.caption){
+      var cp = child(holder, 'p');
+      cp.className = 'da-art-print-cap';
+      cp.textContent = art.spec.caption;
+    }
+    if(art.spec.kind === 'chart'){
+      var built = buildChartSvg(art.spec, 700);
+      built.svg.setAttribute('width', '100%');
+      built.svg.removeAttribute('height');
+      holder.appendChild(built.svg);
+      var t = chartTable(art.spec);
+      holder.appendChild(buildTable(t.columns, t.rows));
+    } else if(art.spec.kind === 'table'){
+      holder.appendChild(buildTable(art.spec.table.columns, art.spec.table.rows));
+    } else {
+      var memo = child(holder, 'div');
+      memo.className = 'da-md';
+      renderMdInto(memo, art.spec.markdown, 0);
+    }
+    var foot = child(holder, 'p');
+    foot.className = 'da-art-print-foot';
+    foot.textContent = art.id + ' · from "' + CFG.title + '" · printed ' + new Date().toLocaleString();
+    document.body.appendChild(holder);
+    document.body.classList.add('da-print-art');
+    window.print();
+  }
+  window.addEventListener('afterprint', function(){
+    document.body.classList.remove('da-print-art');
+    var holder = document.getElementById('da-art-print');
+    if(holder) holder.remove();
+  });
+
+  // The create_artifact tool. `ctx` carries where the card goes (the tool
+  // chip that called it) and the thread generation the call belongs to: a call
+  // finishing after New chat / Load must not number itself into the new thread.
+  function toolCreateArtifact(input, ctx){
+    var spec = artifactSpec(input);   // throws → an is_error tool_result the model can fix
+    if(ctx && ctx.gen !== undefined && ctx.gen !== turnGen) throw new Error('the conversation was replaced');
+    var art = registerArtifact(spec, ctx && ctx.id, ctx && ctx.chip, ctx && ctx.bubble);
+    var shape = spec.kind === 'chart'
+      ? spec.chart.series.length + ' series × ' + spec.chart.categories.length + ' categories'
+      : spec.kind === 'table' ? spec.table.rows.length + ' rows × ' + spec.table.columns.length + ' columns'
+      : spec.markdown.length + ' characters';
+    return 'Artifact ' + art.id + ' ("' + spec.title + '", ' + artKindLabel(spec) + ', ' + shape + ') is now '
+      + 'shown inline in the chat and listed in the Files panel, where the reader can download it ('
+      + artifactFormats(art).map(function(f){ return f.label; }).join(', ') + ') or print it. '
+      + 'Refer to it as ' + art.id + ' instead of repeating its contents.';
+  }
+
+  // --------------------------------------------------------- export files
+  // The files saved beside this report in its export folder, from the inert
+  // #da-exports block (built host-side from the folder itself). Absent for the
+  // single-file report. Paths are re-checked here — relative, no dot segments,
+  // no controls — because they become links.
+  var EXPORTS = (function(){
+    var data = readJsonBlock('da-exports');
+    var files = (data && Array.isArray(data.files)) ? data.files : [];
+    var ok = files.filter(function(f){
+      if(!f || typeof f.path !== 'string' || !f.path) return false;
+      if(/[\u0000-\u001f\u007f\\]/.test(f.path) || /^[\/]|^[A-Za-z]:/.test(f.path)) return false;
+      return f.path.split('/').every(function(seg){ return seg && seg !== '.' && seg !== '..'; });
+    }).map(function(f){
+      return {path: f.path, group: oneLine(f.group, 60) || 'Other', description: oneLine(f.description, 200)};
+    });
+    return {files: ok, omitted: (data && +data.omitted) || 0};
+  })();
+  // The ONLY link in the widget that is not https. Safe because its target is
+  // never model text: the path comes from the host-built list above, every
+  // segment is percent-encoded (so no segment can read as a scheme, a query,
+  // or a parent step), and the result is relative to the report itself
+  // (base-uri 'none' stops a <base> from re-pointing it).
+  function exportLinkEl(entry, label){
+    var a = document.createElement('a');
+    a.href = entry.path.split('/').map(encodeURIComponent).join('/');
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = label || entry.path;
+    a.title = 'Open ' + entry.path + (entry.description ? ' — ' + entry.description : '');
+    return a;
+  }
+  function findExport(target){
+    var t = String(target || '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+    if(!t) return {hits: []};
+    var exact = EXPORTS.files.filter(function(f){ return f.path === t; });
+    if(exact.length) return {hits: exact};
+    var lc = t.toLowerCase();
+    var ci = EXPORTS.files.filter(function(f){ return f.path.toLowerCase() === lc; });
+    if(ci.length) return {hits: ci};
+    var base = EXPORTS.files.filter(function(f){
+      return f.path.split('/').pop().toLowerCase() === lc;
+    });
+    return {hits: base};
+  }
+  function findArtifact(target){
+    var m = String(target || '').trim().match(/^A(\d+)$/i);
+    if(!m) return null;
+    return artifacts[+m[1] - 1] || null;
+  }
+
+  function toolListFiles(input){
+    input = input || {};
+    var match = String(input.match || '').toLowerCase();
+    var group = String(input.group || '').toLowerCase();
+    var cap = Math.max(1, Math.min(+input.limit || 100, 300));
+    var hits = EXPORTS.files.filter(function(f){
+      if(group && f.group.toLowerCase().indexOf(group) === -1) return false;
+      if(match && (f.path + ' ' + f.description).toLowerCase().indexOf(match) === -1) return false;
+      return true;
+    });
+    var groups = {};
+    EXPORTS.files.forEach(function(f){ groups[f.group] = (groups[f.group] || 0) + 1; });
+    return JSON.stringify({
+      conversation_artifacts: artifacts.map(function(a){
+        return a.spec
+          ? {id: a.id, title: a.spec.title, kind: artKindLabel(a.spec),
+             downloads: artifactFormats(a).map(function(f){ return f.ext; })}
+          : {id: a.id, unavailable: true};
+      }),
+      export_folder: EXPORTS.files.length
+        ? {files_total: EXPORTS.files.length + EXPORTS.omitted, groups: groups,
+           matched: hits.length, returned: Math.min(hits.length, cap), files: hits.slice(0, cap)}
+        : {available: false,
+           note: 'This report was saved as a single file, so no export folder sits beside it.'}
+    });
+  }
+
+  function fileChip(kind){
+    var d = document.createElement('div');
+    d.className = 'da-file-chip da-file-chip-' + kind;
+    return d;
+  }
+  // Draw a shared file into the chat. Used live and on replay; a target that
+  // no longer resolves (a moved report, a tampered transcript) still draws, as
+  // an inert note, so the conversation reads the same.
+  function renderShare(input, anchor, bubble){
+    var target = String((input && input.target) || '').trim();
+    var art = findArtifact(target);
+    var chip;
+    if(art && art.spec){
+      chip = fileChip('art');
+      var ico = child(chip, 'span');
+      ico.className = 'da-file-ico';
+      ico.textContent = artIcon(art.spec);
+      var main = child(chip, 'span');
+      main.className = 'da-file-main';
+      main.textContent = art.id + ' · ' + art.spec.title;
+      var only = String((input && input.format) || '').toLowerCase().replace(/^\./, '');
+      var fmts = artifactFormats(art).filter(function(f){ return !only || f.ext === only; });
+      if(!fmts.length) fmts = artifactFormats(art);
+      fmts.forEach(function(fmt){
+        artButton(chip, '⬇ ' + fmt.label, 'Download ' + artFileBase(art) + '.' + fmt.ext, function(){
+          downloadArtifact(art, fmt, null);
+        });
+      });
+      artButton(chip, 'Show', 'Scroll to ' + art.id + ' in the chat', function(){ showArtifact(art.id); });
+    } else {
+      var hits = findExport(target).hits;
+      chip = fileChip('export');
+      var ico2 = child(chip, 'span');
+      ico2.className = 'da-file-ico';
+      ico2.textContent = '📄';
+      if(hits.length === 1){
+        var m2 = child(chip, 'span');
+        m2.className = 'da-file-main';
+        m2.appendChild(exportLinkEl(hits[0]));
+        if(hits[0].description){
+          var dsc = child(chip, 'span');
+          dsc.className = 'da-file-desc';
+          dsc.textContent = hits[0].description;
+        }
+      } else {
+        chip.className += ' da-file-chip-gone';
+        var m3 = child(chip, 'span');
+        m3.className = 'da-file-main';
+        m3.textContent = (target || 'file') + ' — not available from this copy of the report';
+      }
+    }
+    placeAfter(chip, anchor, bubble);
+    return chip;
+  }
+
+  function toolShareFile(input, ctx){
+    var target = String((input && input.target) || '').trim();
+    if(!target) throw new Error('give a target: an export file path from list_files, or an artifact id like "A1"');
+    var art = findArtifact(target);
+    if(art){
+      if(!art.spec) throw new Error(art.id + ' could not be restored, so it cannot be shared');
+    } else if(/^A\d+$/i.test(target)){
+      throw new Error('there is no artifact ' + target.toUpperCase() + ' in this conversation'
+        + (artifacts.length ? ' (it has A1–A' + artifacts.length + ')' : ' yet'));
+    } else {
+      if(!EXPORTS.files.length) throw new Error('this report was saved as a single file, so there is no export folder to link into');
+      var hits = findExport(target).hits;
+      if(hits.length > 1){
+        throw new Error('"' + target + '" matches several files: '
+          + hits.slice(0, 8).map(function(f){ return f.path; }).join(', ') + ' — give the full path');
+      }
+      if(!hits.length){
+        throw new Error('no export file "' + target + '" — call list_files for the exact paths');
+      }
+    }
+    if(ctx && ctx.gen !== undefined && ctx.gen !== turnGen) throw new Error('the conversation was replaced');
+    renderShare(input, ctx && ctx.chip, ctx && ctx.bubble);
+    if(art) return 'Put download buttons for ' + art.id + ' ("' + art.spec.title + '") in the chat.';
+    var hit = findExport(target).hits[0];
+    return 'Put a link to "' + hit.path + '" in the chat; it opens the file saved beside this report in its export folder.';
+  }
+
+  // Replay: a recorded create_artifact / share_file is RE-RENDERED from its
+  // input — never dispatched to TOOLS — and only when the recorded tool_result
+  // says it succeeded. Drawing a card drives nothing on the reader's page, and
+  // it is what makes the artifacts durable. A recorded success whose input no
+  // longer validates (a tampered or hand-edited file) still takes its id, so
+  // the numbering the model was told stays true for every later artifact.
+  function replayToolOutput(b, chip, bubble){
+    if(b.name === 'create_artifact'){
+      var spec = null;
+      try { spec = artifactSpec(b.input || {}); } catch(e){ spec = null; }
+      registerArtifact(spec, b.id, chip, bubble);
+    } else if(b.name === 'share_file'){
+      renderShare(b.input || {}, chip, bubble);
+    }
+  }
+
   var TOOLS = {
     scroll_to_report: toolScroll,
     query_findings: toolQuery,
     filter_report: toolFilter,
     get_report_summary: toolSummary,
     highlight_term: toolHighlightTerm,
-    calculate: toolCalculate
+    calculate: toolCalculate,
+    create_artifact: toolCreateArtifact,
+    list_files: toolListFiles,
+    share_file: toolShareFile
   };
   // Always resolves (never rejects) to {content, is_error} — a handler may return
   // a value OR a Promise (filter_report waits out the report's search debounce),
   // and a throw/rejection still yields an is_error tool_result so no tool_use id
-  // is ever left unanswered.
-  function runTool(name, inp){
+  // is ever left unanswered. `ctx` ({id, chip, bubble, gen}) is where in the
+  // chat the call was made, for the tools that draw into it.
+  function runTool(name, inp, ctx){
     var fn = TOOLS[name];
     if(!fn) return Promise.resolve({content: 'Unknown tool: ' + name, is_error: true});
-    return Promise.resolve().then(function(){ return fn(inp); }).then(function(r){
+    return Promise.resolve().then(function(){ return fn(inp, ctx); }).then(function(r){
       return {content: (r == null || r === '') ? '(no result)' : String(r), is_error: false};
     }, function(e){
       return {content: 'Tool "' + name + '" failed: ' + (e && e.message || e), is_error: true};
@@ -4403,6 +5923,8 @@ _CHAT_JS = r"""
     sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
     sessionCost = {lo: 0, hi: 0};
     contextUsage = {prompt: 0, output: 0};   // the emptied thread occupies nothing
+    artifacts = [];            // the thread's artifacts go with it (their cards below)
+    refreshFiles();
     renderUsage();             // back to hidden — the counter belongs to the thread
     dropStoredTranscript();    // "New chat" is the eraser — the stored copy goes too
     clearPendingSelection();   // drop any pending excerpt + its highlight
@@ -5228,6 +6750,13 @@ _CHAT_JS = r"""
         el.textContent = '⚙ Highlight “' + (inp.term || '') + '”';
       } else if(b.name === 'calculate'){
         el.textContent = '⚙ Calculate ' + (inp.expression || '');
+      } else if(b.name === 'create_artifact'){
+        var kindName = ART_KINDS[String(inp.kind || '').toLowerCase()] || 'Artifact';
+        el.textContent = '⚙ ' + kindName + (inp.title ? ' “' + oneLine(inp.title, 80) + '”' : '');
+      } else if(b.name === 'list_files'){
+        el.textContent = '⚙ List files' + (inp.match ? ' (“' + oneLine(inp.match, 60) + '”)' : '');
+      } else if(b.name === 'share_file'){
+        el.textContent = '⚙ Link ' + (oneLine(inp.target, 120) || 'a file');
       }
     } else if(b.type === 'web_search_tool_result' || b.type === 'web_fetch_tool_result'){
       var chip = st.toolChips[b.tool_use_id];
@@ -5271,7 +6800,7 @@ _CHAT_JS = r"""
     return {
       schema_version: TX_SCHEMA,
       kind: TX_KIND,
-      request_prefix_version: 1,
+      request_prefix_version: TX_PREFIX_VERSION,
       report: {
         report_id: CFG.reportId || '',
         title: CFG.title || '',
@@ -5388,6 +6917,14 @@ _CHAT_JS = r"""
     blocks.forEach(function(b){
       if(b && b.type === 'tool_use' && b.id && (b.id in errById)) markToolChip(st, b.id, errById[b.id]);
     });
+    // Artifacts and shared files are re-drawn from their recorded input (see
+    // replayToolOutput) — the only recorded calls replay renders beyond a chip,
+    // because drawing them drives nothing on the reader's page.
+    blocks.forEach(function(b){
+      if(b && b.type === 'tool_use' && b.id && errById[b.id] === false){
+        replayToolOutput(b, st.toolChips[b.id], bubble);
+      }
+    });
     (notes || []).forEach(function(t){ note(bubble, String(t)); });
     if(!bubble.childNodes.length) bubble.remove();
     return bubble;
@@ -5425,6 +6962,10 @@ _CHAT_JS = r"""
     // is "not measured yet" — carrying the previous thread's figure across would
     // describe a conversation that is no longer open.
     contextUsage = {prompt: 0, output: 0};
+    // Artifacts are numbered by their order in the thread, so the replay below
+    // re-registers them from A1.
+    artifacts = [];
+    refreshFiles();
     renderUsage();
     turns.forEach(function(turn, i){
       var m = turn && turn.message;
@@ -5499,7 +7040,7 @@ _CHAT_JS = r"""
     // or model have a different prefix. Do not replay their stale signatures.
     // Continue append-only from
     // the restored text/tool history, with new thinking on subsequent turns.
-    if(data.truncated || data.thinking_reset || data.request_prefix_version !== 1
+    if(data.truncated || data.thinking_reset || data.request_prefix_version !== TX_PREFIX_VERSION
         || (data.report && data.report.model && data.report.model !== CFG.model)
         || String((data.report || {}).report_id || '') !== String(CFG.reportId || '')){
       turns = withoutThinking(turns);
@@ -5692,7 +7233,8 @@ _CHAT_JS = r"""
             // turn (handlers may be async; a throwing one still returns an
             // is_error tool_result).
             return Promise.all(uses.map(function(b){
-              return runTool(b.name, b.input || {}).then(function(r){
+              var where = {id: b.id, chip: st.toolChips[b.id], bubble: bubble, gen: gen};
+              return runTool(b.name, b.input || {}, where).then(function(r){
                 markToolChip(st, b.id, r.is_error);
                 var tr = {type: 'tool_result', tool_use_id: b.id, content: r.content};
                 if(r.is_error) tr.is_error = true;
@@ -5807,6 +7349,7 @@ _CHAT_JS = r"""
     }
     input.value = '';
     paintCompose();          // an auto-grown box snaps back once it is emptied
+    if(filesOpen) setFilesOpen(false);   // the answer streams into the transcript
     if(hasSel){
       var ex = pendingSel.text;
       var api = 'The user selected this excerpt from the report:\n<excerpt>\n' + ex + '\n</excerpt>\n\n' +
@@ -5832,6 +7375,281 @@ _CHAT_JS = r"""
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // ------------------------------------------------------------ Files panel
+  // One place for everything the reader can take away: the artifacts this
+  // conversation produced (with every download), the conversation itself, and
+  // — in a folder export — the files saved beside the report, as real links.
+  // It is derived, never stored: artifacts come from the thread (so it follows
+  // New chat, Load and a reload exactly), the export list from #da-exports.
+  var filesBtn = document.getElementById('da-chat-files');
+  var filesBadge = document.getElementById('da-files-badge');
+  var filesEl = document.getElementById('da-files');
+  var filesOpen = false;
+  var filesFilter = '';   // the export filter's text survives a re-render
+  var ZIP_NAME = 'chat_files.zip';
+
+  function setFilesOpen(on){
+    filesOpen = !!on;
+    if(filesEl) filesEl.hidden = !filesOpen;
+    msgs.hidden = filesOpen;
+    if(filesBtn) filesBtn.setAttribute('aria-pressed', filesOpen ? 'true' : 'false');
+    if(filesOpen) renderFiles();
+    else scrollDown();
+    paintCompose();
+  }
+  function refreshFiles(){
+    if(filesBadge){
+      filesBadge.textContent = artifacts.length ? String(artifacts.length) : '';
+      filesBadge.hidden = !artifacts.length;
+    }
+    if(filesOpen) renderFiles();
+  }
+  function showArtifact(id){
+    var art = findArtifact(id);
+    if(!art || !art.card) return;
+    if(filesOpen) setFilesOpen(false);
+    if(panel.hidden){ panel.hidden = false; fab.hidden = true; applyGeom(); }
+    follow = false;   // the reader asked to look at something; stop tailing
+    art.card.scrollIntoView({behavior: REDUCE_MOTION ? 'auto' : 'smooth', block: 'start'});
+    flash(art.card);
+  }
+
+  // A store-only ZIP (no compression: the contents are small, and most of them
+  // — PNG, and SVG beside its CSV — would not shrink much anyway). Names are
+  // UTF-8 (flag bit 11). One local header + data per file, then the central
+  // directory and its end record.
+  var CRC_TABLE = null;
+  function crc32(bytes){
+    if(!CRC_TABLE){
+      CRC_TABLE = new Uint32Array(256);
+      for(var n = 0; n < 256; n++){
+        var c = n;
+        for(var k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        CRC_TABLE[n] = c >>> 0;
+      }
+    }
+    var crc = 0xffffffff;
+    for(var i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+  function zipBlob(files){
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0, now = new Date();
+    var time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    var date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    files.forEach(function(f){
+      var name = enc.encode(f.name), data = f.bytes, crc = crc32(data);
+      var loc = new DataView(new ArrayBuffer(30));
+      loc.setUint32(0, 0x04034b50, true); loc.setUint16(4, 20, true); loc.setUint16(6, 0x0800, true);
+      loc.setUint16(8, 0, true); loc.setUint16(10, time, true); loc.setUint16(12, date, true);
+      loc.setUint32(14, crc, true); loc.setUint32(18, data.length, true); loc.setUint32(22, data.length, true);
+      loc.setUint16(26, name.length, true); loc.setUint16(28, 0, true);
+      parts.push(loc, name, data);
+      var cen = new DataView(new ArrayBuffer(46));
+      cen.setUint32(0, 0x02014b50, true); cen.setUint16(4, 20, true); cen.setUint16(6, 20, true);
+      cen.setUint16(8, 0x0800, true); cen.setUint16(10, 0, true); cen.setUint16(12, time, true);
+      cen.setUint16(14, date, true); cen.setUint32(16, crc, true); cen.setUint32(20, data.length, true);
+      cen.setUint32(24, data.length, true); cen.setUint16(28, name.length, true);
+      cen.setUint32(42, offset, true);
+      central.push(cen, name);
+      offset += 30 + name.length + data.length;
+    });
+    var size = 0;
+    central.forEach(function(p){ size += p.byteLength; });
+    var end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true); end.setUint32(12, size, true); end.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [end]), {type: 'application/zip'});
+  }
+  // Every artifact in every format it offers, plus the conversation itself
+  // (the same document Save writes), in one download. A format that cannot be
+  // made in this browser is left out rather than failing the whole zip.
+  function downloadAllZip(statusEl){
+    var jobs = [];
+    artifacts.forEach(function(art){
+      artifactFormats(art).forEach(function(fmt){
+        jobs.push(fmt.make().then(function(blob){ return blob.arrayBuffer(); }).then(function(buf){
+          return {name: artFileBase(art) + '.' + fmt.ext, bytes: new Uint8Array(buf)};
+        }, function(){ return null; }));
+      });
+    });
+    if(history.length){
+      jobs.push(Promise.resolve({name: TX_NAME, bytes: new TextEncoder().encode(serializeTranscript(0))}));
+    }
+    if(statusEl) statusEl.textContent = 'Building the zip…';
+    return Promise.all(jobs).then(function(files){
+      files = files.filter(Boolean);
+      downloadBlob(zipBlob(files), ZIP_NAME);
+      if(statusEl) statusEl.textContent = files.length + ' file(s) zipped into ' + ZIP_NAME + '.';
+    });
+  }
+
+  function filesSection(title, count){
+    var sec = child(filesEl, 'section');
+    sec.className = 'da-files-sec';
+    var h = child(sec, 'h3');
+    h.textContent = title;
+    if(count){
+      var c = child(h, 'span');
+      c.className = 'da-files-count';
+      c.textContent = String(count);
+    }
+    return sec;
+  }
+  function filesNote(parent, text){
+    var p = child(parent, 'p');
+    p.className = 'da-files-note';
+    p.textContent = text;
+    return p;
+  }
+  function artifactRow(parent, art, status){
+    var row = child(parent, 'div');
+    row.className = 'da-file-row';
+    var ico = child(row, 'span');
+    ico.className = 'da-file-ico';
+    ico.textContent = artIcon(art.spec);
+    var main = child(row, 'div');
+    main.className = 'da-file-main';
+    var name = child(main, 'button');
+    name.type = 'button';
+    name.className = 'da-file-name';
+    name.textContent = art.spec ? art.spec.title : '(could not be restored)';
+    name.title = 'Show ' + art.id + ' in the chat';
+    name.addEventListener('click', function(){ showArtifact(art.id); });
+    var meta = child(main, 'span');
+    meta.className = 'da-file-desc';
+    meta.textContent = art.id + (art.spec ? ' · ' + artKindLabel(art.spec) : '');
+    var acts = child(row, 'div');
+    acts.className = 'da-file-acts';
+    artifactFormats(art).forEach(function(fmt){
+      artButton(acts, fmt.label, 'Download ' + artFileBase(art) + '.' + fmt.ext, function(){
+        downloadArtifact(art, fmt, status);
+      });
+    });
+  }
+  function conversationRow(parent, label, desc, btnLabel, onClick){
+    var row = child(parent, 'div');
+    row.className = 'da-file-row';
+    var ico = child(row, 'span');
+    ico.className = 'da-file-ico';
+    ico.textContent = '💬';
+    var main = child(row, 'div');
+    main.className = 'da-file-main';
+    child(main, 'span').textContent = label;
+    var d = child(main, 'span');
+    d.className = 'da-file-desc';
+    d.textContent = desc;
+    var acts = child(row, 'div');
+    acts.className = 'da-file-acts';
+    artButton(acts, btnLabel, '', onClick);
+  }
+
+  function renderExportList(listEl){
+    while(listEl.firstChild) listEl.removeChild(listEl.firstChild);
+    var q = filesFilter.trim().toLowerCase();
+    var groups = [], byName = {};
+    EXPORTS.files.forEach(function(f){
+      if(q && (f.path + ' ' + f.description).toLowerCase().indexOf(q) === -1) return;
+      if(!byName[f.group]){ byName[f.group] = []; groups.push(f.group); }
+      byName[f.group].push(f);
+    });
+    if(!groups.length){ filesNote(listEl, 'No file matches “' + filesFilter + '”.'); return; }
+    groups.forEach(function(g){
+      var files = byName[g];
+      var det = child(listEl, 'details');
+      det.className = 'da-files-group';
+      // Small groups and the two a reviewer reaches for first start open; the
+      // long tails (evidence crops, sheet text, tiles) start folded.
+      det.open = !!q || files.length <= 8 || g === 'Marked-up drawings' || g === 'Findings';
+      var sm = child(det, 'summary');
+      sm.textContent = g + ' (' + files.length + ')';
+      files.forEach(function(f){
+        var row = child(det, 'div');
+        row.className = 'da-file-row da-file-row-export';
+        var main = child(row, 'div');
+        main.className = 'da-file-main';
+        main.appendChild(exportLinkEl(f));
+        if(f.description){
+          var d = child(main, 'span');
+          d.className = 'da-file-desc';
+          d.textContent = f.description;
+        }
+      });
+    });
+  }
+
+  function renderFiles(){
+    if(!filesEl) return;
+    while(filesEl.firstChild) filesEl.removeChild(filesEl.firstChild);
+    var topBar = child(filesEl, 'div');
+    topBar.className = 'da-files-top';
+    var t = child(topBar, 'span');
+    t.className = 'da-files-title';
+    t.textContent = 'Files';
+    var back = child(topBar, 'button');
+    back.type = 'button';
+    back.className = 'ghost-btn';
+    back.textContent = '← Back to chat';
+    back.addEventListener('click', function(){ setFilesOpen(false); });
+
+    var conv = filesSection('From this conversation', artifacts.length);
+    var status = document.createElement('div');
+    status.className = 'da-art-status';
+    status.setAttribute('aria-live', 'polite');
+    if(!artifacts.length){
+      filesNote(conv, 'Nothing yet. Ask for a chart, a table, or a memo — “chart the findings by '
+        + 'sheet and severity”, “table every high-severity finding”, “draft an RFI for '
+        + 'the first conflict” — and it appears in the chat and here, ready to download. '
+        + 'Everything listed here is saved with the conversation.');
+    } else {
+      var bar = child(conv, 'div');
+      bar.className = 'da-files-bar';
+      artButton(bar, '⬇ Download all (.zip)',
+        'Every artifact in every format, plus the conversation transcript, in one zip', function(){
+          downloadAllZip(status);
+        });
+      artifacts.forEach(function(art){ artifactRow(conv, art, status); });
+    }
+    if(history.length){
+      conversationRow(conv, 'Conversation transcript', TX_NAME + ' — load it back later to carry on',
+        'Save', saveTranscriptFile);
+      conversationRow(conv, 'Conversation as PDF', 'through your browser’s print dialog', 'Print', function(){
+        setFilesOpen(false);
+        if(exportBtn) exportBtn.click();
+      });
+    }
+    conv.appendChild(status);
+
+    var ex = filesSection('Saved with this report', EXPORTS.files.length + EXPORTS.omitted);
+    if(!EXPORTS.files.length){
+      filesNote(ex, 'This report was saved as a single file, so no export folder sits beside it. '
+        + 'Use Export All in Drawing Analyzer for the folder version — marked-up PDFs, findings.csv, '
+        + 'the run log — and this panel will link every file in it.');
+      return;
+    }
+    filesNote(ex, 'These open the files in this report’s export folder. The links work while '
+      + 'report.html stays in that folder.');
+    var listEl = document.createElement('div');
+    if(EXPORTS.files.length > 12){
+      var search = child(ex, 'input');
+      search.type = 'search';
+      search.className = 'da-files-search';
+      search.placeholder = 'Filter ' + EXPORTS.files.length + ' files…';
+      search.setAttribute('aria-label', 'Filter the export files');
+      search.value = filesFilter;
+      search.addEventListener('input', function(){
+        filesFilter = search.value;
+        renderExportList(listEl);
+      });
+    }
+    ex.appendChild(listEl);
+    renderExportList(listEl);
+    if(EXPORTS.omitted){
+      filesNote(ex, '+ ' + EXPORTS.omitted + ' more file(s) in the folder are not listed here.');
+    }
+  }
+  if(filesBtn) filesBtn.addEventListener('click', function(){ setFilesOpen(!filesOpen); });
+  refreshFiles();
 
   // ------------------------------------------------------- expandable ask box
   // The composer opens at two rows and grows with what you type, up to a cap
@@ -5880,10 +7698,11 @@ _CHAT_JS = r"""
     if(!panelH) return Math.max(composeMin(), Math.min(window.innerHeight * 0.36, COMPOSE_MAX));
     var used = 0;
     Array.prototype.forEach.call(panel.children, function(el){
-      // Skip the two flex items whose size is the question (the transcript
-      // absorbs the change; the composer is what we are sizing) and the resize
-      // handles, which are absolutely positioned and take no flow space.
-      if(el === composeEl || el === msgs || el.classList.contains('da-rz')) return;
+      // Skip the flex items whose size is the question (the transcript — or
+      // the Files view standing in for it — absorbs the change; the composer is
+      // what we are sizing) and the resize handles, which are absolutely
+      // positioned and take no flow space.
+      if(el === composeEl || el === msgs || el === filesEl || el.classList.contains('da-rz')) return;
       used += el.getBoundingClientRect().height;
     });
     // The composer's own padding, grip row, and row gap ride along with it.
