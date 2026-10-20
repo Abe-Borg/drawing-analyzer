@@ -43,6 +43,17 @@ The report is a single self-contained file. Its security rests on four layers:
    inert visible text — never a live link. Every emitted link carries
    `rel="noopener noreferrer"`.
 
+   The one other kind of link is the Files panel's list of the export folder
+   (`report.html` sitting beside `run.log`, the marked-up PDFs, …). Those
+   targets never come from model text: the export builds the list from the
+   folder it just wrote, the report drops any path that is absolute,
+   drive- or host-qualified, contains `.`/`..`/empty segments or control
+   characters, and the browser percent-encodes every path segment, so a
+   filename such as `javascript:x.pdf` becomes the relative link
+   `javascript%3Ax.pdf`. `base-uri 'none'` keeps them relative to the report.
+   The assistant's `share_file` tool can only name an entry on that list (or an
+   artifact of the conversation).
+
 4. **Content-Security-Policy (defense in depth).** The report ships a CSP
    `<meta>` tag that:
    - allows only the exact inline scripts this build emits, pinned by SHA-256
@@ -110,7 +121,25 @@ The report is a single self-contained file. Its security rests on four layers:
 - A **loaded transcript is treated as hostile input**, exactly like streamed
   model output: it is rendered through the same text-node-only path with the
   same https-only link policy, and any tool call recorded in it is drawn as a
-  label, never executed.
+  label, never executed. The two exceptions only draw: a recorded chart, table
+  or memo (`create_artifact`) is re-validated and re-rendered from its recorded
+  input, and a recorded `share_file` is re-drawn as a link only if its target is
+  on this report's own export list. Neither touches the report page or the
+  network.
+
+### Artifacts (charts, tables, memos)
+
+- The assistant's `create_artifact` input is validated into a fresh object
+  before anything is drawn, and drawn with the same safe-DOM rules: SVG built
+  with `createElementNS` and numeric attributes, text through `textContent`,
+  colours from a fixed palette (no model string reaches a style or an
+  attribute that could carry markup or a URL).
+- Downloads are made in the browser from the conversation (`blob:` downloads,
+  no request): CSV files neutralize formula sigils the way `findings.csv` does
+  (a leading `'` before `=`, `+`, `-`, `@`; a plain number is left alone);
+  a memo's `.html` is the serialized safe-DOM render with its own
+  `default-src 'none'` CSP and no script; the SVG carries no script or
+  `foreignObject`.
 
 ## Persistent API-key storage (GUI)
 
@@ -149,11 +178,13 @@ accordingly:
   display filenames, configuration, stage statuses, usage, and artifact hashes.
   Sanitized at emit time (keys redacted, absolute paths reduced to basenames)
   but still descriptive of the project — treat like the rest of the export.
-- `chat_history.json` — only if you save one from the report's assistant. It is
-  written by your browser, not by the export, so it is **not** listed or hashed
-  in `run_manifest.json`: the manifest inventories what the export itself wrote
-  and is sealed before any conversation happens. A transcript sitting in an
-  export folder is expected to exceed the manifest, not evidence of tampering.
+- `chat_history.json`, `chat_files.zip` and the `A1-….svg/.png/.csv/.md/.html`
+  artifact files — only if you save them from the report's assistant. They are
+  written by your browser, not by the export, so they are **not** listed or
+  hashed in `run_manifest.json`: the manifest inventories what the export itself
+  wrote and is sealed before any conversation happens. A transcript or artifact
+  sitting in an export folder is expected to exceed the manifest, not evidence
+  of tampering.
 
 The Ask-AI assistant sends the report context and your question to Anthropic.
 The verification, citation, and QC stages send their described crops and claims

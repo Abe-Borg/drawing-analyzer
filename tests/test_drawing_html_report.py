@@ -177,13 +177,17 @@ def test_report_is_self_contained_html():
     assert "<style>" in doc and "<script>" in doc
     assert "<link" not in doc
     assert 'src="http' not in doc and "src='http" not in doc
-    # The only https reference is the Anthropic Messages endpoint.
+    # The only https reference is the Anthropic Messages endpoint. The SVG
+    # namespace name the chart builder passes to createElementNS is an
+    # identifier the browser never fetches, so it is the one other URL allowed.
+    allowed = ("https://api.anthropic.com", "http://www.w3.org/2000/svg'")
     for prefix in ("http://", "https://"):
         rest = doc
         while prefix in rest:
             i = rest.index(prefix)
-            assert rest[i:].startswith("https://api.anthropic.com"), rest[i : i + 60]
-            rest = rest[i + len("https://api.anthropic.com"):]
+            hit = next((a for a in allowed if rest[i:].startswith(a)), None)
+            assert hit, rest[i : i + 60]
+            rest = rest[i + len(hit):]
 
 
 def test_report_without_chat_has_no_chat_artifacts_or_network_references():
@@ -206,6 +210,28 @@ def test_report_without_chat_has_no_chat_artifacts_or_network_references():
         hashlib.sha256(hr._CHAT_JS.encode("utf-8")).digest()
     ).decode("ascii")
     assert chat_hash not in doc
+
+
+@pytest.mark.parametrize("path", [
+    "../outside.txt", "evidence/../../outside.png", "./run.log", "a//b.md", "",
+    "/etc/passwd", "C:/Windows/win.ini", "C:\\Windows\\win.ini",
+    "\\\\server\\share\\x.pdf", "bad\x00name.pdf", "tab\tname.pdf", 42,
+])
+def test_export_list_refuses_paths_that_could_leave_the_folder(path):
+    # Each listed path becomes a link relative to the report, so anything that
+    # could step outside the export folder, name another drive or host, or carry
+    # a control character is dropped before it reaches the page.
+    import json
+
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW,
+        export_files={"files": [
+            {"path": path, "group": "Other", "description": ""},
+            {"path": "diagnostics\\00_summary.md", "group": "Diagnostics", "description": ""},
+        ]},
+    )
+    listed = json.loads(_script_block_body(doc, "da-exports"))["files"]
+    assert [f["path"] for f in listed] == ["diagnostics/00_summary.md"]
 
 
 def test_report_contains_every_sheet_and_the_overview():
@@ -542,6 +568,18 @@ def test_findings_and_summary_data_blocks_present_and_structured():
             ),
             lambda parsed, h: any(h in p for p in parsed),
             id="starters",
+        ),
+        # A hostile export filename in the Files panel's #da-exports list.
+        pytest.param(
+            "da-exports",
+            "evil</script><script>window.__pwned=1</script>.pdf",
+            lambda h: hr.build_html_report(
+                _make_ctx(), source_names=[SRC], now=NOW,
+                export_files={"files": [{"path": h, "group": "Marked-up drawings",
+                                         "description": h}]},
+            ),
+            lambda parsed, h: parsed["files"][0]["path"] == h,
+            id="exports",
         ),
     ],
 )

@@ -543,6 +543,41 @@ def test_run_manifest_hashes_every_artifact_except_itself(tmp_path):
         assert a["bytes"] == (folder / a["path"]).stat().st_size
 
 
+def _exports_block(report_html: str) -> "dict | None":
+    """The report's inert #da-exports JSON (the Files panel's list), if any."""
+    opener = '<script id="da-exports" type="application/json">'
+    if opener not in report_html:
+        return None
+    start = report_html.index(opener) + len(opener)
+    return json.loads(report_html[start:report_html.index("</script>", start)])
+
+
+def test_report_files_panel_lists_exactly_the_files_the_export_ships(tmp_path):
+    # The Files panel links the folder the report sits in, so its list is the
+    # folder as published: every file once — run.log and run_manifest.json,
+    # written after the report, included — nothing that is not there, and not
+    # the report itself.
+    ctx = _qc_ctx(tmp_path)
+    ctx.sheets = _make_ctx().sheets
+    ctx.combined_text = "digest"
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=["M-101.pdf"], now=NOW)
+
+    listed = _exports_block((folder / "report.html").read_text(encoding="utf-8"))
+    paths = [f["path"] for f in listed["files"]]
+    on_disk = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
+    assert sorted(paths) == sorted(on_disk - {"report.html"})
+    assert len(paths) == len(set(paths))
+    groups = {f["path"]: f["group"] for f in listed["files"]}
+    assert groups["M-101_reviewed.pdf"] == "Marked-up drawings"
+    assert groups["run_manifest.json"] == groups["run.log"] == "Run record"
+    assert {groups[p] for p in paths if p.startswith("evidence/")} == {"Evidence crops"}
+    # A report without the assistant has no panel, so it carries no list.
+    plain = dx.write_drawing_export(
+        ctx, tmp_path / "nochat", source_names=["M-101.pdf"], now=NOW, include_chat=False
+    )
+    assert _exports_block((plain / "report.html").read_text(encoding="utf-8")) is None
+
+
 def test_run_manifest_summarizes_qc_run(tmp_path):
     # The §18.4 machine-readable counterpart: status, sources (no paths, no
     # content SHA), stage results, receipts-derived coverage, prose accounting.

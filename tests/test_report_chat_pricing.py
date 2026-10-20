@@ -65,6 +65,8 @@ def _exercise(node, monkeypatch, actions, *, model="claude-haiku-5-5"):
       function clearPendingSelection(){}
       function clearTermHighlight(){}
       function scrollDown(){}
+      var artifacts = [];
+      function refreshFiles(){}
       var clearChat;
       var clearBtn = {addEventListener: function(type, listener){clearChat = listener;}};
     """

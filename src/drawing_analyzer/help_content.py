@@ -1392,6 +1392,22 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "report or go to a colleague. None of that is uploaded anywhere."
             ),
             _bullet(
+                "Ask for a chart, a table, or a memo -- \"chart the findings by sheet and "
+                "severity\", \"draft an RFI for the first conflict\" -- and it appears in "
+                "the chat as a card (A1, A2, ...) with its own downloads: SVG, PNG and CSV "
+                "for a chart, CSV for a table, Markdown and HTML for a memo, plus Print for "
+                "that one item. Cards are saved with the conversation and come back on "
+                "reload or Load."
+            ),
+            _bullet(
+                "The Files button in the chat header collects everything you can take "
+                "away: the conversation's charts, tables and memos (or all of them at once "
+                "as a zip), the transcript, and -- in a folder export -- every file saved "
+                "beside the report, such as the marked-up PDFs, findings.csv and run.log, "
+                "as links that open them. The assistant can put the same links into its "
+                "answers."
+            ),
+            _bullet(
                 "A saved conversation never contains your API key: anything shaped like "
                 "a key is redacted from the whole document before it is written, and the "
                 "file format has no field for one. A conversation you load back in is "

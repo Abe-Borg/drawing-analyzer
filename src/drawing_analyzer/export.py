@@ -337,10 +337,24 @@ def _index_document(
     return "\n".join(lines)
 
 
+def build_report_document(
+    ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None,
+    embed_api_key: bool = False, include_chat: bool = True,
+    pdf_links: "dict[str, dict] | None" = None, export_files: "dict | None" = None,
+) -> str:
+    """The folder export's ``report.html`` (evidence crops linked, Files panel fed)."""
+    return build_html_report(
+        ctx, source_names=source_names, now=now, api_key=api_key,
+        embed_api_key=embed_api_key, link_evidence=True, include_chat=include_chat,
+        pdf_links=pdf_links, export_files=export_files,
+    )
+
+
 def build_export_documents(
     ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None,
     embed_api_key: bool = False, include_chat: bool = True,
     pdf_links: "dict[str, dict] | None" = None,
+    export_files: "dict | None" = None, include_report: bool = True,
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
@@ -359,6 +373,11 @@ def build_export_documents(
     ``include_chat=False`` for a report with no assistant at all. The folder
     report links the verifier's evidence crops (copied alongside by
     :func:`write_qc_outputs`).
+
+    ``export_files`` (:func:`build_export_file_list`) feeds the report's Files
+    panel. :func:`write_drawing_export` passes ``include_report=False`` and
+    writes ``report.html`` itself once the rest of the folder exists, because
+    the panel lists what is actually on disk.
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
@@ -372,11 +391,14 @@ def build_export_documents(
         getattr(getattr(ctx, "run_journal", None), "private_roots", ()) or ()
     )
 
-    docs: list[tuple[str, str]] = [
-        ("report.html",
-         build_html_report(ctx, source_names=source_names, now=now, api_key=api_key,
-                           embed_api_key=embed_api_key, link_evidence=True,
-                           include_chat=include_chat, pdf_links=pdf_links)),
+    docs: list[tuple[str, str]] = []
+    if include_report:
+        docs.append(("report.html", build_report_document(
+            ctx, source_names=source_names, now=now, api_key=api_key,
+            embed_api_key=embed_api_key, include_chat=include_chat,
+            pdf_links=pdf_links, export_files=export_files,
+        )))
+    docs += [
         ("00_index.md", _index_document(
             ctx, source_names=source_names, now=now, sheet_files=sheet_files,
             roots=roots,
@@ -1539,6 +1561,99 @@ def _write_tile_notes(
     }
 
 
+# ---------------------------------------------------------------------------
+# The report's Files panel: what this export folder holds, as relative links.
+#
+# report.html's assistant lists the files saved beside it so the reader can open
+# them from the page instead of hunting through the folder. The list is taken
+# from the staging folder itself, after every ordinary artifact is on disk, so a
+# writer that adds a file cannot leave the panel stale or advertise a file that
+# is not there. run.log and run_manifest.json are named up front because they
+# are always written next, after report.html.
+# ---------------------------------------------------------------------------
+
+#: Panel sections in display order. Anything unclassified lands in "Other".
+EXPORT_FILE_GROUPS = (
+    "Marked-up drawings", "Findings", "Digests", "Run record", "Diagnostics",
+    "Evidence crops", "Sheet text", "Tiles", "Other",
+)
+#: Files the export always writes AFTER report.html (§18.4 finalization order).
+_WRITTEN_AFTER_REPORT = ("run.log", "run_manifest.json")
+#: Bound on the listing (evidence crops and opt-in tiles can run to thousands);
+#: the omitted count rides along so the panel can say so.
+MAX_EXPORT_FILE_ENTRIES = 5000
+
+_EXPORT_FILE_NOTES = {
+    "00_index.md": ("Digests", "Run summary and guide to this folder"),
+    "00_synthesis.md": ("Digests", "Cross-sheet overview"),
+    "00_focus.md": ("Digests", "The focus report for this run's focus"),
+    "combined.md": ("Digests", "Every sheet digest plus the synthesis in one document"),
+    "review_plan.md": ("Digests", "The review checklist authored for this set"),
+    "set_identity.json": ("Digests", "Detected project identity and adopted codes"),
+    "findings.csv": ("Findings", "Every finding, all fields (opens in Excel)"),
+    "findings.json": ("Findings", "Every finding, machine-readable"),
+    "markup_manifest.json": ("Findings", "Every planned markup and its receipt"),
+    "run.log": ("Run record", "Sanitized per-run log"),
+    "run_manifest.json": ("Run record", "Machine-readable run summary and file hashes"),
+    "diagnostics/00_summary.md": ("Diagnostics", "Start here: the run call by call"),
+}
+_EXPORT_DIR_GROUPS = {
+    "diagnostics": "Diagnostics",
+    "evidence": "Evidence crops",
+    "sheet_text": "Sheet text",
+    TILES_DIRNAME: "Tiles",
+}
+_SHEET_DIGEST_RE = re.compile(r"^\d{2,}_.+_p\d+\.md$")
+
+
+def _export_file_entry(rel: str) -> dict:
+    """One Files-panel row for the export-relative POSIX path ``rel``."""
+    if rel in _EXPORT_FILE_NOTES:
+        group, note = _EXPORT_FILE_NOTES[rel]
+    elif "/" in rel:
+        group, note = _EXPORT_DIR_GROUPS.get(rel.split("/", 1)[0], "Other"), ""
+    elif rel.lower().endswith(".pdf"):
+        group = "Marked-up drawings"
+        note = (
+            "Marked-up drawing (incomplete markup)" if "_INCOMPLETE" in rel
+            else "Marked-up drawing"
+        )
+    elif _SHEET_DIGEST_RE.match(rel):
+        group, note = "Digests", "One sheet's digest"
+    else:
+        group, note = "Other", ""
+    return {"path": rel, "group": group, "description": note}
+
+
+def build_export_file_list(folder: "Path | str") -> dict:
+    """The report's Files-panel inventory for an export folder being written.
+
+    Walks ``folder`` recursively (every file, as an export-relative POSIX path),
+    adds the files the export writes after the report (``run.log``,
+    ``run_manifest.json``), and leaves out ``report.html`` itself — the panel is
+    on that page. Sorted by panel section, then path (I-7). Returns
+    ``{"files": [...], "omitted": n}``; ``omitted`` counts entries past
+    :data:`MAX_EXPORT_FILE_ENTRIES`.
+    """
+    root = Path(folder)
+    names = {
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    names.update(_WRITTEN_AFTER_REPORT)
+    names.discard("report.html")
+    rank = {group: i for i, group in enumerate(EXPORT_FILE_GROUPS)}
+    entries = sorted(
+        (_export_file_entry(name) for name in names),
+        key=lambda e: (rank.get(e["group"], len(rank)), e["path"].casefold(), e["path"]),
+    )
+    return {
+        "files": entries[:MAX_EXPORT_FILE_ENTRIES],
+        "omitted": max(0, len(entries) - MAX_EXPORT_FILE_ENTRIES),
+    }
+
+
 def write_drawing_export(
     ctx: Any,
     parent_dir: Any,
@@ -1595,6 +1710,7 @@ def write_drawing_export(
         for name, content in build_export_documents(
             ctx, source_names=source_names, now=now, api_key=api_key,
             embed_api_key=embed_api_key, include_chat=include_chat, pdf_links=pdf_links,
+            include_report=False,
         ):
             contained_target(staging, name).write_text(content, encoding="utf-8")
         # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
@@ -1608,6 +1724,18 @@ def write_drawing_export(
         # timeline). An ordinary artifact: before run.log/run_manifest.json so
         # the Outputs list and the hashes cover it.
         write_diagnostics_folder(ctx, staging)
+        # report.html goes last among the ordinary artifacts: its Files panel
+        # lists the folder as it now stands (plus run.log / run_manifest.json,
+        # written next), so every link it offers is to a file that exists.
+        contained_target(staging, "report.html").write_text(
+            build_report_document(
+                ctx, source_names=source_names, now=now, api_key=api_key,
+                embed_api_key=embed_api_key, include_chat=include_chat,
+                pdf_links=pdf_links,
+                export_files=build_export_file_list(staging) if include_chat else None,
+            ),
+            encoding="utf-8",
+        )
         # Phase 26A finalization order (§18.4): every ordinary artifact and the
         # markup manifest are on disk → finalize run.log (it lists what is
         # actually there) → write run_manifest.json last (it hashes them all,

@@ -64,6 +64,49 @@ citations all come back. Your API key is never part of it (any `sk-ant-…` in t
 conversation is redacted before anything is written), and nothing is uploaded —
 saving and loading happen entirely on your machine.
 
+**Charts, tables and memos, right in the chat.** Ask for *"a chart of the
+findings by sheet and severity"*, *"a table of every high-severity finding"*, or
+*"draft an RFI for the VAV-3 clearance conflict"*, and the assistant puts it into
+the conversation as an **artifact**: a card under its answer, numbered `A1`,
+`A2`, … so later answers can refer to it. Each kind has its own downloads:
+
+| Artifact | On screen | Downloads |
+| --- | --- | --- |
+| Chart (bar, horizontal bar, line, donut) | drawn at the panel's width, hover a mark for its values, **Data** shows the numbers as a table | `.svg` (vector, with title and caption), `.png` (2×), `.csv` (the data) |
+| Table | sortable columns (numbers sort as numbers) | `.csv` (opens in Excel; formula-looking cells are neutralized like `findings.csv`), **Copy** pastes into a spreadsheet as cells |
+| Memo | rendered Markdown | `.md`, `.html` (a standalone page that also opens in Word), **Copy** |
+
+Every card also has **Print**, which prints that one artifact on its own (pick
+*Save as PDF* in the print dialog for a PDF). The assistant is told to take an
+artifact's numbers from the report, the findings ledger, or its exact calculator
+— never to estimate them — and an invalid chart or table comes back to it as an
+error saying what to fix rather than as a broken card.
+
+Artifacts are **durable**: an artifact is the recorded tool call that made it, so
+it is saved with the conversation and comes back on reload, on **Load**, and in
+a colleague's copy of a saved `chat_history.json`. **New chat** clears them with
+the thread.
+
+**The Files panel.** The **Files** button in the chat header (its badge counts
+the conversation's artifacts) opens one place for everything you can take away:
+
+- **From this conversation** — every artifact with its download buttons (click a
+  title to jump to it in the chat), **Download all (.zip)** for every artifact in
+  every format plus the transcript, and the transcript's own **Save** and
+  **Print** rows.
+- **Saved with this report** — in a folder export (**Export All…** /
+  `write_drawing_export`), every file in the export folder as a real link: the
+  marked-up PDFs, `findings.csv`, `run.log`, `run_manifest.json`,
+  `diagnostics/`, the evidence crops, grouped and filterable. The list is taken
+  from the folder after everything else is written, so it never names a file
+  that is not there; the links are relative, so they work wherever the folder is
+  moved as long as `report.html` stays in it. A single-file report (**Save HTML
+  Report…**) has no folder beside it and says so.
+
+The assistant can see the same list (`list_files`) and drop a clickable file
+straight into its answer (`share_file`) — ask *"where's the marked-up PDF?"* and
+you get the link, not directions.
+
 See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output is
 treated as hostile and can never execute), API-key handling, secret redaction in
 logs, and what project data each artifact and the Ask-AI assistant contains.

@@ -6,6 +6,40 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Charts, tables and memos in the report's Ask AI chat.** A new client tool,
+  `create_artifact`, lets the assistant put a chart (bar, horizontal bar, line,
+  donut), a sortable table, or a Markdown memo straight into the conversation as
+  a numbered card (`A1`, `A2`, …) instead of describing it in prose. Charts are
+  drawn as SVG at the panel's width with a hover readout and a **Data** table
+  view; every card has its own downloads (chart: SVG, PNG, CSV; table: CSV and
+  copy-as-cells; memo: Markdown and a standalone HTML page) and **Print** for
+  that artifact alone. An artifact is its recorded tool call, so it is saved
+  with the conversation and rebuilt on reload or **Load** with the same id; an
+  invalid spec returns an error the model can correct. CSV downloads neutralize
+  formula sigils like `findings.csv`.
+- **Files panel.** A **Files** button in the chat header (badged with the
+  artifact count) lists everything the reader can take away: the
+  conversation's artifacts with their downloads and a **Download all (.zip)**
+  (every artifact in every format plus `chat_history.json`), the transcript's
+  Save/Print, and — in a folder export — every file saved beside `report.html`
+  as a real relative link (marked-up PDFs, `findings.csv`, `run.log`,
+  `run_manifest.json`, `diagnostics/`, evidence crops), grouped and filterable.
+  The assistant can read the same list (`list_files`) and drop a clickable file
+  into its answer (`share_file`).
+
+### Changed
+
+- `write_drawing_export` now writes `report.html` after the other ordinary
+  artifacts (still before `run.log` and `run_manifest.json`), so the report's
+  Files panel lists the folder as it actually is. `build_export_documents`
+  gains `export_files=` and `include_report=`; `build_html_report` gains
+  `export_files=` (from the new `export.build_export_file_list`).
+- Saved chat transcripts carry `request_prefix_version: 2` (the tool list
+  changed). A transcript saved by an older report resumes with its text and
+  tool history and with earlier reasoning reset, as for any changed prefix.
+
 ## [1.11.0] - 2026-10-13
 
 ### Added
