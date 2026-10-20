@@ -177,13 +177,13 @@ def test_thread_replacement_clears_tokens_and_dollars(node, monkeypatch, reset):
     assert "est. $0.06" in snapshots[-1]["text"]
 
 
-@pytest.mark.parametrize("model,expected", [("claude-sonnet-5-5", 0.20), ("claude-opus-5-5", 0.20)])
+@pytest.mark.parametrize("model,expected", [("claude-sonnet-5-5", 0.10), ("claude-opus-5-5", 0.20)])
 def test_existing_models_keep_their_cache_read_rates(node, monkeypatch, model, expected):
     snapshots = _exercise(
         node, monkeypatch, [_message(0, outputs=(0,), cache_read=1_000_000)], model=model,
     )
     assert snapshots[-1]["cost"] == pytest.approx({"lo": expected, "hi": expected})
-    assert "est. $0.20" in snapshots[-1]["text"]
+    assert f"est. ${expected:.2f}" in snapshots[-1]["text"]
 
 
 def test_unknown_model_has_tokens_without_a_dollar_estimate(node, monkeypatch):

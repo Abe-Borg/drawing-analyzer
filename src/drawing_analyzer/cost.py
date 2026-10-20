@@ -833,8 +833,8 @@ def _critique_prefix_costs(
     scenario          prefix read-equivalents
     ===============  ==========================
     flat (old)        2.00
-    reuse (Opus 5.5)  1.25 + 0.05 = 1.30
-    reuse (others)    1.25 + 0.10 = 1.35
+    reuse (Opus/Sonnet 5.5) 1.25 + 0.05 = 1.30
+    reuse (others)       1.25 + 0.10 = 1.35
     no reuse          1.25 x 2    = 2.50
     ===============  ==========================
 
