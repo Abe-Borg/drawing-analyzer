@@ -123,7 +123,10 @@ own PC and talks only to the Anthropic API using your own API key.
    **"Windows protected your PC"** notice — click **More info → Run anyway**.
    This is expected for independent software; you'll see it on the first install
    and on each update.
-3. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
+3. The installer shows the license (AGPL-3.0-or-later, with the copyright
+   notice and a link to the source) — the same page appears on every update.
+   It installs per-user (no admin prompt), adds a Start-menu shortcut plus a
+   **Drawing Analyzer License** shortcut to the installed `LICENSE.txt`, and
    launches. Paste your Anthropic API key into the field at the top and you're
    ready.
 
@@ -2519,6 +2522,15 @@ The copyleft license is not optional here: the project depends on
 **[PyMuPDF](https://pymupdf.readthedocs.io/)**, which is dual-licensed
 **AGPL-3.0 / Artifex commercial**, so a combined work distributed with PyMuPDF
 must itself be AGPL (unless you obtain Artifex's commercial license).
+Commercial use and AGPL-compliant redistribution are both allowed as is; a
+**proprietary** (closed-source) distribution is not, unless PyMuPDF's licensing
+is resolved with Artifex or PyMuPDF is replaced.
+
+The Windows installer carries the same notices as the source: its license page
+shows the AGPL text under the copyright line (on a fresh install and on every
+in-app update, which runs the full wizard), the license is installed next to the
+program as `LICENSE.txt` with a Start-menu shortcut, and the Setup exe and the
+Add/Remove Programs entry carry the copyright and license in their metadata.
 All PyMuPDF usage is isolated to exactly **two** modules —
 `src/drawing_analyzer/render.py` (rasterizing sheets and crops) and
 `src/drawing_analyzer/annotate.py` (writing cloud annotations onto reviewed

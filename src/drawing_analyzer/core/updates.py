@@ -453,7 +453,9 @@ def spawn_installer(path: str | Path) -> None:
     """Launch the downloaded installer and return so the app can exit.
 
     On Windows the installer runs detached; the caller then quits the app so
-    the (Inno Setup) installer can replace the running files and relaunch. On
+    the (Inno Setup) installer can replace the running files and relaunch.
+    It is launched with no ``/SILENT`` switch on purpose: an update runs the
+    full wizard, so its license page is shown on every update as well. On
     other platforms this best-effort ``Popen`` exists for parity / testing —
     the shipped product is Windows-only.
     """

@@ -28,6 +28,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `run_manifest.json`, `diagnostics/`, evidence crops), grouped and filterable.
   The assistant can read the same list (`list_files`) and drop a clickable file
   into its answer (`share_file`).
+- **The Windows installer presents the license and copyright.** Setup now has a
+  license page showing the AGPL-3.0-or-later text under the copyright line, with
+  a link to the source. The in-app updater runs the installer's full wizard, so
+  the page appears on every update as well as on a fresh install. The license is
+  installed next to the program as `LICENSE.txt` with a **Drawing Analyzer
+  License** Start-menu shortcut, and the Setup exe's version resource and the
+  Add/Remove Programs entry carry the copyright and license. The About panel and
+  the README's Licensing section say where to find it, and that a proprietary
+  build would need Artifex's commercial PyMuPDF license or another PDF engine.
 
 ### Changed
 
