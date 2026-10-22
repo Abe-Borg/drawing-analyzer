@@ -112,7 +112,7 @@ dist\DrawingAnalyzer\DrawingAnalyzer.exe --selfcheck   # sanity check
 |---|---|
 | `packaging/windows/app_entry.py` | The frozen app's entry point; adds `--version` / `--selfcheck` flags for CI. |
 | `packaging/windows/drawing-analyzer.spec` | PyInstaller recipe. Bundles customtkinter/tkinterdnd2 assets and keyring's Windows backend (the imports PyInstaller can't discover on its own). |
-| `packaging/windows/installer.iss` | Inno Setup script → `DrawingAnalyzerSetup.exe`. Per-user install (no admin), Start-menu shortcut, clean uninstaller, closes a running instance on update. |
+| `packaging/windows/installer.iss` | Inno Setup script → `DrawingAnalyzerSetup.exe`. Per-user install (no admin), read-only license page (`InfoBeforeFile`, no "I accept" step; AGPL text under the copyright line, shown on install and on every in-app update), installs `LICENSE.txt` with a Start-menu shortcut, copyright in the Setup exe / Add-Remove Programs metadata, Start-menu shortcut, clean uninstaller, closes a running instance on update. |
 | `packaging/windows/make_manifest.py` | Writes `latest.json` (version, download URL, sha256). Round-tripped against the app's parser in `tests/test_updates.py`. |
 | `src/drawing_analyzer/core/updates.py` | The in-app updater: fetch manifest → compare → download → verify sha256 → launch installer. Fully unit-tested, no network in tests. |
 | `.github/workflows/release.yml` | Ties it together: a read-only `build` job (every relevant PR + tag) and a write-scoped, tag-only `publish` job. RC tags publish as pre-releases. |

@@ -1616,13 +1616,17 @@ _ABOUT = HelpDocument(
             ),
             _para(
                 "The full license text ships with the source as the LICENSE "
-                "file. This program comes with NO WARRANTY, to the extent "
-                "permitted by law."
+                "file; the Windows installer shows it on its license page and "
+                "installs it next to the program as LICENSE.txt (the Start menu "
+                "has a \"Drawing Analyzer License\" shortcut to it). This "
+                "program comes with NO WARRANTY, to the extent permitted by law."
             ),
             _bullet(
                 "Why AGPL: the PDF engine, PyMuPDF, is itself licensed "
                 "AGPL-3.0, so a combined work distributed with it must carry "
-                "the same license."
+                "the same license. A closed-source (proprietary) build would "
+                "need Artifex's commercial PyMuPDF license or a different PDF "
+                "engine."
             ),
             _bullet(
                 "In practice this is also a transparency guarantee: the "
