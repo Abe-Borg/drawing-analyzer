@@ -2525,12 +2525,6 @@ must itself be AGPL (unless you obtain Artifex's commercial license).
 Commercial use and AGPL-compliant redistribution are both allowed as is; a
 **proprietary** (closed-source) distribution is not, unless PyMuPDF's licensing
 is resolved with Artifex or PyMuPDF is replaced.
-
-The Windows installer carries the same notices as the source: its license page
-shows the AGPL text under the copyright line (on a fresh install and on every
-in-app update, which runs the full wizard), the license is installed next to the
-program as `LICENSE.txt` with a Start-menu shortcut, and the Setup exe and the
-Add/Remove Programs entry carry the copyright and license in their metadata.
 All PyMuPDF usage is isolated to exactly **two** modules —
 `src/drawing_analyzer/render.py` (rasterizing sheets and crops) and
 `src/drawing_analyzer/annotate.py` (writing cloud annotations onto reviewed
@@ -2543,3 +2537,11 @@ annotations with a cloud border-effect dict (`/BE {/S /C /I 2}`), but it does
 **not** generate the appearance stream (`/AP`) that PyMuPDF's `annot.update()`
 produces, so some viewers render those annotations blank — which is why PyMuPDF
 is used here. That trade-off is documented in `annotate.py`'s module docstring.
+
+The Windows installer carries the same notices as the source: its license page
+shows the AGPL text under the copyright line (on a fresh install and on every
+in-app update, which runs the full wizard). The page is read-only — there is no
+"I accept" step, since the AGPL does not require accepting it to run the
+program. The license is installed next to the program as `LICENSE.txt` with a
+Start-menu shortcut, and the Setup exe's version resource and the Add/Remove
+Programs entry carry the copyright and license.

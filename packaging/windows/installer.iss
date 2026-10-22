@@ -34,12 +34,18 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}/releases/latest
+; AppCopyright only feeds the Setup exe's version resource (VersionInfoCopyright);
+; AppComments is what the Add/Remove Programs entry shows, so it carries the
+; copyright as well.
 AppCopyright={#MyAppCopyright}
-AppComments=Free software under the GNU AGPL-3.0-or-later. Source code: {#MyAppURL}
-; The license page. The in-app updater launches this installer through the
-; shell with no /SILENT switch, so an update runs the full wizard and shows
-; this page too; keep it that way (a silent install skips every wizard page).
-LicenseFile=..\..\LICENSE
+AppComments={#MyAppCopyright}. Free software under the GNU AGPL-3.0-or-later. Source code: {#MyAppURL}
+; The license page. An information page, not LicenseFile: LicenseFile's page
+; keeps Next disabled until "I accept the agreement" is chosen, and AGPL
+; section 9 does not require accepting the license merely to run the program.
+; The in-app updater launches this installer through the shell with no
+; /SILENT switch, so an update runs the full wizard and shows this page too;
+; keep it that way (a silent install skips every wizard page).
+InfoBeforeFile=..\..\LICENSE
 DefaultDirName={autopf}\Drawing Analyzer
 DefaultGroupName=Drawing Analyzer
 DisableProgramGroupPage=yes
@@ -65,10 +71,11 @@ RestartApplications=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-; Replaces the stock "You must accept the terms of this agreement" line above
-; the license text: the AGPL governs copying, modifying and redistributing the
-; program, and its section 9 does not require acceptance merely to run it.
-LicenseLabel3={#MyAppCopyright}. {#MyAppName} is free software under the GNU Affero General Public License, version 3 or later. Please read it below: it sets the terms for copying, modifying and redistributing the program. A copy is installed as LICENSE.txt in the program folder, and the complete source code is at {#MyAppURL}.
+; Retitle the stock "Information" page (InfoBeforeFile above) as the license
+; page, with the copyright line above the license text.
+WizardInfoBefore=License
+InfoBeforeLabel=Please read the license under which {#MyAppName} is distributed.
+InfoBeforeClickLabel={#MyAppCopyright}. {#MyAppName} is free software under the GNU Affero General Public License, version 3 or later, shown below: it sets the terms for copying, modifying and redistributing the program. A copy is installed as LICENSE.txt in the program folder, and the complete source code is at {#MyAppURL}. When you are ready to continue with Setup, click Next.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
