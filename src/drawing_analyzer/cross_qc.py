@@ -61,7 +61,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from .core.request_usage import RequestUsage, any_fallback_served
-from . import call_telemetry, prompt_experiments, resource_pressure, tiling
+from . import call_telemetry, resource_pressure, tiling
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -220,10 +220,6 @@ the arithmetic). Each claim: sheet_id (the sheet the numbers are on); quote (COP
 VERBATIM the on-sheet text); kind (one of sum, product, factor); terms (the \
 numbers as printed); expected (the stated result they should combine to); note (a \
 short phrase naming the relationship). Emit "claims": [] if there are none."""
-# F2 experiment (off by default): evidence fields first. The same object when off.
-_CROSS_QC_FINDINGS_INSTRUCTION = prompt_experiments.apply_quote_first(
-    _CROSS_QC_FINDINGS_INSTRUCTION, "Each finding is a CROSS-SHEET conflict with: "
-)
 
 # Map instruction (sharded path): handle-based findings + comparable facts. The
 # model NEVER sees source identity — only opaque per-request handles (S001 …).
@@ -260,9 +256,6 @@ most 40 facts.
 - Each claim (numeric relationship to verify by calculation — you only transcribe): \
 sheet_id (set this to the sheet's HANDLE, e.g. S001); quote (VERBATIM); kind (sum, \
 product, factor); terms; expected; note. Emit [] if none."""
-_CROSS_QC_MAP_INSTRUCTION = prompt_experiments.apply_quote_first(
-    _CROSS_QC_MAP_INSTRUCTION, "cross-sheet conflict: "
-)
 
 CROSS_QC_RECONCILE_SYSTEM_PROMPT = """\
 You are reconciling a large construction drawing set that was reviewed in shards. \
@@ -287,9 +280,6 @@ the exact_quote of the primary fact); also_on (array of {"sheet_handle", \
 "source_quote" = the other fact's exact_quote}); refs (optional). Every finding \
 lists >= 1 also_on and both quotes must come verbatim from the facts. Emit \
 "findings": [] if you find no cross-sheet conflict; "claims": [] likewise."""
-CROSS_QC_RECONCILE_SYSTEM_PROMPT = prompt_experiments.apply_quote_first(
-    CROSS_QC_RECONCILE_SYSTEM_PROMPT, "Each finding: "
-)
 
 
 _CROSS_QC_RECONCILE_MANIFEST_HEADER = "SHEET MANIFEST (handle = sheet-id (discipline)):"
