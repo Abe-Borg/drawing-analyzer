@@ -2153,6 +2153,8 @@ quality decision.
 | `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
 | `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Haiku 5.5, one flat finding object whose schema mirrors the prompt's field list. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
 | `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` | off | The same contract on the verifier's two-field verdict (`verdict` as a three-way enum + `note`), on the single-crop and cross-sheet calls alike. Vision-involved, so it carries the critique's caveat; the prompt is unchanged (it already asks for a bare object), so the requests differ only by the schema. Structured and plain verdicts cache under separate keys. Prove it with `-k verify_under_output_config_format`. Whether it is worth turning on is answered by the parse-loss line the verification stage now writes (see *Verification pass*). |
+| `DRAWING_ANALYZER_EXPERIMENT_QUOTE_FIRST` | off | **Temporary A/B experiment** (see [Prompt experiments](#prompt-experiments-ab)). Every findings field list (digest, critique, cross-sheet QC whole-set / shard / reconcile) asks for the evidence (`source_quote`, `also_on`, `anchor_hint`, `tile_label`) right after the sheet id, before the category, severity and finding text. Read once when the process starts. Re-keys the digest, critique and cross-QC caches while on. |
+| `DRAWING_ANALYZER_EXPERIMENT_CRITIQUE_EXAMPLE` | off | **Temporary A/B experiment.** The critique prompt gains one illustrative `<example>` reply: a quoted finding, a sheet-level absence, and a sum claim, on generic content. Read once when the process starts. Re-keys the critique cache only. |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
@@ -2186,6 +2188,60 @@ quality decision.
 | `DRAWING_ANALYZER_MAX_PAGE_PT` | `20000` | Largest sane page dimension (points); a larger/NaN/infinite box is treated as pathological and its page is skipped before rendering. |
 | `DRAWING_ANALYZER_EST_BYTES_PER_SHEET` | `3145728` | Per-sheet temp/output estimate for the QC-run disk preflight (evidence crops, reviewed PDFs). |
 | `DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS` | `24` | How long a leftover `drawing_qc_*` work directory may sit in the system temp dir before a later run reaps it. These hold the high-DPI evidence crops and are created lazily by the verify / investigate / markup stages, so on a repeatedly-reviewed set they are the largest thing the tool leaves behind. Pruned on the way *in*, never at run end: `extract_drawing_context` returns before the caller exports, and the export copies the evidence out — deleting at run end would destroy the crops before anything saved them. The current run's own directory is never touched, and neither is one with anything recent anywhere inside it (a concurrent run writes crops two levels down, where the top-level mtime cannot see them). `0` disables pruning; a malformed value falls back to the default. |
+
+### Prompt experiments (A/B)
+
+Two candidate prompt changes from the prompt review ship **off**, each behind
+its own variable, so they can be measured on real drawings before anyone
+changes a default (`src/drawing_analyzer/prompt_experiments.py`):
+
+- **Evidence first** (`DRAWING_ANALYZER_EXPERIMENT_QUOTE_FIRST=1`). The model
+  copies the verbatim quote before it writes its judgment. The host already
+  discards or flags a finding whose quote is not in the text layer, so a quote
+  written first should anchor to real text more often. Under critique
+  structured outputs the schema moves `source_quote` up too. Structured outputs
+  emit required fields first, in schema order, so the optional `tile_label` and
+  `anchor_hint` still follow the judgment there.
+- **Critique example** (`DRAWING_ANALYZER_EXPERIMENT_CRITIQUE_EXAMPLE=1`). One
+  `<example>` reply in the critique prompt: a finding with a verbatim quote, an
+  absence (`anchor_hint: "SHEET"`, empty quote), and a sum claim transcribed as
+  printed. The content is deliberately generic (a keynote, a north arrow, a
+  room-area total) so the model does not anchor on any one trade's equipment.
+  It costs a few hundred prompt tokens per critique read.
+
+Both are read **once, when the process starts**, not per call. Every prompt
+version and cache key is computed from the prompt text, so this guarantees
+that a run never sends one arm while caching under the other. Unset, every
+request and every cache key is byte-identical to a build without them. With
+one on, the stages it changes re-key and re-run once; the stages it leaves
+alone (the digest, under the critique example alone) are reused. `run.log`
+and `run_manifest.json` record the arm in the environment block
+(`prompt_experiments=...`).
+
+To compare, run the same files twice with QC on, once without the variable
+and once with it, exporting each run to its own folder. Then:
+
+```bash
+python scripts/compare_prompt_experiment.py BASELINE_EXPORT VARIANT_EXPORT
+```
+
+It refuses exports of different inputs, then prints for each arm:
+- total findings, and findings per channel;
+- the anchor outcome (EXACT / FUZZY / TILE / UNANCHORED);
+- the share of findings that carry a quote yet anchored nowhere;
+- digest findings blocks that would not parse at all, and digest findings the
+  parser dropped as invalid.
+
+A digest served from the cache keeps no parser notes. The digest parse
+numbers are therefore compared only when both arms read every digest fresh,
+and the report says when they were not. To measure the evidence-first arm's
+effect on the digest, give each run a fresh cache (`DRAWING_ANALYZER_CACHE_PATH`
+pointing at a new file).
+
+It finishes with the adoption rule from the review: **adopt only with fewer
+unanchored or malformed findings and no rise in total findings.** One set is
+an anecdote, so repeat it on several before folding an experiment into the
+prompts (and delete the flag either way).
 
 ## Resilient inputs
 

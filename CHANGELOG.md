@@ -8,6 +8,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Two opt-in prompt experiments, and a script to judge them.** Both are off
+  by default and leave every request and cache key unchanged when off.
+  `DRAWING_ANALYZER_EXPERIMENT_QUOTE_FIRST=1` asks for the verbatim quote
+  (and the other evidence fields) before the judgment in every findings field
+  list (digest, critique, cross-sheet QC) and in the critique's
+  structured-outputs schema. `DRAWING_ANALYZER_EXPERIMENT_CRITIQUE_EXAMPLE=1`
+  adds one illustrative example reply to the critique prompt. Each is read
+  once when the process starts, re-keys only the stages it changes, and is
+  recorded in `run.log` / `run_manifest.json`.
+  `scripts/compare_prompt_experiment.py` reads a baseline and a variant export
+  of the same files and reports findings per channel, the anchor outcome, the
+  share of quoted findings that anchored nowhere, and digest findings dropped
+  as invalid, against the adoption rule (fewer unanchored or malformed
+  findings, no rise in total findings). See *Prompt experiments (A/B)* in the
+  README.
 - **Charts, tables and memos in the report's Ask AI chat.** A new client tool,
   `create_artifact`, lets the assistant put a chart (bar, horizontal bar, line,
   donut), a sortable table, or a Markdown memo straight into the conversation as
