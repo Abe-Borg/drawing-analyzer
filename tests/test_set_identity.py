@@ -127,7 +127,8 @@ def test_corpus_is_deterministic_and_page_ordered():
     text2, b2 = build_identity_user_text(sheets, geoms)
     assert text1 == text2 and b1.omitted_chars == b2.omitted_chars
     # Page order: sheet 1 appears before sheet 12.
-    assert text1.index("Sheet 1/12") < text1.index("Sheet 12/12")
+    assert text1.index('<sheet id="set.pdf (page 1/99)">') < text1.index(
+        '<sheet id="set.pdf (page 12/99)">')
     assert not b1.degraded
 
 
@@ -140,12 +141,12 @@ def test_corpus_deep_slices_only_for_early_sheets():
              for i, s in enumerate(sheets)]
     text, _ = build_identity_user_text(sheets, geoms)
     # Early sheets carry their text layer verbatim; late sheets do not.
-    assert text.count("TEXT LAYER (verbatim") == _FULL_SLICE_SHEETS
+    assert text.count("<text_layer>") == _FULL_SLICE_SHEETS
     assert "LAYER-0" in text
     assert f"LAYER-{_FULL_SLICE_SHEETS + 2}" not in text
     # A late sheet's digest is capped at the header slice (+ slack for its label).
-    late_block = text.split(f"Sheet {_FULL_SLICE_SHEETS + 3}/")[1]
-    assert len(late_block.split("=====")[0]) < _HEADER_SLICE + 200
+    late_block = text.split(f'<sheet id="set.pdf (page {_FULL_SLICE_SHEETS + 3}/99)">')[1]
+    assert len(late_block.split("</sheet>")[0]) < _HEADER_SLICE + 200
 
 
 def test_corpus_edition_windows_reach_late_sheets():
@@ -158,7 +159,7 @@ def test_corpus_edition_windows_reach_late_sheets():
         sheet_text="GENERAL NOTES: ALL WORK PER NFPA 13 2016 EDITION AS AMENDED.",
     )
     text, _ = build_identity_user_text(sheets, geoms)
-    assert "EDITION MENTIONS" in text
+    assert "<edition_mentions>" in text
     assert "ALL WORK PER NFPA 13 2016 EDITION" in text
     assert "REGEX-HARVESTED EDITION HINTS: NFPA 13 2016" in text
 
@@ -178,7 +179,7 @@ def test_corpus_edition_windows_reach_international_codes():
         ),
     )
     text, _ = build_identity_user_text(sheets, geoms)
-    assert "EDITION MENTIONS" in text
+    assert "<edition_mentions>" in text
     assert "DIN EN 12845:2020" in text
     assert "IEC 60364" in text
     # Direct window checks across families; a year is optional evidence

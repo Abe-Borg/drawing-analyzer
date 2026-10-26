@@ -40,6 +40,8 @@ Module layout::
     batch_critique.py Message Batches / Files API critique path (one shared upload
                       feeds both self-consistency reads; DA-030/DA-034)
     cross_qc.py       cross-sheet conflict hunt (text-only, dual anchors)
+    sheet_blocks.py   the <sheet> boundary around drawing text in every
+                      text-only prompt (content can't close or forge a block)
     prose_harvest.py  prose Coordination/Conflict/synthesis items -> ledger entries
     anchor.py         finding quote -> PDF rectangle resolution (offline)
     absence_check.py  "not found on this sheet" findings searched for in the

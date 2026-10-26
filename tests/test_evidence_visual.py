@@ -578,15 +578,17 @@ def test_legacy_findings_are_not_relabelled():
 # --------------------------------------------------------------------------- #
 
 
-def test_the_prompt_edit_supplies_the_invalidation():
-    """All three prompts ride every cross-QC key, so editing one changes them all."""
+@pytest.mark.parametrize("attr, edit", [
+    ("cross_qc_map_system_prompt", lambda original: (lambda: original() + " EDITED")),
+    # The user-turn framing (sheet blocks, headers, task lines) is model-visible
+    # but outside every system prompt, so it must ride the key on its own.
+    ("_CROSS_QC_USER_FRAMING", lambda original: (*original, "EDITED")),
+])
+def test_the_prompt_edit_supplies_the_invalidation(attr, edit, monkeypatch):
+    """All three prompts and the user framing ride every cross-QC key."""
     geom = _geom("a.pdf", "A-1", text="A-1 title.")
     entries = [("A-1", "digest", geom.sheet_text, geom)]
     key = X._cross_qc_cache_key(entries, model="m", preamble="")
 
-    original = X.cross_qc_map_system_prompt
-    X.cross_qc_map_system_prompt = lambda: original() + " EDITED"
-    try:
-        assert X._cross_qc_cache_key(entries, model="m", preamble="") != key
-    finally:
-        X.cross_qc_map_system_prompt = original
+    monkeypatch.setattr(X, attr, edit(getattr(X, attr)))
+    assert X._cross_qc_cache_key(entries, model="m", preamble="") != key

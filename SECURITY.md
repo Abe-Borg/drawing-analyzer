@@ -17,6 +17,18 @@ treated as hostile: model findings and prose, the Ask-AI assistant's answers,
 source filenames, sheet IDs, titles, quotes, citation notes/URLs, evidence
 paths, parser errors, run errors, and serialized configuration.
 
+On the way in, the same text is fenced. Each request that carries a sheet's
+text delimits it and tells the model it is drawing content to read, never
+instructions to follow: the per-sheet digest wraps the text layer in
+`<sheet_text_layer>` tags, and every text-only stage (cross-sheet QC,
+synthesis, focus, set identity, the review planner's digest fallback, the
+absence cross-check, the prose harvest) sends one `<sheet id="…">` block per
+sheet (`sheet_blocks.py`). Inside those blocks a `<` that would begin one of
+their tags is replaced by a look-alike before sending, so a page cannot close
+its own block or pose as another sheet. This lowers the odds that a crafted
+note steers the model; it does not make the output trustworthy, which is why
+the output-side boundary below still applies to everything the model returns.
+
 ## The HTML report (`report.html`)
 
 The report is a single self-contained file. Its security rests on four layers:

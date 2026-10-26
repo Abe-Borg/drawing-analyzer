@@ -1505,7 +1505,15 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "instruction. Because the drawing becomes the prompt, the model's reply can "
                 "be influenced by whatever is on the page."
             ),
-            _para("So every reply is treated as hostile text, and that is contained three ways:"),
+            _para(
+                "What goes in is fenced first. A sheet's text reaches the model inside "
+                "marked blocks, with the instruction that it is drawing content to read, "
+                "never instructions to follow; where many sheets share one request, a page "
+                "cannot close its own block or pose as another sheet. That lowers the "
+                "odds of steering; it cannot rule it out."
+            ),
+            _para("So every reply is still treated as hostile text, and that is contained "
+                  "three ways:"),
             _bullet(
                 "It is never executed anywhere — not in the PDF, not in the exports, not "
                 "in the report, which escapes every value and pins its scripts by hash."

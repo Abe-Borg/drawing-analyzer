@@ -59,6 +59,7 @@ from .digest import (
     transient_retry_wait,
 )
 from .models import AdoptedCode, SetIdentity, source_page_key
+from .sheet_blocks import SHEET_CONTENT_RULE, sheet_block
 
 # Extraction/classification, not deep reasoning — cheaper than synthesis's "high".
 # Adaptive thinking shares this envelope with the answer, and the identity pass
@@ -117,7 +118,9 @@ marine, …), ANY jurisdiction, and ANY language. You are given a budgeted text 
 corpus for one set: a short digest head for every sheet, deeper digest + \
 verbatim text-layer slices for the earliest sheets (where cover sheets, sheet \
 indexes, and general notes usually live), and verbatim windows around every \
-code-edition mention found anywhere in the set. Identify what this set IS.
+code-edition mention found anywhere in the set. Each sheet is a <sheet id="..."> \
+block holding its <digest> and, where present, its <text_layer> slice and its \
+<edition_mentions>. """ + SHEET_CONTENT_RULE + """ Identify what this set IS.
 
 Rules:
 - Report only what the corpus supports. NEVER invent a code, edition, \
@@ -259,28 +262,24 @@ def _edition_windows(sheet_text: str) -> list[str]:
     return out
 
 
-def _sheet_block(
-    index: int, total: int, sd: SheetDigest, geom: Any, *, deep: bool
-) -> str:
+def _sheet_block(sd: SheetDigest, geom: Any, *, deep: bool) -> str:
     """One sheet's corpus block. ``deep`` sheets carry digest + text-layer slices."""
-    lines = [f"===== Sheet {index}/{total}: {sd.ref.display_label} ====="]
     digest_text = (sd.text or "").strip()
     if digest_text:
         cap = _FULL_DIGEST_SLICE if deep else _HEADER_SLICE
-        lines.append(digest_text[:cap])
+        digest_body = digest_text[:cap]
     elif sd.error:
-        lines.append(f"[digest failed: {_one_line(sd.error)[:120]}]")
+        digest_body = f"[digest failed: {_one_line(sd.error)[:120]}]"
     else:
-        lines.append("[no digest text]")
+        digest_body = "[no digest text]"
+    sections = [("digest", digest_body)]
     sheet_text = (getattr(geom, "sheet_text", "") or "") if geom is not None else ""
     if deep and sheet_text.strip():
-        lines.append(f"TEXT LAYER (verbatim, first {_FULL_TEXT_SLICE} chars):")
-        lines.append(sheet_text[:_FULL_TEXT_SLICE])
+        sections.append(("text_layer", sheet_text[:_FULL_TEXT_SLICE]))
     windows = _edition_windows(sheet_text)
     if windows:
-        lines.append("EDITION MENTIONS (verbatim windows):")
-        lines.extend(f'- "{w}"' for w in windows)
-    return "\n".join(lines)
+        sections.append(("edition_mentions", "\n".join(f'- "{w}"' for w in windows)))
+    return sheet_block(sd.ref.display_label, sections)
 
 
 def build_identity_user_text(
@@ -303,7 +302,7 @@ def build_identity_user_text(
     used = sum(len(p) for p in parts)
     for i, sd in enumerate(sheet_digests, start=1):
         geom = geom_by_key.get(source_page_key(sd.ref))
-        block = _sheet_block(i, total, sd, geom, deep=(i <= _FULL_SLICE_SHEETS))
+        block = _sheet_block(sd, geom, deep=(i <= _FULL_SLICE_SHEETS))
         budget.total_chars += len(block)
         if used + len(block) <= _TOTAL_BUDGET:
             parts.append(block)
@@ -312,7 +311,7 @@ def build_identity_user_text(
             budget.included_chars += len(block)
             continue
         # Over budget: try the header-only form before dropping the sheet.
-        fallback = _sheet_block(i, total, sd, geom=None, deep=False)
+        fallback = _sheet_block(sd, geom=None, deep=False)
         if used + len(fallback) <= _TOTAL_BUDGET:
             parts.append(fallback)
             parts.append("")

@@ -449,6 +449,22 @@ consume ledger entries and nothing else.
   item key only when the request carried the schema; re-resolve the store key
   after the call. A bare-JSON parse is attempted only under the structured
   contract, and a fenced reply still wins.
+- **Sheet blocks** (`sheet_blocks.py`): every text-only stage that sends sheet
+  text or digest prose (cross-QC whole-set/map/reconcile, synthesis, focus,
+  identity, the planner's digest fallback, absence check, harvest) wraps each
+  sheet with `sheet_block(id, [(tag, body)], label=)` →
+  `<sheet id="…"><digest>…</digest><text_layer>…</text_layer></sheet>`, and its
+  system prompt carries `SHEET_CONTENT_RULE`. The planner states the rule in
+  its uncached fallback turn instead, so `PLANNER_PROMPT_VERSION` (and through
+  the plan, the critique's profiles key) does not move. Bodies are neutralized:
+  a `<` that starts any `SHEET_BLOCK_TAGS` name (any case, inner whitespace)
+  becomes U+2039; attributes are escaped. Host user-turn framing never spells a
+  literal tag. Reconcile facts are grouped per handle, one line per fact.
+  Cross-QC's key hashes prompts and per-sheet inputs, not the composed turn, so
+  `_CROSS_QC_USER_FRAMING` (including `SHEET_BLOCK_FRAMING_VERSION`) rides its
+  `prompt`; the other stages hash their whole user text. The digest's own
+  `<sheet_text_layer>` is separate and stays un-neutralized: changing it would
+  re-key every digest.
 - **Cross-QC grounding** reads `models.sheet_evidence_text(geom)`, not the capped
   `sheet_text`. A present-but-empty full text means no textual evidence and does
   not fall back; `None` means unavailable; a non-string is unavailable. Prompt

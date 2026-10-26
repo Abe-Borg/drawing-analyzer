@@ -119,7 +119,7 @@ class _TailClient(BetaClientMixin):
                 body = kw["messages"][0]["content"][0]["text"]
                 if system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
                     outer.reconcile_calls += 1
-                    present = all(re.search(rf"\b{h}\b", body) for h in ("S001", "S022"))
+                    present = all(f'<sheet id="{h}">' in body for h in ("S001", "S022"))
                     fin = {
                         "sheet_handle": "S001", "category": "conflict",
                         "severity": "high", "text": "valve assignment disagrees",
@@ -137,7 +137,7 @@ class _TailClient(BetaClientMixin):
                 else:
                     outer.map_calls += 1
                     facts = []
-                    for h in re.findall(r"SHEET (S\d+)", body):
+                    for h in re.findall(r'<sheet id="(S\d+)">', body):
                         quote = {"S001": outer._qa, "S022": outer._qb}.get(h)
                         if quote is None:
                             continue

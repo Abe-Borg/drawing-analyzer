@@ -42,6 +42,7 @@ from .digest import (
     stream_with_cap_retry,
     unfinished_reply_error,
 )
+from .sheet_blocks import SHEET_CONTENT_RULE, sheet_block
 from .stage_cache import (
     get_stage_cache_entry,
     put_stage_cache_entry,
@@ -78,8 +79,9 @@ You are a senior design professional who has just read a complete SET of \
 construction drawings. The operator running the analysis asked a specific FOCUS \
 question \
 about this set. You are given (1) that focus and (2) the per-sheet TEXT digests \
-of every readable sheet (each already extracted from the drawings; each may end \
-with a per-sheet "{focus_header}" section gathered with the focus in mind). \
+of every readable sheet (each already extracted from the drawings, as a \
+<sheet id="..."> block holding its <digest>; each digest may end with a \
+per-sheet "{focus_header}" section gathered with the focus in mind). {rule} \
 Produce the FOCUS REPORT: a direct, set-level answer to the operator's focus, \
 assembled across all sheets.
 
@@ -99,7 +101,7 @@ focus asks about, say so explicitly — gaps and conflicts are part of the answe
 focus needs.
 - Output Markdown. Do NOT emit a top-level title or heading — the caller adds \
 the section header. Use short subsections / bullets / tables as fits the focus.\
-""".format(focus_header=FOCUS_SECTION_HEADER)
+""".format(focus_header=FOCUS_SECTION_HEADER, rule=SHEET_CONTENT_RULE)
 
 
 # Corpus budget (chars) for the per-sheet digests in the user turn. Same
@@ -132,8 +134,9 @@ class FocusPrompt:
 def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusPrompt:
     """Assemble the user turn: the focus, every readable digest, then the task.
 
-    Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
-    with its sheet label so the report can cite sheets. The focus appears first
+    Only ``ok`` sheets are included (a failed sheet has no text); each is a
+    ``<sheet>`` block under its sheet label (:mod:`.sheet_blocks`), so the
+    report can cite sheets and no digest can forge another. The focus appears first
     (framing) and is restated by the task instruction last, so the bulk of the
     digests sits between question framing and the ask.
 
@@ -148,32 +151,29 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
         "",
         f"<operator_focus>\n{focus}\n</operator_focus>",
         "",
-        "Per-sheet digests for the set follow (one block per sheet):",
+        "Per-sheet digests for the set follow (one sheet block per sheet):",
         "",
     ]
-    total = len(ok_sheets)
     used = 0
     sheets_omitted = 0
     chars_omitted = 0
 
-    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
-        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+    def _block(sd: SheetDigest) -> str:
+        return sheet_block(sd.ref.display_label, (("digest", sd.text.strip()),))
 
     for i, sd in enumerate(ok_sheets, start=1):
-        header, body = _block(i, sd)
-        cost = len(header) + len(body)
+        block = _block(sd)
+        cost = len(block)
         if used + cost > _TOTAL_BUDGET and used > 0:
             # Stop at the first sheet that does not fit, and drop everything
             # after it, so what reaches the model is a contiguous prefix rather
             # than whichever later sheets happened to be small enough.
-            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
-                d_header, d_body = _block(j, dropped)
+            for dropped in ok_sheets[i - 1:]:
                 sheets_omitted += 1
-                chars_omitted += len(d_header) + len(d_body)
+                chars_omitted += len(_block(dropped))
             break
         used += cost
-        parts.append(header)
-        parts.append(body)
+        parts.append(block)
         parts.append("")
     if sheets_omitted:
         parts.append(
