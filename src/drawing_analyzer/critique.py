@@ -42,7 +42,7 @@ from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from . import call_telemetry, prompt_experiments
+from . import call_telemetry
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     clamp_effort_for_model,
@@ -237,76 +237,6 @@ base area × 1.3 = design area); emit "claims": [] if there are none. Never \
 compute or "fix" the numbers — report them as printed and let the reviewer's \
 calculation catch any error. Put nothing but the JSON object inside the block."""
 
-# F2 experiment (off by default): evidence fields first. The same object when off.
-_CRITIQUE_FINDINGS_INSTRUCTION = prompt_experiments.apply_quote_first(
-    _CRITIQUE_FINDINGS_INSTRUCTION, "Each finding is an object with: "
-)
-
-# F3 experiment (off by default): one illustrative reply, on deliberately
-# generic content — a keynote pointing at the wrong note, a missing north arrow,
-# a room-area total — so the model sees the shape (a verbatim quote, a
-# sheet-level absence with an empty quote, numbers transcribed as printed even
-# where they do not add up) without anchoring on any discipline's equipment.
-# Data rather than text, so the F2 key order applies to it as well. It carries
-# neither the fence sentence nor the tail sentence the structured derivation
-# below removes.
-_CRITIQUE_EXAMPLE_REPLY = {
-    "findings": [
-        {
-            "sheet_id": "X-101",
-            "category": "conflict",
-            "severity": "medium",
-            "text": "Keynote 7 refers to general note 4 for roof drain sizes, but "
-                    "general note 4 covers pipe insulation.",
-            "recommended_action": "Correct keynote 7 to cite the note that lists "
-                                  "roof drain sizes.",
-            "source_quote": "7. SEE GENERAL NOTE 4 FOR ROOF DRAIN SIZES.",
-            "tile_label": "r2c3",
-            "refs": [],
-        },
-        {
-            "sheet_id": "X-101",
-            "category": "question",
-            "severity": "low",
-            "text": "Expected a north arrow on this floor plan; not found on this sheet.",
-            "recommended_action": "Add a north arrow, or confirm the plan orientation "
-                                  "is shown on another sheet.",
-            "source_quote": "",
-            "anchor_hint": "SHEET",
-            "refs": [],
-        },
-    ],
-    "claims": [
-        {
-            "sheet_id": "X-101",
-            "quote": "ROOM 101 120 SF ROOM 102 80 SF TOTAL 210 SF",
-            "kind": "sum",
-            "terms": ["120", "80"],
-            "expected": "210",
-            "note": "room area total",
-        },
-    ],
-}
-
-
-def _critique_example_block() -> str:
-    """The F3 ``<example>`` block, keys in the active field order."""
-    findings = [
-        json.dumps(prompt_experiments.order_keys(f, "sheet_id"))
-        for f in _CRITIQUE_EXAMPLE_REPLY["findings"]
-    ]
-    claims = [json.dumps(c) for c in _CRITIQUE_EXAMPLE_REPLY["claims"]]
-    return (
-        "\n\n<example>\nThe JSON object of an illustrative reply (its sheet, notes "
-        "and values are invented; report only what THIS sheet shows):\n"
-        '{"findings": [\n  ' + ",\n  ".join(findings) + '\n], "claims": [\n  '
-        + ",\n  ".join(claims) + "\n]}\n</example>"
-    )
-
-
-if prompt_experiments.CRITIQUE_EXAMPLE:
-    _CRITIQUE_FINDINGS_INSTRUCTION += _critique_example_block()
-
 # Folded into the critique cache key so any edit to the persona, the task line,
 # the findings instruction, or the shared sheet-text-layer framing re-critiques
 # rather than serving a stale read. The text-layer constants live in digest.py
@@ -406,15 +336,6 @@ _CRITIQUE_FINDING_ITEM_SCHEMA: dict = {
     ],
     "additionalProperties": False,
 }
-if prompt_experiments.QUOTE_FIRST:
-    # Structured outputs emit required properties first, each group in schema
-    # order, so this is what moves ``source_quote`` ahead of the judgment in a
-    # schema-bound reply. ``CRITIQUE_STRUCTURED_PROMPT_VERSION`` hashes the
-    # schema with sorted keys and cannot see property order; the reordered
-    # instruction it also hashes is what keys this variant apart.
-    _CRITIQUE_FINDING_ITEM_SCHEMA["properties"] = prompt_experiments.order_keys(
-        _CRITIQUE_FINDING_ITEM_SCHEMA["properties"], "sheet_id"
-    )
 
 # ``terms`` and ``expected`` accept a string or a number because the sheet does:
 # the model transcribes what is printed ("1,500 SF", 1500) and the deterministic

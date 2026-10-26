@@ -13,7 +13,6 @@ drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
 python scripts/run_acceptance.py   # release gates (PASS/FAIL; hermetic — never the canary)
 python scripts/check_browser_suite.py browser-results.xml   # a skip is not a pass
 python scripts/measure_evidence_coverage.py --pdf SET.pdf   # coverage scan (zero API calls)
-python scripts/compare_prompt_experiment.py BASE VARIANT  # A/B two exports (zero API calls)
 ```
 
 Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
@@ -466,18 +465,6 @@ consume ledger entries and nothing else.
   `prompt`; the other stages hash their whole user text. The digest's own
   `<sheet_text_layer>` is separate and stays un-neutralized: changing it would
   re-key every digest.
-- **Prompt experiments** (`prompt_experiments.py`): temporary A/B arms, off by
-  default and **read once at import**, not per call: they rewrite module-level
-  prompt strings that every prompt-version hash and cache key derives from, so
-  a process can never send one arm and key the other. `QUOTE_FIRST` runs
-  `apply_quote_first(instruction, marker)` on the digest, critique and three
-  cross-QC field lists (`evidence_first` moves clauses verbatim and raises on a
-  missing or ambiguous marker) and reorders the critique schema's properties.
-  `CRITIQUE_EXAMPLE` appends `_critique_example_block()` before
-  `CRITIQUE_PROMPT_VERSION` and the structured derivation. Off is
-  byte-identical. `active()` rides the run's environment block; tests probe
-  arms in a child interpreter; `scripts/compare_prompt_experiment.py` compares
-  two exports. Fold a winner into the prompts and delete its flag either way.
 - **Cross-QC grounding** reads `models.sheet_evidence_text(geom)`, not the capped
   `sheet_text`. A present-but-empty full text means no textual evidence and does
   not fall back; `None` means unavailable; a non-string is unavailable. Prompt

@@ -31,7 +31,7 @@ from .core.api_config import (
 )
 from .core.tokenizer import estimate_image_tokens_total
 from .core.request_usage import RequestUsage, any_fallback_served
-from . import cancellation, prompt_experiments, resource_pressure
+from . import cancellation, resource_pressure
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
 from .models import (
@@ -359,10 +359,6 @@ prose section MUST also appear as an entry in this findings block — the block 
 the machine-read mirror of those sections. Emit at most 40 findings, most \
 important first; emit {"findings": []} if there are none. Put nothing but the \
 JSON object inside the block, and write no prose after it."""
-# F2 experiment (off by default): evidence fields first. The same object when off.
-_FINDINGS_INSTRUCTION = prompt_experiments.apply_quote_first(
-    _FINDINGS_INSTRUCTION, "Each finding is an object with: "
-)
 
 # The user-turn framing the model actually reads, as templates rather than
 # inline f-strings, so they can be hashed into the prompt versions below.
