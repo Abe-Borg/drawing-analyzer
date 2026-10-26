@@ -68,6 +68,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-sheet digest already fenced its text layer this way and is unchanged.
 - The cross-QC cache key now covers its user-turn framing, not only its system
   prompts, so a future edit to how sheets are introduced re-keys it.
+- **`pypdf` 6.19.0 → 6.21.2** (`requirements.txt`, `requirements-release.lock`)
+  and the audit jobs' **`setuptools` 84.0.0 → 84.1.0** (`ci.yml`, `release.yml`).
+  `pip-audit` began failing on newly published advisories against both pins
+  (eleven for `pypdf`, among them GHSA-qfv9-64jg-mh7p and GHSA-6c7f-9265-g8fw;
+  GHSA-xmj3-9gf7-h52w for `setuptools`). Fixed by upgrading, not by an
+  `--ignore-vuln` exception. `pypdf` reads uploaded specification PDFs only.
 - Cached cross-QC, synthesis, focus, set-identity, absence-check and
   prose-harvest results are re-requested once (their prompts changed). Digest
   and critique caches, and cached review plans, keep their keys; a review plan
