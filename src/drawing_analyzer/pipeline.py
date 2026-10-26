@@ -1357,6 +1357,7 @@ def _journal_environment(
     from .critique import CRITIQUE_PROMPT_VERSION
     from .digest_cache import cache_schema_version
     from .models import COORDINATE_SPACE_VERSION
+    from .prompt_experiments import active as active_prompt_experiments
     from .render import _renderer_environment_fingerprint
     from .verify import VERIFY_PROMPT_VERSION
 
@@ -1377,6 +1378,10 @@ def _journal_environment(
             "digest", "critique", "identity", "review_plan", "citation", "investigation",
         )},
         coordinate_space=COORDINATE_SPACE_VERSION,
+        # Only when an arm is on, so a baseline run's record is unchanged and
+        # an A/B comparison can tell its two exports apart.
+        **({"prompt_experiments": ",".join(active_prompt_experiments())}
+           if active_prompt_experiments() else {}),
     )
 
 
