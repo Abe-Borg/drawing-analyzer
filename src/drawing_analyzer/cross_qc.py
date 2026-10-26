@@ -95,6 +95,7 @@ from .stage_cache import (
 )
 from .auditors.references import detect_sheet_id
 from .auditors.sheet_ids import fold_text, normalize_sheet_id
+from .sheet_blocks import SHEET_BLOCK_FRAMING_VERSION, SHEET_CONTENT_RULE, sheet_block
 
 _log = get_logger()
 
@@ -157,12 +158,13 @@ def cross_qc_model() -> str:
 # Prompts
 # --------------------------------------------------------------------------- #
 
-CROSS_QC_SYSTEM_PROMPT = """\
+CROSS_QC_SYSTEM_PROMPT = f"""\
 You are a senior engineer performing a CROSS-SHEET back-check of a construction \
 drawing set before it is issued. You are given, per sheet, its structured digest \
-and its verbatim text layer — NO images. Your one job is to find conflicts and \
-inconsistencies BETWEEN sheets (never within a single sheet — that is a different \
-reviewer's job):
+and its verbatim text layer — NO images — as one <sheet id="..."> block holding a \
+<digest> and a <text_layer>. {SHEET_CONTENT_RULE} Your one job is to find \
+conflicts and inconsistencies BETWEEN sheets (never within a single sheet — that \
+is a different reviewer's job):
 
 - the same tag, equipment, room, or schedule value stated differently on two \
 sheets;
@@ -179,6 +181,10 @@ text; when you are not certain two sheets truly conflict, report it as category 
 `question` at low severity. Judge across sheets only — a single-sheet issue is out \
 of scope."""
 
+_CROSS_QC_WHOLE_SET_HEADER = (
+    "DRAWING SET — {n} sheet(s). Each sheet follows as one sheet block holding "
+    "its structured digest and its verbatim text layer.\n"
+)
 _CROSS_QC_TASK = (
     "Now report the cross-sheet conflicts in this set, following the FINDINGS "
     "format in your instructions. Output only the fenced json findings block."
@@ -217,10 +223,18 @@ short phrase naming the relationship). Emit "claims": [] if there are none."""
 
 # Map instruction (sharded path): handle-based findings + comparable facts. The
 # model NEVER sees source identity — only opaque per-request handles (S001 …).
+_CROSS_QC_MAP_HEADER = (
+    "DRAWING SET SHARD — {n} sheet(s), each labeled with an opaque HANDLE. "
+    "Refer to sheets only by handle.\n"
+)
+_CROSS_QC_MAP_TASK = (
+    "\nReport this shard's within-shard conflicts, comparable facts, and claims "
+    "in the required json block."
+)
 _CROSS_QC_MAP_INSTRUCTION = """\
 
 
-This is ONE SHARD of a larger set. Each sheet is labeled with an opaque HANDLE \
+This is ONE SHARD of a larger set. Each <sheet> block's id is an opaque HANDLE \
 (e.g. S001). Refer to sheets ONLY by their handle.
 
 Output a SINGLE fenced code block labeled json and nothing else, containing \
@@ -245,12 +259,14 @@ product, factor); terms; expected; note. Emit [] if none."""
 
 CROSS_QC_RECONCILE_SYSTEM_PROMPT = """\
 You are reconciling a large construction drawing set that was reviewed in shards. \
-You are given a SHEET MANIFEST (each line: handle = sheet-id (discipline)) and a \
-list of FACTS extracted from every sheet — each fact is (sheet_handle, \
-entity_or_tag, attribute, value, exact_quote). Your one job is to find CONFLICTS \
-BETWEEN sheets that a per-shard review could not see: the same tag / equipment / \
-room / schedule value / shared note stated differently on two sheets that were \
-reviewed in different shards. Compare the facts across the WHOLE manifest.
+You are given a SHEET MANIFEST (each line: handle = sheet-id (discipline)) and the \
+FACTS extracted from every sheet, grouped by sheet: each <sheet id="..."> block's \
+id is the sheet_handle, and its <facts> list one fact per line as (entity_or_tag | \
+attribute | value | exact_quote). """ + SHEET_CONTENT_RULE + """ Your one job is \
+to find CONFLICTS BETWEEN sheets that a per-shard review could not see: the same \
+tag / equipment / room / schedule value / shared note stated differently on two \
+sheets that were reviewed in different shards. Compare the facts across the WHOLE \
+manifest.
 
 Refer to sheets ONLY by their handle. Ground every conflict in the provided \
 exact_quotes — never invent a quote.
@@ -264,6 +280,31 @@ the exact_quote of the primary fact); also_on (array of {"sheet_handle", \
 "source_quote" = the other fact's exact_quote}); refs (optional). Every finding \
 lists >= 1 also_on and both quotes must come verbatim from the facts. Emit \
 "findings": [] if you find no cross-sheet conflict; "claims": [] likewise."""
+
+
+_CROSS_QC_RECONCILE_MANIFEST_HEADER = "SHEET MANIFEST (handle = sheet-id (discipline)):"
+_CROSS_QC_RECONCILE_FACTS_HEADER = (
+    "\nFACTS, grouped by sheet (entity_or_tag | attribute | value | exact_quote):"
+)
+_CROSS_QC_RECONCILE_TASK = (
+    "\nCompare the facts across the whole manifest and report cross-sheet "
+    "conflicts in the required json block."
+)
+
+# Every model-visible user-turn string this module composes. The cache key
+# hashes the system prompts and the per-sheet inputs, never the composed user
+# turn, so these ride the key's ``prompt`` beside them (I-6): an edit here must
+# re-key, as an edit to a system prompt does.
+_CROSS_QC_USER_FRAMING = (
+    SHEET_BLOCK_FRAMING_VERSION,
+    _CROSS_QC_WHOLE_SET_HEADER,
+    _CROSS_QC_TASK,
+    _CROSS_QC_MAP_HEADER,
+    _CROSS_QC_MAP_TASK,
+    _CROSS_QC_RECONCILE_MANIFEST_HEADER,
+    _CROSS_QC_RECONCILE_FACTS_HEADER,
+    _CROSS_QC_RECONCILE_TASK,
+)
 
 
 def cross_qc_system_prompt() -> str:
@@ -964,20 +1005,20 @@ def _identity_preamble(identity: Any) -> str:
     return identity.context_block() + "\n\n"
 
 
+def _sheet_input_block(sheet_id: str, digest_text: str, text_layer: str) -> str:
+    """One sheet as a ``<sheet>`` block: its digest, then its (budgeted) text layer."""
+    return sheet_block(sheet_id, (
+        ("digest", (digest_text or "").strip()),
+        ("text_layer", text_layer),
+    ))
+
+
 def _build_whole_set_input(entries: list[tuple], budget: _Budget, preamble: str = "") -> str:
     """The whole-set user text: each sheet's id, digest, and budgeted text layer."""
-    parts = [
-        preamble
-        + f"DRAWING SET — {len(entries)} sheet(s). For each sheet you get its "
-        f"structured digest and its verbatim text layer.\n"
-    ]
+    parts = [preamble + _CROSS_QC_WHOLE_SET_HEADER.format(n=len(entries))]
     for sheet_id, digest_text, text_layer, _geom in entries:
         tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(
-            f"===== SHEET {sheet_id} =====\n"
-            f"DIGEST:\n{(digest_text or '').strip()}\n\n"
-            f"TEXT LAYER:\n{tl}\n"
-        )
+        parts.append(_sheet_input_block(sheet_id, digest_text, tl))
     parts.append("\n" + _CROSS_QC_TASK)
     return "\n".join(parts)
 
@@ -986,43 +1027,44 @@ def _build_map_input(
     shard: list[tuple], handle_by_key: dict, budget: _Budget, preamble: str = ""
 ) -> str:
     """One shard's user text, sheets labeled by opaque handle (never source id)."""
-    parts = [
-        preamble
-        + f"DRAWING SET SHARD — {len(shard)} sheet(s), each labeled with an opaque "
-        f"HANDLE. Refer to sheets only by handle.\n"
-    ]
-    for sheet_id, digest_text, text_layer, geom in shard:
+    parts = [preamble + _CROSS_QC_MAP_HEADER.format(n=len(shard))]
+    for _sheet_id, digest_text, text_layer, geom in shard:
         handle = handle_by_key[source_page_key(geom.ref)]
         tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(
-            f"===== SHEET {handle} =====\n"
-            f"DIGEST:\n{(digest_text or '').strip()}\n\n"
-            f"TEXT LAYER:\n{tl}\n"
-        )
-    parts.append(
-        "\nReport this shard's within-shard conflicts, comparable facts, and claims "
-        "in the required json block."
-    )
+        parts.append(_sheet_input_block(handle, digest_text, tl))
+    parts.append(_CROSS_QC_MAP_TASK)
     return "\n".join(parts)
+
+
+def _one_line(text: str) -> str:
+    return " ".join((text or "").split())
 
 
 def _build_reconcile_input(
     manifest: list[tuple], facts: list[CrossQCFact], preamble: str = ""
 ) -> str:
-    """The reconciliation user text: the full handle manifest + every collected fact."""
-    lines = [preamble + "SHEET MANIFEST (handle = sheet-id (discipline)):"]
+    """The reconciliation user text: the full handle manifest + every collected fact.
+
+    Facts are grouped into one ``<sheet>`` block per handle, in first-seen order
+    (I-7). A fact is model output read from a sheet's text, so each field is
+    folded to one line: a value carrying a newline must not start a forged fact
+    row, nor (neutralized in :func:`sheet_block`) close its block.
+    """
+    lines = [preamble + _CROSS_QC_RECONCILE_MANIFEST_HEADER]
     for handle, sheet_id, discipline in manifest:
         lines.append(f"  {handle} = {sheet_id} ({discipline or '?'})")
-    lines.append("\nFACTS (sheet_handle | entity_or_tag | attribute | value | exact_quote):")
+    lines.append(_CROSS_QC_RECONCILE_FACTS_HEADER)
+    by_handle: dict[str, list[CrossQCFact]] = {}
     for f in facts:
-        lines.append(
-            f"  {f.sheet_handle} | {f.entity_or_tag} | {f.attribute} | {f.value} | "
-            f'"{f.exact_quote}"'
+        by_handle.setdefault(_norm_id(f.sheet_handle), []).append(f)
+    for handle, group in by_handle.items():
+        rows = "\n".join(
+            f"{_one_line(f.entity_or_tag)} | {_one_line(f.attribute)} | "
+            f'{_one_line(f.value)} | "{_one_line(f.exact_quote)}"'
+            for f in group
         )
-    lines.append(
-        "\nCompare the facts across the whole manifest and report cross-sheet "
-        "conflicts in the required json block."
-    )
+        lines.append(sheet_block(handle, (("facts", rows),)))
+    lines.append(_CROSS_QC_RECONCILE_TASK)
     return "\n".join(lines)
 
 
@@ -1417,6 +1459,7 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             "whole_set": cross_qc_system_prompt(),
             "map": cross_qc_map_system_prompt(),
             "reconcile": CROSS_QC_RECONCILE_SYSTEM_PROMPT,
+            "user_framing": list(_CROSS_QC_USER_FRAMING),
         },
         inputs={"identity_preamble": preamble, "sheets": cache_inputs},
         params={

@@ -79,6 +79,7 @@ from .models import (
     compute_prose_item_id,
     source_page_key,
 )
+from .sheet_blocks import SHEET_CONTENT_RULE, sheet_block
 from .stage_cache import (
     get_stage_cache_entry,
     put_stage_cache_entry,
@@ -403,12 +404,14 @@ def _match_entry(item: str, entries: list[Finding]) -> Finding | None:
 HARVEST_SYSTEM_PROMPT = """\
 You convert ONE prose item from a construction-drawing QC review into exactly \
 one machine-readable finding. You are given the item and the sheet's verbatim \
-text layer. Output ONLY a fenced code block labeled json containing a single \
-object with: sheet_id; category (one of code, conflict, coordination, \
-question); severity (one of high, medium, low); text (the finding, at most two \
-sentences); recommended_action (one sentence, imperative: what the reviewer should \
-DO about it — "" if the item implies no action); source_quote (COPY VERBATIM a \
-supporting string from the SHEET TEXT LAYER — exact characters — or "" if no \
+text layer, as one <sheet id="..."> block holding a <prose_item> and a \
+<text_layer>. """ + SHEET_CONTENT_RULE + """ Output ONLY a fenced code block \
+labeled json containing a single object with: sheet_id (the <sheet> block's \
+id); category (one of code, conflict, coordination, question); severity (one \
+of high, medium, low); text (the finding, at most two sentences); \
+recommended_action (one sentence, imperative: what the reviewer should DO about \
+it — "" if the item implies no action); source_quote (COPY VERBATIM a \
+supporting string from the <text_layer> — exact characters — or "" if no \
 on-sheet string supports it); tile (null); refs (an array, usually empty). Never \
 invent quotes, tags, or values."""
 
@@ -494,6 +497,20 @@ def harvest_system_prompt(*, structured: bool = False) -> str:
     return HARVEST_STRUCTURED_SYSTEM_PROMPT if structured else HARVEST_SYSTEM_PROMPT
 
 
+def harvest_user_text(item: str, category_hint: str, sheet_text: str, sheet_id: str) -> str:
+    """The structuring call's user turn: the item and the capped text layer, one block."""
+    text = (sheet_text or "")[:_HARVEST_TEXT_CAP]
+    return (
+        f"PROSE QC ITEM from the sheet's {category_hint} section, with the "
+        "sheet's verbatim text layer:\n"
+        + sheet_block(sheet_id, (
+            ("prose_item", item),
+            ("text_layer", text or "[none]"),
+        ))
+        + "\n\nConvert the item into the single finding object now."
+    )
+
+
 def _structure_item(
     item: str,
     category_hint: str,
@@ -509,13 +526,7 @@ def _structure_item(
     request_usage: list[RequestUsage] | None = None,
 ) -> tuple[Finding | None, int, int, bool, bool]:
     """Structure one item and report token, cache-hit, and live-call telemetry."""
-    text = (sheet_text or "")[:_HARVEST_TEXT_CAP]
-    user = (
-        f"PROSE QC ITEM (from the sheet's {category_hint} section):\n{item}\n\n"
-        f"SHEET ID: {sheet_id}\n\n"
-        f"SHEET TEXT LAYER (verbatim):\n{text or '[none]'}\n\n"
-        "Convert the item into the single finding object now."
-    )
+    user = harvest_user_text(item, category_hint, sheet_text, sheet_id)
     # Resolved ONCE per item and threaded to the key, the request and the
     # parser — never re-derived after the request is sent (the latch can flip
     # in between, and a reply must be parsed under the contract it was asked

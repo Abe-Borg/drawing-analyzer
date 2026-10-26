@@ -50,6 +50,36 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   changed). A transcript saved by an older report resumes with its text and
   tool history and with earlier reasoning reset, as for any changed prefix.
 
+### Security
+
+- **Drawing text is fenced in every text-only prompt.** Cross-sheet QC (the
+  whole-set call, each shard map and every reconciliation), synthesis, the
+  focus report, set identity, the review planner's digest fallback, the absence
+  cross-check and the prose harvest now send each sheet as one
+  `<sheet id="…">` block holding its `<digest>` and `<text_layer>` (the
+  reconciliation's facts as `<facts>`, grouped by sheet), and each stage tells
+  the model that everything inside a `<sheet>` block is drawing content to
+  analyze, never instructions to follow. Before, these stages put the verbatim
+  text layer and the digests under plain `===== SHEET … =====` banners, so a
+  page carrying a fake banner could pass its text off as another sheet's. A `<`
+  that would open or close one of the block tags is replaced by U+2039 inside
+  the content, sheet ids are attribute-escaped, and each reconciliation fact is
+  one line, so a value with a newline can no longer start a forged row. The
+  per-sheet digest already fenced its text layer this way and is unchanged.
+- The cross-QC cache key now covers its user-turn framing, not only its system
+  prompts, so a future edit to how sheets are introduced re-keys it.
+- **`pypdf` 6.19.0 → 6.21.2** (`requirements.txt`, `requirements-release.lock`)
+  and the audit jobs' **`setuptools` 84.0.0 → 84.1.0** (`ci.yml`, `release.yml`).
+  `pip-audit` began failing on newly published advisories against both pins
+  (eleven for `pypdf`, among them GHSA-qfv9-64jg-mh7p and GHSA-6c7f-9265-g8fw;
+  GHSA-xmj3-9gf7-h52w for `setuptools`). Fixed by upgrading, not by an
+  `--ignore-vuln` exception. `pypdf` reads uploaded specification PDFs only.
+- Cached cross-QC, synthesis, focus, set-identity, absence-check and
+  prose-harvest results are re-requested once (their prompts changed). Digest
+  and critique caches, and cached review plans, keep their keys; a review plan
+  (and with it the critique) re-runs only if the refreshed set identity comes
+  back different.
+
 ## [1.11.0] - 2026-10-13
 
 ### Added

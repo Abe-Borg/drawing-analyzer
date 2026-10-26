@@ -268,11 +268,11 @@ class _MapReconcileClient(BetaClientMixin):
                     needed = [fin["sheet_handle"]] + [
                         l["sheet_handle"] for l in fin.get("also_on", [])
                     ]
-                    present = all(re.search(rf"\b{h}\b", body) for h in needed)
+                    present = all(f'<sheet id="{h}">' in body for h in needed)
                     obj = {"findings": [fin] if present else [], "claims": []}
                 else:
                     outer.map_calls += 1
-                    handles = re.findall(r"SHEET (S\d+)", body)
+                    handles = re.findall(r'<sheet id="(S\d+)">', body)
                     facts = [{
                         "sheet_handle": h, "entity_or_tag": "COLO", "attribute": "serves",
                         "value": "area", "exact_quote": "sheet text layer", "context": "note",
@@ -605,7 +605,7 @@ def test_sharded_omitted_findings_are_not_cached(omission_phase):
         reconcile = kw["system"].startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60])
         body = kw["messages"][0]["content"][0]["text"]
         if ((omission_phase == "reconcile" and reconcile)
-                or (omission_phase == "map" and not reconcile and "SHEET S001" in body)):
+                or (omission_phase == "map" and not reconcile and '<sheet id="S001">' in body)):
             obj = X._tolerant_json_object(response.content[0].text)
             finding = conflict if reconcile else dict(
                 conflict, source_quote="sheet text layer",
@@ -646,7 +646,7 @@ def test_sharded_failures_stay_incomplete_with_text_truncation(failure_phase):
         reconcile = kw["system"].startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60])
         body = kw["messages"][0]["content"][0]["text"]
         if ((failure_phase == "reconcile" and reconcile)
-                or (failure_phase == "map" and not reconcile and "SHEET S001" in body)):
+                or (failure_phase == "map" and not reconcile and '<sheet id="S001">' in body)):
             failures.append(failure_phase)
             raise RuntimeError(f"{failure_phase} failed")
         return create(**kw)

@@ -37,6 +37,7 @@ from .digest import (
     stream_with_cap_retry,
     unfinished_reply_error,
 )
+from .sheet_blocks import SHEET_CONTENT_RULE, sheet_block
 from .stage_cache import (
     get_stage_cache_entry,
     put_stage_cache_entry,
@@ -74,7 +75,8 @@ def default_synthesis_model() -> str:
 SYNTHESIS_SYSTEM_PROMPT = """\
 You are a senior design professional reviewing a complete SET of construction \
 drawings. You are given the per-sheet TEXT digests of every sheet in the set (each already \
-extracted from the drawings). Produce a concise SET-LEVEL overview that a \
+extracted from the drawings), each as a <sheet id="..."> block holding its \
+<digest>. {rule} Produce a concise SET-LEVEL overview that a \
 specification reviewer — who will NOT see the drawings — can use to understand \
 the set as a whole and check the written specs against it.
 
@@ -102,7 +104,7 @@ so rather than guessing.
 - Be concise — this is an overview, not a transcription. Don't repeat every \
 schedule row; point to the sheet that carries it.
 - Output Markdown. Do NOT emit a top-level title or heading — the caller adds the \
-section header. Use short subsections / bullets."""
+section header. Use short subsections / bullets.""".format(rule=SHEET_CONTENT_RULE)
 
 
 # Corpus budget (chars) for the per-sheet digests in the user turn.
@@ -140,8 +142,9 @@ class SynthesisPrompt:
 def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     """Assemble the user-turn text: every readable sheet's digest, then the task.
 
-    Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
-    with its sheet label so the model can cite sheet numbers in conflicts.
+    Only ``ok`` sheets are included (a failed sheet has no text); each is a
+    ``<sheet>`` block under its sheet label (:mod:`.sheet_blocks`), so the
+    model can cite sheet numbers in conflicts and no digest can forge another.
 
     Overflow past :data:`_TOTAL_BUDGET` drops a contiguous tail of sheets and
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
@@ -150,33 +153,30 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     against text the model cannot see.
     """
     parts: list[str] = [
-        "Per-sheet digests for the set follow (one block per sheet):",
+        "Per-sheet digests for the set follow (one sheet block per sheet):",
         "",
     ]
-    total = len(ok_sheets)
     used = 0
     sheets_omitted = 0
     chars_omitted = 0
 
-    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
-        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+    def _block(sd: SheetDigest) -> str:
+        return sheet_block(sd.ref.display_label, (("digest", sd.text.strip()),))
 
     for i, sd in enumerate(ok_sheets, start=1):
-        header, body = _block(i, sd)
-        cost = len(header) + len(body)
+        block = _block(sd)
+        cost = len(block)
         if used + cost > _TOTAL_BUDGET and used > 0:
             # Stop at the first sheet that does not fit, and drop everything
             # after it. Skipping this one to squeeze in a later, smaller sheet
             # would quietly reprioritize the set and leave the notice below
             # describing a corpus with holes in it.
-            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
-                d_header, d_body = _block(j, dropped)
+            for dropped in ok_sheets[i - 1:]:
                 sheets_omitted += 1
-                chars_omitted += len(d_header) + len(d_body)
+                chars_omitted += len(_block(dropped))
             break
         used += cost
-        parts.append(header)
-        parts.append(body)
+        parts.append(block)
         parts.append("")
     if sheets_omitted:
         parts.append(

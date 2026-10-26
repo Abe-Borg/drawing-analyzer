@@ -1537,11 +1537,11 @@ class _ShardOracleClient(BetaClientMixin):
                     needed = [fin["sheet_handle"]] + [
                         leg["sheet_handle"] for leg in fin.get("also_on", [])
                     ]
-                    present = all(re.search(rf"\b{h}\b", body) for h in needed)
+                    present = all(f'<sheet id="{h}">' in body for h in needed)
                     obj = {"findings": [fin] if present else [], "claims": []}
                 else:
                     outer.map_calls += 1
-                    handles = re.findall(r"SHEET (S\d+)", body)
+                    handles = re.findall(r'<sheet id="(S\d+)">', body)
                     obj = {
                         "findings": [], "claims": [],
                         "facts": [

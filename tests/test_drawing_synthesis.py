@@ -75,8 +75,8 @@ def test_build_synthesis_user_text_includes_each_sheet():
     sheets = [_digest("M-101", "VAV-3 plan"), _digest("M-501", "VAV-3 schedule row")]
     prompt = build_synthesis_user_text(sheets)
     text = prompt.text
-    assert "Sheet 1/2: M-101.pdf" in text
-    assert "Sheet 2/2: M-501.pdf" in text
+    assert '<sheet id="M-101.pdf (page 1/1)">' in text
+    assert '<sheet id="M-501.pdf (page 1/1)">' in text
     assert "VAV-3 plan" in text and "VAV-3 schedule row" in text
     assert text.rstrip().endswith("conflicts, and cite the sheet numbers involved.")
     assert prompt.sheets_omitted == 0 and prompt.chars_omitted == 0
@@ -90,8 +90,8 @@ def test_synthesis_prompt_budget_drops_whole_sheets_and_counts_the_loss(monkeypa
     assert prompt.sheets_omitted == 3 and prompt.chars_omitted > 0
     # The first sheet is kept whole — a half-digest would invite conflicts
     # against text the model cannot see.
-    assert "Sheet 1/4: M-001.pdf" in prompt.text
-    assert "Sheet 4/4: M-004.pdf" not in prompt.text
+    assert '<sheet id="M-001.pdf (page 1/1)">' in prompt.text
+    assert '<sheet id="M-004.pdf (page 1/1)">' not in prompt.text
     assert "The last 3 sheet(s)" in prompt.text
     # The task instruction still lands last, after the omission notice.
     assert prompt.text.rstrip().endswith("cite the sheet numbers involved.")
