@@ -10,14 +10,19 @@ by side:
 - total findings, and findings per channel (digest, critique, cross-QC, ...);
 - anchor outcome: EXACT / FUZZY / TILE / UNANCHORED, and the share of findings
   that **carry a quote** yet anchored nowhere (the hallucinated-quote signal);
-- digest findings-block drift: sheets whose parser note reports a problem, and
-  findings the parser dropped as invalid (from ``diagnostics/events.csv``).
+- digest findings-block drift (from ``diagnostics/events.csv``): sheets whose
+  whole findings block would not parse, and findings the parser dropped as
+  invalid. A digest served from the cache carries no parser note, so these are
+  compared only when both arms read every digest fresh; otherwise the report
+  says so and the rule judges on the anchor numbers alone.
 
 Both exports must come from the same inputs; it refuses otherwise. The arms
 can share a digest cache: an arm re-keys exactly the stages its prompts change,
 so neither replays the other's results, and a stage it leaves alone (the digest
-under the critique example alone) is reused, which keeps the difference to
-what the experiment changed.
+under the critique example alone) is reused. A reused digest has no parser
+note, though, so to compare digest parsing too (the evidence-first arm changes
+the digest), run each arm on a fresh cache (``DRAWING_ANALYZER_CACHE_PATH``
+pointing at a new file).
 
     python scripts/compare_prompt_experiment.py BASELINE_DIR VARIANT_DIR
     python scripts/compare_prompt_experiment.py BASELINE_DIR VARIANT_DIR --json
@@ -36,6 +41,11 @@ from pathlib import Path
 
 ANCHOR_STATUSES = ("EXACT", "FUZZY", "TILE", "UNANCHORED")
 _DROPPED_RE = re.compile(r"dropped (\d+) invalid finding")
+_CACHED_RE = re.compile(r"(?:^|; )cached=True(?:;|$)")
+# Every note for a block that yielded nothing names "findings block"
+# ("... present but unparseable", "... truncated ..."); a block recovered from
+# an unclosed fence parsed, and its note does not.
+_BLOCK_FAILED = "findings block"
 _RUN_SUFFIX_RE = re.compile(r"_\d+$")
 
 
@@ -51,22 +61,29 @@ def _sources(manifest: dict) -> list[tuple]:
     )
 
 
-def _digest_drift(folder: Path) -> tuple[int, int]:
-    """``(sheets with a findings-parser note, findings dropped as invalid)``."""
+def _digest_drift(folder: Path) -> dict:
+    """Digest findings-block telemetry from the run's ``SHEET_DIGESTED`` events."""
+    drift = {"fresh": 0, "cached": 0, "noted": 0, "blocks_unparsed": 0, "dropped": 0}
     path = folder / "diagnostics" / "events.csv"
     if not path.is_file():
-        return 0, 0
-    sheets = dropped = 0
+        return drift
     with open(path, encoding="utf-8-sig", newline="") as fp:
         for row in csv.DictReader(fp):
             if row.get("event_code") != "SHEET_DIGESTED":
                 continue
             fields = row.get("fields") or ""
+            if _CACHED_RE.search(fields):
+                # A cache hit restores findings, not the parse note: unknown,
+                # never "clean".
+                drift["cached"] += 1
+                continue
+            drift["fresh"] += 1
             if "parser_note=" not in fields:
                 continue
-            sheets += 1
-            dropped += sum(int(n) for n in _DROPPED_RE.findall(fields))
-    return sheets, dropped
+            drift["noted"] += 1
+            drift["blocks_unparsed"] += _BLOCK_FAILED in fields
+            drift["dropped"] += sum(int(n) for n in _DROPPED_RE.findall(fields))
+    return drift
 
 
 def load_arm(folder: Path) -> dict:
@@ -88,7 +105,7 @@ def load_arm(folder: Path) -> dict:
             quoted_unanchored += status == "UNANCHORED"
         for tag in {_channel(str(t)) for t in f.get("sources") or []} or {"unknown"}:
             channels[tag] += 1
-    drift_sheets, dropped = _digest_drift(folder)
+    drift = _digest_drift(folder)
     return {
         "folder": str(folder),
         "experiments": environment.get("prompt_experiments", "none"),
@@ -99,30 +116,49 @@ def load_arm(folder: Path) -> dict:
         "quoted": quoted,
         "quoted_unanchored": quoted_unanchored,
         "quoted_unanchored_rate": (quoted_unanchored / quoted) if quoted else 0.0,
-        "digest_drift_sheets": drift_sheets,
-        "digest_dropped_invalid": dropped,
+        "digest_fresh_sheets": drift["fresh"],
+        "digest_cached_sheets": drift["cached"],
+        "digest_drift_sheets": drift["noted"],
+        "digest_blocks_unparsed": drift["blocks_unparsed"],
+        "digest_dropped_invalid": drift["dropped"],
     }
 
 
-def verdict(base: dict, variant: dict) -> tuple[str, list[str]]:
-    """The adoption rule, read literally: fewer unanchored or malformed, no more findings."""
+_MALFORMED = (
+    ("unparseable digest findings blocks", "digest_blocks_unparsed"),
+    ("digest findings dropped invalid", "digest_dropped_invalid"),
+)
+
+
+def digest_comparable(base: dict, variant: dict) -> bool:
+    """Whether both arms read every digest fresh, so their parse notes compare."""
+    return not (base["digest_cached_sheets"] or variant["digest_cached_sheets"])
+
+
+def verdict(base: dict, variant: dict) -> tuple[str, list[str], list[str]]:
+    """The adoption rule, read literally: fewer unanchored or malformed, no more findings.
+
+    Returns ``(decision, reasons, notes)``: ``reasons`` are what keeps the
+    baseline; ``notes`` say what could not be compared.
+    """
     reasons: list[str] = []
+    notes: list[str] = []
     if variant["findings"] > base["findings"]:
         reasons.append(f"total findings rose ({base['findings']} -> {variant['findings']})")
-    fewer_unanchored = variant["quoted_unanchored_rate"] < base["quoted_unanchored_rate"]
-    fewer_malformed = variant["digest_dropped_invalid"] < base["digest_dropped_invalid"]
-    if not (fewer_unanchored or fewer_malformed):
-        reasons.append("neither the unanchored-quote rate nor the dropped count fell")
-    worse = [
-        name for name, b, v in (
-            ("unanchored-quote rate", base["quoted_unanchored_rate"],
-             variant["quoted_unanchored_rate"]),
-            ("dropped invalid findings", base["digest_dropped_invalid"],
-             variant["digest_dropped_invalid"]),
-        ) if v > b
-    ]
-    reasons += [f"{name} got worse" for name in worse]
-    return ("ADOPT" if not reasons else "KEEP BASELINE"), reasons
+    metrics = [("unanchored-quote rate", "quoted_unanchored_rate")]
+    if digest_comparable(base, variant):
+        metrics += list(_MALFORMED)
+    else:
+        notes.append(
+            "digest parse metrics not compared: "
+            f"{base['digest_cached_sheets'] + variant['digest_cached_sheets']} digest(s) "
+            "were served from the cache, which keeps no parser notes"
+        )
+    better = [name for name, key in metrics if variant[key] < base[key]]
+    reasons += [f"{name} got worse" for name, key in metrics if variant[key] > base[key]]
+    if not better:
+        reasons.append("no unanchored or malformed measure fell")
+    return ("ADOPT" if not reasons else "KEEP BASELINE"), reasons, notes
 
 
 def _render(base: dict, variant: dict) -> str:
@@ -148,14 +184,20 @@ def _render(base: dict, variant: dict) -> str:
             variant["quoted_unanchored"]),
         row("  unanchored-quote rate", f"{base['quoted_unanchored_rate']:.1%}",
             f"{variant['quoted_unanchored_rate']:.1%}"),
+        row("digests read fresh / from cache",
+            f"{base['digest_fresh_sheets']}/{base['digest_cached_sheets']}",
+            f"{variant['digest_fresh_sheets']}/{variant['digest_cached_sheets']}"),
         row("digest sheets with parser notes", base["digest_drift_sheets"],
             variant["digest_drift_sheets"]),
+        row("digest blocks unparseable", base["digest_blocks_unparsed"],
+            variant["digest_blocks_unparsed"]),
         row("digest findings dropped invalid", base["digest_dropped_invalid"],
             variant["digest_dropped_invalid"]),
     ]
-    decision, reasons = verdict(base, variant)
+    decision, reasons, notes = verdict(base, variant)
     lines += ["", f"Adoption rule: {decision}"]
     lines += [f"  - {r}" for r in reasons]
+    lines += [f"  note: {n}" for n in notes]
     lines.append(
         "  (one set is an anecdote: repeat on several sets before changing a default)"
     )
@@ -174,9 +216,9 @@ def main(argv: "list[str] | None" = None) -> int:
               file=sys.stderr)
         return 2
     if args.json:
-        decision, reasons = verdict(base, variant)
-        print(json.dumps({"baseline": base, "variant": variant,
-                          "decision": decision, "reasons": reasons}, indent=2))
+        decision, reasons, notes = verdict(base, variant)
+        print(json.dumps({"baseline": base, "variant": variant, "decision": decision,
+                          "reasons": reasons, "notes": notes}, indent=2))
     else:
         print(_render(base, variant))
     return 0

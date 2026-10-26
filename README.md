@@ -2229,7 +2229,14 @@ It refuses exports of different inputs, then prints for each arm:
 - total findings, and findings per channel;
 - the anchor outcome (EXACT / FUZZY / TILE / UNANCHORED);
 - the share of findings that carry a quote yet anchored nowhere;
-- the digest findings the parser dropped as invalid.
+- digest findings blocks that would not parse at all, and digest findings the
+  parser dropped as invalid.
+
+A digest served from the cache keeps no parser notes. The digest parse
+numbers are therefore compared only when both arms read every digest fresh,
+and the report says when they were not. To measure the evidence-first arm's
+effect on the digest, give each run a fresh cache (`DRAWING_ANALYZER_CACHE_PATH`
+pointing at a new file).
 
 It finishes with the adoption rule from the review: **adopt only with fewer
 unanchored or malformed findings and no rise in total findings.** One set is

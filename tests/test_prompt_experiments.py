@@ -168,8 +168,12 @@ def test_critique_example_is_a_reply_the_host_parsers_accept():
 # The comparison script
 # --------------------------------------------------------------------------- #
 
+_FRESH = ((False, ""), (False, ""))
+
+
 def _export(folder: Path, *, experiments: str | None, findings: list[dict],
-            dropped: int = 0, sources=(("set.pdf", 3, 1000),)) -> Path:
+            digests=_FRESH, sources=(("set.pdf", 3, 1000),)) -> Path:
+    """A minimal export; ``digests`` is one ``(served from cache, parser note)`` per sheet."""
     folder.mkdir(parents=True)
     environment = {"python": "3.12"}
     if experiments:
@@ -186,10 +190,11 @@ def _export(folder: Path, *, experiments: str | None, findings: list[dict],
               newline="") as fp:
         w = csv.DictWriter(fp, fieldnames=["sequence", "event_code", "fields"])
         w.writeheader()
-        w.writerow({"sequence": 1, "event_code": "SHEET_DIGESTED",
-                    "fields": "sheet=p1; parser_note=dropped "
-                              f"{dropped} invalid finding(s)" if dropped else "sheet=p1"})
-        w.writerow({"sequence": 2, "event_code": "SHEET_DIGESTED", "fields": "sheet=p2"})
+        for i, (cached, note) in enumerate(digests, 1):
+            # The journal's own "k=v; k=v" rendering of a SHEET_DIGESTED event.
+            fields = f"sheet=p{i}; source=SRC-0001; status=OK; cached={cached}; findings=2"
+            w.writerow({"sequence": i, "event_code": "SHEET_DIGESTED",
+                        "fields": fields + (f"; parser_note={note}" if note else "")})
     return folder
 
 
@@ -198,28 +203,58 @@ def _f(status: str, quote: str = "Q", *sources: str) -> dict:
             "sources": list(sources) or ["digest_json"]}
 
 
-def test_comparison_reports_the_adoption_metrics_and_applies_the_rule(tmp_path):
-    base = _export(tmp_path / "a", experiments=None, dropped=2, findings=[
-        _f("EXACT"), _f("UNANCHORED"), _f("UNANCHORED", "Q", "critique_1", "critique_2"),
-        _f("UNANCHORED", ""),  # no quote: not the hallucinated-quote signal
-    ])
-    variant = _export(tmp_path / "b", experiments="quote_first", dropped=1, findings=[
-        _f("EXACT"), _f("FUZZY"), _f("UNANCHORED", "Q", "critique_1"), _f("TILE", ""),
-    ])
+_BASE_FINDINGS = [
+    _f("EXACT"), _f("UNANCHORED"), _f("UNANCHORED", "Q", "critique_1", "critique_2"),
+    _f("UNANCHORED", ""),  # no quote: not the hallucinated-quote signal
+]
+_BETTER_FINDINGS = [
+    _f("EXACT"), _f("FUZZY"), _f("UNANCHORED", "Q", "critique_1"), _f("TILE", ""),
+]
+# The baseline's first sheet recovered an unclosed fence (a parse, not a
+# failure) and dropped two invalid items.
+_BASE_DIGESTS = ((False, "recovered from an unclosed (truncated) fence; "
+                         "dropped 2 invalid finding(s)"), (False, ""))
+
+
+def test_comparison_reports_the_adoption_metrics(tmp_path):
+    base = _export(tmp_path / "a", experiments=None, findings=_BASE_FINDINGS,
+                   digests=_BASE_DIGESTS)
+    variant = _export(tmp_path / "b", experiments="quote_first", findings=_BETTER_FINDINGS,
+                      digests=((False, "dropped 1 invalid finding(s)"), (False, "")))
     a, b = compare.load_arm(base), compare.load_arm(variant)
     assert (a["experiments"], b["experiments"]) == ("none", "quote_first")
     assert (a["quoted"], a["quoted_unanchored"]) == (3, 2)
     assert (b["quoted"], b["quoted_unanchored"]) == (3, 1)
     assert a["channels"] == {"critique": 1, "digest_json": 3}     # two runs, one channel
     assert (a["digest_dropped_invalid"], b["digest_dropped_invalid"]) == (2, 1)
-    assert compare.verdict(a, b)[0] == "ADOPT"
+    assert a["digest_blocks_unparsed"] == 0                         # a recovery parsed
+    assert compare.verdict(a, b) == ("ADOPT", [], [])
 
+
+@pytest.mark.parametrize("variant_findings, variant_digests, decision, reason, noted", [
     # More findings fails the rule even when quotes anchor better.
-    more = _export(tmp_path / "c", experiments="quote_first", findings=[
-        *[_f("EXACT")] * 5,
-    ])
-    decision, reasons = compare.verdict(a, compare.load_arm(more))
-    assert decision == "KEEP BASELINE" and any("rose" in r for r in reasons)
+    ([_f("EXACT")] * 5, _FRESH, "KEEP BASELINE", "rose", False),
+    # A wholly unparseable block has no "dropped N" count; losing a sheet's
+    # whole findings block must not read as fewer malformed findings.
+    (_BASE_FINDINGS, ((False, "findings block present but unparseable"), (False, "")),
+     "KEEP BASELINE", "unparseable", False),
+    # Cached digests carry no parser notes: identical results must not pass as
+    # an improvement on the dropped count the variant could not see.
+    (_BASE_FINDINGS, ((True, ""), (True, "")), "KEEP BASELINE", "no unanchored", True),
+    # With digests cached, a real anchoring gain still decides, with the gap disclosed.
+    (_BETTER_FINDINGS, ((True, ""), (True, "")), "ADOPT", None, True),
+], ids=["more-findings", "unparseable-block", "cached-identical", "cached-better"])
+def test_comparison_applies_the_adoption_rule(
+    tmp_path, variant_findings, variant_digests, decision, reason, noted,
+):
+    a = compare.load_arm(_export(tmp_path / "a", experiments=None, findings=_BASE_FINDINGS,
+                                 digests=_BASE_DIGESTS))
+    b = compare.load_arm(_export(tmp_path / "b", experiments="critique_example",
+                                 findings=variant_findings, digests=variant_digests))
+    got, reasons, notes = compare.verdict(a, b)
+    assert got == decision
+    assert reason is None or any(reason in r for r in reasons)
+    assert bool(notes) == noted
 
 
 def test_comparison_refuses_exports_of_different_inputs(tmp_path, capsys):
