@@ -151,9 +151,17 @@ def _is_transient_status_error(exc: Exception) -> bool:
     response was lost) and so must not be blindly re-issued as a fresh upload —
     that would orphan the first, accepted file. The SDK retries those connection
     / timeout cases internally with a reused idempotency key instead.
+
+    The monthly spend-cap 429 is excluded: it carries no ``retry-after`` and
+    keeps failing until access resumes, so it is permanent here
+    (:func:`~drawing_analyzer.resource_pressure.spend_limit_kind`).
     """
     status = _error_status(exc)
-    return status is not None and status in _TRANSIENT_STATUSES
+    return (
+        status is not None
+        and status in _TRANSIENT_STATUSES
+        and resource_pressure.spend_limit_kind(exc) is None
+    )
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -196,8 +204,16 @@ def _clean_error(exc: Exception) -> str:
     and the *reason* is the actionable part (collapsing it to a bare ``HTTP 400``
     is exactly what hid the 32 MB request-size failure). Connection / timeout
     errors get a fixed message; anything else is tag-stripped and truncated.
+    An API spend-limit answer (the spend-cap 429 or a Console-limit 400) keeps
+    the API's own message, which says when access resumes — never the
+    "try again" a rate-limit 429 gets.
     """
     status = _error_status(exc)
+    if status is not None and resource_pressure.spend_limit_kind(exc) is not None:
+        return (
+            f"API spend limit reached ({status}): "
+            f"{resource_pressure.api_error_message(exc)}"
+        )
     if status is not None:
         phrase = _STATUS_PHRASES.get(status)
         if phrase is None:
@@ -240,8 +256,13 @@ def transient_retry_wait(
     ``attempt`` is the 0-based count of retries already taken; ``sleep`` is
     injectable so tests never wait. Recording never raises into the loop. A
     stopped run (:mod:`~drawing_analyzer.cancellation`) wakes from the backoff
-    and raises ``RunCancelled`` instead of retrying.
+    and raises ``RunCancelled`` instead of retrying. An API spend-limit answer
+    is never retried; it latches the run so no further paid request is sent
+    (:func:`~drawing_analyzer.resource_pressure.note_spend_limit`).
     """
+    if resource_pressure.spend_limit_kind(exc) is not None:
+        resource_pressure.note_spend_limit(exc, stage=stage)
+        return False
     if not _is_transient_error(exc):
         return False
     if attempt >= max_retries:

@@ -32,12 +32,44 @@ class _Headers(dict):
     """A headers map with the ``.get`` shape httpx exposes."""
 
 
-def _status_error(status: int, headers: dict | None = None, name: str = "APIStatusError"):
-    exc = type(name, (Exception,), {})(f"HTTP {status}")
+def _status_error(
+    status: int, headers: dict | None = None, name: str = "APIStatusError",
+    *, body: dict | None = None, message: str | None = None,
+):
+    exc = type(name, (Exception,), {})(message or f"HTTP {status}")
     exc.status_code = status
     exc.request_id = f"req_{status}_x"
     exc.response = SimpleNamespace(headers=_Headers(headers or {}))
+    if body is not None:
+        exc.body = body
+    if message is not None:
+        exc.message = message
     return exc
+
+
+_SPEND_CAP_MESSAGE = (
+    "You have reached your API usage limits: your organization has crossed its "
+    "monthly API usage threshold, set based on your organization's API tier. "
+    "You will regain access on 2026-12-01 at 00:00 UTC."
+)
+
+
+def _spend_cap_429():
+    """The monthly tier-cap answer: 429, no retry-after, the documented error_code."""
+    return _status_error(429, body={"type": "error", "error": {
+        "type": "rate_limit_error", "message": _SPEND_CAP_MESSAGE,
+        "details": {"error_code": "enforced_spend_limit_reached"},
+    }})
+
+
+def _own_limit_400(scope: str = ""):
+    message = (
+        f"You have reached your specified {scope}API usage limits. "
+        "You will regain access on 2026-12-01 at 00:00 UTC."
+    )
+    return _status_error(400, body={"type": "error", "error": {
+        "type": "invalid_request_error", "message": message,
+    }})
 
 
 @pytest.fixture
@@ -106,6 +138,74 @@ def test_retry_helper_still_retries_with_no_active_run():
     slept: list[float] = []
     assert transient_retry_wait(_status_error(503), 0, 2, slept.append, stage="upload") is True
     assert slept == [2.0]
+    # A spend limit is permanent with or without a run to latch.
+    assert transient_retry_wait(_spend_cap_429(), 0, 2, slept.append, stage="digest") is False
+    assert slept == [2.0]
+
+
+# --------------------------------------------------------------------------- #
+# Spend leg — an answer no retry can outwait
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("exc,kind", [
+    (_spend_cap_429(), rp.SPEND_TIER_CAP),
+    # No parsed body: the SDK's message embeds the body, error_code included.
+    (_status_error(429, message="Error code: 429 - {'error': {'details': "
+                   "{'error_code': 'enforced_spend_limit_reached'}}}"), rp.SPEND_TIER_CAP),
+    (_status_error(429, {"retry-after": "7"}), None),           # an ordinary rate limit
+    (_status_error(429, body={"type": "error", "error": {
+        "type": "rate_limit_error", "message": "Number of request tokens has exceeded "
+        "your per-minute rate limit", "details": {"error_code": "rate_limited"},
+    }}), None),
+    (_own_limit_400(), rp.SPEND_OWN_LIMIT),
+    (_own_limit_400("workspace "), rp.SPEND_OWN_LIMIT),
+    (_status_error(400, body={"type": "error", "error": {
+        "type": "invalid_request_error", "message": "prompt is too long",
+    }}), None),
+    (RuntimeError("You have reached your specified API usage limits"), None),  # no status
+])
+def test_spend_limit_kind(exc, kind):
+    assert rp.spend_limit_kind(exc) == kind
+
+
+def test_spend_limit_is_never_retried_and_latches_the_run(active):
+    journal = RunJournal(run_id="RUN-spend")
+    active.attach_journal(journal)
+    slept: list[float] = []
+    exc = _spend_cap_429()
+    # Before any limit — and after an ordinary 429 — nothing is gated.
+    active.note_spend_limit(_status_error(429, {"retry-after": "7"}), stage="digest")
+    rp.check_spend_limit()
+    assert active.spend_limit is None
+
+    assert transient_retry_wait(exc, 0, 5, slept.append, stage="digest") is False
+    assert slept == [] and active.api_retries == 0 and active.api_give_ups == 0
+    hit = active.spend_limit
+    assert (hit.kind, hit.status, hit.stage) == (rp.SPEND_TIER_CAP, 429, "digest")
+    assert "2026-12-01" in hit.message            # the API's own resume time is kept
+    # The same answer noted again by another layer counts once; a second
+    # in-flight answer counts as an answer but does not replace the first.
+    active.note_spend_limit(exc, stage="critique")
+    active.note_spend_limit(_own_limit_400(), stage="critique")
+    assert active.spend_limit_answers == 2 and active.spend_limit.stage == "digest"
+    assert len(_events(journal, "SPEND_LIMIT")) == 1
+
+    # Every later paid request is refused before it is sent; an unbilled
+    # upload is refused too but not counted.
+    with pytest.raises(rp.SpendLimitReached) as refused:
+        rp.check_spend_limit()
+    assert rp.spend_limit_kind(refused.value) == rp.SPEND_TIER_CAP
+    assert transient_retry_wait(refused.value, 0, 5, slept.append, stage="verify") is False
+    with pytest.raises(rp.SpendLimitReached):
+        rp.check_spend_limit(count=False)
+    assert active.spend_limit_refused == 1 and slept == []
+
+    assert [s["kind"] for s in active.signals()] == [rp.SIGNAL_SPEND_LIMIT]
+    assert active.starvation_status == rp.STARVATION_DETECTED
+    block = json.loads(json.dumps(active.to_dict()))["spend_limit"]
+    assert block["hit"]["kind"] == rp.SPEND_TIER_CAP
+    assert (block["answers"], block["refused"]) == (2, 1)
 
 
 @pytest.mark.parametrize("exc,kind", [
@@ -588,8 +688,9 @@ def _make_pdf(path: Path) -> Path:
     return path
 
 
-def _flaky_client(fail_first: int, *, status: int = 429):
-    """A digest-only fake whose first ``fail_first`` calls are rate limited."""
+def _flaky_client(fail_first: int, *, status: int = 429, error=None):
+    """A digest-only fake whose first ``fail_first`` calls are rate limited
+    (or raise a fresh ``error()`` when one is given)."""
     from tests.fixtures.fake_anthropic import (
         BetaClientMixin, FakeMessage, FakeTextBlock, FakeUsage, StreamingMessagesMixin,
     )
@@ -600,6 +701,8 @@ def _flaky_client(fail_first: int, *, status: int = 429):
         def create(self, **kw):
             type(self).calls += 1
             if type(self).calls <= fail_first:
+                if error is not None:
+                    raise error()
                 raise _status_error(status, {"retry-after": "1"})
             return FakeMessage(
                 content=[FakeTextBlock(text="Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120.")],
@@ -654,3 +757,34 @@ def test_pipeline_records_rate_limiting_in_the_run_record(tmp_path, monkeypatch,
     log = (folder / "run.log").read_text(encoding="utf-8")
     assert "Resource pressure (starvation check)" in log
     assert f"Starvation:  {expected_status}" in log
+
+
+def test_pipeline_stops_paid_requests_after_a_spend_limit(tmp_path, monkeypatch):
+    # The first digest request is answered with the monthly spend cap. It is
+    # not retried, and no further paid request leaves the run: the second
+    # sheet (and anything after it) is refused before it is sent, while the
+    # run still finishes and exports with the limit in its record.
+    from drawing_analyzer import digest
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    monkeypatch.setattr(digest, "_retry_backoff_seconds", lambda attempt: 0.0)
+    a = _make_pdf(tmp_path / "M-101.pdf")
+    b = _make_pdf(tmp_path / "M-102.pdf")
+    client = _flaky_client(10**6, error=_spend_cap_429)
+    ctx = extract_drawing_context([a, b], client=client, rows=1, cols=1, max_workers=1)
+
+    assert type(client.messages).calls == 1           # one request sent, none retried
+    pressure = ctx.resource_pressure
+    assert pressure.api_retries == 0
+    assert pressure.spend_limit.kind == rp.SPEND_TIER_CAP
+    assert pressure.spend_limit_refused >= 1
+    assert [s["kind"] for s in pressure.signals()][0] == rp.SIGNAL_SPEND_LIMIT
+    assert ctx.ok_sheet_count == 0
+    # The API's own message (it says when access resumes) reaches the errors.
+    assert any("2026-12-01" in e for e in ctx.errors)
+
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=["M-101.pdf", "M-102.pdf"])
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    block = manifest["resource_pressure"]["spend_limit"]
+    assert block["hit"]["kind"] == rp.SPEND_TIER_CAP and block["hit"]["stage"] == "digest"
+    assert block["refused"] == pressure.spend_limit_refused
