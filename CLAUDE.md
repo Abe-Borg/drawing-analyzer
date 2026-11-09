@@ -211,7 +211,20 @@ map lives in `src/drawing_analyzer/__init__.py`.
   metric that cannot be read is `unavailable`, never 0. Disk is reported by
   label (`temp` / `work_dir` / `cache`), never by path. Stored API events and
   journal incidents are bounded; the aggregates count everything. Advisory and
-  never fatal. Tests inject `probe=` / `interval=` and patch
+  never fatal — except the **spend-limit latch**, which only stops spending.
+  `resource_pressure.spend_limit_kind(exc)` is the one classifier (429 with
+  `error.details.error_code == "enforced_spend_limit_reached"` = tier cap; 400
+  "You have reached your specified … API usage limits" = Console limit);
+  `digest._is_transient_status_error` excludes it, so no loop retries it.
+  `note_spend_limit(exc, stage=)` latches the run (first hit kept, each
+  exception object counted once) at `_dispatch_messages`, `_create_batch`, the
+  upload loop and `transient_retry_wait`. `check_spend_limit()` refuses at the
+  same three gates as `cancellation.check()` (uploads pass `count=False`: not
+  billed); batch polls, results reads and cleanup are never gated, so an
+  accepted batch is still collected. `SpendLimitReached` is an ordinary
+  `Exception` (I-3 absorbs it; a stop is `RunCancelled`) with no status, so it
+  is never transient. The batch-resubmit loop `break`s on a spend limit
+  instead of backing off. Tests inject `probe=` / `interval=` and patch
   `digest._retry_backoff_seconds` to 0 so a 429 fixture never sleeps.
 - **Call telemetry** (`call_telemetry.py`): one `CallRecord` per model
   request — what it was given (model, `max_tokens`, effort + the model's
@@ -621,7 +634,10 @@ consume ledger entries and nothing else.
   with `_pre_qc_note` (QC ran and left findings): that prose predates QC, and
   the chat system prompt ranks a finding's status above it. Request shape (`thinking`,
   `webSearch`, `webFetch`) comes from the capability registry. A reader-supplied
-  key outranks the embedded one, and the key row renders in both modes.
+  key outranks the embedded one, and the key row renders in both modes. A 401
+  whose message begins `CORS requests are not allowed` (the organization
+  blocks browser calls) is not a key failure: keep the key, don't reopen the
+  form; every other 401 forgets the reader's key.
   **Inline artifacts** (`create_artifact`: chart / table / memo cards) have no
   storage of their own: an artifact *is* its recorded `tool_use` input in
   `history`, so transcripts carry it. `artifactSpec` is the one validator, live

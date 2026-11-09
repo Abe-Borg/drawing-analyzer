@@ -50,6 +50,33 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   changed). A transcript saved by an older report resumes with its text and
   tool history and with earlier reasoning reset, as for any changed prefix.
 
+### Fixed
+
+- **A reached API spend limit ends a run's paid work cleanly.** The
+  organization's monthly spend cap answers with a 429 that has no
+  `retry-after` and keeps failing until access resumes. It used to be retried
+  like a rate limit on every sheet and reported as "rate limited — try again".
+  A Console spend limit (a 400) was not retried but failed each remaining sheet
+  in turn. Both are now recognized (`resource_pressure.spend_limit_kind`),
+  never retried, and recorded once with the API's message, which says when
+  access resumes. From then on the run refuses every further model call, batch
+  submission and image upload before it is sent. Stages fail normally (I-3),
+  so zero-API work still runs and completed work still exports; a batch the
+  API already accepted is still collected, and batch-resubmit recovery stops
+  instead of backing off. The record adds a `SPEND_LIMIT` signal, a
+  `spend_limit` block in `run_manifest.json`'s `resource_pressure`, a *spend
+  limit* line in `run.log`, a `SPEND_LIMIT` journal event, and a red line in
+  the GUI completion summary.
+- **Report chat: an organization that blocks browser calls no longer looks
+  like a bad key.** Organizations with zero data retention or the Compliance
+  API get a 401 beginning *"CORS requests are not allowed for this
+  Organization"* on every browser request. The assistant treated it as a
+  rejected key: it deleted the reader's saved key, fell back to the embedded
+  key (which failed the same way), and kept asking for another key. It now
+  says the organization blocks browser calls, keeps the key, and leaves the key
+  field closed. A 429 from the monthly spend cap is likewise reported as the
+  spend cap rather than "wait a moment and try again".
+
 ### Security
 
 - **Drawing text is fenced in every text-only prompt.** Cross-sheet QC (the

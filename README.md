@@ -43,6 +43,17 @@ instead of telling them to regenerate a report they cannot regenerate). **Use my
 own key** opens the field, **Use the report's key** hands it back, and **Forget
 key** clears the reader's key while saying plainly that the file's own credential
 is still in the file. Pass `include_chat=False` to omit the assistant entirely.
+
+**Organizations that block browser calls.** Some organizations cannot call the
+Anthropic API directly from a browser — for example those with zero data
+retention or the Compliance API. Every request from the assistant then returns
+a 401 whose message begins *"CORS requests are not allowed for this
+Organization"*. That is not a bad key, and no other key will get past it, so
+the assistant says so, **keeps the key** you entered, and does not reopen the
+key field. The rest of the report works normally; only the chat needs a key
+from an organization that allows browser calls. Likewise, a 429 caused by the
+organization's **monthly spend cap** is reported as the spend cap, not as a
+rate limit to wait out.
 The chat model defaults to Sonnet 5.5, which supports the web-search and
 web-fetch server tools at half Opus 5.5's per-token price (the reader's key pays
 for it), and can be overridden with `DRAWING_ANALYZER_CHAT_MODEL`. It runs at a
@@ -1630,7 +1641,7 @@ left alone for the same reason.
 A slow or partial run raises one question before any other: were the agents
 starved while they worked? `run.log` and `run_manifest.json` answer it
 directly. Every run carries a **resource-pressure record**
-(`ctx.resource_pressure`, module `resource_pressure.py`) built from three legs:
+(`ctx.resource_pressure`, module `resource_pressure.py`) built from four legs:
 
 - **API capacity.** Every transient retry in every stage — digest, critique,
   verification, investigation, identity, review plan, focus, synthesis,
@@ -1657,23 +1668,46 @@ directly. Every run carries a **resource-pressure record**
   cap, investigations that hit the evidence-round cap or the per-run finding
   cap, citation references beyond the per-run cap, and batch attempts the
   stall watch or the time bound abandoned.
+- **API spend limits.** Two answers cannot be waited out inside a run: the
+  organization's **monthly spend cap** for its usage tier (HTTP 429 with
+  `error_code: enforced_spend_limit_reached` and no `retry-after`; access
+  resumes at the start of the next month or when the tier is raised) and a
+  **spend limit you set** in the Claude Console, for the organization or a
+  workspace (HTTP 400, *"You have reached your specified … API usage
+  limits"*). Neither is retried. The first one is recorded — stage, HTTP
+  status, request id, and the API's own message, which says when access
+  resumes — and from then on the run **sends no further paid requests**:
+  every later model call, batch submission and image upload is refused
+  before it leaves the machine and fails with a short *"not sent: the … spend
+  limit was reached earlier in this run"* error. Each stage handles that like
+  any other failure, so the zero-API stages still run and everything finished
+  before the limit still exports. A batch the API had already accepted is
+  still collected. The record counts how many requests the limit answered
+  and how many paid requests were refused. Setting a monthly spend limit on
+  the workspace whose key drawing-analyzer uses (especially a key embedded in
+  shared reports) is a cheap guard; with this leg, reaching it ends a run
+  cleanly instead of failing every remaining sheet one by one.
 
 The record derives **`starvation_status`** — `DETECTED` or `NOT_DETECTED` —
-from named signals, each carrying its evidence: `API_THROTTLED` (a give-up,
-three capacity answers, or 30 s+ spent in backoff), `CPU_STARVED` (two late
-ticks, or one lag of 10 s+), `MEMORY_PRESSURE` (system memory at 90 %+ load
-or under 512 MB available), `LOW_DISK` (under 1 GB free at a watched
-location) and `BUDGET_EXHAUSTED`. A couple of recovered retries over a long
-run are reported as counts but are not a verdict.
+from named signals, each carrying its evidence: `SPEND_LIMIT` (an API spend
+limit was reached; listed first, since it explains every failure after it),
+`API_THROTTLED` (a give-up, three capacity answers, or 30 s+ spent in backoff),
+`CPU_STARVED` (two late ticks, or one lag of 10 s+), `MEMORY_PRESSURE` (system
+memory at 90 %+ load or under 512 MB available), `LOW_DISK` (under 1 GB free at
+a watched location) and `BUDGET_EXHAUSTED`. A couple of recovered retries over
+a long run are reported as counts but are not a verdict.
 
 Where it shows: `run.log` gets a `Starvation:` header line and a *Resource
 pressure (starvation check)* section; `run_manifest.json` a `resource_pressure`
 block (verdict, signals, API counts with the bounded event list, host
-aggregates, the budget list and the thresholds used); the HTML report's *Run
-record* block and the GUI completion summary each carry the one-line verdict;
-and the journal trace shows the events as they happened — `API_RETRY`,
-`API_GIVE_UP`, `RESOURCE_PRESSURE` (one per threshold breach, capped at 50),
-`BUDGET_EXHAUSTED` and the closing `RESOURCE_SUMMARY`. Aggregates count
+aggregates, the budget list, the `spend_limit` block — the first hit, how many
+answers said so, how many paid requests were refused — and the thresholds
+used); the HTML report's *Run record* block and the GUI completion summary each
+carry the one-line verdict, and the GUI adds its own red line naming a reached
+spend limit with the API's message; and the journal trace shows the events as
+they happened — `API_RETRY`, `API_GIVE_UP`, `SPEND_LIMIT`, `RESOURCE_PRESSURE`
+(one per threshold breach, capped at 50), `BUDGET_EXHAUSTED` and the closing
+`RESOURCE_SUMMARY`. Aggregates count
 everything; only the listed events are bounded. The SDK's own in-client
 retries (two per request by default) happen beneath these loops and are
 visible only in the wire capture (`DRAWING_ANALYZER_DEBUG`).
