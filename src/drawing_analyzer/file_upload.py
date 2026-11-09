@@ -419,6 +419,14 @@ def upload_sheet_images(
                 aborted.set()
                 raise cancellation.RunCancelled()
             try:
+                # Past an API spend limit no batch can be submitted, so an
+                # upload would only be deleted again. Not billed, so not
+                # counted as a refused paid request.
+                resource_pressure.check_spend_limit(count=False)
+            except resource_pressure.SpendLimitReached:
+                aborted.set()
+                raise
+            try:
                 uploaded = client.files.upload(
                     file=(name, image.png_bytes, "image/png")
                 )
@@ -458,6 +466,7 @@ def upload_sheet_images(
                     continue
                 if _is_transient_status_error(exc):
                     resource_pressure.note_api_give_up(exc, stage="upload", attempts=attempt + 1)
+                resource_pressure.note_spend_limit(exc, stage="upload")
                 # Permanent, or transient retries exhausted: pinpoint the exact
                 # image (overview vs which tile), its size, and the API status /
                 # request-id so the failure that doomed this sheet is fully

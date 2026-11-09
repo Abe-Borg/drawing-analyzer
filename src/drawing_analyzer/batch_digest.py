@@ -803,9 +803,20 @@ def _create_batch(
     An accepted batch opens one :mod:`~drawing_analyzer.call_telemetry`
     record per item; ``items`` maps ``custom_id`` to the work item's portable
     label (``SRC-0001:p0``) so the record names the sheet, not the slot.
+
+    Also refused once the run has hit an API spend limit
+    (:func:`~drawing_analyzer.resource_pressure.check_spend_limit`), and a
+    submit the API answers with one latches the run for every later request.
     """
     with cancellation.submitting():
-        mb = client.messages.batches.create(requests=reqs)
+        resource_pressure.check_spend_limit()
+        try:
+            mb = client.messages.batches.create(requests=reqs)
+        except Exception as exc:
+            resource_pressure.note_spend_limit(
+                exc, stage=call_telemetry.current_stage() or "batch_submit",
+            )
+            raise
         batch_id = _get(mb, "id")
         cancellation.track_remote_batch(
             batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
@@ -1208,6 +1219,10 @@ def _recover_via_batch_resubmit(
                 "batch-resubmit round %d submit failed: %s; keeping batch errors",
                 round_no, summarize_exc(exc),
             )
+            if resource_pressure.spend_limit_kind(exc) is not None:
+                # An API spend limit: no later round can be accepted until
+                # access resumes, so stop rather than back off and resubmit.
+                break
             backoff = _retry_backoff_seconds(round_no - 1)
             if backoff >= max_elapsed_seconds - (time.monotonic() - started):
                 resource_pressure.note_api_give_up(exc, stage="batch_submit", attempts=round_no)

@@ -1745,7 +1745,29 @@ def test_batch_backend_outage_recovers_via_fresh_batch_not_realtime():
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
-def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch):
+def _spend_cap_answer():
+    exc = RuntimeError("Error code: 429")
+    exc.status_code = 429
+    exc.body = {"type": "error", "error": {
+        "type": "rate_limit_error",
+        "message": "You have reached your API usage limits. You will regain access "
+                   "on 2026-12-01 at 00:00 UTC.",
+        "details": {"error_code": "enforced_spend_limit_reached"},
+    }}
+    return exc
+
+
+@pytest.mark.parametrize("resubmit_answer, submits, cancels", [
+    # Every resubmission is accepted and stalls: primary + 2 bounded rounds,
+    # each stuck batch canceled.
+    (None, 3, 3),
+    # The first resubmission hits the monthly spend cap: no later round can be
+    # accepted until access resumes, so recovery stops instead of backing off.
+    (_spend_cap_answer, 2, 1),
+])
+def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(
+    monkeypatch, resubmit_answer, submits, cancels,
+):
     # A genuinely dead Batches backend (every batch stalls) must not loop
     # forever: the resubmit rounds are capped, unreached sheets keep a clean,
     # retriable batch error, and NO real-time call is ever made.
@@ -1753,7 +1775,18 @@ def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch
     clock = {"t": 0.0}
     monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
     client = _FakeClient(_succeed)
-    _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+    batches = _NeverEndingBatches(client, clock, tick=600.0)
+    _install_batches(client, batches)
+    attempts = []
+    accept = batches.create
+
+    def _create(**kw):
+        attempts.append(1)
+        if resubmit_answer is not None and len(attempts) > 1:
+            raise resubmit_answer()
+        return accept(**kw)
+
+    batches.create = _create
 
     batch = submit_drawing_batch(
         iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
@@ -1764,9 +1797,8 @@ def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch
     )
 
     assert client.rescue_calls == []  # never a real-time call, even when doomed
-    # primary submit + 2 bounded resubmission rounds; each stuck batch canceled.
-    assert len(client.create_calls) == 3
-    assert len(client.cancel_calls) == 3
+    assert len(attempts) == submits
+    assert len(client.cancel_calls) == cancels
     assert all(not d.ok for d in digests)
     assert all("not collected" in d.error and "stalled" in d.error for d in digests)
     # Every stuck batch was canceled, so the uploaded files were released.

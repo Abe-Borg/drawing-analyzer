@@ -36,6 +36,19 @@ completion summary. Three legs feed it:
    ``max_tokens``, investigations that hit the evidence-round cap or the
    per-run finding cap, citation references beyond the per-run cap, and batch
    attempts abandoned by the stall watch or the time bound.
+4. **API spend limits.** The organization's monthly tier cap (a 429 carrying
+   ``error.details.error_code == "enforced_spend_limit_reached"`` and no
+   ``retry-after``) and a spend limit set in the Console (a 400 whose message
+   begins "You have reached your specified … API usage limits") cannot be
+   waited out inside a run. :func:`spend_limit_kind` recognizes both; the
+   retry loops treat them as permanent, and the first one is recorded here
+   (:meth:`ResourcePressure.note_spend_limit`). From then on the run refuses
+   every new paid request before it is sent (:func:`check_spend_limit`,
+   called at the real-time dispatch, the batch submit and the Files upload),
+   raising :class:`SpendLimitReached` — an ordinary ``Exception``, so each
+   stage's I-3 guard records the failure and the work already done still
+   ships. This latch is the record's one effect on control flow, and it only
+   ever stops spending; its own bookkeeping never raises.
 
 The record derives a one-word verdict — ``starvation_status`` of ``DETECTED``
 or ``NOT_DETECTED`` — from named **signals** (:data:`SIGNAL_API_THROTTLED`,
@@ -69,6 +82,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import sys
 import threading
@@ -104,6 +118,7 @@ SIGNAL_CPU_STARVED = "CPU_STARVED"
 SIGNAL_MEMORY_PRESSURE = "MEMORY_PRESSURE"
 SIGNAL_LOW_DISK = "LOW_DISK"
 SIGNAL_BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+SIGNAL_SPEND_LIMIT = "SPEND_LIMIT"
 
 # Transient-failure kinds (``ApiRetryEvent.kind``). The first three are
 # *capacity* answers — the API had no room for the request — and drive the
@@ -144,6 +159,21 @@ MAX_INCIDENT_EVENTS = 50
 # other stored row is dropped and the stride doubles, so a long run keeps an
 # evenly spaced series over its whole length rather than only its first hours.
 MAX_STORED_HOST_SAMPLES = 2_000
+
+# API spend limits (see the module docstring, leg 4). The kinds name which
+# limit answered; the API's own message says when access resumes, so it is kept
+# (bounded) rather than re-worded.
+SPEND_TIER_CAP = "tier_spend_cap"        # 429: the usage tier's monthly cap
+SPEND_OWN_LIMIT = "own_spend_limit"      # 400: a limit set in the Console
+SPEND_LIMIT_LABELS = {
+    SPEND_TIER_CAP: "monthly API spend cap for the organization's usage tier",
+    SPEND_OWN_LIMIT: "API spend limit set in the Claude Console",
+}
+SPEND_CAP_ERROR_CODE = "enforced_spend_limit_reached"
+_OWN_SPEND_LIMIT_RE = re.compile(
+    r"you have reached your specified (?:workspace )?api usage limits", re.IGNORECASE,
+)
+MAX_SPEND_MESSAGE_CHARS = 300
 
 
 def _utc_now() -> datetime:
@@ -252,6 +282,106 @@ def rate_limit_snapshot(exc: Any) -> dict[str, int]:
         except ValueError:
             continue
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Spend limits: the answers no retry can outwait.
+# --------------------------------------------------------------------------- #
+
+
+def _error_payload(exc: Any) -> dict:
+    """The ``error`` object of an SDK error's JSON body (``{}`` when absent)."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return {}
+    inner = body.get("error")
+    return inner if isinstance(inner, dict) else body
+
+
+def _error_text(exc: Any) -> str:
+    """The API's own error message, else the SDK message, else ``str(exc)``."""
+    for candidate in (_error_payload(exc).get("message"), getattr(exc, "message", None)):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return str(exc)
+
+
+def api_error_message(exc: Any) -> str:
+    """The API's message for ``exc``, one line, bounded (never raises)."""
+    try:
+        return " ".join(_error_text(exc).split())[:MAX_SPEND_MESSAGE_CHARS]
+    except Exception:  # noqa: BLE001
+        return type(exc).__name__
+
+
+def spend_limit_kind(exc: Any) -> str | None:
+    """Which API spend limit ``exc`` reports, or ``None`` (duck-typed, never raises).
+
+    :data:`SPEND_TIER_CAP` — the usage tier's monthly cap: HTTP 429 with
+    ``error.details.error_code == "enforced_spend_limit_reached"`` (the SDK
+    error's message embeds the body, so that code is also looked for there
+    when the parsed body is unavailable). :data:`SPEND_OWN_LIMIT` — a limit set
+    in the Console: HTTP 400 whose message says "You have reached your
+    specified (workspace) API usage limits". A :class:`SpendLimitReached`
+    refusal reports the kind of the limit that caused it. Every other error —
+    including an ordinary rate-limit 429 — is ``None``.
+    """
+    try:
+        if isinstance(exc, SpendLimitReached):
+            return exc.kind
+        status = status_of(exc)
+        if status == 429:
+            details = _error_payload(exc).get("details")
+            code = details.get("error_code") if isinstance(details, dict) else None
+            if code == SPEND_CAP_ERROR_CODE:
+                return SPEND_TIER_CAP
+            if code is None and SPEND_CAP_ERROR_CODE in _error_text(exc):
+                return SPEND_TIER_CAP
+        elif status == 400 and _OWN_SPEND_LIMIT_RE.search(_error_text(exc)):
+            return SPEND_OWN_LIMIT
+    except Exception:  # noqa: BLE001 - a classifier never breaks a retry loop
+        return None
+    return None
+
+
+@dataclass
+class SpendLimitHit:
+    """The first API answer this run got saying a spend limit was reached."""
+
+    kind: str
+    status: int | None
+    stage: str
+    message: str                       # the API's own text: says when access resumes
+    request_id: str = ""
+    at: str = ""
+
+    @property
+    def label(self) -> str:
+        return SPEND_LIMIT_LABELS.get(self.kind, "API spend limit")
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind, "status": self.status, "stage": self.stage,
+            "message": self.message, "request_id": self.request_id, "at": self.at,
+        }
+
+
+class SpendLimitReached(Exception):
+    """A paid request this run did not send, because a spend limit already answered.
+
+    An ordinary ``Exception`` (unlike :class:`~drawing_analyzer.cancellation.RunCancelled`):
+    the stage guards' I-3 ``except Exception`` record it like any other failure,
+    so later stages still run their zero-API work and the deliverable ships. It
+    carries no HTTP status, so no retry loop treats it as transient.
+    """
+
+    def __init__(self, hit: SpendLimitHit) -> None:
+        self.kind = hit.kind
+        self.hit = hit
+        super().__init__(
+            f"not sent: the {hit.label} was reached earlier in this run "
+            f"(during {hit.stage}); see the run record (run.log, Resource pressure)"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -814,6 +944,12 @@ class ResourcePressure:
         # Budget leg.
         self.exhaustions: list[BudgetExhaustion] = []
         self.exhaustions_dropped = 0
+        # Spend leg: the first spend-limit answer, how many answers said so
+        # (requests already in flight when it landed), and how many paid
+        # requests the run then refused to send.
+        self.spend_limit: SpendLimitHit | None = None
+        self.spend_limit_answers = 0
+        self.spend_limit_refused = 0
         # Host leg.
         self.host = HostStats()
         self._monitor: HostResourceMonitor | None = None
@@ -914,6 +1050,7 @@ class ResourcePressure:
                 worst_lag_s=round(self.host.worst_lag_seconds, 2),
                 peak_rss=_fmt_bytes(self.host.peak_rss_bytes),
                 budget_exhaustions=sum(e.count for e in self.exhaustions),
+                spend_limit=self.spend_limit.kind if self.spend_limit else "none",
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1009,6 +1146,74 @@ class ResourcePressure:
             return event
         except Exception:  # noqa: BLE001 - never fail the retry loop that called us
             return None
+
+    def note_spend_limit(self, exc: BaseException, *, stage: str) -> SpendLimitHit | None:
+        """Record an API answer saying a spend limit was reached; latch the run.
+
+        A no-op for any other error and for this run's own
+        :class:`SpendLimitReached` refusals. The first answer is kept (with the
+        API's message, which says when access resumes); later ones only count.
+        The same exception object is counted once, however many layers note it.
+        Returns the run's latched hit, or ``None``. Never raises.
+        """
+        try:
+            if isinstance(exc, SpendLimitReached):
+                return self.spend_limit
+            kind = spend_limit_kind(exc)
+            if kind is None:
+                return self.spend_limit
+            if getattr(exc, "_da_spend_limit_noted", False):
+                return self.spend_limit
+            try:
+                exc._da_spend_limit_noted = True  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - an exception that refuses attributes
+                pass
+            try:
+                status = status_of(exc)
+            except Exception:  # noqa: BLE001
+                status = None
+            try:
+                rid = request_id_of(exc) or ""
+            except Exception:  # noqa: BLE001
+                rid = ""
+            hit = SpendLimitHit(
+                kind=kind, status=status, stage=str(stage)[:40] or "?",
+                message=api_error_message(exc), request_id=rid, at=_iso(self._clock()),
+            )
+            with self._lock:
+                self.spend_limit_answers += 1
+                first = self.spend_limit is None
+                if first:
+                    self.spend_limit = hit
+            if first:
+                fields: dict[str, Any] = {
+                    "kind": kind, "status": status if status is not None else "-",
+                    "message": hit.message,
+                }
+                if rid:
+                    fields["request_id"] = rid
+                self._emit("SPEND_LIMIT", stage=hit.stage, level="ERROR", **fields)
+                _log.error(
+                    "API spend limit reached (%s) during %s: %s — no further paid "
+                    "requests will be sent this run", hit.label, hit.stage, hit.message,
+                )
+            return self.spend_limit
+        except Exception:  # noqa: BLE001 - never fail the call site that noted it
+            return None
+
+    def check_spend_limit(self, *, count: bool = True) -> None:
+        """Raise :class:`SpendLimitReached` once this run has hit a spend limit.
+
+        ``count`` adds the refusal to :attr:`spend_limit_refused` (paid
+        requests); a Files upload, which is not billed, passes ``False``.
+        """
+        with self._lock:
+            hit = self.spend_limit
+            if hit is None:
+                return
+            if count:
+                self.spend_limit_refused += 1
+        raise SpendLimitReached(hit)
 
     def note_budget_exhausted(
         self, stage: str, kind: str, *, count: int = 1, detail: str = "",
@@ -1166,6 +1371,20 @@ class ResourcePressure:
         """The named starvation signals this run's evidence supports (ordered)."""
         out: list[dict[str, Any]] = []
         with self._lock:
+            hit = self.spend_limit
+            if hit is not None:
+                # First: it explains every failure after it, and no retry,
+                # rerun or extra worker gets past it until access resumes.
+                evidence = f"{hit.label} reached during {hit.stage} at {hit.at}"
+                if self.spend_limit_refused:
+                    evidence += (
+                        f"; {self.spend_limit_refused} later paid "
+                        f"{_plural(self.spend_limit_refused, 'request')} not sent"
+                    )
+                out.append({
+                    "kind": SIGNAL_SPEND_LIMIT, "evidence": f"{evidence} — {hit.message}",
+                    "stages": [hit.stage],
+                })
             throttled = self.api_throttle_retries
             if (
                 self.api_give_ups
@@ -1275,6 +1494,20 @@ class ResourcePressure:
         if self.api_events_dropped:
             api.append(f"{self.api_events_dropped} more not listed")
         lines.append("  api: " + " · ".join(api))
+        hit = self.spend_limit
+        if hit is not None:
+            spend = [
+                f"{hit.label} reached during {hit.stage} at {hit.at}"
+                + (f" (HTTP {hit.status})" if hit.status is not None else ""),
+                f"{self.spend_limit_answers} {_plural(self.spend_limit_answers, 'answer')} "
+                "said so",
+                f"{self.spend_limit_refused} later paid "
+                f"{_plural(self.spend_limit_refused, 'request')} not sent",
+            ]
+            if hit.request_id:
+                spend.append(f"request_id {hit.request_id}")
+            lines.append("  spend limit: " + " · ".join(spend))
+            lines.append(f"  spend limit message: {hit.message}")
         h = self.host
         if not h.monitored:
             lines.append(f"  host: not sampled ({h.disabled_reason or 'monitor not started'})")
@@ -1355,6 +1588,11 @@ class ResourcePressure:
                 "budget": {
                     "exhaustions": [e.to_dict() for e in self.exhaustions],
                     "dropped": self.exhaustions_dropped,
+                },
+                "spend_limit": {
+                    "hit": self.spend_limit.to_dict() if self.spend_limit else None,
+                    "answers": self.spend_limit_answers,
+                    "refused": self.spend_limit_refused,
                 },
                 "thresholds": {
                     "api_throttle_retries": API_THROTTLE_RETRIES_FOR_SIGNAL,
@@ -1490,3 +1728,26 @@ def note_budget_exhausted(stage: str, kind: str, *, count: int = 1, detail: str 
     pressure = current()
     if pressure is not None:
         pressure.note_budget_exhausted(stage, kind, count=count, detail=detail)
+
+
+def note_spend_limit(exc: BaseException, *, stage: str) -> None:
+    """Forward a spend-limit answer to the active run's recorder (latching it).
+
+    A no-op for any other error, and outside a run: a direct stage call still
+    treats the answer as permanent (no retry), it just has no run to stop.
+    """
+    pressure = current()
+    if pressure is not None:
+        pressure.note_spend_limit(exc, stage=stage)
+
+
+def check_spend_limit(*, count: bool = True) -> None:
+    """Refuse a paid request once this thread's run has hit a spend limit.
+
+    Raises :class:`SpendLimitReached`; does nothing outside a run or before a
+    limit was reached. Called where :func:`~drawing_analyzer.cancellation.check`
+    gates the same requests (real-time dispatch, batch submit, Files upload).
+    """
+    pressure = current()
+    if pressure is not None:
+        pressure.check_spend_limit(count=count)

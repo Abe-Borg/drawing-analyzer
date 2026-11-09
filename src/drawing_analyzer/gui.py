@@ -2233,6 +2233,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # slow or partial run says whether the agents were starved and of what.
         # The full numbers are in run.log / run_manifest.json.
         pressure = getattr(ctx, "resource_pressure", None)
+        # An API spend limit stops the run's paid work outright, so it gets its
+        # own line ahead of the starvation summary, with the API's message (it
+        # says when access resumes).
+        spend_hit = getattr(pressure, "spend_limit", None)
+        if spend_hit is not None:
+            try:
+                self._log(
+                    f"API spend limit reached ({spend_hit.label}) during "
+                    f"{spend_hit.stage}: {spend_hit.message} No further API requests "
+                    "were sent; work finished before that point is in this export, and "
+                    "a rerun after access resumes reuses any cached results.",
+                    level="error",
+                )
+            except Exception:  # noqa: BLE001 - a diagnostic never breaks the summary
+                pass
         summary_line = getattr(pressure, "summary_line", None)
         if callable(summary_line):
             try:

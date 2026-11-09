@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .. import call_telemetry, cancellation
+from .. import call_telemetry, cancellation, resource_pressure
 
 _log = logging.getLogger(__name__)
 
@@ -1578,9 +1578,16 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
     Every request that is sent gets one :mod:`~drawing_analyzer.call_telemetry`
     record — what it was given (caps, effort, thinking, tools) and what it used
     — closed with the response, the error, or the stop.
+
+    It is also the spend-limit gate (:mod:`~drawing_analyzer.resource_pressure`,
+    leg 4): an answer saying the organization's spend cap or a Console spend
+    limit was reached latches the run, and once latched no request is sent —
+    :class:`~drawing_analyzer.resource_pressure.SpendLimitReached` is raised
+    here instead, before any telemetry record opens.
     """
     namespace = messages_namespace(client, kwargs)
     cancellation.check()
+    resource_pressure.check_spend_limit()
     record = call_telemetry.begin(kwargs, method=method)
     try:
         if method == "create":
@@ -1597,6 +1604,9 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
         raise
     except Exception as exc:
         call_telemetry.finish(record, error=exc)
+        resource_pressure.note_spend_limit(
+            exc, stage=call_telemetry.current_stage() or "unattributed",
+        )
         raise
     call_telemetry.finish(record, message=message)
     return message

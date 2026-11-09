@@ -474,6 +474,12 @@ def scope(stage: str, item: Any = "", **item_limits: int) -> Iterator[None]:
         _scope.value = previous
 
 
+def current_stage() -> str:
+    """The stage the calling thread's :func:`scope` names (``""`` when unscoped)."""
+    value = getattr(_scope, "value", None)
+    return value[0] if value else ""
+
+
 # Frames that are transport plumbing, not the stage that wanted the call.
 _PLUMBING_MODULES = frozenset({
     __name__,
