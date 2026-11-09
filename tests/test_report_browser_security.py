@@ -387,32 +387,42 @@ def test_ask_ai_without_key_uses_inline_key_field(page, tmp_path):
     assert page.is_visible("#da-chat-key-input")
 
 
-def test_ask_ai_401_forgets_key_and_resurfaces_field(page, tmp_path):
+@pytest.mark.parametrize("api_message, key_is_bad", [
+    # A rejected key: dropped, and the entry field re-opened for a new one.
+    ("unauthorized", True),
+    # The organization blocks browser calls (ZDR / Compliance API). The key is
+    # fine and no other key would work, so it is kept and the form stays shut.
+    ("CORS requests are not allowed for this Organization because of its settings.", False),
+])
+def test_ask_ai_401_handles_key_by_cause(page, tmp_path, api_message, key_is_bad):
     doc = hr.build_html_report(
         _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
         source_names=["a.pdf"], now=NOW,
     )
-    # fetch → 401: the entered key must be dropped and the field re-opened.
     stub = (
         "(function(){ window.fetch = function(){"
         " return Promise.resolve({ ok:false, status:401,"
-        " json:function(){ return Promise.resolve({error:{message:'unauthorized'}}); } }); }; })();"
+        " json:function(){ return Promise.resolve({error:{message:"
+        + json.dumps(api_message) + "}}); } }); }; })();"
     )
     page.add_init_script(stub)
     _load(page, doc, tmp_path)
 
     page.click("#da-chat-fab")
-    page.fill("#da-chat-key-input", "sk-ant-will-be-rejected")
+    page.fill("#da-chat-key-input", "sk-ant-entered-key")
     page.click("#da-chat-key-save")
-    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-will-be-rejected"
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-entered-key"
 
     page.fill("#da-chat-input", "hello")
     page.click("#da-chat-send")
     page.wait_for_selector(".da-err", timeout=5000)
     assert "401" in page.eval_on_selector(".da-err", "el => el.textContent")
-    # Rejected key forgotten; the entry field is shown again for a new one.
-    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
-    assert page.is_visible("#da-chat-key-input")
+    if key_is_bad:
+        assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+        assert page.is_visible("#da-chat-key-input")
+    else:
+        assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-entered-key"
+        assert not page.is_visible("#da-chat-key-input")
     assert page.evaluate("window.__pwned") is False
 
 

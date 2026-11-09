@@ -6462,7 +6462,15 @@ _CHAT_JS = r"""
             CFG.refusalFallbackBeta = null;
             return streamOnce(bubble, noTools);
           }
-          if(resp.status === 401){
+          // A 401 whose message begins "CORS requests are not allowed" is not a
+          // key problem: the organization refuses API calls made from a
+          // browser (zero data retention, the Compliance API). No key fixes
+          // that, so the reader's key is kept and the key form stays closed.
+          if(resp.status === 401 && /^CORS requests are not allowed/i.test(msg)){
+            msg = 'This organization does not allow Claude API calls from a web browser (401), ' +
+              'so the chat cannot run from this report. Your API key is fine and was kept; ' +
+              'a different key will not change this. (' + msg + ')';
+          } else if(resp.status === 401){
             // WHICH key was rejected decides the recovery, so read that before
             // forgetKey() clears the reader's. A rejected embedded key is no
             // longer a dead end: the reader can supply their own, which is the
@@ -6482,7 +6490,14 @@ _CHAT_JS = r"""
               revealKeyForm('The key embedded in this report was rejected (401). Enter your own key to continue.');
             }
           }
-          if(resp.status === 429) msg = 'Rate limited by the API (429) — wait a moment and try again. ' + msg;
+          if(resp.status === 429){
+            // The monthly spend cap answers 429 too, but waiting does not help:
+            // access resumes only when the API message says it does.
+            var details = body && body.error && body.error.details;
+            msg = (details && details.error_code === 'enforced_spend_limit_reached')
+              ? 'The organization has reached its monthly API spend cap (429). ' + msg
+              : 'Rate limited by the API (429) — wait a moment and try again. ' + msg;
+          }
           throw new Error(msg);
         });
       }
