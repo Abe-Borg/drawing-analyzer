@@ -79,6 +79,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- `pypdf` 6.21.2 → 6.21.4 in `requirements-release.lock` and
+  `requirements.txt`, clearing the seven advisories pip-audit reports against
+  6.21.2 (GHSA-62m5-6wh8-28x7, GHSA-42gh-23hr-vphw, GHSA-x3rh-gjgm-fmqc,
+  GHSA-4vqv-7265-gm2w, GHSA-5849-834g-hvw5, GHSA-mfr5-77xh-9j7h,
+  GHSA-cggf-277g-3q54). The `pyproject.toml` range (`pypdf>=4.0`) is
+  unchanged.
 - **Drawing text is fenced in every text-only prompt.** Cross-sheet QC (the
   whole-set call, each shard map and every reconciliation), synthesis, the
   focus report, set identity, the review planner's digest fallback, the absence
