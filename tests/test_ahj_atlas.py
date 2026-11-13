@@ -40,30 +40,33 @@ LONG = {"Adoptions": [
     ["Maricopa County, AZ", "Building", "IBC", 2024, ""],
     [None, "Sprinkler", "NFPA 13", 2025, ""],
 ]}
+# NFPA 2001 (clean agent) is a designation that looks like a year: its column
+# must not be mistaken for an edition, nor its number read as one.
 WIDE = {"Atlas": [
-    ["AHJ", "IBC", "IFC", "NFPA 13", "NFPA 72", "Notes"],
-    ["Maricopa County, AZ", 2024, "2024 w/ local amendments", 2025, 2025, "row note"],
-    ["Loudoun County, VA", 2021, 2021, 2022, 2022, ""],
+    ["AHJ", "IBC", "IFC", "NFPA 13", "NFPA 72", "NFPA 2001", "Notes"],
+    ["Maricopa County, AZ", 2024, "2024 w/ local amendments", 2025, 2025, 2025, "row note"],
+    ["Loudoun County, VA", 2021, 2021, 2022, 2022, 2022, ""],
 ]}
 TABS = {
     "Loudoun County, VA": [["Code", "Edition"], ["IBC", 2021], ["NFPA 13", 2022]],
     "Maricopa County, AZ": [["Code", "Edition"], ["IBC", 2024], ["NFPA 13", 2025]],
 }
-FREE = {"Notes": [["Project codes: NFPA 13 2025", None], [None, "2024 IBC"], ["Updated 2025", "misc"]]}
+FREE = {"Notes": [["Project codes: NFPA 13 2025", None], [None, "2024 IBC"], ["Updated 2025", "misc"],
+                  ["Clean agent: NFPA 2001 2022", None]]}
 
 
 @pytest.mark.parametrize("sheets, expected", [
     (LONG, {"Loudoun County, VA": [("IBC", "2021"), ("IFC", "2021"), ("NFPA 13", "2022")],
             "Maricopa County, AZ": [("IBC", "2024"), ("NFPA 13", "2025")]}),
     (WIDE, {"Loudoun County, VA": [("IBC", "2021"), ("IFC", "2021"), ("NFPA 13", "2022"),
-                                   ("NFPA 72", "2022")],
+                                   ("NFPA 2001", "2022"), ("NFPA 72", "2022")],
             "Maricopa County, AZ": [("IBC", "2024"), ("IFC", "2024"), ("NFPA 13", "2025"),
-                                    ("NFPA 72", "2025")]}),
+                                    ("NFPA 2001", "2025"), ("NFPA 72", "2025")]}),
     (TABS, {"Loudoun County, VA": [("IBC", "2021"), ("NFPA 13", "2022")],
             "Maricopa County, AZ": [("IBC", "2024"), ("NFPA 13", "2025")]}),
     # Free text: only cells naming a known code WITH a year; "Updated 2025" is
     # not a code.
-    (FREE, {"": [("IBC", "2024"), ("NFPA 13", "2025")]}),
+    (FREE, {"": [("IBC", "2024"), ("NFPA 13", "2025"), ("NFPA 2001", "2022")]}),
 ], ids=["long", "wide", "one-tab-per-ahj", "free-text"])
 def test_each_layout_yields_every_jurisdictions_editions(tmp_path, sheets, expected):
     atlas = load_ahj_atlas(_book(tmp_path / "atlas.xlsx", sheets))
@@ -93,11 +96,13 @@ def test_a_wide_rows_note_column_is_not_stamped_on_every_code(tmp_path):
 
 
 def test_a_code_with_no_year_is_skipped_with_a_warning(tmp_path):
-    sheets = {"A": [["Code", "Edition"], ["IBC", 2024], ["NFPA 72", None]]}
+    sheets = {"A": [["Code", "Edition"], ["IBC", 2024], ["NFPA 72", None], ["NFPA 2001", None]]}
     atlas = load_ahj_atlas(_book(tmp_path / "atlas.xlsx", sheets))
     (only,) = atlas.jurisdictions
+    # "NFPA 2001" names a standard, not a 2001 edition.
     assert _codes(only) == [("IBC", "2024")]
     assert any("NFPA 72" in w for w in atlas.warnings)
+    assert any("NFPA 2001" in w for w in atlas.warnings)
 
 
 def test_a_csv_atlas_reads_like_a_workbook(tmp_path):

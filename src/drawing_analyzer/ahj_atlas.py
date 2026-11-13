@@ -180,8 +180,19 @@ def _cell_text(value: Any) -> str:
 
 
 def _year(text: str) -> str | None:
-    m = _YEAR_RE.search(text or "")
-    return m.group(1) if m else None
+    """The edition year in ``text``, never the number of the code it names.
+
+    A designation can look like a year — NFPA 2001 is the clean-agent
+    standard — so the designation's own span is blanked before searching:
+    ``"NFPA 2001 2022"`` is the 2022 edition and ``"NFPA 2001"`` alone has no
+    year at all.
+    """
+    text = text or ""
+    m = _DESIGNATION_RE.search(text)
+    if m:
+        text = text[:m.start()] + " " * (m.end() - m.start()) + text[m.end():]
+    found = _YEAR_RE.search(text)
+    return found.group(1) if found else None
 
 
 def designation(text: str) -> str | None:
