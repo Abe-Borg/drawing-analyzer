@@ -80,8 +80,8 @@ class LivePanel:
         self.enabled = bool(enabled)
         self.kick()
 
-    def preview(self, sheets: list, stages: list) -> None:
-        self._guard(self.model.preview, sheets, stages)
+    def preview(self, sheets: list, stages: list, revision: Any = None) -> None:
+        self._guard(lambda: self.model.preview(sheets, stages, revision=revision))
         self.kick()
 
     def begin(self) -> RunMonitor:

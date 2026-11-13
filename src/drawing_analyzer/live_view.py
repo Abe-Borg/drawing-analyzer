@@ -458,6 +458,9 @@ class LiveRunModel:
         self.run_ended_at: "float | None" = None     # wall
         self.ended_at: "float | None" = None         # animation clock
         self.series: deque = deque(maxlen=SERIES_SECONDS)   # [second, in, out]
+        # The loaded files' revision (the host's fingerprint) the board was
+        # previewed from: sheet ids encode order and page, not file content.
+        self.revision: Any = None
         self._focus = False
         self._reset_cursors()
 
@@ -481,19 +484,26 @@ class LiveRunModel:
         self,
         sheets: "Iterable[tuple[str, str] | tuple[str, str, str]]",
         stages: "Iterable[str]",
+        *,
+        revision: Any = None,
     ) -> None:
         """Show a not-yet-run set: every sheet pending, the planned track.
 
         Ignored while a run is in flight. A finished board stays up until the
         loaded set actually changes, so its results are not wiped by an
         unrelated option toggle; the track follows the options only while idle.
+        ``revision`` identifies the files' content (the GUI passes
+        ``sources_fingerprint``): a PDF overwritten in place keeps its sheet
+        ids, so without it a revised set would keep the old run's board.
         Cells and stage nodes that were already on the board keep their
         identity, so only what is new animates in.
         """
         if self.phase == PHASE_RUNNING:
             return
         rows = [tuple(s) for s in sheets]
-        same_set = [r[0] for r in rows] == [s.item for s in self.sheets]
+        same_set = ([r[0] for r in rows] == [s.item for s in self.sheets]
+                    and revision == self.revision)
+        self.revision = revision
         if self.phase != PHASE_IDLE:
             if same_set:
                 return
@@ -514,8 +524,10 @@ class LiveRunModel:
     def _clear_run_state(self) -> None:
         """Forget the last run's figures; keep the board's cells and nodes."""
         stages, sheets, since = self.stages, self.sheets, self.sheets_since
+        revision = self.revision
         fresh = LiveRunModel(clock=self._clock, wall_clock=self._wall)
         self.__dict__.update(fresh.__dict__)
+        self.revision = revision
         now = self._clock()
         for st in stages:
             st.state, st.status, st.note = STAGE_PLANNED, "", ""
@@ -541,9 +553,13 @@ class LiveRunModel:
         if ctx is not None:
             try:
                 cost = getattr(ctx, "total_estimated_cost", None)
+                usage = getattr(ctx, "run_usage", None)
                 if cost is not None:
                     self.cost, self.cost_known, self.cost_final = Decimal(cost), True, True
-                usage = getattr(ctx, "run_usage", None)
+                elif usage is not None:
+                    # The run's ledger could not price everything: the spend is
+                    # unknown, and a partial live estimate must not stand in.
+                    self.cost, self.cost_known, self.cost_final = Decimal(0), False, True
                 if usage is not None:
                     self.tokens_in = int(
                         usage.total_input_tokens + usage.total_cache_read_tokens

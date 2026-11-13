@@ -811,8 +811,8 @@ def test_idle_board_previews_the_loaded_set_and_the_planned_stack(tmp_path, monk
     with _gui_module() as (gui, tk):
         app, _workers, _callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
         previews = []
-        app._live = types.SimpleNamespace(preview=lambda rows, stages: previews.append(
-            (rows, stages)))
+        app._live = types.SimpleNamespace(
+            preview=lambda rows, stages, revision=None: previews.append((rows, stages, revision)))
         app._live_sheet_key, app._live_sheet_rows = None, []
         app._refresh_live_preview = types.MethodType(
             gui.DrawingAnalyzerApp._refresh_live_preview, app)
@@ -820,8 +820,9 @@ def test_idle_board_previews_the_loaded_set_and_the_planned_stack(tmp_path, monk
         app._refresh_live_preview()
         app._qc_markups_var.set(True)
         app._refresh_live_preview()
-        (rows, plain), (_rows, full) = previews
+        (rows, plain, revision), (_rows, full, _rev) = previews
         assert [r[1] for r in rows] == [ref.display_label for ref in list_sheets([pdf])]
+        assert revision == gui.sources_fingerprint([pdf])   # file content, not just ids
         assert "critique" not in plain and {"critique", "verification", "markup"} <= set(full)
         app._busy = True                            # a run owns the board
         app._refresh_live_preview()

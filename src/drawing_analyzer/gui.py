@@ -2096,7 +2096,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             if len(self._live_sheet_rows) < 2:
                 # The set overview needs two readable sheets.
                 stages = [s for s in stages if s != "synthesis"]
-            live.preview(self._live_sheet_rows, stages)
+            live.preview(self._live_sheet_rows, stages, revision=self._live_sheet_key)
         except Exception as exc:  # noqa: BLE001 - a preview is decoration
             _log.debug("live view preview failed: %s", exc)
 

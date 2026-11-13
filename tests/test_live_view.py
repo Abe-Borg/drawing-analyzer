@@ -45,7 +45,7 @@ from drawing_analyzer.live_view import (
     notify_monitor,
     planned_stages,
 )
-from drawing_analyzer.models import SheetRef, resolve_run_configuration
+from drawing_analyzer.models import RunUsage, SheetRef, resolve_run_configuration
 from drawing_analyzer.run_journal import RunJournal
 from tests.fixtures.fake_anthropic import FakeMessage, FakeUsage
 
@@ -152,7 +152,8 @@ def test_batch_items_queue_on_their_sheets_even_when_labelled_after_listing():
     assert [s.state for s in r.model.sheets] == [SHEET_QUEUED, SHEET_DONE]
 
 
-def test_tokens_and_cost_count_once_even_when_polled_mid_update():
+@pytest.mark.parametrize("ledger_cost", [Decimal("1.25"), None])
+def test_tokens_and_cost_count_once_even_when_polled_mid_update(ledger_cost):
     refs = _refs(1)
     r = _live_run(refs)
     rec = _call(r.calls, "digest", sheet_item(refs[0]))
@@ -172,10 +173,15 @@ def test_tokens_and_cost_count_once_even_when_polled_mid_update():
     assert r.model.cost == expected and r.model.cost_known and not r.model.cost_final
     assert sum(b[1] + b[2] for b in r.model.series) == 38_000
 
-    ctx = SimpleNamespace(total_estimated_cost=Decimal("1.25"), run_usage=None, findings=[],
+    # The run's own ledger is final. When it cannot price everything, the
+    # spend is unknown — the partial live estimate must not stand in for it.
+    ctx = SimpleNamespace(total_estimated_cost=ledger_cost, run_usage=RunUsage(), findings=[],
                           reference_findings=[], qc_status="", coverage_status="", sheets=[])
     r.model.finish(ctx, r.monitor)
-    assert r.model.cost == Decimal("1.25") and r.model.cost_final
+    if ledger_cost is None:
+        assert not r.model.cost_known
+    else:
+        assert r.model.cost == ledger_cost and r.model.cost_final and r.model.cost_known
 
 
 def test_critique_reads_mark_their_sheet_and_shared_basenames_resolve_by_source():
@@ -241,12 +247,17 @@ def test_preview_survives_option_toggles_but_not_a_new_set():
     model.preview(rows, ["inventory", "digest", "critique"])   # QC ticked
     assert model.sheets == cells and model._stage("critique").state == STAGE_PLANNED
 
+    model.preview(rows, ["inventory", "digest"], revision="rev-1")
     model.begin()
     assert model.sheets == cells                               # no re-cascade
     model.finish(None)
-    model.preview(rows, ["inventory", "digest"])               # same set: board stays
+    model.preview(rows, ["inventory", "digest"], revision="rev-1")   # same set: stays
     assert model.phase == PHASE_DONE
-    model.preview(rows[:2], ["inventory", "digest"])            # a new set replaces it
+    # The same files overwritten in place: same sheet ids, new content.
+    model.preview(rows, ["inventory", "digest"], revision="rev-2")
+    assert model.phase != PHASE_DONE
+    model.finish(None)
+    model.preview(rows[:2], ["inventory", "digest"], revision="rev-2")   # a new set
     assert len(model.sheets) == 2 and model.phase != PHASE_DONE
 
 
