@@ -89,10 +89,13 @@ from .core.app_paths import api_key_paths, app_config_dir
 from .colors import COLORS
 from .source_registry import sources_fingerprint
 from .cost import (
+    drawing_file_tokens,
     estimate_drawing_set_cost,
     estimate_exhaustive_run_cost,
+    estimate_text_tokens,
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
+    xfast_note,
 )
 from .help_content import (
     GET_API_KEY,
@@ -102,14 +105,19 @@ from .help_content import (
     PROCESSING_MODES,
     HelpDocument,
     help_document,
+    processing_fast_mode,
     processing_transports,
     transport_hint,
 )
 from .html_report import build_html_report
-from .models import parse_governing_editions
-from .pipeline import DrawingContext, extract_drawing_context
+from .pipeline import DrawingContext, _resolve_save_tiles, extract_drawing_context
 from .render import list_sheets
-from .spec_documents import SpecBudget, SpecDocument
+from .spec_documents import (
+    CONTEXT_TOTAL_CHAR_BUDGET,
+    SPEC_TOTAL_CHAR_BUDGET,
+    SpecBudget,
+    SpecDocument,
+)
 
 _PDF_FILETYPES = [("PDF drawings", "*.pdf"), ("All files", "*.*")]
 
@@ -121,6 +129,25 @@ _SPEC_FILETYPES = [
     ("Markdown", "*.md"),
     ("All files", "*.*"),
 ]
+
+_CHECKLIST_FILETYPES = [
+    ("Checklists", "*.md *.txt *.docx *.pdf *.xlsx *.xlsm *.csv"),
+    ("Excel", "*.xlsx *.xlsm"),
+    ("Word (.docx)", "*.docx"),
+    ("PDF", "*.pdf"),
+    ("Markdown / text", "*.md *.txt"),
+    ("CSV", "*.csv"),
+    ("All files", "*.*"),
+]
+
+_ATLAS_FILETYPES = [
+    ("Excel workbook", "*.xlsx *.xlsm"),
+    ("CSV", "*.csv"),
+    ("All files", "*.*"),
+]
+
+# Width of a file row's label before it wraps; the Remove button sits right.
+_FILE_ROW_WRAP = 600
 
 _SPEC_WARNING_TITLE = "Confirm project specification documents"
 _SPEC_WARNING_BODY = (
@@ -163,6 +190,12 @@ class CollapsibleSection:
     falls below the header (sibling widgets never shift) — used by the activity
     log, the one section that should absorb the space collapsed sections hand
     back and hand its own back when collapsed.
+
+    ``hold_when_collapsed=False`` (with ``expand=True``) is for an expanding
+    section in the *middle* of the window — the loaded-files list: collapsed,
+    its container drops back to ``fill="x"`` without ``expand`` so it leaves
+    no empty gap; expanded, it shares the slack with the log again. Its
+    position in the packing order never changes (``pack_configure``).
     """
 
     def __init__(
@@ -174,17 +207,19 @@ class CollapsibleSection:
         summary_provider=None,
         pady=(0, 8),
         expand: bool = False,
+        hold_when_collapsed: bool = True,
     ) -> None:
         self.title = title
         self._expanded = expanded
         self._summary_provider = summary_provider
         self._expand = expand
+        self._hold_when_collapsed = hold_when_collapsed
         # Reproduces each old *_row's geometry exactly so surrounding spacing is
         # unchanged (the sections used fill="x", padx=16, pady=(0, 8)). An
         # ``expand`` section instead claims the vertical slack (fill="both",
         # expand=True) and keeps it even while collapsed (see the class docstring).
         self.container = ctk.CTkFrame(master, fg_color="transparent")
-        if expand:
+        if expand and (expanded or hold_when_collapsed):
             self.container.pack(fill="both", expand=True, padx=16, pady=pady)
         else:
             self.container.pack(fill="x", padx=16, pady=pady)
@@ -216,6 +251,11 @@ class CollapsibleSection:
             self._pack_body()
         else:
             self.body.pack_forget()
+        if self._expand and not self._hold_when_collapsed:
+            if self._expanded:
+                self.container.pack_configure(fill="both", expand=True)
+            else:
+                self.container.pack_configure(fill="x", expand=False)
         self._render_header()
 
     def set_expanded(self, expanded: bool) -> None:
@@ -257,11 +297,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 pass
 
         self.title("Drawing Context Analyzer")
-        # Shorter default now that the optional sections (and the API key when a
-        # key is already loaded) start collapsed; the activity log — the sole
-        # expand=True section — absorbs any slack and grows as sections collapse
-        # (and is itself collapsible, handing its space to the buttons below).
-        self.geometry("820x660")
+        # The optional sections (and the API key when a key is already loaded)
+        # start collapsed; the activity log and the Loaded-files list — the two
+        # expand=True sections — share any slack and grow as sections collapse.
+        # 720 tall fits the file list's minimum beside the QC and Processing
+        # headers with every action row visible (they are packed first).
+        self.geometry("820x720")
         # Width floor: the header must fit the title (~230px) plus the
         # four-button bar (3×112 + 68 + padding ≈ 428px) inside the 32+32px
         # outer/card padding — 640 clipped the row once "About" was added.
@@ -292,10 +333,25 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Uploaded project specifications (optional) — see spec_documents.py.
         # Distinct from "Per-run focus" below: this is ground-truth reference
         # material, extracted once at upload time (not a live textbox).
-        self._spec_paths: list[Path] = []
         self._spec_documents: list[SpecDocument] = []
         self._specs_text: str = ""
         self._specs_budget: SpecBudget | None = None
+        # Additional project context (background documents: basis of design,
+        # owner standards, prior comments) — extracted and budgeted like the
+        # specs, sent beside them under its own prompt block.
+        self._context_documents: list[SpecDocument] = []
+        self._context_text: str = ""
+        self._context_budget: SpecBudget | None = None
+        # Uploaded checklist files, each parsed into a review Profile the QC
+        # critique applies item by item (profiles.load_checklist_file).
+        self._checklists: list = []
+        # AHJ Atlas Input (optional): the loaded workbook and the jurisdiction
+        # chosen from it. Its editions govern the run (governing_editions=).
+        self._atlas = None
+        self._atlas_choice = None
+        # While a run or an extraction is in flight the file list's Add/Remove
+        # buttons are disabled (inputs are snapshotted at Analyze).
+        self._inputs_locked = False
         self._last_log_msg: str | None = None
         # Latest activity-log line, surfaced in the log section's collapsed
         # header so the most recent status stays visible without expanding it.
@@ -333,6 +389,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Ask-AI panel prompts for one at runtime). On restores the old embedded
         # -key convenience — with a red warning in the report; don't share it.
         self._embed_key_var = BooleanVar(value=False)
+        # Diagnostics: stage every rendered tile PNG into the export's tiles/
+        # folder. Starts from DRAWING_ANALYZER_SAVE_TILES; the box then wins.
+        self._save_tiles_var = BooleanVar(value=_resolve_save_tiles(None))
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
@@ -371,6 +430,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._build_ui()
         self._register_dnd()
         self._refresh_summary()
+        self._refresh_files_panel()
         # Silent, throttled (once/day) update check shortly after the window
         # paints — never blocks startup, and only surfaces a dialog when an
         # update is actually available. The footer's "Check for Updates" button
@@ -573,43 +633,54 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self.focus_expand_btn.pack(side="left", padx=(6, 0))
 
-        # Project specifications (optional) — the real project spec documents
-        # for this run, distinct from "Per-run focus" above: this is
-        # ground-truth reference material, not an ad-hoc question, and it never
-        # creates a new report section — conflicts fold into ordinary findings.
-        self._specs_sec = CollapsibleSection(
-            outer, "Project specifications (optional)", expanded=False,
-            summary_provider=self._specs_summary,
+        # Loaded files — every input this run will send, by category, each
+        # file with its own Remove button and every category with its token
+        # count. Specifications and additional context ride every sheet's
+        # digest prompt; checklists ride the QC critique; the AHJ Atlas Input
+        # sets the governing code editions. Drawings come from the drop zone
+        # above or "Add drawings…" here. Rebuilt by _refresh_files_panel.
+        self._files_sec = CollapsibleSection(
+            outer, "Loaded files", expanded=False,
+            summary_provider=self._files_summary,
+            expand=True, hold_when_collapsed=False,
         )
-        specs_row = self._specs_sec.body
-        ctk.CTkLabel(
-            specs_row,
-            text=(
-                "Upload the real project spec documents (.pdf/.docx/.txt/.md) "
-                "so QC can check the drawings against them. Any conflict shows "
-                "up as an ordinary finding — there's no separate spec report."
-            ),
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=COLORS["text_muted"],
-            wraplength=740,
-            justify="left",
-        ).pack(anchor="w")
-        specs_btn_row = ctk.CTkFrame(specs_row, fg_color="transparent")
-        specs_btn_row.pack(fill="x", pady=(4, 0))
-        self.upload_specs_btn = ctk.CTkButton(
-            specs_btn_row, text="Upload spec documents…", width=190, height=32,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
+        files_body = self._files_sec.body
+        add_row = ctk.CTkFrame(files_body, fg_color="transparent")
+        add_row.pack(fill="x", pady=(2, 4))
+        self._add_buttons: dict[str, ctk.CTkButton] = {}
+        for key, text, width, command in (
+            ("drawings", "Add drawings…", 118, self._on_browse),
+            ("specs", "Add specs…", 104, self._on_upload_specs),
+            ("checklists", "Add checklists…", 124, self._on_add_checklists),
+            ("context", "Add context…", 112, self._on_add_context),
+            ("atlas", "Load AHJ Atlas Input…", 170, self._on_load_atlas),
+        ):
+            btn = ctk.CTkButton(
+                add_row, text=text, width=width, height=30,
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
+                border_width=1, border_color=COLORS["border"],
+                text_color=COLORS["text_secondary"], command=command,
+            )
+            btn.pack(side="left", padx=(0, 6))
+            self._add_buttons[key] = btn
+        # Back-compat handle: the specs button keeps its old attribute name.
+        self.upload_specs_btn = self._add_buttons["specs"]
+        # A small requested height: the list grows into the window's slack
+        # (shared with the activity log) and scrolls past it, so a long file
+        # list never pushes the QC / Processing headers off a short window.
+        self._files_list = ctk.CTkScrollableFrame(
+            files_body, height=90, fg_color=COLORS["bg_input"],
             border_width=1, border_color=COLORS["border"],
-            text_color=COLORS["text_secondary"], command=self._on_upload_specs,
         )
-        self.upload_specs_btn.pack(side="left")
-        self.specs_status_label = ctk.CTkLabel(
-            specs_btn_row, text="No spec documents loaded.",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=COLORS["text_muted"],
-        )
-        self.specs_status_label.pack(side="left", padx=(10, 0))
+        self._files_list.pack(fill="both", expand=True, pady=(0, 2))
+        # The frame's vertical scrollbar requests a 200 px default height,
+        # which overrides ``height`` above as the list's minimum. Lower it so
+        # the requested height is honored (the bar still stretches to fill).
+        try:
+            self._files_list._scrollbar.configure(height=20)
+        except Exception:  # noqa: BLE001 - cosmetic; an older CTk keeps 200 px
+            pass
 
         # QC review options.
         self._qc_sec = CollapsibleSection(
@@ -654,23 +725,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._reference_audit_hint.pack(anchor="w", padx=(28, 0))
         self._on_qc_toggle()   # set the sub-toggle's initial enabled state
 
-        # Governing code editions: the reviewer's word on which editions govern
-        # (the AHJ's adoption), outranking what the identity stage detects for
-        # the codes named. Used by the citation check, review plan, cross-sheet
-        # QC and edition audit; ignored by a standard run.
+        # Governing code editions now come from the AHJ Atlas Input (Loaded
+        # files above), not a typed field: say so where the field used to be.
         ctk.CTkLabel(
-            qc_row, text="Governing code editions (optional)",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=COLORS["text_primary"],
+            qc_row,
+            text=("Governing code editions: load an AHJ Atlas Input (Excel) under "
+                  "Loaded files. Optional — without one, the editions on the "
+                  "drawings are used."),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"], wraplength=700, justify="left",
         ).pack(anchor="w", pady=(8, 0))
-        self.governing_entry = ctk.CTkEntry(
-            qc_row, width=520, height=30,
-            placeholder_text="e.g. NFPA 13 2022; IBC 2021 (replaces the detected edition)",
-            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
-            text_color=COLORS["text_primary"],
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-        )
-        self.governing_entry.pack(anchor="w", pady=(2, 0))
 
         # Review-profile selector (Phase 24 §16.4): a checkbox per available
         # profile, showing its title/version/discipline/source. Applicable profiles
@@ -701,18 +765,22 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # point. Text is single-sourced in help_content.transport_hint so the
         # checkbox, cost dialog, and help panel never drift apart.
         self._transport_hint = ctk.CTkLabel(
-            transport_row, text=transport_hint(self._processing_mode_var.get()),
+            transport_row, text=self._transport_hint_text(),
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=COLORS["text_muted"], justify="left", wraplength=780,
+            text_color=COLORS["text_muted"], justify="left", wraplength=720,
         )
         self._transport_hint.pack(anchor="w", pady=(2, 0))
 
-        # Summary + actions row
+        # Summary + actions row. Packed below with the bottom rows (see the
+        # ``after=`` chain there), so the Analyze button can never be pushed off
+        # a short window by expanded sections.
         row = ctk.CTkFrame(outer, fg_color="transparent")
-        row.pack(fill="x", padx=16, pady=(0, 8))
+        self._action_row = row
+        # Wraps rather than widening: a long full-QC estimate used to squeeze
+        # the Stop button to a sliver at the minimum window width.
         self.summary_label = ctk.CTkLabel(
             row, text="", font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=COLORS["text_secondary"], justify="left",
+            text_color=COLORS["text_secondary"], justify="left", wraplength=400,
         )
         self.summary_label.pack(side="left")
         self.clear_btn = ctk.CTkButton(
@@ -745,7 +813,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             outer, text="", font=ctk.CTkFont(family="Consolas", size=12),
             text_color=COLORS["text_muted"], anchor="w",
         )
-        self.progress_label.pack(fill="x", padx=16, pady=(0, 4))
 
         # Activity log — live status + per-sheet diagnostics. The digest itself
         # is no longer shown here; it is written only to the saved Markdown file.
@@ -783,8 +850,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # work on a double-click with no key to paste, but writes the key into
         # the file (so it must not be shared). Off by default: the report prompts
         # for a key at first use and keeps it only in the browser tab.
+        # The two bottom rows are packed against the footer (``after=``) so
+        # they claim their space before the sections above: with many sections
+        # expanded on a short window, the activity log and the sections give
+        # way, never the export buttons or the tile-image option.
+        btn_row = ctk.CTkFrame(outer, fg_color="transparent")
+        btn_row.pack(side="bottom", fill="x", padx=16, pady=(0, 8), after=self._footer)
         opt_row = ctk.CTkFrame(outer, fg_color="transparent")
-        opt_row.pack(fill="x", padx=16, pady=(0, 4))
+        opt_row.pack(side="bottom", fill="x", padx=16, pady=(0, 4), after=btn_row)
+        # Then the progress line and the Analyze row, above the options: the
+        # activity log sits between the sections and the Analyze row and is
+        # the first thing to give way on a short window.
+        self.progress_label.pack(side="bottom", fill="x", padx=16, pady=(0, 2), after=opt_row)
+        self._action_row.pack(
+            side="bottom", fill="x", padx=16, pady=(4, 2), after=self.progress_label,
+        )
         self._embed_key_check = ctk.CTkCheckBox(
             opt_row,
             text="Embed API key in HTML report (Ask-AI works offline; don't share the file)",
@@ -797,16 +877,31 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Bottom action row: open the on-disk diagnostics log (always available —
         # the detailed request-level trace lives in a file, not this activity
         # log), and save the digest (enabled once a run produces text).
-        btn_row = ctk.CTkFrame(outer, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=(0, 16))
+        # The diagnostics log button with its one option stacked beneath it,
+        # so the right-hand export buttons keep their width at the minimum
+        # window size.
+        diag_col = ctk.CTkFrame(btn_row, fg_color="transparent")
+        diag_col.pack(side="left")
         self.open_log_btn = ctk.CTkButton(
-            btn_row, text="Open Diagnostics Log", width=190, height=34,
+            diag_col, text="Open Diagnostics Log", width=190, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
             border_width=1, border_color=COLORS["border"],
             text_color=COLORS["text_secondary"], command=self._on_open_log,
         )
-        self.open_log_btn.pack(side="left")
+        self.open_log_btn.pack(anchor="w")
+        # Diagnostics option, kept with the log it belongs to: stage every
+        # rendered tile image into the export's tiles/ folder (with per-tile
+        # notes). Off unless DRAWING_ANALYZER_SAVE_TILES is set; never places a
+        # call and never changes a result.
+        self._save_tiles_check = ctk.CTkCheckBox(
+            diag_col, text="Save tile images (export tiles/ folder)",
+            variable=self._save_tiles_var,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+            checkbox_width=16, checkbox_height=16,
+        )
+        self._save_tiles_check.pack(anchor="w", pady=(4, 0))
         # GUI export surface trimmed (gui-export-options-cleanup): the per-artifact
         # "Save Markdown…" and "Save Findings CSV…" buttons were removed from the
         # GUI to keep it fast and uncluttered — the operator's two review
@@ -1251,6 +1346,27 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._sync_dropzone_section()
             self._refresh_summary()
             self._refresh_profile_suggestions()
+            self._refresh_files_panel()
+            self._reveal_files()
+
+    def _remove_pdf(self, path: Path) -> None:
+        """Drop one drawing PDF from the run (its Remove button)."""
+        if self._busy:
+            return
+        kept = [p for p in self._pdfs if str(p) != str(path)]
+        if len(kept) == len(self._pdfs):
+            return
+        self._pdfs = kept
+        self._ctx = None
+        self._log(f"Removed drawing: {Path(path).name}", level="muted")
+        self._sync_dropzone_section()
+        self._refresh_summary()
+        # A new file list: the measured bases describe the old one. The
+        # preflight clears and re-measures (and re-suggests profiles).
+        self._refresh_profile_suggestions()
+        self._refresh_files_panel()
+
+    # ---------------------------------------------------- reference documents
 
     def _on_upload_specs(self) -> None:
         """Prompt the quality warning, then let the operator pick spec files.
@@ -1258,7 +1374,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         The warning is shown on EVERY click, before the file picker opens —
         matches the existing ``askyesno(..., icon="warning")`` pattern used
         for the cost-confirm / plaintext-key-storage dialogs. Only "Yes"
-        opens the picker; "No" leaves any previously-loaded specs untouched.
+        opens the picker. Picked files are ADDED to those already loaded (a
+        file picked again replaces its earlier copy); each loaded file has its
+        own Remove button in the Loaded files list.
         """
         if self._busy:
             return
@@ -1267,94 +1385,541 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         files = filedialog.askopenfilenames(
             title="Select project specification documents", filetypes=_SPEC_FILETYPES
         )
-        if not files:
+        if files:
+            self._start_document_extraction("specs", [Path(f) for f in files])
+
+    def _on_add_context(self) -> None:
+        """Pick additional context documents (basis of design, owner standards…)."""
+        if self._busy:
             return
-        paths = [Path(f) for f in files]
-        # Mirrors the main analyze flow's busy guard: without this, Analyze
-        # or Clear could run (the latter would apply this extraction's
-        # stale result right on top of a just-cleared state) before the
-        # background thread below finishes populating self._specs_text.
+        files = filedialog.askopenfilenames(
+            title="Select additional context documents", filetypes=_SPEC_FILETYPES
+        )
+        if files:
+            self._start_document_extraction("context", [Path(f) for f in files])
+
+    def _start_document_extraction(self, kind: str, paths: list[Path]) -> None:
+        """Extract text off the UI thread; the result lands via ``after``.
+
+        Mirrors the main analyze flow's busy guard: without it, Analyze or
+        Clear could run before the background thread finishes (Clear would
+        then have this extraction's stale result applied on top of it).
+        """
         self._busy = True
-        self.upload_specs_btn.configure(state="disabled", text="Reading…")
+        self._set_inputs_editable(False)
         self.analyze_btn.configure(state="disabled")
         self.clear_btn.configure(state="disabled")
-        self.specs_status_label.configure(text="Reading spec documents…")
-        threading.Thread(target=self._extract_specs_worker, args=(paths,), daemon=True).start()
+        noun = "spec documents" if kind == "specs" else "context documents"
+        self._set_progress_text(f"Reading {noun}…", color=COLORS["text_secondary"])
+        threading.Thread(
+            target=self._extract_documents_worker, args=(kind, paths), daemon=True,
+        ).start()
 
-    def _extract_specs_worker(self, paths: list[Path]) -> None:
-        """Extract text off the calling worker thread (a large PDF spec must
-        not freeze the UI); the result lands back via ``self.after``.
-
-        Per-file extraction failures are already captured on each
-        ``SpecDocument`` (I-3) and never raise, but this still guards the
-        whole pass (mirrors ``_worker``'s try/except around the analysis
-        run) so an unexpected failure reports back and clears the busy
-        state instead of leaving the UI stuck on "Reading…" forever.
-        """
+    def _extract_documents_worker(self, kind: str, paths: list[Path]) -> None:
+        """Per-file failures are captured on each ``SpecDocument`` (I-3) and
+        never raise; this still guards the whole pass so an unexpected failure
+        reports back and clears the busy state instead of sticking."""
         try:
-            from .spec_documents import build_specs_text, extract_spec_documents
+            from .spec_documents import extract_spec_documents
 
             docs = extract_spec_documents(paths)
-            text, budget = build_specs_text(docs)
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
-            self.after(0, lambda e=exc: self._on_specs_extraction_error(str(e)))
+            self.after(0, lambda e=exc: self._on_document_extraction_error(kind, str(e)))
             return
-        self.after(0, lambda: self._apply_specs_result(paths, docs, text, budget))
+        self.after(0, lambda: self._apply_documents_result(kind, docs))
+
+    # Kept under its historical name for callers that still use it.
+    def _extract_specs_worker(self, paths: list[Path]) -> None:
+        self._extract_documents_worker("specs", paths)
+
+    def _end_extraction(self) -> None:
+        self._busy = False
+        self._set_inputs_editable(True)
+        self.analyze_btn.configure(state="normal")
+        self.clear_btn.configure(state="normal")
+        self._set_progress_text("")
+
+    def _on_document_extraction_error(self, kind: str, message: str) -> None:
+        self._end_extraction()
+        noun = "spec documents" if kind == "specs" else "context documents"
+        self._log(f"Could not read {noun}: {message}", level="error")
 
     def _on_specs_extraction_error(self, message: str) -> None:
-        self._busy = False
-        self.upload_specs_btn.configure(state="normal", text="Upload spec documents…")
-        self.analyze_btn.configure(state="normal")
-        self.clear_btn.configure(state="normal")
-        self.specs_status_label.configure(text="No spec documents loaded.")
-        self._log(f"Could not read spec documents: {message}", level="error")
+        self._on_document_extraction_error("specs", message)
 
-    def _apply_specs_result(
-        self, paths: list[Path], docs: list[SpecDocument], text: str, budget: SpecBudget
-    ) -> None:
-        self._spec_paths = paths
-        self._spec_documents = docs
-        self._specs_text = text
-        self._specs_budget = budget
-        self._busy = False
-        self.upload_specs_btn.configure(state="normal", text="Upload spec documents…")
-        self.analyze_btn.configure(state="normal")
-        self.clear_btn.configure(state="normal")
+    def _apply_documents_result(self, kind: str, docs: list[SpecDocument]) -> None:
+        """Merge freshly extracted documents into the category and rebuild it."""
+        self._end_extraction()
+        current = self._spec_documents if kind == "specs" else self._context_documents
+        picked = {str(d.path) for d in docs}
+        merged = [d for d in current if str(d.path) not in picked]
         ok = [d for d in docs if d.ok]
-        failed = [d for d in docs if not d.ok]
+        merged += ok
+        if kind == "specs":
+            self._spec_documents = merged
+        else:
+            self._context_documents = merged
+        label = "spec document(s)" if kind == "specs" else "context document(s)"
         if ok:
-            self.specs_status_label.configure(
-                text=f"{len(ok)} spec document(s) loaded ({len(text):,} chars)."
-            )
             self._log(
-                "Loaded spec document(s): " + ", ".join(d.display_name for d in ok),
+                f"Loaded {label}: " + ", ".join(d.display_name for d in ok),
                 level="success",
             )
+        for d in docs:
+            if not d.ok:
+                self._log(f"Could not read {d.display_name}: {d.error}", level="warning")
+        self._rebuild_document_text(kind)
+        if ok:
+            self._reveal_files()
+
+    def _apply_specs_result(
+        self, paths: list[Path], docs: list[SpecDocument], text: str = "",
+        budget: SpecBudget | None = None,
+    ) -> None:
+        """Historical entry point; the text is rebuilt from the documents."""
+        self._apply_documents_result("specs", docs)
+
+    def _rebuild_document_text(self, kind: str) -> None:
+        """Re-join a category's loaded documents under its budget (no re-reading)."""
+        from .spec_documents import build_specs_text
+
+        if kind == "specs":
+            text, budget = build_specs_text(self._spec_documents, budget_chars=SPEC_TOTAL_CHAR_BUDGET)
+            self._specs_text, self._specs_budget = text, budget
+            noun = "Spec"
         else:
-            self.specs_status_label.configure(text="No spec documents loaded.")
-        for d in failed:
-            self._log(f"Could not read spec document {d.display_name}: {d.error}", level="warning")
+            text, budget = build_specs_text(
+                self._context_documents, budget_chars=CONTEXT_TOTAL_CHAR_BUDGET,
+            )
+            self._context_text, self._context_budget = text, budget
+            noun = "Context"
         if budget.degraded:
             self._log(
-                f"Spec text truncated to the {budget.budget_chars:,}-char "
+                f"{noun} text truncated to the {budget.budget_chars:,}-char "
                 f"budget ({budget.omitted_chars:,} char(s) omitted).",
                 level="warning",
             )
         self._refresh_summary()
+        self._refresh_files_panel()
+
+    def _remove_document(self, kind: str, path: Path) -> None:
+        if self._busy:
+            return
+        if kind == "specs":
+            self._spec_documents = [d for d in self._spec_documents if str(d.path) != str(path)]
+        else:
+            self._context_documents = [
+                d for d in self._context_documents if str(d.path) != str(path)
+            ]
+        self._log(f"Removed {Path(path).name}", level="muted")
+        self._rebuild_document_text(kind)
 
     def _current_specs_text(self) -> str:
         return self._specs_text or ""
+
+    def _current_context_text(self) -> str:
+        return self._context_text or ""
+
+    # ------------------------------------------------------------- checklists
+
+    def _on_add_checklists(self) -> None:
+        """Pick checklist files; each becomes a review profile for QC critique."""
+        if self._busy:
+            return
+        files = filedialog.askopenfilenames(
+            title="Select review checklists", filetypes=_CHECKLIST_FILETYPES
+        )
+        if not files:
+            return
+        paths = [Path(f) for f in files]
+        self._busy = True
+        self._set_inputs_editable(False)
+        self.analyze_btn.configure(state="disabled")
+        self.clear_btn.configure(state="disabled")
+        self._set_progress_text("Reading checklists…", color=COLORS["text_secondary"])
+
+        def _work() -> None:
+            from .profiles import load_checklist_file
+
+            loaded, failed = [], []
+            for path in paths:
+                try:
+                    loaded.append(load_checklist_file(path))
+                except Exception as exc:  # noqa: BLE001 - one bad file never sinks the rest
+                    failed.append((path, str(exc)))
+            self.after(0, lambda: self._apply_checklists(loaded, failed))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_checklists(self, loaded: list, failed: list) -> None:
+        self._end_extraction()
+        picked = {str(p.source_path) for p in loaded}
+        self._checklists = [
+            p for p in self._checklists if str(p.source_path) not in picked
+        ] + list(loaded)
+        for prof in loaded:
+            self._log(
+                f"Loaded checklist {prof.title}: {len(prof.items)} item(s).",
+                level="success",
+            )
+        for path, error in failed:
+            self._log(f"Could not read checklist {Path(path).name}: {error}", level="warning")
+        self._refresh_summary()
+        self._refresh_files_panel()
+        if loaded:
+            self._reveal_files()
+
+    def _remove_checklist(self, profile) -> None:
+        if self._busy:
+            return
+        self._checklists = [p for p in self._checklists if p is not profile]
+        self._log(f"Removed checklist {profile.title}", level="muted")
+        self._refresh_summary()
+        self._refresh_files_panel()
+
+    # -------------------------------------------------------------- AHJ atlas
+
+    def _on_load_atlas(self) -> None:
+        """Load the AHJ Atlas Input (Excel) — the run's governing code editions."""
+        if self._busy:
+            return
+        path = filedialog.askopenfilename(
+            title="Load AHJ Atlas Input (Excel)", filetypes=_ATLAS_FILETYPES
+        )
+        if not path:
+            return
+        self._busy = True
+        self._set_inputs_editable(False)
+        self.analyze_btn.configure(state="disabled")
+        self.clear_btn.configure(state="disabled")
+        self._set_progress_text("Reading AHJ Atlas Input…", color=COLORS["text_secondary"])
+
+        def _work() -> None:
+            from .ahj_atlas import load_ahj_atlas
+
+            atlas = load_ahj_atlas(Path(path))  # never raises (I-3)
+            self.after(0, lambda: self._apply_atlas(atlas))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_atlas(self, atlas) -> None:
+        self._end_extraction()
+        for warning in atlas.warnings[:10]:
+            self._log(f"AHJ Atlas: {warning}", level="warning")
+        if len(atlas.warnings) > 10:
+            self._log(f"AHJ Atlas: {len(atlas.warnings) - 10} more warning(s).", level="warning")
+        if not atlas.ok:
+            self._log(f"AHJ Atlas Input not loaded: {atlas.error}", level="error")
+            messagebox.showerror("AHJ Atlas Input", f"{atlas.display_name}\n\n{atlas.error}")
+            return
+        if len(atlas.jurisdictions) == 1:
+            self._set_atlas(atlas, atlas.jurisdictions[0])
+        else:
+            self._choose_jurisdiction(atlas)
+
+    def _set_atlas(self, atlas, jurisdiction) -> None:
+        self._atlas, self._atlas_choice = atlas, jurisdiction
+        where = f" — {jurisdiction.name}" if jurisdiction.name else ""
+        self._log(
+            f"AHJ Atlas Input loaded ({atlas.display_name}{where}): "
+            f"{jurisdiction.summary()}. These editions replace the ones detected "
+            "on the drawings for the codes named.",
+            level="success",
+        )
+        self._refresh_summary()
+        self._refresh_files_panel()
+        self._reveal_files()
+
+    def _remove_atlas(self) -> None:
+        if self._busy:
+            return
+        self._atlas, self._atlas_choice = None, None
+        self._log("Removed the AHJ Atlas Input.", level="muted")
+        self._refresh_summary()
+        self._refresh_files_panel()
+
+    def _choose_jurisdiction(self, atlas) -> None:
+        """Ask which jurisdiction of a multi-AHJ atlas governs this project."""
+        win = ctk.CTkToplevel(self)
+        win.title("Choose the AHJ")
+        win.configure(fg_color=COLORS["bg_dark"])
+        win.geometry("520x460")
+        win.minsize(400, 320)
+        win.transient(self)
+        card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(
+            card,
+            text=(f"{atlas.display_name} lists {len(atlas.jurisdictions)} "
+                  "jurisdictions. Which one governs this project?"),
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            text_color=COLORS["text_primary"], wraplength=460, justify="left",
+        ).pack(anchor="w", padx=14, pady=(14, 6))
+        query = ctk.CTkEntry(
+            card, placeholder_text="Filter by name or code…", height=30,
+            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+        )
+        query.pack(fill="x", padx=14, pady=(0, 6))
+        bottom = ctk.CTkFrame(card, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=14, pady=(6, 14))
+        listing = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_input"])
+        listing.pack(fill="both", expand=True, padx=14)
+        choice = StringVar(value="0")
+
+        def _fill(*_args) -> None:
+            for child in listing.winfo_children():
+                child.destroy()
+            needle = query.get().strip().casefold()
+            for i, j in enumerate(atlas.jurisdictions):
+                text = f"{j.label}  —  {j.summary()}"
+                if needle and needle not in text.casefold():
+                    continue
+                ctk.CTkRadioButton(
+                    listing, text=text, variable=choice, value=str(i),
+                    font=ctk.CTkFont(family="Segoe UI", size=12),
+                    text_color=COLORS["text_primary"],
+                ).pack(anchor="w", pady=2)
+
+        query.bind("<KeyRelease>", _fill)
+        _fill()
+
+        def _use() -> None:
+            try:
+                picked = atlas.jurisdictions[int(choice.get())]
+            except (ValueError, IndexError):
+                return
+            win.destroy()
+            self._set_atlas(atlas, picked)
+
+        ctk.CTkButton(
+            bottom, text="Use this AHJ", width=130, height=32,
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=_use,
+        ).pack(side="right")
+        ctk.CTkButton(
+            bottom, text="Cancel", width=90, height=32,
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"], command=win.destroy,
+        ).pack(side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        try:
+            win.grab_set()
+        except Exception:  # noqa: BLE001 - a grab failure only loses modality
+            pass
+
+    def _current_governing(self):
+        """The governing-edition entries from the AHJ Atlas Input (``[]``: none)."""
+        choice = getattr(self, "_atlas_choice", None)
+        return list(choice.entries) if choice is not None else []
+
+    # -------------------------------------------------------- loaded-file list
+
+    def _set_inputs_editable(self, enabled: bool) -> None:
+        """Enable/disable every Add button and (via a rebuild) every Remove."""
+        self._inputs_locked = not enabled
+        for btn in getattr(self, "_add_buttons", {}).values():
+            btn.configure(state="normal" if enabled else "disabled")
+        self._refresh_files_panel()
+
+    def _files_summary(self) -> str:
+        """Collapsed Loaded-files header: what is loaded, by category."""
+        parts = []
+        if self._pdfs:
+            parts.append(f"{len(self._pdfs)} drawing PDF(s)")
+        if self._spec_documents:
+            parts.append(f"{len(self._spec_documents)} spec(s)")
+        if self._checklists:
+            parts.append(f"{len(self._checklists)} checklist(s)")
+        if self._context_documents:
+            parts.append(f"{len(self._context_documents)} context doc(s)")
+        if self._atlas_choice is not None:
+            parts.append("AHJ Atlas")
+        if not parts:
+            return "add drawings, specs, checklists, context or the AHJ Atlas Input"
+        return " · ".join(parts)
+
+    def _reveal_files(self) -> None:
+        """Expand the Loaded-files list when something is added, so the user
+        sees what was loaded (and its Remove button) without hunting for it."""
+        sec = getattr(self, "_files_sec", None)
+        if sec is not None and not self._busy:
+            sec.set_expanded(True)
+
+    def _file_groups(self) -> list[dict]:
+        """The Loaded-files list as data: one dict per category.
+
+        Each group: ``title``, ``detail`` (count + tokens), ``empty`` (shown when
+        nothing is loaded) and ``rows`` — ``(label, detail, remove_callback)``.
+        Kept separate from the widgets so the token arithmetic is one place.
+        """
+        groups: list[dict] = []
+
+        # Drawings — image + text-layer tokens for one digest read each.
+        counts = [len(list_sheets([p])) for p in self._pdfs]
+        files = drawing_file_tokens(
+            counts, self._usable_preflight_bases(), model=REVIEW_MODEL_DEFAULT,
+        )
+        rows = []
+        for path, ft in zip(self._pdfs, files):
+            text = (f" + ~{ft.text_tokens:,} text" if ft.text_tokens is not None else "")
+            basis = "" if ft.measured else " (allowance until measured)"
+            rows.append((
+                path.name,
+                f"{ft.sheets} sheet(s) · ~{ft.image_tokens:,} image{text} tokens{basis}",
+                lambda p=path: self._remove_pdf(p),
+            ))
+        total = sum(f.total for f in files)
+        groups.append({
+            "title": "Drawings",
+            "detail": (f"{len(self._pdfs)} file(s), {sum(counts)} sheet(s) · "
+                       f"~{total:,} tokens per digest read") if self._pdfs else "",
+            "empty": "none — drop PDFs above or Add drawings…",
+            "rows": rows,
+        })
+
+        for kind, title, docs, text, note in (
+            ("specs", "Specifications", self._spec_documents, self._specs_text,
+             "sent with every sheet"),
+            ("context", "Additional context", self._context_documents, self._context_text,
+             "sent with every sheet"),
+        ):
+            rows = [
+                (d.display_name, f"~{estimate_text_tokens(len(d.text)):,} tokens",
+                 lambda k=kind, p=d.path: self._remove_document(k, p))
+                for d in docs
+            ]
+            budget = self._specs_budget if kind == "specs" else self._context_budget
+            cut = (f" (budget reached: {budget.omitted_chars:,} chars omitted)"
+                   if budget is not None and budget.degraded else "")
+            groups.append({
+                "title": title,
+                "detail": (f"{len(docs)} file(s) · ~{estimate_text_tokens(len(text)):,} "
+                           f"tokens, {note}{cut}") if docs else "",
+                "empty": ("none — the project specifications, if you have them"
+                          if kind == "specs" else
+                          "none — e.g. basis of design, owner standards, prior comments"),
+                "rows": rows,
+            })
+
+        from .profiles import build_checklist_prompt, flatten_items
+
+        rows = [
+            (p.title, f"{len(p.items)} item(s) · "
+                      f"~{estimate_text_tokens(len(build_checklist_prompt(p.items))):,} tokens",
+             lambda prof=p: self._remove_checklist(prof))
+            for p in self._checklists
+        ]
+        all_items = flatten_items(self._checklists)
+        groups.append({
+            "title": "Checklists",
+            "detail": (f"{len(self._checklists)} file(s), {len(all_items)} item(s) · "
+                       f"~{estimate_text_tokens(len(build_checklist_prompt(all_items))):,} "
+                       "tokens, applied by the QC Markups critique") if self._checklists else "",
+            "empty": "none — applied by the QC Markups critique",
+            "rows": rows,
+        })
+
+        choice = self._atlas_choice
+        rows = []
+        if choice is not None and self._atlas is not None:
+            where = f"{choice.name} · " if choice.name else ""
+            rows.append((
+                self._atlas.display_name,
+                f"{where}{choice.summary()} · "
+                f"~{estimate_text_tokens(len('; '.join(choice.entries))):,} tokens",
+                self._remove_atlas,
+            ))
+        groups.append({
+            "title": "AHJ Atlas Input (optional)",
+            "detail": (f"{len(choice.codes)} governing edition(s)" if choice is not None else ""),
+            "empty": "none — the editions on the drawings are used",
+            "rows": rows,
+        })
+        return groups
+
+    def _refresh_files_panel(self) -> None:
+        """Rebuild the Loaded-files list (called whenever an input changes)."""
+        frame = getattr(self, "_files_list", None)
+        if frame is None:
+            return
+        try:
+            for child in frame.winfo_children():
+                child.destroy()
+            groups = self._file_groups()
+        except Exception as exc:  # noqa: BLE001 - a list refresh must never break the UI
+            _log.warning("loaded-files refresh failed: %s", exc)
+            return
+        state = "disabled" if self._inputs_locked else "normal"
+        for group in groups:
+            head = ctk.CTkFrame(frame, fg_color="transparent")
+            head.pack(fill="x", pady=(6, 0))
+            ctk.CTkLabel(
+                head, text=group["title"],
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                text_color=COLORS["text_primary"],
+            ).pack(side="left")
+            if group["detail"]:
+                ctk.CTkLabel(
+                    head, text=f"  {group['detail']}",
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color=COLORS["text_secondary"],
+                ).pack(side="left")
+            if not group["rows"]:
+                ctk.CTkLabel(
+                    head, text=f"  {group['empty']}",
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color=COLORS["text_muted"],
+                ).pack(side="left")
+            for label, detail, remove in group["rows"]:
+                row = ctk.CTkFrame(frame, fg_color="transparent")
+                row.pack(fill="x", padx=(14, 0), pady=1)
+                ctk.CTkButton(
+                    row, text="Remove", width=70, height=24,
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    fg_color=COLORS["bg_card"], hover_color=COLORS["error"],
+                    border_width=1, border_color=COLORS["border"],
+                    text_color=COLORS["text_secondary"], command=remove, state=state,
+                ).pack(side="right", padx=(6, 4))
+                ctk.CTkLabel(
+                    row, text=f"{label}  ·  {detail}",
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color=COLORS["text_secondary"], anchor="w", justify="left",
+                    wraplength=_FILE_ROW_WRAP,
+                ).pack(side="left", fill="x", expand=True)
+        note = self._files_total_text(groups)
+        if note:
+            ctk.CTkLabel(
+                frame, text=note, font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color=COLORS["text_muted"], justify="left",
+                wraplength=_FILE_ROW_WRAP,
+            ).pack(anchor="w", pady=(8, 2))
+        sec = getattr(self, "_files_sec", None)
+        if sec is not None:
+            sec.refresh()
+
+    def _files_total_text(self, groups: list[dict]) -> str:
+        if not any(g["rows"] for g in groups):
+            return ""
+        return (
+            "Tokens per digest read (≈4 characters per text token). Specs and "
+            "context ride every sheet's request; the cost line prices it all."
+        )
 
     def _on_clear(self) -> None:
         if self._busy:
             return
         self._pdfs = []
         self._ctx = None
-        self._spec_paths = []
         self._spec_documents = []
         self._specs_text = ""
         self._specs_budget = None
-        self.specs_status_label.configure(text="No spec documents loaded.")
+        self._context_documents = []
+        self._context_text = ""
+        self._context_budget = None
+        self._checklists = []
+        self._atlas = None
+        self._atlas_choice = None
         self._reset_profile_selection()
         self._clear_log()
         self.html_btn.configure(state="disabled")
@@ -1363,6 +1928,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._set_progress_text("")
         self._sync_dropzone_section()
         self._refresh_summary()
+        self._refresh_files_panel()
 
     def _on_qc_toggle(self) -> None:
         """Enable the markup sub-toggles only when QC Markups is on.
@@ -1410,8 +1976,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             ctk.CTkLabel(
                 parent,
                 text=("Review checklists: authored automatically per set "
-                      "(model-planned). Drop .md checklists in "
-                      "~/.drawing_analyzer/profiles to add your own."),
+                      "(model-planned). Add your own with Add checklists… under "
+                      "Loaded files, or keep .md checklists in "
+                      "~/.drawing_analyzer/profiles."),
                 font=ctk.CTkFont(family="Segoe UI", size=11),
                 text_color=COLORS["text_muted"], wraplength=520, justify="left",
             ).pack(anchor="w", padx=(28, 0), pady=(6, 0))
@@ -1544,6 +2111,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # unrelated option toggle happens to refresh it — so the measured number
         # would appear only by accident.
         self._refresh_summary()
+        # The per-file token counts in the Loaded-files list sharpen the same way.
+        self._refresh_files_panel()
 
     def _reset_profile_selection(self) -> None:
         """Clear all profile state (called on Clear) so nothing carries into a new set.
@@ -1670,48 +2239,32 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         One call covers all three surfaces so a run's start/finish never
         leaves the pop-out editable while the header box (and everything
-        that reads it) is locked, or vice versa. The governing-editions field
-        is a run input too, so it locks and unlocks with them.
+        that reads it) is locked, or vice versa. The loaded-file list is a
+        run input too, so its Add/Remove buttons lock and unlock with them.
         """
         state = "normal" if enabled else "disabled"
         self.focus_box.configure(state=state)
         self.focus_expand_btn.configure(state=state)
         if self.focus_popout_box is not None:
             self.focus_popout_box.configure(state=state)
-        governing = getattr(self, "governing_entry", None)
-        if governing is not None:
-            governing.configure(state=state)
+        self._set_inputs_editable(enabled)
 
-    def _current_governing(self) -> str:
-        """The governing-editions text currently in the field ("" when empty)."""
-        entry = getattr(self, "governing_entry", None)
-        if entry is None:
-            return ""
-        try:
-            return entry.get().strip()
-        except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
-            return ""
+    def _transport_hint_text(self) -> str:
+        """The Processing hint; XFast adds the fast-mode price premium."""
+        mode = self._processing_mode_var.get()
+        text = transport_hint(mode)
+        if processing_fast_mode(mode):
+            text += " " + xfast_note(REVIEW_MODEL_DEFAULT)
+        return text
 
     def _on_transport_toggle(self, _selection: str | None = None) -> None:
-        # Keep the muted hint under the Processing checkbox in sync with the
-        # chosen transport, then refresh the cost summary (whose rate also
-        # depends on the batch/real-time choice).
+        # Keep the muted hint under the Processing menu in sync with the
+        # chosen mode, then refresh the cost summary (whose rate also depends
+        # on the batch/real-time choice and on XFast's fast-mode premium).
         hint = getattr(self, "_transport_hint", None)
         if hint is not None:
-            hint.configure(text=transport_hint(self._processing_mode_var.get()))
+            hint.configure(text=self._transport_hint_text())
         self._refresh_summary()
-
-    def _specs_summary(self) -> str:
-        """Collapsed specs-header hint: count only successfully-loaded docs.
-
-        A failed/unreadable spec (unsupported, corrupt, image-only) is still
-        stored in self._spec_documents with an ``error``, but contributes no
-        spec text and is NOT sent to QC (project_specifications stays None), so
-        counting it would falsely imply specs are included. Mirror the ``d.ok``
-        basis used by _apply_specs_result's status label.
-        """
-        n = sum(1 for d in self._spec_documents if d.ok)
-        return f"{n} doc(s)" if n else ""
 
     def _qc_summary(self) -> str:
         """Collapsed QC-header hint: how many of the four QC options are on."""
@@ -1723,7 +2276,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         parts = [f"{on} on"] if on else []
         if self._current_governing():
-            parts.append("editions set")
+            parts.append("AHJ editions")
         return " · ".join(parts)
 
     def _log_summary(self) -> str:
@@ -1748,8 +2301,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         wiring needed. Guarded because _refresh_summary can fire mid-build.
         """
         for name in (
-            "_key_sec", "_drop_sec", "_focus_sec",
-            "_specs_sec", "_qc_sec", "_transport_sec", "_log_sec",
+            "_key_sec", "_drop_sec", "_files_sec", "_focus_sec",
+            "_qc_sec", "_transport_sec", "_log_sec",
         ):
             sec = getattr(self, name, None)
             if sec is not None:
@@ -1782,9 +2335,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         refs = list_sheets(self._pdfs)
         sheets = len(refs)
         files = len({r.pdf_path for r in refs})
-        digest_batch, critique_batch = processing_transports(
-            self._processing_mode_var.get()
-        )
+        mode = self._processing_mode_var.get()
+        digest_batch, critique_batch = processing_transports(mode)
+        fast = processing_fast_mode(mode)
+        # Specs and context share the per-sheet reference block, so the
+        # estimate prices their combined size.
+        reference_chars = len(self._current_specs_text()) + len(self._current_context_text())
         # §10.3 item 1 says not to replace every refresh with a synchronous scan.
         # This does not: it reads whatever the background preflight has already
         # produced, or nothing. The summary sharpens on its own once the scan
@@ -1794,16 +2350,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
             batch=digest_batch,
             focus=bool(self._current_focus()),
-            spec_chars=len(self._current_specs_text()),
+            spec_chars=reference_chars,
             bases=bases,
+            fast_mode=fast,
         )
         if self._qc_markups_var.get():
             full = estimate_exhaustive_run_cost(
                 sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
                 batch=digest_batch, critique_batch=critique_batch,
                 focus=bool(self._current_focus()),
-                spec_chars=len(self._current_specs_text()),
+                spec_chars=reference_chars,
                 bases=bases,
+                fast_mode=fast,
             )
             cost = (
                 f"~${full.low_cost:,.2f}–${full.high_cost:,.2f} (full QC est.)"
@@ -1839,27 +2397,26 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             return
 
-        # Snapshot the focus + specs + QC options with the file list, so mid-run
-        # edits can't change what a running analysis was asked to do.
+        # Snapshot every input with the file list, so mid-run edits can't
+        # change what a running analysis was asked to do.
         governing_editions = self._current_governing()
-        governing_codes, unreadable = parse_governing_editions(governing_editions)
-        if unreadable:
-            messagebox.showerror(
-                "Governing code editions",
-                "Each entry needs a code and a 4-digit edition year, separated "
-                "by semicolons (e.g. NFPA 13 2022; IBC 2021). Could not read: "
-                + "; ".join(unreadable),
-            )
-            return
+        atlas_choice = getattr(self, "_atlas_choice", None)
         focus = self._current_focus()
         project_specifications = self._current_specs_text() or None
+        project_context = self._current_context_text() or None
         qc_markups = self._qc_markups_var.get()
         markup_verified_only = self._qc_verified_only_var.get()
         ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
-        profiles = self._selected_profiles()
+        checklists = list(getattr(self, "_checklists", []))
+        # Installed profiles by name, uploaded checklists as Profile objects —
+        # resolve_profiles takes both.
+        profiles = self._selected_profiles() + checklists
         processing_mode = self._processing_mode_var.get()
         use_batch, critique_use_batch = processing_transports(processing_mode)
+        fast_mode = processing_fast_mode(processing_mode)
+        save_tiles = bool(self._save_tiles_var.get())
+        reference_chars = len(project_specifications or "") + len(project_context or "")
 
         # Cost-confirm gate — show the estimated spend before anything is sent.
         # For an exhaustive QC run (DA-010) show the full per-stage estimate with a
@@ -1877,8 +2434,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, critique_batch=critique_use_batch,
                 focus=bool(focus),
-                spec_chars=len(project_specifications or ""),
+                spec_chars=reference_chars,
                 bases=bases,
+                fast_mode=fast_mode,
             )
             prompt = format_exhaustive_cost_prompt(exh)
             dialog_title = "Confirm full QC run"
@@ -1886,8 +2444,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, focus=bool(focus),
-                spec_chars=len(project_specifications or ""),
+                spec_chars=reference_chars,
                 bases=bases,
+                fast_mode=fast_mode,
             )
             prompt = format_drawing_cost_prompt(estimate)
             dialog_title = "Confirm drawing analysis"
@@ -1904,7 +2463,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.reviewed_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self._set_focus_editable(False)
-        self.upload_specs_btn.configure(state="disabled")
+        # The inputs are locked for the run; hand their space to the log.
+        files_sec = getattr(self, "_files_sec", None)
+        if files_sec is not None:
+            files_sec.set_expanded(False)
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
@@ -1918,18 +2480,49 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "re-analyzed.",
                 level="muted",
             )
-        if governing_editions and (qc_markups or reference_audit):
-            self._log(
-                "Governing code editions set: "
-                + "; ".join(c.display for c in governing_codes)
-                + " (they replace the editions detected on the drawings).",
-                level="accent",
-            )
+        if atlas_choice is not None:
+            if qc_markups or reference_audit:
+                where = f" for {atlas_choice.name}" if atlas_choice.name else ""
+                self._log(
+                    f"AHJ Atlas Input{where}: {atlas_choice.summary()} (these "
+                    "replace the editions detected on the drawings).",
+                    level="accent",
+                )
+            else:
+                self._log(
+                    "AHJ Atlas Input loaded, but no QC option is on — the governing "
+                    "editions are used only by QC Markups or the deterministic audit.",
+                    level="warning",
+                )
         if project_specifications:
             self._log(
                 f"Project specifications attached: {len(project_specifications):,} "
                 "chars — conflicts will be reported as ordinary findings.",
                 level="accent",
+            )
+        if project_context:
+            self._log(
+                f"Additional context attached: {len(project_context):,} chars — "
+                "requirements it states are checked like the specifications.",
+                level="accent",
+            )
+        if checklists:
+            if qc_markups:
+                self._log(
+                    f"Checklists applied by the QC critique: "
+                    + ", ".join(p.title for p in checklists) + ".",
+                    level="accent",
+                )
+            else:
+                self._log(
+                    "Checklists loaded, but QC Markups is off — checklists are "
+                    "applied only by the QC critique.",
+                    level="warning",
+                )
+        if save_tiles:
+            self._log(
+                "Tile images will be saved (Export All writes them to tiles/).",
+                level="muted",
             )
         if processing_mode == PROCESSING_MODE_ECONOMY:
             self._log(
@@ -1943,6 +2536,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "Hybrid mode: initial sheet analysis runs now; QC critique "
                 "reads use the half-rate Batch queue and may take hours.",
                 level="muted",
+            )
+        elif fast_mode:
+            self._log(
+                "XFast mode: full-rate API calls with immediate results, and Opus "
+                "requests in fast mode. " + xfast_note(REVIEW_MODEL_DEFAULT),
+                level="warning",
             )
         else:
             self._log(
@@ -1958,7 +2557,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
                   use_batch, critique_use_batch, self._run_cancel,
-                  governing_editions),
+                  governing_editions, project_context, fast_mode, save_tiles),
             daemon=True,
         ).start()
 
@@ -1975,7 +2574,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         use_batch: bool = True,
         critique_use_batch: bool | None = None,
         cancel: CancelToken | None = None,
-        governing_editions: str = "",
+        governing_editions: "str | list[str]" = "",
+        project_context: str | None = None,
+        fast_mode: bool = False,
+        save_tile_artifacts: bool = False,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -1995,9 +2597,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 markup_verified_only=markup_verified_only,
                 ink_rejected=ink_rejected,
                 profiles=profiles or None,
-                # No GUI control for the tile-artifact dump: omitting
-                # save_tile_artifacts leaves DRAWING_ANALYZER_SAVE_TILES in charge.
+                # The "Save tile images" box under the diagnostics log button
+                # (seeded from DRAWING_ANALYZER_SAVE_TILES).
+                save_tile_artifacts=save_tile_artifacts,
                 governing_editions=governing_editions or None,
+                project_context=project_context,
+                fast_mode=fast_mode,
                 cancel=cancel,
             )
         except RunCancelled:
@@ -2128,7 +2733,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
-        self.upload_specs_btn.configure(state="normal")
         self._log(
             "Run stopped. Nothing further will be sent. Sheets that finished are "
             "in the cache — re-running the same files reuses them at no cost, and "
@@ -2149,7 +2753,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
-        self.upload_specs_btn.configure(state="normal")
         has_text = bool(ctx.combined_text.strip())
         if has_text:
             self.html_btn.configure(state="normal")
@@ -2389,7 +2992,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
-        self.upload_specs_btn.configure(state="normal")
         self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)
@@ -2685,6 +3287,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         """
         footer = ctk.CTkFrame(parent, fg_color="transparent")
         footer.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        self._footer = footer
         ctk.CTkLabel(
             footer, text=f"v{__version__}",
             font=ctk.CTkFont(family="Segoe UI", size=11),

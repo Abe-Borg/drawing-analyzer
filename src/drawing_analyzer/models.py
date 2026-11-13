@@ -2250,6 +2250,11 @@ class RunConfiguration:
     # export a ``tiles/`` folder with per-tile notes. Output-side only — it never
     # places a call, never joins the paid-expert set, and never gates QC status.
     save_tile_artifacts: bool = False
+    # XFast: real-time requests to a model with fast mode carry
+    # ``speed: "fast"`` (premium per-token price). Real-time only — the Batch
+    # API has no fast mode — so it resolves False whenever either transport
+    # batches.
+    fast_mode: bool = False
     # Names of normally-required exhaustive stages an explicit flag disabled. A
     # non-empty tuple makes this a DEBUG_OVERRIDE configuration (§3.3 / §15.1).
     debug_overrides: tuple[str, ...] = ()
@@ -2311,6 +2316,7 @@ class RunConfiguration:
             "use_batch": self.use_batch,
             "critique_use_batch": self.critique_use_batch,
             "save_tile_artifacts": self.save_tile_artifacts,
+            "fast_mode": self.fast_mode,
             "debug_overrides": list(self.debug_overrides),
             "governing_editions": [
                 c.display + (f" ({c.amendment_note})" if c.amendment_note else "")
@@ -2338,6 +2344,7 @@ def resolve_run_configuration(
     use_batch: bool = False,
     critique_use_batch: "bool | None" = None,
     save_tile_artifacts: bool = False,
+    fast_mode: bool = False,
     governing_editions: Any = None,
 ) -> RunConfiguration:
     """Resolve the raw run options into one normalized :class:`RunConfiguration`.
@@ -2476,6 +2483,12 @@ def resolve_run_configuration(
             else bool(critique_use_batch)
         ),
         save_tile_artifacts=bool(save_tile_artifacts),
+        # Fast mode exists only on the real-time transport; a batched stage
+        # could not honor it, so a run that batches anything does not claim it.
+        fast_mode=bool(fast_mode) and not use_batch and not (
+            bool(use_batch) if critique_use_batch is None
+            else bool(critique_use_batch)
+        ),
         debug_overrides=tuple(overrides),
         governing_editions=governing,
     )
@@ -2584,6 +2597,10 @@ class UsageRecord:
     # fallback ran this attempt on a different one (``model`` is then the model
     # that ran and was billed). ``None`` on every ordinary record.
     requested_model: "str | None" = None
+    # ``"fast"`` when the response ran in fast mode (``usage.speed``; the XFast
+    # processing mode), priced at the model's fast-mode rate. ``None`` is
+    # standard speed — every batch, cached and pre-feature record.
+    speed: "str | None" = None
 
     def to_dict(self) -> dict:
         return {
@@ -2606,6 +2623,9 @@ class UsageRecord:
             "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
             "cache_write_ttl": self.cache_write_ttl,
             "requested_model": self.requested_model,
+            # Only when set, so a standard-speed record serializes exactly as
+            # it did before fast mode existed.
+            **({"speed": self.speed} if self.speed else {}),
         }
 
 

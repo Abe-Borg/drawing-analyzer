@@ -15,6 +15,9 @@ dependencies = [
     "platformdirs",
     "pypdf>=4.0",
     "python-docx>=1.1",
+    # AHJ Atlas Input (.xlsx) and spreadsheet checklists — ahj_atlas.py,
+    # profiles.load_checklist_file. MIT; pure Python.
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

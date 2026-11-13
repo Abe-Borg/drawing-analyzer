@@ -418,6 +418,14 @@ class ModelCapabilities:
     # treating the capability as a guarantee. Default ``False`` so an
     # unregistered id is never sent a parameter its platform may reject.
     supports_structured_outputs: bool = False
+    # Whether a real-time request to this model may carry ``speed: "fast"``
+    # (fast mode: the same model at up to 2.5x the output tokens per second,
+    # at a premium per-token price — see ``core.pricing``). Only models where
+    # fast mode is generally available and needs no beta header declare it:
+    # asking for fast mode on a model without it is a 400, and Opus 5 / Opus
+    # 4.8 need a research-preview beta (and, for Opus 5, waitlist access).
+    # Default ``False`` so an unregistered id is never sent the parameter.
+    supports_fast_mode: bool = False
 
 
 # 5.5 profiles verified independently on 2026-10-05 against:
@@ -467,6 +475,9 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # The migration guide recommends fallbacks: "default" for refusals.
         supports_refusal_fallback=True,
         supports_structured_outputs=True,
+        # Fast mode is generally available on Opus 5.5 (no beta header):
+        # https://platform.claude.com/docs/en/build-with-claude/fast-mode
+        supports_fast_mode=True,
     ),
     MODEL_SONNET_5_5: ModelCapabilities(
         # Adaptive thinking accepts all five effort levels. The optional
@@ -1538,32 +1549,120 @@ def messages_namespace(client: Any, kwargs: dict):
     return client.messages
 
 
+# ---------------------------------------------------------------------------
+# Fast mode (``speed: "fast"``) — the XFast processing mode
+# ---------------------------------------------------------------------------
+#
+# A run asks for fast mode by setting ``requested_speed`` on its
+# :class:`~drawing_analyzer.resource_pressure.ResourcePressure` recorder, which
+# already reaches every worker thread the run opens (``worker_binding``). Each
+# real-time request then carries ``speed: "fast"`` when its model declares
+# ``supports_fast_mode``; stages on other models (Sonnet, Haiku) go out at
+# standard speed. The Batch API rejects the parameter, so it is only ever
+# attached here, on the real-time path.
+#
+# The parameter rides ``extra_body``: the pinned SDK exposes ``speed`` only on
+# the beta namespace, and a request goes out on the plain namespace once the
+# refusal fallback latches off. ``extra_body`` lands at the top level of the
+# JSON body on either namespace, which is where the API reads it.
+FAST_MODE_SPEED = "fast"
+
+# Whether this process may still request fast mode. An organization below the
+# usage tiers that include fast mode, or a platform without it, answers a
+# ``speed`` request with a 400. Analysis must not fail for a speed choice, so
+# (mirroring ``_refusal_fallback_available``) the first such rejection turns
+# the feature off for the rest of the process and the call is re-sent at
+# standard speed.
+_fast_mode_available = True
+
+_FAST_MODE_REJECTION_MARKERS = ("speed", "fast mode", "fast-mode", "fast_mode")
+
+
+def model_supports_fast_mode(model: str) -> bool:
+    """Whether ``model`` may be sent ``speed: "fast"`` (registry capability)."""
+    return model_capabilities(model).supports_fast_mode
+
+
+def fast_mode_requested() -> bool:
+    """Whether the calling thread's run asked for fast mode (XFast)."""
+    pressure = resource_pressure.current()
+    return getattr(pressure, "requested_speed", None) == FAST_MODE_SPEED
+
+
+def fast_mode_active_for(model: str) -> bool:
+    """Whether a real-time request to ``model`` goes out at fast speed now."""
+    return (
+        _fast_mode_available
+        and fast_mode_requested()
+        and model_supports_fast_mode(model)
+    )
+
+
+def apply_fast_mode(kwargs: dict, *, model: str) -> dict:
+    """Return ``kwargs`` with ``speed: "fast"`` attached when the run asked for it.
+
+    Returns ``kwargs`` unchanged (the same object) when fast mode does not
+    apply — the run did not ask, the model lacks the capability, or the
+    feature latched off — so the caller can tell whether it was attached.
+    Merges into an existing ``extra_body`` rather than replacing it.
+    """
+    if not fast_mode_active_for(model):
+        return kwargs
+    out = dict(kwargs)
+    extra = dict(out.get("extra_body") or {})
+    extra["speed"] = FAST_MODE_SPEED
+    out["extra_body"] = extra
+    return out
+
+
+def _is_fast_mode_rejection(exc: Exception) -> bool:
+    """True for a 400 that plausibly names the ``speed`` parameter / fast mode."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _FAST_MODE_REJECTION_MARKERS)
+
+
 def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method: str) -> Any:
-    """Issue one Messages request, opting capable models into refusal fallback and
-    self-healing if the platform rejects the beta/parameter itself.
+    """Issue one Messages request, opting capable models into refusal fallback
+    (and, on an XFast run, fast mode), self-healing if the platform rejects
+    either feature itself.
 
     ``method`` is ``"create"`` (returns the ``Message`` directly) or
     ``"stream"`` (the context manager is entered and exited here, so callers
     get a plain ``Message`` either way — see :func:`~drawing_analyzer.digest.stream_message`).
     On a fallback-specific 400 (:func:`_is_refusal_fallback_rejection`), the
     feature latches off for the process (see :data:`_refusal_fallback_available`)
-    and the exact same call is re-issued once without it. Any other exception
-    (transient or not) propagates unchanged to the caller's own retry loop.
+    and the call is re-issued without it; a fast-mode 400
+    (:func:`_is_fast_mode_rejection`) does the same for ``speed`` (see
+    :data:`_fast_mode_available`). Each latch flips at most once, so the loop
+    ends. Any other exception (transient or not) propagates unchanged to the
+    caller's own retry loop.
     """
-    global _refusal_fallback_available
-    attempted = apply_refusal_fallback(kwargs, model=model)
-    try:
-        return _dispatch_messages(client, attempted, method)
-    except Exception as exc:
-        if attempted is kwargs or not _is_refusal_fallback_rejection(exc):
+    global _refusal_fallback_available, _fast_mode_available
+    while True:
+        fast = apply_fast_mode(kwargs, model=model)
+        attempted = apply_refusal_fallback(fast, model=model)
+        try:
+            return _dispatch_messages(client, attempted, method)
+        except Exception as exc:
+            if fast is not kwargs and _is_fast_mode_rejection(exc):
+                _fast_mode_available = False
+                _log.warning(
+                    "fast mode unavailable (%s); continuing at standard speed "
+                    "for the rest of this process.",
+                    exc,
+                )
+                continue
+            if attempted is not fast and _is_refusal_fallback_rejection(exc):
+                _refusal_fallback_available = False
+                _log.warning(
+                    "refusal fallback unavailable (%s); continuing without it for the "
+                    "rest of this process.",
+                    exc,
+                )
+                continue
             raise
-        _refusal_fallback_available = False
-        _log.warning(
-            "refusal fallback unavailable (%s); continuing without it for the "
-            "rest of this process.",
-            exc,
-        )
-        return _dispatch_messages(client, kwargs, method)
 
 
 def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:

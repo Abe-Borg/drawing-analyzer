@@ -134,6 +134,124 @@ def parse_profile(text: str, *, source_path: Any = None, fallback_name: str = "p
 
 
 # --------------------------------------------------------------------------- #
+# Uploaded checklist files (GUI "Load checklists…")
+# --------------------------------------------------------------------------- #
+
+CHECKLIST_FILE_EXTENSIONS = frozenset(
+    {".md", ".txt", ".docx", ".pdf", ".xlsx", ".xlsm", ".csv"}
+)
+# Uploaded checklists are named apart from the profiles folder's, so loading a
+# file can never shadow (or be shadowed by) an installed profile of the same
+# stem. ``snapshot_profiles`` reports their source as ``uploaded``.
+UPLOADED_PROFILE_PREFIX = "upload:"
+_MAX_CHECKLIST_ITEM_CHARS = 600
+_SPREADSHEET_HEADER_RE = re.compile(
+    r"^(items?|no\.?|#|id|description|check\s*(list)?\s*items?|checks?|"
+    r"requirements?|status|category|section|reference|comments?|notes?|remarks?)$",
+    re.IGNORECASE,
+)
+_ITEM_NUMBER_RE = re.compile(r"^[\d.()-]{1,8}$")
+
+
+def _spreadsheet_lines(path: Path) -> list[str]:
+    """One line per non-empty row (cells joined), header row and item numbers dropped."""
+    rows: list[list[str]] = []
+    if path.suffix.lower() == ".csv":
+        import csv
+
+        from .spec_documents import _decode_text_bytes
+
+        rows = [list(r) for r in csv.reader(_decode_text_bytes(path.read_bytes()).splitlines())]
+    else:
+        import openpyxl  # lazy: only a spreadsheet checklist needs it
+
+        book = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        try:
+            for ws in book.worksheets:
+                for row in ws.iter_rows(max_col=40, values_only=True):
+                    rows.append(["" if c is None else str(c) for c in row])
+                    if len(rows) >= 5_000:
+                        break
+        finally:
+            book.close()
+    lines: list[str] = []
+    seen_header = False
+    for row in rows:
+        cells = [" ".join(c.split()) for c in row if c and str(c).strip()]
+        if not cells:
+            continue
+        if not seen_header:
+            seen_header = True
+            if any(_SPREADSHEET_HEADER_RE.match(c) for c in cells):
+                continue
+        cells = [c for c in cells if not _ITEM_NUMBER_RE.match(c)]
+        if cells:
+            lines.append(" — ".join(cells))
+    return lines
+
+
+def _plain_items(lines: Iterable[str]) -> tuple[str, ...]:
+    """Checklist items from text with no list bullets: one per substantive line."""
+    items: list[str] = []
+    for raw in lines:
+        line = " ".join(str(raw).split())
+        if not line or line.startswith("#") or line == "---":
+            continue
+        if len(line) < 4 or len(line) > _MAX_CHECKLIST_ITEM_CHARS:
+            continue
+        items.append(line)
+    return tuple(items)
+
+
+def load_checklist_file(path: Any) -> Profile:
+    """Read an uploaded checklist file into a :class:`Profile`.
+
+    A Markdown/text file in the profile format (frontmatter + list bullets)
+    parses exactly as a profiles-folder file would. Anything else — a Word or
+    PDF checklist, a spreadsheet (one item per row), or plain lines with no
+    bullets — becomes one item per substantive line. Raises ``ValueError``
+    with a readable reason when the file yields no items.
+    """
+    from .spec_documents import extract_spec_text
+
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in CHECKLIST_FILE_EXTENSIONS:
+        raise ValueError(
+            f"unsupported file type {suffix or '(none)'} "
+            f"(accepted: {', '.join(sorted(CHECKLIST_FILE_EXTENSIONS))})"
+        )
+    if suffix in (".xlsx", ".xlsm", ".csv"):
+        lines = _spreadsheet_lines(path)
+        text = "\n".join(lines)
+        items = _plain_items(lines)
+        meta: dict[str, str] = {}
+    else:
+        doc = extract_spec_text(path)
+        if not doc.ok:
+            raise ValueError(doc.error or "no extractable text")
+        text = doc.text
+        meta, body = _parse_frontmatter(text)
+        items = _parse_items(body) or _plain_items(body.splitlines())
+    if not items:
+        raise ValueError("no checklist items found")
+    # The file name, extension included, so check.xlsx and check.docx loaded
+    # together stay two checklists.
+    name = UPLOADED_PROFILE_PREFIX + ((meta.get("name") or path.name).strip() or path.name)
+    return Profile(
+        name=name,
+        title=(meta.get("title") or path.name).strip(),
+        disciplines=_split_tags(meta.get("disciplines", "")),
+        version=(meta.get("version") or "0").strip(),
+        author=meta.get("author", "").strip(),
+        date=meta.get("date", "").strip(),
+        items=items,
+        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        source_path=path,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
 
@@ -375,7 +493,9 @@ def snapshot_profiles(profiles: Iterable[Profile]) -> list:
     snaps = []
     for p in profiles:
         source = ""
-        if p.source_path is not None:
+        if p.name.startswith(UPLOADED_PROFILE_PREFIX):
+            source = "uploaded"
+        elif p.source_path is not None:
             try:
                 source = "builtin" if p.source_path.resolve().parent == builtin_dir.resolve() else "user"
             except OSError:

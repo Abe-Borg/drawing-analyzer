@@ -351,3 +351,67 @@ def test_chunk_items_splits_evenly_and_losslessly():
     # more chunks than items → some empty, still exactly n, still lossless
     chunks3 = P.chunk_items(["a", "b"], 4)
     assert len(chunks3) == 4 and sum(len(c) for c in chunks3) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Uploaded checklist files (GUI "Add checklists…")
+# --------------------------------------------------------------------------- #
+
+
+def _xlsx(path):
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["No.", "Check item"])
+    ws.append([1, "FDC within 100 ft of a hydrant"])
+    ws.append([2, "Riser room has a floor drain"])
+    wb.save(path)
+
+
+def _docx(path):
+    docx = pytest.importorskip("docx")
+    doc = docx.Document()
+    doc.add_paragraph("FDC within 100 ft of a hydrant", style="List Bullet")
+    doc.add_paragraph("Riser room has a floor drain")
+    doc.save(path)
+
+
+@pytest.mark.parametrize("name, write", [
+    ("checks.xlsx", _xlsx),
+    ("checks.docx", _docx),
+    ("checks.md", lambda p: p.write_text(
+        "---\ntitle: FP checks\n---\n- FDC within 100 ft of a hydrant\n"
+        "- Riser room has a floor drain\n", encoding="utf-8")),
+    ("checks.txt", lambda p: p.write_text(
+        "# Fire protection\nFDC within 100 ft of a hydrant\n\n"
+        "Riser room has a floor drain\n", encoding="utf-8")),
+], ids=["xlsx-rows", "docx-lines", "md-profile", "txt-lines"])
+def test_a_checklist_file_becomes_an_injectable_profile(tmp_path, name, write):
+    path = tmp_path / name
+    write(path)
+    prof = P.load_checklist_file(path)
+    # One item per check: header rows, item numbers and headings are dropped.
+    assert prof.items == ("FDC within 100 ft of a hydrant", "Riser room has a floor drain")
+    # It reaches the critique exactly like an installed profile does, and is
+    # recorded as uploaded rather than as a profiles-folder file.
+    assert P.resolve_profiles([prof]) == [prof]
+    assert "FDC within 100 ft of a hydrant" in P.build_checklist_prompt(P.flatten_items([prof]))
+    assert P.snapshot_profiles([prof])[0].source == "uploaded"
+
+
+def test_two_checklists_with_the_same_stem_stay_two(tmp_path):
+    a, b = tmp_path / "checks.md", tmp_path / "checks.txt"
+    a.write_text("- One check\n", encoding="utf-8")
+    b.write_text("Another check\n", encoding="utf-8")
+    assert P.load_checklist_file(a).name != P.load_checklist_file(b).name
+
+
+@pytest.mark.parametrize("name, content", [
+    ("checks.pptx", b"x"),
+    ("checks.txt", b"   \n\n"),
+])
+def test_an_unusable_checklist_file_raises_a_readable_error(tmp_path, name, content):
+    path = tmp_path / name
+    path.write_bytes(content)
+    with pytest.raises(ValueError):
+        P.load_checklist_file(path)

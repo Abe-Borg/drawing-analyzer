@@ -966,6 +966,11 @@ class ResourcePressure:
         self.calls = CallTelemetry(
             clock=self._clock, exhaustions=lambda: list(self.exhaustions),
         )
+        # The speed the run asked for (``"fast"`` on an XFast run, else
+        # ``None``). Lives here because this record already reaches every
+        # worker thread the run opens; ``core.api_config.apply_fast_mode``
+        # reads it per request.
+        self.requested_speed: str | None = None
 
     # -- wiring ------------------------------------------------------------- #
 

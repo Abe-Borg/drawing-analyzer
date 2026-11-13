@@ -201,8 +201,10 @@ def _cost_preview_app(gui, tk, monkeypatch):
         _qc_markups_var=var(value=False), _qc_verified_only_var=var(value=False),
         _ink_rejected_var=var(value=False), _reference_audit_var=var(value=False),
         _current_focus=lambda: "", _current_specs_text=lambda: "",
-        _current_governing=lambda: "",
+        _current_context_text=lambda: "", _current_governing=lambda: [],
+        _checklists=[], _atlas_choice=None, _save_tiles_var=var(value=False),
         _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,
+        _refresh_files_panel=lambda: None, _reveal_files=lambda: None,
         summary_label=types.SimpleNamespace(configure=lambda **kw: summaries.append(kw["text"])),
         after=lambda delay, callback: callbacks.append(callback),
     )
@@ -612,3 +614,115 @@ def test_the_main_window_wires_both_hooks_in_init():
     init_src = ast.unparse(init)
     assert "self.protocol('WM_DELETE_WINDOW', self._on_close_request)" in init_src
     assert "self.report_callback_exception = self._on_callback_exception" in init_src
+
+
+# --------------------------------------------------------------------------- #
+# Loaded files: every input reaches the run; Remove drops exactly one file
+# --------------------------------------------------------------------------- #
+
+
+def _inputs_app(gui, tk, monkeypatch):
+    """The cost-preview stub plus what Analyze touches once confirmed."""
+    app, workers, callbacks, summaries = _cost_preview_app(gui, tk, monkeypatch)
+    started = []
+
+    class Worker:
+        def __init__(self, *, target, args=(), daemon):
+            self.target, self.args = target, args
+
+        def start(self):
+            started.append(self.args)
+
+    widget = types.SimpleNamespace(configure=lambda **kw: None)
+    logs = []
+    app.__dict__.update(
+        analyze_btn=widget, stop_btn=widget, clear_btn=widget, html_btn=widget,
+        reviewed_btn=widget, export_btn=widget, _files_sec=None,
+        _set_focus_editable=lambda enabled: None, _clear_log=lambda: None,
+        _log=lambda message, level="info": logs.append(message),
+        _set_progress_text=lambda *a, **k: None, _ctx=None, _run_cancel=None,
+        _spec_documents=[], _context_documents=[], _specs_budget=None,
+        _context_budget=None, _specs_text="", _context_text="", _atlas=None,
+        _refresh_files_panel=lambda: None, _reveal_files=lambda: None,
+        _worker=lambda *args: None,
+    )
+    for name in ("_remove_pdf", "_apply_documents_result", "_rebuild_document_text",
+                 "_remove_document", "_current_specs_text", "_current_context_text",
+                 "_current_governing", "_end_extraction", "_set_inputs_editable"):
+        setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
+    app._add_buttons = {}
+    monkeypatch.setattr(gui.threading, "Thread", Worker)
+    tk.messagebox.askyesno = lambda title, prompt: True
+    return app, started, logs
+
+
+def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
+    from drawing_analyzer.ahj_atlas import AtlasJurisdiction
+    from drawing_analyzer.models import parse_governing_editions
+    from drawing_analyzer.profiles import Profile
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-no-network")
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, started, _ = _inputs_app(gui, tk, monkeypatch)
+        app._pdfs = [pdf]
+        app._specs_text, app._context_text = "SPEC TEXT", "BASIS OF DESIGN"
+        checklist = Profile(name="upload:fp.xlsx", title="fp.xlsx", items=("Check FDC",))
+        app._checklists = [checklist]
+        codes, _ = parse_governing_editions("NFPA 13 2025; IBC 2024")
+        app._atlas_choice = AtlasJurisdiction(
+            name="Loudoun County, VA", entries=("NFPA 13 2025", "IBC 2024"), codes=codes,
+        )
+        app._processing_mode_var.set("XFast")
+        app._save_tiles_var.set(True)
+        app._on_process()
+        (args,) = started
+        (pdfs, focus, specs, qc, _vo, _audit, _ink, profiles, use_batch,
+         critique_batch, _cancel, governing, context, fast_mode, save_tiles) = args
+    assert pdfs == [pdf] and specs == "SPEC TEXT" and context == "BASIS OF DESIGN"
+    assert checklist in profiles
+    assert governing == ["NFPA 13 2025", "IBC 2024"]
+    assert (use_batch, critique_batch, fast_mode, save_tiles) == (False, False, True, True)
+
+
+def test_remove_drops_one_drawing_and_remeasures_the_rest(tmp_path, monkeypatch):
+    a, b = _preview_pdf(tmp_path), tmp_path / "other.pdf"
+    b.write_bytes(a.read_bytes())
+    with _gui_module() as (gui, tk):
+        app, workers, callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
+        app.__dict__.update(_ctx=object(), _log=lambda *a, **k: None)
+        app._remove_pdf = types.MethodType(gui.DrawingAnalyzerApp._remove_pdf, app)
+        app._add_pdfs([a, b])
+        workers.pop()()
+        callbacks.pop()()
+        assert len(app._usable_preflight_bases()) == 6
+        app._remove_pdf(b)
+        assert app._pdfs == [a] and app._ctx is None
+        # The two-file bases no longer describe the list: cleared, re-measured.
+        assert app._usable_preflight_bases() is None
+        workers.pop()()
+        callbacks.pop()()
+        assert len(app._usable_preflight_bases()) == 3
+
+
+def test_loading_documents_adds_to_the_category_and_remove_rebuilds_its_text(tmp_path, monkeypatch):
+    from drawing_analyzer.spec_documents import SpecDocument
+
+    def doc(name, text):
+        return SpecDocument(path=tmp_path / name, display_name=name, text=text)
+
+    with _gui_module() as (gui, tk):
+        app, _, _ = _inputs_app(gui, tk, monkeypatch)
+        app._apply_documents_result("specs", [doc("a.docx", "ALPHA")])
+        app._apply_documents_result("specs", [doc("b.docx", "BRAVO")])
+        assert [d.display_name for d in app._spec_documents] == ["a.docx", "b.docx"]
+        assert "ALPHA" in app._specs_text and "BRAVO" in app._specs_text
+        # Picking a file again replaces its earlier copy rather than doubling it.
+        app._apply_documents_result("specs", [doc("a.docx", "ALPHA v2")])
+        assert app._specs_text.count("ALPHA") == 1 and "ALPHA v2" in app._specs_text
+        app._remove_document("specs", tmp_path / "b.docx")
+        assert "BRAVO" not in app._specs_text
+        # Context is its own category; the specs are untouched by it.
+        app._apply_documents_result("context", [doc("bod.txt", "CONTEXT")])
+        assert app._current_context_text().endswith("CONTEXT")
+        assert "CONTEXT" not in app._current_specs_text()

@@ -36,6 +36,11 @@ SPEC_FILE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md"})
 # non-fatal run warning (I-3).
 SPEC_FILE_CHAR_BUDGET = 400_000
 SPEC_TOTAL_CHAR_BUDGET = 400_000
+# Additional project context (background documents — basis of design, owner
+# standards, prior comments) shares the specs' extraction and budgeting but has
+# its own, smaller ceiling: it rides the same per-sheet system-prompt slot, so
+# it adds to every sheet's prompt alongside the specs (~50k tokens at most).
+CONTEXT_TOTAL_CHAR_BUDGET = 200_000
 
 
 @dataclass
@@ -223,7 +228,9 @@ def _budgeted(text: str, budget_chars: int) -> tuple[str, int]:
     return text[: budget_chars - len(marker)] + marker, omitted
 
 
-def build_specs_text(documents: list[SpecDocument]) -> tuple[str, SpecBudget]:
+def build_specs_text(
+    documents: list[SpecDocument], *, budget_chars: int = SPEC_TOTAL_CHAR_BUDGET,
+) -> tuple[str, SpecBudget]:
     """Concatenate every successfully-extracted document under a per-file
     header, applying the per-file budget first and then the whole-block budget.
     With both budgets equal (see the module constants) a single uploaded spec
@@ -232,19 +239,19 @@ def build_specs_text(documents: list[SpecDocument]) -> tuple[str, SpecBudget]:
     combined block regardless of file count. Failed/empty documents are skipped
     here — their errors are the caller's responsibility to surface (the GUI logs
     them per-file)."""
-    budget = SpecBudget()
+    budget = SpecBudget(budget_chars=budget_chars)
     parts: list[str] = []
     for doc in documents:
         if not doc.ok:
             continue
         budget.total_chars += len(doc.text)
-        kept, omitted = _budgeted(doc.text, SPEC_FILE_CHAR_BUDGET)
+        kept, omitted = _budgeted(doc.text, min(SPEC_FILE_CHAR_BUDGET, budget_chars))
         if omitted:
             budget.omitted_chars += omitted
             budget.omitted_files.append(doc.display_name)
         parts.append(f"===== {doc.display_name} =====\n{kept}")
     combined = "\n\n".join(parts).strip()
-    combined, extra_omitted = _budgeted(combined, SPEC_TOTAL_CHAR_BUDGET)
+    combined, extra_omitted = _budgeted(combined, budget_chars)
     if extra_omitted:
         budget.omitted_chars += extra_omitted
     # The true length of what's actually returned — not an accumulated,

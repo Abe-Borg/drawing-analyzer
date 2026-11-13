@@ -586,17 +586,99 @@ to check against, not something to summarize or transcribe. If nothing on \
 this sheet conflicts with them, do not mention them at all."""
 
 
-def normalize_specs_text(specs_text: Any) -> str | None:
+# ---------------------------------------------------------------------------
+# Optional additional project context (uploaded background documents).
+#
+# Rides the same system-prompt slot as the specifications — and therefore the
+# same prompt-cache breakpoint and the same digest-cache fragment — but under
+# its own block and framing: a basis-of-design narrative or an owner standard
+# is background the sheet is read against, not the contract specifications.
+# Requirements it states fold into ordinary findings, exactly like specs.
+# ---------------------------------------------------------------------------
+
+_CONTEXT_ADDENDUM_TEMPLATE = """\
+
+
+ADDITIONAL PROJECT CONTEXT — the operator has supplied the following \
+background documents for this run (for example a basis-of-design narrative, \
+owner or client design standards, a code analysis, or prior review comments). \
+They are NOT part of the drawing set and are not the contract specifications.
+
+<project_context>
+{context}
+</project_context>
+
+Use this context to understand the project and to read THIS sheet correctly. \
+Where it states a requirement that applies to this sheet and the sheet \
+conflicts with it or omits it, report that as an ORDINARY finding in the \
+FINDINGS block below — category "conflict" or "code" as appropriate, quoting \
+the drawing text (not the context text) in source_quote, and naming the \
+requirement and the document it comes from in the finding's text. Do NOT add \
+a separate prose section for it, and do not summarize the context. If nothing \
+on this sheet relates to it, do not mention it."""
+
+
+@dataclass(frozen=True)
+class ReferenceMaterial:
+    """Specifications plus additional context, threaded where spec text goes.
+
+    Only built when context is present (see :func:`compose_reference_text`):
+    a specs-only run keeps threading the plain string, so its prompt and cache
+    key stay byte-identical to the pre-context build.
+    """
+
+    specs: str | None = None
+    context: str | None = None
+
+
+def compose_reference_text(
+    specs_text: Any, context_text: Any,
+) -> "str | ReferenceMaterial | None":
+    """The value to pass as ``specs_text`` for a run with optional context.
+
+    ``None`` with neither; the plain (stripped) spec string with specs only;
+    a :class:`ReferenceMaterial` once any context is present.
+    """
+    specs = normalize_specs_text(specs_text)
+    context = normalize_specs_text(context_text)
+    if context is None:
+        return specs
+    return ReferenceMaterial(specs=specs, context=context)
+
+
+def normalize_specs_text(specs_text: Any) -> "str | ReferenceMaterial | None":
     """Normalize uploaded project-specifications text: stripped, or ``None``
-    when empty — mirrors :func:`normalize_focus`."""
+    when empty — mirrors :func:`normalize_focus`.
+
+    A :class:`ReferenceMaterial` normalizes each part; with no context left it
+    collapses to the plain spec string (or ``None``), so the specs-only shape
+    never depends on how the caller built it.
+    """
     if specs_text is None:
         return None
+    if isinstance(specs_text, ReferenceMaterial):
+        specs = normalize_specs_text(specs_text.specs)
+        context = normalize_specs_text(specs_text.context)
+        if context is None:
+            return specs
+        return ReferenceMaterial(specs=specs, context=context)
     text = str(specs_text).strip()
     return text or None
 
 
-def build_specs_addendum(specs_text: str) -> str:
-    """Render the system-prompt addendum for (normalized, non-empty) spec text."""
+def build_specs_addendum(specs_text: "str | ReferenceMaterial") -> str:
+    """Render the system-prompt addendum for (normalized, non-empty) spec text,
+    and the additional-context block after it when the run carries one."""
+    if isinstance(specs_text, ReferenceMaterial):
+        head = (
+            _SPECS_ADDENDUM_TEMPLATE.format(specs=specs_text.specs)
+            if specs_text.specs else ""
+        )
+        tail = (
+            _CONTEXT_ADDENDUM_TEMPLATE.format(context=specs_text.context)
+            if specs_text.context else ""
+        )
+        return head + tail
     return _SPECS_ADDENDUM_TEMPLATE.format(specs=specs_text)
 
 

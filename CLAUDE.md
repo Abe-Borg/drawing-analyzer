@@ -360,6 +360,31 @@ map lives in `src/drawing_analyzer/__init__.py`.
 - **Page identity:** any other `/Type /Page` reached by `_page_dependency_sha256`
   is an opaque leaf. A GOTO destination is not hashed; the reference already
   rides the referencing annot, so retargeting still moves the key.
+- **Fast mode / XFast** (`fast_mode=`): resolves on only when both transports
+  are real-time (`RunConfiguration.fast_mode`); the pipeline sets
+  `ResourcePressure.requested_speed = "fast"`, which reaches workers through
+  `worker_binding()`. `call_with_refusal_fallback` attaches `speed` via
+  `extra_body` (the pinned SDK exposes `speed` only on the beta namespace) to
+  models declaring `supports_fast_mode` (Opus 5.5 only); a 400 naming speed
+  latches `_fast_mode_available` off and resends at standard speed (each latch
+  flips once, so the loop ends). Billing: `ModelPrice.fast_mode_multiplier`,
+  `UsageRecord.speed` from `RequestUsage.speed` (`usage.speed`), or — for a
+  stage that summed its tokens — inferred by `_record_usage` from
+  `fast_mode_active_for` on REAL_TIME records. Estimates take `fast_mode=`
+  (a context variable in `cost.py`): price every stage through
+  `_estimate_request_cost` / `_usage_record_cost`, never the raw pricing calls.
+  Fast mode never touches a cache key.
+- **Reference documents:** `project_context` (additional context) is budgeted
+  like specs (`CONTEXT_TOTAL_CHAR_BUDGET`) and threaded as `specs_text` via
+  `digest.compose_reference_text`, which returns a `ReferenceMaterial` **only**
+  when context is present — a specs-only run stays a plain string, so its
+  prompt and digest keys are byte-identical. The specs fragment hashes the
+  rendered addendum, so context moves the key by itself. `ahj_atlas.py` reads
+  the AHJ Atlas Input (`.xlsx`/`.xlsm`/`.csv`; long, wide, tab-per-AHJ and
+  free-text layouts) into governing-edition entries; `profiles.load_checklist_file`
+  turns uploaded checklists into `Profile`s named `upload:<file name>`
+  (snapshot source `uploaded`). Both import `openpyxl` lazily and never raise
+  past their documented contract (the atlas captures every failure).
 - **GUI** (`gui.py`): console-less entry (`[project.gui-scripts]` on Windows;
   the frozen build is windowed). The guarded `customtkinter` import reports
   through a stdlib `messagebox` and raises **ImportError**, not `SystemExit`
@@ -368,7 +393,15 @@ map lives in `src/drawing_analyzer/__init__.py`.
   mid-analysis it stops the run and closes once the stop settles
   (`QUIT_STOP_GRACE_SECONDS`). `_worker` catches `RunCancelled` by name.
   `report_callback_exception` → `_on_callback_exception`. Both reporters swallow
-  every failure of their own channels.
+  every failure of their own channels. Inputs live in the *Loaded files*
+  section (`_file_groups` is the data, `_refresh_files_panel` the widgets; call
+  it on every input change, never from `_refresh_summary`, which fires per
+  keystroke). The bottom rows, progress line and Analyze row are packed
+  `side="bottom", after=` the footer so a short window clips the log and
+  sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
+  requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
+  or the list cannot shrink. GUI lifecycle tests drive real handlers on a
+  `SimpleNamespace` stub — a handler that calls a new method needs it stubbed.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,
   tokenizer, structured-outputs gate. The tokenizer is estimate-only; the exact
   count is `count_tokens_via_api`, and the local path is the conservative
@@ -601,7 +634,8 @@ consume ledger entries and nothing else.
   stamp. GOTO destinations, CropBox, and occupancy sampling are in the PyMuPDF
   gotchas. `export.py` writes `markup_manifest.json`; `html_report.py` renders
   the report. Opt-in `save_tile_artifacts` (`DRAWING_ANALYZER_SAVE_TILES`,
-  `tile_artifacts.py`; deliberately no GUI control — kwarg or env var only) bypasses the level-1 render skip so tiles exist on warm
+  `tile_artifacts.py`; the GUI's *Save tile images* checkbox under *Open
+  Diagnostics Log*, seeded from the env var, passes it explicitly) bypasses the level-1 render skip so tiles exist on warm
   runs; the level-2 cache still serves the digests.
 - **Export** (`export.py`): `write_drawing_export` writes `report.html` after the
   other ordinary artifacts (`include_report=False`, then `build_report_document`
