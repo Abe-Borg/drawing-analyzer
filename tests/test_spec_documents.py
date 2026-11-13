@@ -600,11 +600,13 @@ def test_pipeline_no_specs_changes_nothing(tmp_path):
     assert _system_text(calls[0]).startswith(DIGEST_SYSTEM_PROMPT)
 
 
+# Explicit ids: a generated id would carry the 205k-char context, and pytest
+# puts the id in PYTEST_CURRENT_TEST — over Windows' 32,767-char env limit.
 @pytest.mark.parametrize("specs, context, error", [
     (BEAM_SPEC, BOD_CONTEXT, False),
     (None, BOD_CONTEXT, False),
     (None, "c" * (CONTEXT_TOTAL_CHAR_BUDGET + 5_000), True),
-])
+], ids=["specs-and-context", "context-only", "context-over-budget"])
 def test_pipeline_sends_additional_context_with_every_digest(tmp_path, specs, context, error):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.pipeline import extract_drawing_context
