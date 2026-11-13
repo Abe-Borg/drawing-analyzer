@@ -371,8 +371,21 @@ _HOW_TO_USE = HelpDocument(
             _para(
                 "Press Analyze Drawings. A dialog shows the estimated cost before any paid "
                 "call is made — confirm to proceed. The estimate is computed entirely on "
-                "your machine; nothing is sent until you accept. Progress and per-sheet "
-                "diagnostics stream into the activity log as the run works."
+                "your machine; nothing is sent until you accept. The Activity section then "
+                "shows the run as it works: the Live view board, or the log."
+            ),
+            _bullet(
+                "Live view — an animated board of the run: the pipeline's stages light up "
+                "as they run, one cell per sheet changes color as it is queued, read, "
+                "served from the cache or fails, and the header shows live tokens, calls "
+                "in flight and the estimated spend so far. At the end of a QC run it shows "
+                "the findings by verification status. Hover a cell or a stage for detail."
+            ),
+            _bullet(
+                "Log — the timestamped progress and per-sheet diagnostics. Pick Log on the "
+                "Activity toggle to turn the visuals off (the choice is remembered); while "
+                "the board is showing, warnings logged behind it are counted beside the "
+                "toggle so none is missed."
             ),
             _bullet(
                 "Stop — the red button beside Analyze Drawings — is the kill switch, in "

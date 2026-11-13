@@ -326,6 +326,9 @@ import io  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from drawing_analyzer.annotate import count_annotations  # noqa: E402
+from drawing_analyzer.live_view import (  # noqa: E402
+    SHEET_TERMINAL, STAGE_DONE, LiveRunModel, RunMonitor,
+)
 from tests.fixtures import gauntlet as G  # noqa: E402
 
 
@@ -341,12 +344,14 @@ def oracle(tmp_path_factory):
     oset = G.build_oracle_set(root / "set")
     client = G.oracle_client()
     work = root / "qc"
+    monitor = RunMonitor()
     ctx = extract_drawing_context(
         oset.inputs, client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, qc_work_dir=work,
+        reference_audit=True, qc_markups=True, qc_work_dir=work, monitor=monitor,
     )
     export = write_drawing_export(ctx, root / "out", source_names=oset.source_names)
-    return SimpleNamespace(ctx=ctx, set=oset, client=client, work=work, export=export)
+    return SimpleNamespace(ctx=ctx, set=oset, client=client, work=work, export=export,
+                           monitor=monitor)
 
 
 def _one(findings, **want):
@@ -1686,3 +1691,44 @@ def test_acceptance_failed_shard_holds_cross_qc_partial():
     assert len(res.claims) == 1
     assert res.claims[0].sheet_id == "F-D-00-1"
     assert res.claims[0].source_name == "f0.pdf"
+
+
+# ---- the GUI's Live view follows the same run ---------------------------------
+
+
+def test_gauntlet_live_view_agrees_with_the_run(oracle):
+    """The monitor got the run's own recorders, and a board folded from them
+    accounts for every sheet, every model call and every recorded stage."""
+    from drawing_analyzer.call_telemetry import sheet_item
+
+    ctx, monitor = oracle.ctx, oracle.monitor
+    parts = monitor.parts()
+    assert parts.journal is ctx.run_journal
+    assert parts.pressure is ctx.resource_pressure
+    assert [row[0] for row in parts.sheets] == [sheet_item(sd.ref) for sd in ctx.sheets]
+
+    model = LiveRunModel()
+    model.begin()
+    model.poll(monitor)
+    records = ctx.call_telemetry.snapshot()
+    assert records
+    assert model.tokens_out == sum(r.output_tokens for r in records)
+    assert model.tokens_in == sum(
+        r.input_tokens + r.cache_read_tokens + r.cache_write_tokens for r in records)
+    assert model.calls_done + model.calls_failed == sum(
+        1 for r in records if r.outcome not in ("", "NO_RESULT", "CANCELLED"))
+    assert model.calls_in_flight == 0
+
+    model.finish(ctx)
+    by_item = {s.item: s for s in model.sheets}
+    for sd in ctx.sheets:
+        sheet = by_item[sheet_item(sd.ref)]
+        assert sheet.state in SHEET_TERMINAL
+        assert (sheet.state == "failed") == (not sd.ok)
+    track = {s.name: s for s in model.stages}
+    for sr in ctx.stage_results:
+        if sr.stage in track and sr.status != "NOT_REQUESTED":
+            assert (track[sr.stage].state, track[sr.stage].status) == (STAGE_DONE, sr.status)
+    assert model.cost == ctx.total_estimated_cost and model.cost_final
+    ids = {f.id for f in ctx.findings} | {f.id for f in ctx.reference_findings}
+    assert model.findings.total == len(ids)

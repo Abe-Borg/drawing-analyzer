@@ -65,6 +65,7 @@ from .models import (
 from .render import (
     inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets,
 )
+from .live_view import notify_monitor
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import (
     EST_BYTES_PER_SHEET,
@@ -3052,6 +3053,7 @@ def extract_drawing_context(
     cancel: "cancellation.CancelToken | None" = None,
     project_context: str | None = None,
     fast_mode: bool = False,
+    monitor: Any = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -3220,6 +3222,12 @@ def extract_drawing_context(
     adopted edition for the citation check, review plan, cross-sheet QC and
     edition audit. An entry without a code and a 4-digit year raises
     ``ValueError`` before anything is spent.
+
+    ``monitor`` (a :class:`~drawing_analyzer.live_view.RunMonitor`) is a
+    read-only window for a host UI: the run attaches its own journal,
+    resource/call record, resolved configuration and sheet list to it, and
+    the GUI's *Live view* animates from them. It never changes what the run
+    does, and a failure to notify it is swallowed (I-3).
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -3348,6 +3356,12 @@ def extract_drawing_context(
     pressure = resource_pressure.current() or resource_pressure.ResourcePressure()
     pressure.attach_journal(journal)
     pressure.start_host_monitor(_resource_watch_paths(qc_work_dir, cache))
+    # Live view (GUI): hand the host the run's own recorders. Read-only for the
+    # host and never fatal here (notify_monitor swallows everything).
+    notify_monitor(
+        monitor, "attach", journal=journal, pressure=pressure, config=config,
+        focus=bool(focus),
+    )
     journal.emit(
         "RUN_START",
         files=len(pdf_paths),
@@ -3457,6 +3471,7 @@ def extract_drawing_context(
     paths = inventory.accepted_paths
     refs = list_sheets(paths)
     total = len(refs)
+    notify_monitor(monitor, "set_sheets", refs)
     file_count = len(inventory.accepted_documents)
 
     # The inventory already hashed every accepted source once (§10.1); the prescan
