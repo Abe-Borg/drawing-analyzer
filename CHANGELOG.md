@@ -6,7 +6,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.12.1] - 2026-11-13
+## [1.13.0] - 2026-11-13
 
 ### Added
 
@@ -36,6 +36,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejects `speed` falls back to standard speed for the process.
 - **Save tile images** checkbox under *Open Diagnostics Log* (seeded from
   `DRAWING_ANALYZER_SAVE_TILES`).
+
+### Changed
+
+- **The typed Governing code editions field is gone from the GUI**; the AHJ
+  Atlas Input replaces it. The library's `governing_editions=` is unchanged and
+  also accepts a list of entries.
+- **Dependencies:** `openpyxl` 3.1.5 (and `et_xmlfile` 2.0.0) added for the AHJ
+  Atlas Input and spreadsheet checklists (`pyproject.toml`, `requirements.txt`,
+  `requirements-release.lock`). Both MIT.
+
+### Fixed
+
+- AHJ Atlas parsing no longer mistakes a year-like code number for its edition.
+
+## [1.12.1] - 2026-11-13
+
+### Added
+
 - **Charts, tables and memos in the report's Ask AI chat.** A new client tool,
   `create_artifact`, lets the assistant put a chart (bar, horizontal bar, line,
   donut), a sortable table, or a Markdown memo straight into the conversation as
@@ -68,13 +86,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   build would need Artifex's commercial PyMuPDF license or another PDF engine.
 
 ### Changed
-
-- **The typed Governing code editions field is gone from the GUI**; the AHJ
-  Atlas Input replaces it. The library's `governing_editions=` is unchanged and
-  also accepts a list of entries.
-- **Dependencies:** `openpyxl` 3.1.5 (and `et_xmlfile` 2.0.0) added for the AHJ
-  Atlas Input and spreadsheet checklists (`pyproject.toml`, `requirements.txt`,
-  `requirements-release.lock`). Both MIT.
 
 - `write_drawing_export` now writes `report.html` after the other ordinary
   artifacts (still before `run.log` and `run_manifest.json`), so the report's
