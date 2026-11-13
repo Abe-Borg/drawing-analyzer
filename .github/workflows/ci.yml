@@ -113,7 +113,8 @@ jobs:
       - name: Install (engine + dev + browser test)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,browsertest]"
+          pip install -c requirements-release.lock -e ".[dev,browsertest]"
+          python -m pip check
       - name: Install Chromium (pinned by the Playwright version)
         run: python -m playwright install --with-deps chromium
       - name: Report exploit suite

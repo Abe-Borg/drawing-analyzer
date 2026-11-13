@@ -6,7 +6,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.12.0] - 2026-11-13
+## [1.12.1] - 2026-11-13
 
 ### Added
 
@@ -54,6 +54,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Release validation uses the release dependency lock from the first install.**
+  The v1.12.0 candidate was not published: its validation job first installed
+  newer, unconstrained dependencies, then downgraded to the release lock for
+  auditing, leaving newer PyMuPDF companion packages with missing license
+  metadata behind. Linux/Windows release validation, browser CI, and the
+  acceptance runner's clean-install smoke now use the committed constraints
+  throughout and check dependency consistency. The license audit stays intact.
 - **A reached API spend limit ends a run's paid work cleanly.** The
   organization's monthly spend cap answers with a 429 that has no
   `retry-after` and keeps failing until access resumes. It used to be retried
