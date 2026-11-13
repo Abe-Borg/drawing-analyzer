@@ -8,6 +8,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live view in the GUI.** The activity area is now the **Activity** section
+  with a **Live view | Log** toggle. The Live view is an animated board of the
+  run on a blueprint grid: a pipeline track whose stage nodes pulse while they
+  run (with data packets streaming into them — blue for real-time reads, amber
+  while work waits in the batch queue) and burst green / amber / red when they
+  finish; one cell per sheet that shimmers while queued, scans while being
+  read, and settles read / cached / failed, with purple marks for critique
+  reads; a live token-throughput chart and call counters; a header with the
+  elapsed clock, tokens and the estimated spend so far; a ticker of notable
+  events; hover tooltips; and, at the end of a QC run, the findings broken
+  down by verification status and severity. Before a run it previews the
+  loaded set and the stages the current QC options would run. Picking **Log**
+  (or collapsing the section) turns the visuals off; the choice is remembered.
+  Warnings logged while the board is showing are counted beside the toggle.
+- **`extract_drawing_context(monitor=…)`** and `drawing_analyzer.live_view`
+  (`RunMonitor`, `LiveRunModel`), `live_scene` (`LiveScene`, `CanvasPainter`)
+  and `live_panel` (`LivePanel`): a read-only window onto a live run — its own
+  journal, per-call telemetry, resolved configuration and sheets — and the
+  toolkit-free model, scene and frame loop the GUI draws from. A monitor can
+  never change or fail a run; the live spend is an estimate replaced by the
+  run's usage-ledger figure when it returns.
 - **Live spend line in the GUI.** While a run works, the line under the
   Analyze row shows what has been billed so far, what is in flight in the
   Batch queue, and a projected total, refreshed every second. Each response is
@@ -26,6 +47,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`extract_drawing_context(spend=...)`) and `cost.spend_forecast(estimate)`
   for library callers. `CancelToken.cancel(reason)` records why a run was
   stopped when it was not the user.
+
+### Changed
+
+- The GUI opens taller when the screen has room (up to 880 px, measured in the
+  toolkit's scaled units so a 125–150% display is not overshot).
 
 ## [1.13.0] - 2026-11-13
 

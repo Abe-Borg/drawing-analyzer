@@ -67,6 +67,11 @@ Module layout::
     live_spend.py     the run's live spend (SpendMonitor): billed / in flight /
                       projected total while the run works, and the budget cap
                       that stops the run through the kill switch
+    live_view.py      RunMonitor (extract_drawing_context(monitor=)) + the
+                      LiveRunModel reducer behind the GUI's Live view
+    live_scene.py     the Live view's animated scene (draw primitives) and the
+                      diffing CanvasPainter (toolkit-free)
+    live_panel.py     the GUI-side Live view driver: self-pacing frame loop
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored
                       per-tile notes builders (no PyMuPDF import)
     export.py         folder export: findings.csv/json, sheet text, evidence,
