@@ -400,7 +400,12 @@ map lives in `src/drawing_analyzer/__init__.py`.
   `side="bottom", after=` the footer so a short window clips the log and
   sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
-  or the list cannot shrink. GUI lifecycle tests drive real handlers on a
+  or the list cannot shrink. Persisted GUI preferences (not secrets, not run
+  inputs) live in `core/preferences.py` (`gui_preferences.json`, tolerant read,
+  best-effort atomic write); today only `SKIP_FULL_QC_CONFIRM`, set by the
+  full-QC cost dialog's "Don't show this again" (`gui._ask_cost_confirmation`,
+  remembered on Yes only) and cleared by the QC section's confirm box. A
+  skipped dialog logs the estimate. GUI lifecycle tests drive real handlers on a
   `SimpleNamespace` stub — a handler that calls a new method needs it stubbed.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,
   tokenizer, structured-outputs gate. The tokenizer is estimate-only; the exact

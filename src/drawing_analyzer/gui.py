@@ -78,7 +78,7 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
 
 from . import __version__, diagnostics
 from .cancellation import CancelToken, RunCancelled
-from .core import updates
+from .core import preferences, updates
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import (
     SecureKeyStorageUnavailable,
@@ -392,6 +392,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Diagnostics: stage every rendered tile PNG into the export's tiles/
         # folder. Starts from DRAWING_ANALYZER_SAVE_TILES; the box then wins.
         self._save_tiles_var = BooleanVar(value=_resolve_save_tiles(None))
+        # Full-QC cost confirmation: on unless the user ticked "Don't show this
+        # again" in that dialog. Persisted in gui_preferences.json; the QC
+        # section's "Confirm estimated cost" box turns it back on.
+        self._prefs_path = preferences.default_preferences_path()
+        self._confirm_full_qc_var = BooleanVar(
+            value=not preferences.get_bool(
+                self._prefs_path, preferences.SKIP_FULL_QC_CONFIRM
+            )
+        )
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
@@ -709,6 +718,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_muted"],
         )
         self._ink_rejected_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
+        # A preference, not a run option: always editable, and the way back
+        # after "Don't show this again" in the full-QC cost dialog.
+        self._confirm_full_qc_check = ctk.CTkCheckBox(
+            qc_row, text="Confirm estimated cost before each full QC run",
+            variable=self._confirm_full_qc_var,
+            command=self._on_confirm_full_qc_toggle,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._confirm_full_qc_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
         self._reference_audit_check = ctk.CTkCheckBox(
             qc_row, text="Deterministic audit only — no additional API calls",
             variable=self._reference_audit_var, command=self._refresh_summary,
@@ -1952,6 +1971,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
         self._refresh_summary()
 
+    def _on_confirm_full_qc_toggle(self) -> None:
+        """Persist the full-QC cost-confirmation preference (best-effort)."""
+        preferences.set_preference(
+            self._prefs_path, preferences.SKIP_FULL_QC_CONFIRM,
+            not bool(self._confirm_full_qc_var.get()),
+        )
+
     # --------------------------------------------------------------------- #
     # Review profiles (Phase 24 §16.4)
     # --------------------------------------------------------------------- #
@@ -2429,6 +2455,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # the scan finished, or it failed. No blocking, no second PDF owner, and
         # no spinner: the work was already done under a lock we do not touch.
         bases = self._usable_preflight_bases()
+        skipped_estimate: str | None = None
         if qc_markups:
             exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
@@ -2439,7 +2466,23 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 fast_mode=fast_mode,
             )
             prompt = format_exhaustive_cost_prompt(exh)
-            dialog_title = "Confirm full QC run"
+            if self._confirm_full_qc_var.get():
+                proceed, dont_show = _ask_cost_confirmation(
+                    self, "Confirm full QC run", prompt
+                )
+                if not proceed:
+                    return
+                if dont_show:
+                    self._confirm_full_qc_var.set(False)
+                    self._on_confirm_full_qc_toggle()
+            else:
+                # The user opted out of the dialog; the estimate still reaches
+                # the activity log once the run starts.
+                skipped_estimate = (
+                    f"${exh.low_cost:,.2f}–${exh.high_cost:,.2f}"
+                    if exh.low_cost is not None and exh.high_cost is not None
+                    else "unavailable"
+                )
         else:
             estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
@@ -2449,9 +2492,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 fast_mode=fast_mode,
             )
             prompt = format_drawing_cost_prompt(estimate)
-            dialog_title = "Confirm drawing analysis"
-        if not messagebox.askyesno(dialog_title, prompt):
-            return
+            if not messagebox.askyesno("Confirm drawing analysis", prompt):
+                return
 
         self._busy = True
         self._ctx = None
@@ -2472,6 +2514,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
             level="accent",
         )
+        if skipped_estimate is not None:
+            self._log(
+                f"Full QC estimated cost: {skipped_estimate} — confirmation "
+                "skipped (turn it back on under QC review → Confirm estimated "
+                "cost before each full QC run).",
+                level="warning",
+            )
         if focus:
             self._log(f"Per-run focus: {focus}", level="accent")
             self._log(
@@ -3805,6 +3854,88 @@ def _describe_busy(analysis: bool, export: bool) -> str:
     if export:
         return "An export is still being written."
     return ""
+
+
+def _ask_cost_confirmation(parent, title: str, prompt: str) -> tuple[bool, bool]:
+    """A Yes/No cost confirmation with a "Don't show this again" checkbox.
+
+    Modal over ``parent``; returns ``(proceed, dont_show_again)``. Closing the
+    window or Escape is No. The opt-out is reported only on Yes — skipping the
+    dialog means proceeding, so a ticked box on No would remember nothing.
+    """
+    result = {"proceed": False}
+    win = ctk.CTkToplevel(parent)
+    win.title(title)
+    win.configure(fg_color=COLORS["bg_dark"])
+    win.geometry("760x620")
+    win.minsize(560, 400)
+    win.transient(parent)
+    dont_show = BooleanVar(master=win, value=False)
+
+    def finish(proceed: bool) -> None:
+        result["proceed"] = proceed
+        try:
+            win.grab_release()
+        except Exception:  # noqa: BLE001 - platform dependent
+            pass
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+    win.bind("<Escape>", lambda _e: finish(False))
+
+    card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+    card.pack(fill="both", expand=True, padx=12, pady=12)
+    ctk.CTkLabel(
+        card, text=title,
+        font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+        text_color=COLORS["text_primary"], justify="left",
+    ).pack(anchor="w", padx=18, pady=(16, 8))
+
+    # Bottom bar first so pack reserves the bottom edge before the text expands.
+    bottom = ctk.CTkFrame(card, fg_color="transparent")
+    bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
+    yes_btn = ctk.CTkButton(
+        bottom, text="Yes", width=90, height=34,
+        font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+        command=lambda: finish(True),
+    )
+    yes_btn.pack(side="right")
+    ctk.CTkButton(
+        bottom, text="No", width=90, height=34,
+        font=ctk.CTkFont(family="Segoe UI", size=12),
+        fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+        border_width=1, border_color=COLORS["border"],
+        text_color=COLORS["text_secondary"],
+        command=lambda: finish(False),
+    ).pack(side="right", padx=(0, 8))
+    ctk.CTkCheckBox(
+        bottom, text="Don't show this again", variable=dont_show,
+        font=ctk.CTkFont(family="Segoe UI", size=12),
+        text_color=COLORS["text_secondary"],
+        checkbox_width=18, checkbox_height=18,
+    ).pack(side="left")
+
+    body = ctk.CTkTextbox(
+        card, fg_color=COLORS["bg_dark"], text_color=COLORS["text_secondary"],
+        font=ctk.CTkFont(family="Segoe UI", size=12), wrap="word",
+    )
+    body.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+    body.insert("1.0", prompt)
+    body.configure(state="disabled")
+
+    def grab() -> None:
+        try:
+            if win.winfo_exists():
+                win.grab_set()
+                yes_btn.focus_set()
+        except Exception:  # noqa: BLE001 - grabbing before viewable can raise
+            pass
+
+    # Grabbing before the toplevel is viewable raises on some platforms.
+    win.after(150, grab)
+    parent.wait_window(win)
+    return result["proceed"], result["proceed"] and bool(dont_show.get())
 
 
 def main() -> None:
