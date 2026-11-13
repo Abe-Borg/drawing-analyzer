@@ -1,5 +1,13 @@
 # Release validation record — 1.12.0
 
+**NOT PUBLISHED.** The v1.12.0 tag is retained as a failed candidate. All
+tests and the installer build passed, but the release license audit failed in
+[run 43493527500](https://github.com/Abe-Borg/drawing-analyzer/actions/runs/43493527500).
+The initial unconstrained validation install brought in PyMuPDF 2.1 and its
+companions; downgrading for the audit left `pymupdf_layout` and `pymupdf4llm`
+installed without license metadata. Publication was skipped. Version 1.12.1
+corrects validation to use the committed dependency constraints throughout.
+
 Release requested by Abe Borg on 2026-11-13 to ship the latest code.
 Automated evidence and checks requiring a live account or desktop applications
 are recorded separately; an unrun check is not a pass.

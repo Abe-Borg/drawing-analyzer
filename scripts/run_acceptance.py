@@ -147,8 +147,11 @@ def gate_build_and_install_smoke() -> str:
         venv.create(env_dir, with_pip=True)
         bin_dir = "Scripts" if sys.platform == "win32" else "bin"
         py = env_dir / bin_dir / ("python.exe" if sys.platform == "win32" else "python")
-        if _run([str(py), "-m", "pip", "install", "--quiet", str(wheels[0])]) != 0:
+        if _run([str(py), "-m", "pip", "install", "--quiet", "-c",
+                 str(REPO_ROOT / "requirements-release.lock"), str(wheels[0])]) != 0:
             return "FAIL (wheel install)"
+        if _run([str(py), "-m", "pip", "check"]) != 0:
+            return "FAIL (installed dependency consistency)"
         # No built-in profiles ship (review plans are model-authored per set —
         # Phase A), so the smoke proves the profile MECHANISM in the installed
         # wheel instead: the loader tolerates the absent builtin dir, and the
