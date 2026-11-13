@@ -51,6 +51,8 @@ from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest_cache import DigestCache  # noqa: E402
 from drawing_analyzer.export import write_drawing_export  # noqa: E402
 from drawing_analyzer.html_report import build_html_report  # noqa: E402
+from drawing_analyzer.cost import estimate_exhaustive_run_cost, spend_forecast  # noqa: E402
+from drawing_analyzer.live_spend import SpendMonitor  # noqa: E402
 from drawing_analyzer.models import SheetRef  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
@@ -329,6 +331,16 @@ from drawing_analyzer.annotate import count_annotations  # noqa: E402
 from tests.fixtures import gauntlet as G  # noqa: E402
 
 
+class _LiveSpend(SpendMonitor):
+    """Keeps the last live reading, taken before the ledger replaces it."""
+
+    live = None
+
+    def finish(self, run_usage=None):
+        self.live = self.snapshot()
+        super().finish(run_usage)
+
+
 @pytest.fixture(scope="module")
 def oracle(tmp_path_factory):
     """One cold exhaustive run over the full §19.1 oracle set + its export.
@@ -341,12 +353,17 @@ def oracle(tmp_path_factory):
     oset = G.build_oracle_set(root / "set")
     client = G.oracle_client()
     work = root / "qc"
+    spend = _LiveSpend(forecast=spend_forecast(
+        estimate_exhaustive_run_cost(len(oset.inputs), batch=False)
+    ))
     ctx = extract_drawing_context(
         oset.inputs, client=client, rows=2, cols=2,
-        reference_audit=True, qc_markups=True, qc_work_dir=work,
+        reference_audit=True, qc_markups=True, qc_work_dir=work, spend=spend,
     )
     export = write_drawing_export(ctx, root / "out", source_names=oset.source_names)
-    return SimpleNamespace(ctx=ctx, set=oset, client=client, work=work, export=export)
+    return SimpleNamespace(
+        ctx=ctx, set=oset, client=client, work=work, export=export, spend=spend,
+    )
 
 
 def _one(findings, **want):
@@ -879,6 +896,20 @@ def test_gauntlet_every_billed_call_has_a_provisioning_record(oracle):
     assert {a["path"] for a in manifest["artifacts"]} >= {
         "diagnostics/00_summary.md", "diagnostics/api_calls.csv", "diagnostics/api_calls.json",
     }
+
+
+def test_gauntlet_live_spend_prices_every_stage_as_the_ledger_does(oracle):
+    """The figure shown while the run works is the one the run records."""
+    live, ledger = oracle.spend.live, oracle.ctx.run_usage
+    by_family = {
+        family: float(group["estimated_cost"])
+        for family, group in ledger.by_family().items() if group["calls"] > group["cache_hits"]
+    }
+    assert {s.family: s.billed for s in live.stages if s.billed} == pytest.approx(by_family)
+    assert live.billed == pytest.approx(float(ledger.total_estimated_cost))
+    # Every stage had ended, so nothing was left forecast or in flight.
+    assert live.projected_low == live.projected_high == pytest.approx(live.billed)
+    assert live.in_flight_items == 0 and not live.unpriced_calls
 
 
 # ---- assertion 14: sacred prose ----------------------------------------------

@@ -10,6 +10,7 @@ Launch with ``python -m drawing_analyzer``.
 """
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import subprocess
@@ -95,8 +96,10 @@ from .cost import (
     estimate_text_tokens,
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
+    spend_forecast,
     xfast_note,
 )
+from .live_spend import SpendMonitor, format_money, format_spend_line
 from .help_content import (
     GET_API_KEY,
     HELP_DOCUMENTS,
@@ -329,6 +332,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # The running analysis's kill switch (Stop button, and quitting mid-run);
         # None while no analysis runs. See drawing_analyzer.cancellation.
         self._run_cancel: CancelToken | None = None
+        # The current (or last) run's live spend, read by the spend line.
+        self._spend: SpendMonitor | None = None
         self._quitting = False
         # Uploaded project specifications (optional) — see spec_documents.py.
         # Distinct from "Per-run focus" below: this is ground-truth reference
@@ -400,6 +405,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             value=not preferences.get_bool(
                 self._prefs_path, preferences.SKIP_FULL_QC_CONFIRM
             )
+        )
+        # Budget cap: stops the run when its spend reaches the amount. Both
+        # stay editable while a run works (see _on_budget_change).
+        self._budget_on_var = BooleanVar(
+            value=preferences.get_bool(self._prefs_path, preferences.BUDGET_CAP_ENABLED)
+        )
+        self._budget_var = StringVar(
+            value=preferences.get_str(self._prefs_path, preferences.BUDGET_CAP_AMOUNT)
         )
         self._key_shown = False
         self._initial_key = self._load_api_key()
@@ -833,6 +846,31 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_muted"], anchor="w",
         )
 
+        # Live spend + budget cap. The line fills in while a run works (see
+        # _tick_spend). The cap box and its amount are a preference and stay
+        # editable during a run: a change applies to the run in progress.
+        self._spend_row = ctk.CTkFrame(outer, fg_color="transparent")
+        self.spend_label = ctk.CTkLabel(
+            self._spend_row, text="", font=ctk.CTkFont(family="Consolas", size=12),
+            text_color=COLORS["text_muted"], anchor="w", justify="left", wraplength=420,
+        )
+        self.spend_label.pack(side="left", fill="x", expand=True)
+        self._budget_entry = ctk.CTkEntry(
+            self._spend_row, textvariable=self._budget_var, width=84, height=26,
+            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+        )
+        self._budget_entry.pack(side="right")
+        self._budget_entry.bind("<Return>", self._on_budget_change)
+        self._budget_entry.bind("<FocusOut>", self._on_budget_change)
+        self._budget_check = ctk.CTkCheckBox(
+            self._spend_row, text="Stop the run at $",
+            variable=self._budget_on_var, command=self._on_budget_change,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._budget_check.pack(side="right", padx=(8, 4))
+
         # Activity log — live status + per-sheet diagnostics. The digest itself
         # is no longer shown here; it is written only to the saved Markdown file.
         # Collapsible like the sections above, and the sole ``expand=True``
@@ -881,8 +919,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # activity log sits between the sections and the Analyze row and is
         # the first thing to give way on a short window.
         self.progress_label.pack(side="bottom", fill="x", padx=16, pady=(0, 2), after=opt_row)
+        self._spend_row.pack(
+            side="bottom", fill="x", padx=16, pady=(0, 2), after=self.progress_label,
+        )
         self._action_row.pack(
-            side="bottom", fill="x", padx=16, pady=(4, 2), after=self.progress_label,
+            side="bottom", fill="x", padx=16, pady=(4, 2), after=self._spend_row,
         )
         self._embed_key_check = ctk.CTkCheckBox(
             opt_row,
@@ -1971,6 +2012,92 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
         self._refresh_summary()
 
+    # ----------------------------------------------- live spend + budget cap
+
+    def _budget_cap(self) -> float | None:
+        """The cap the box and amount ask for; ``ValueError`` if unreadable."""
+        if not self._budget_on_var.get():
+            return None
+        return parse_budget(self._budget_var.get())
+
+    def _on_budget_change(self, _event=None) -> None:
+        """The cap box or amount changed: remember it and apply it to a live run.
+
+        An unreadable amount leaves the run's current cap in force. A cap at
+        or below what the run has already spent would stop it at once, so that
+        change is confirmed first and reverted if declined.
+        """
+        if getattr(self, "_budget_confirming", False):
+            return          # the confirmation dialog took focus from the entry
+        try:
+            cap = self._budget_cap()
+        except ValueError:
+            self._mark_budget_entry(valid=False)
+            return
+        self._mark_budget_entry(valid=True)
+        monitor = self._spend
+        if monitor is not None and self._busy and cap != monitor.budget:
+            snap = monitor.snapshot()
+            if cap is not None and cap <= snap.committed and not self._confirm_stopping_cap(
+                cap, snap.committed
+            ):
+                previous = monitor.budget
+                self._budget_on_var.set(previous is not None)
+                if previous is not None:
+                    self._budget_var.set(f"{previous:.2f}")
+            else:
+                monitor.set_budget(cap)
+                self._log(
+                    f"Budget cap set to {format_money(cap)}." if cap is not None
+                    else "Budget cap turned off for this run.",
+                    level="accent",
+                )
+            self._refresh_spend_line()
+        preferences.set_preference(
+            self._prefs_path, preferences.BUDGET_CAP_ENABLED, bool(self._budget_on_var.get())
+        )
+        preferences.set_preference(
+            self._prefs_path, preferences.BUDGET_CAP_AMOUNT, self._budget_var.get().strip()
+        )
+
+    def _confirm_stopping_cap(self, cap: float, committed: float) -> bool:
+        self._budget_confirming = True
+        try:
+            return bool(messagebox.askyesno(
+                "Stop this run?",
+                f"This run has already spent about {format_money(committed)}, "
+                f"which is at or above a cap of {format_money(cap)}.\n\n"
+                "Setting this cap stops the run now. Continue?",
+                icon="warning", parent=self,
+            ))
+        finally:
+            self._budget_confirming = False
+
+    def _mark_budget_entry(self, *, valid: bool) -> None:
+        entry = getattr(self, "_budget_entry", None)
+        if entry is not None:
+            entry.configure(border_color=COLORS["border"] if valid else COLORS["error"])
+
+    def _refresh_spend_line(self) -> None:
+        monitor = self._spend
+        if monitor is None:
+            self.spend_label.configure(text="")
+            return
+        snap = monitor.snapshot()
+        color = COLORS["text_secondary"]
+        if snap.budget_hit is not None:
+            color = COLORS["error"]
+        elif snap.budget is not None and snap.committed >= 0.8 * snap.budget:
+            color = COLORS["warning"]
+        self.spend_label.configure(text=format_spend_line(snap), text_color=color)
+
+    def _tick_spend(self) -> None:
+        """Refresh the spend line once a second for as long as a run works."""
+        if not self._busy or self._spend is None:
+            return
+        self._refresh_spend_line()
+        self.after(SPEND_REFRESH_MS, self._tick_spend)
+
     def _on_confirm_full_qc_toggle(self) -> None:
         """Persist the full-QC cost-confirmation preference (best-effort)."""
         preferences.set_preference(
@@ -2423,6 +2550,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             return
 
+        try:
+            budget_cap = self._budget_cap()
+        except ValueError:
+            self._mark_budget_entry(valid=False)
+            messagebox.showerror(
+                "Budget cap",
+                "The budget cap is on, but its amount is not a dollar figure "
+                "greater than zero. Enter an amount (for example 50) or turn "
+                "the cap off.",
+            )
+            return
+
         # Snapshot every input with the file list, so mid-run edits can't
         # change what a running analysis was asked to do.
         governing_editions = self._current_governing()
@@ -2456,8 +2595,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # no spinner: the work was already done under a lock we do not touch.
         bases = self._usable_preflight_bases()
         skipped_estimate: str | None = None
+        quoted = None
         if qc_markups:
-            exh = estimate_exhaustive_run_cost(
+            quoted = exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, critique_batch=critique_use_batch,
                 focus=bool(focus),
@@ -2484,7 +2624,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     else "unavailable"
                 )
         else:
-            estimate = estimate_drawing_set_cost(
+            quoted = estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, focus=bool(focus),
                 spec_chars=reference_chars,
@@ -2498,6 +2638,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._busy = True
         self._ctx = None
         self._run_cancel = CancelToken()
+        # The run's live spend: priced as responses arrive, projected from the
+        # estimate just quoted, and capped by the budget box (which stays live).
+        self._spend = SpendMonitor(budget=budget_cap, forecast=spend_forecast(quoted))
         self.analyze_btn.configure(state="disabled", text="Analyzing…")
         self.stop_btn.configure(state="normal", text="Stop")
         self.clear_btn.configure(state="disabled")
@@ -2521,6 +2664,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "cost before each full QC run).",
                 level="warning",
             )
+        if budget_cap is not None:
+            self._log(
+                f"Budget cap: {format_money(budget_cap)} — the run stops if its "
+                "spend reaches it. The cap can be changed or turned off while "
+                "the run works.",
+                level="accent",
+            )
+            low = getattr(quoted, "low_cost", None)
+            if low is not None and low > budget_cap:
+                self._log(
+                    f"The estimate's low end ({format_money(low)}) is above the "
+                    "cap, so this run is likely to be stopped before it finishes.",
+                    level="warning",
+                )
         if focus:
             self._log(f"Per-run focus: {focus}", level="accent")
             self._log(
@@ -2606,9 +2763,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
                   use_batch, critique_use_batch, self._run_cancel,
-                  governing_editions, project_context, fast_mode, save_tiles),
+                  governing_editions, project_context, fast_mode, save_tiles,
+                  self._spend),
             daemon=True,
         ).start()
+        self._tick_spend()
 
     def _worker(
         self,
@@ -2627,6 +2786,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         project_context: str | None = None,
         fast_mode: bool = False,
         save_tile_artifacts: bool = False,
+        spend: SpendMonitor | None = None,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -2653,6 +2813,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 project_context=project_context,
                 fast_mode=fast_mode,
                 cancel=cancel,
+                spend=spend,
             )
         except RunCancelled:
             # The user's Stop (or quitting mid-run). A BaseException, so it is
@@ -2782,13 +2943,34 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
+        self._refresh_spend_line()
+        hit = self._spend.snapshot().budget_hit if self._spend is not None else None
+        if hit is not None:
+            self._log(
+                f"Budget cap reached — the run was stopped at about "
+                f"{format_money(hit.committed)} against a cap of "
+                f"{format_money(hit.limit)}. Requests already made are still "
+                "billed, so the final charge can be a little higher.",
+                level="error",
+            )
         self._log(
             "Run stopped. Nothing further will be sent. Sheets that finished are "
             "in the cache — re-running the same files reuses them at no cost, and "
             "the next run collects anything a canceled batch finished first.",
             level="warning",
         )
-        self._set_progress_text("Stopped.", color=COLORS["warning"])
+        self._set_progress_text(
+            "Stopped — budget cap reached." if hit is not None else "Stopped.",
+            color=COLORS["warning"],
+        )
+        if hit is not None:
+            messagebox.showwarning(
+                "Budget cap reached",
+                f"The run was stopped because its spend reached the budget cap "
+                f"of {format_money(hit.limit)}.\n\n"
+                "Sheets that finished are in the cache. Raise the cap or turn "
+                "it off and run again to continue from there.",
+            )
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
@@ -2802,6 +2984,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
+        self._refresh_spend_line()
         has_text = bool(ctx.combined_text.strip())
         if has_text:
             self.html_btn.configure(state="normal")
@@ -3041,6 +3224,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
+        self._refresh_spend_line()
         self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)
@@ -3840,6 +4024,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 # How long quitting mid-run waits for the stop to settle (worker unwound,
 # remote batch cancels sent) before closing anyway.
 QUIT_STOP_GRACE_SECONDS = 30.0
+
+
+# How often the spend line re-reads the run's monitor.
+SPEND_REFRESH_MS = 1000
+
+
+def parse_budget(text: str) -> float:
+    """A typed budget cap as dollars. ``ValueError`` unless it is a positive amount."""
+    cleaned = str(text or "").strip().lstrip("$").replace(",", "").strip()
+    amount = float(cleaned)            # ValueError on "" or non-numeric text
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("a budget cap must be greater than zero")
+    return amount
 
 
 def _describe_busy(analysis: bool, export: bool) -> str:

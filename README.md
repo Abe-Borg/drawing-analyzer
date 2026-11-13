@@ -301,6 +301,54 @@ submission never sent are deleted immediately. A stop that arrives after the
 run's last paid request — once markup writing has begun — lets the run finish,
 and the log says so.
 
+#### Live spend and the budget cap
+
+While a run works, the line under the *Analyze Drawings* row shows its spend,
+refreshed every second:
+
+```
+Spent $12.40  ·  in flight ~$3.10–$5.80 (24 batch request(s))  ·  projected $41.20–$58.00  ·  quoted $30.00–$190.00  ·  cap $60.00
+```
+
+- **Spent** is every response received so far, priced the moment it arrives
+  with the same rule the usage ledger uses (batch results at the batch rate,
+  each attempt of a refusal fallback at the model that ran it, web searches
+  per use). "at least" appears if a response ran on a model the price table
+  does not know.
+- **In flight** is Message Batch requests that have been submitted and not yet
+  read. A batch reports no usage until its results exist, so this is a band
+  rather than a figure; it moves to *Spent* as results are read.
+- **Projected** is where the total is heading. It starts at the quoted
+  estimate and narrows as the run learns: each stage's remaining items are
+  priced at a rate that moves from the estimate's per-item figure to the
+  stage's own observed average as its items complete, a stage that finishes
+  counts exactly what it billed, and a stage that turns out to be cached or
+  unnecessary drops out. When the run ends the line reads **Final cost**, taken
+  from the usage ledger.
+- **Quoted** is the estimate shown before the run, for comparison.
+
+Every figure is this app's price table applied to the tokens the API reports —
+an estimate, not your invoice.
+
+**Stop the run at $** (beside the spend line) is a budget cap. Tick the box,
+type an amount, and the run is stopped through the kill switch above when its
+spend reaches it. The box and the amount stay live during a run: change the
+amount or untick the box and the change applies to the run in progress. Setting
+a cap at or below what the run has already spent asks for confirmation first,
+because it stops the run at once. An amount that cannot be read leaves the
+current cap in force, and Analyze will not start with the box ticked and no
+usable amount. The setting is remembered between sessions.
+
+What the cap compares against is *Spent* plus a **floor** on *In flight*: the
+low per-item rate, counted only when it can be trusted (the estimate priced
+the pages from their measured sizes, or the stage has already shown what its
+items cost). An over-wide estimate of queued work therefore never stops a run
+that is within its cap. The other side of that choice: work already sent is
+billed for whatever it completes, so a batch run can finish above the cap by
+up to the batch that was in flight when it tripped. A run stopped by the cap behaves like any
+stopped run — nothing is exported, finished sheets are in the cache, and the
+next run picks up from there once the cap is raised or turned off.
+
 Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the rooms,
 and what types of plumbing fixtures each has"*. You always get the standard
 digest; a focus adds the Focus Report on top (see [Per-run focus](#per-run-focus)).
@@ -463,6 +511,7 @@ ctx = extract_drawing_context(
     # save_tile_artifacts=True keeps every rendered tile for the export's tiles/.
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
+    spend=spend,                      # optional live spend + budget cap (see below)
 )
 print(ctx.combined_text)
 print(ctx.qc_status)            # NOT_REQUESTED | COMPLETE | PARTIAL | FAILED (§3.3)
@@ -487,6 +536,34 @@ The kill switch is a `drawing_analyzer.cancellation.CancelToken`. Call
 the stages' non-fatal `except Exception` guards cannot swallow it; catch it by
 name. `token.wait_for_remote_cancels(timeout)` waits for the stop's remote batch
 cancels to be sent, which matters if the process is about to exit.
+
+Live spend is a `drawing_analyzer.live_spend.SpendMonitor`:
+
+```python
+from drawing_analyzer import CancelToken, SpendMonitor
+from drawing_analyzer.cost import estimate_exhaustive_run_cost, spend_forecast
+
+token = CancelToken()
+spend = SpendMonitor(
+    budget=60.0,                                   # optional cap, in dollars
+    forecast=spend_forecast(                       # optional: enables the projection
+        estimate_exhaustive_run_cost(sheet_count, batch=True)
+    ),
+)
+# ...run extract_drawing_context(..., cancel=token, spend=spend) on a worker thread...
+snap = spend.snapshot()         # any thread, any time
+print(snap.billed, snap.in_flight_items, snap.projected_low, snap.projected_high)
+spend.set_budget(80.0)          # raise, lower or clear (None) while the run works
+```
+
+`snapshot()` returns a `SpendSnapshot`: `billed`, `in_flight_items` with its
+`in_flight_low` / `in_flight_high` band, `projected_low` / `projected_high`
+(`None` without a forecast until the run ends), the `quoted_*` estimate, a
+per-family `stages` breakdown, `unpriced_calls`, and `budget_hit` once the cap
+has stopped the run. The cap acts through `cancel`, so a monitor with a budget
+needs `cancel=` (`ValueError` otherwise), and a run it stops raises
+`RunCancelled` with `token.reason` set. After a normal return the snapshot is
+`final` and equals `ctx.run_usage`.
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
@@ -788,7 +865,9 @@ always equal the exact sum of the records. A cache hit records zero billed token
 a batch call is priced at the batch rate, a real-time call at the standard rate —
 per record. Before an exhaustive run the GUI shows a per-stage estimate with a
 low–high range (verification and citation scale with how many findings/citations
-turn up); after the run the completion summary and a collapsible **Token usage &
+turn up); while it runs the spend line shows what is billed, in flight and
+projected (see [Live spend and the budget cap](#live-spend-and-the-budget-cap));
+after the run the completion summary and a collapsible **Token usage &
 estimated cost by stage** table in the report show the actuals. Pricing constants
 carry a verified effective date (`core.pricing.PRICING_EFFECTIVE_DATE`) —
 re-verify against the published rates before relying on a dollar figure.

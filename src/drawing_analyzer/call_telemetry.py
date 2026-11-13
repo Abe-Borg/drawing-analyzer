@@ -516,6 +516,12 @@ def _current_scope() -> tuple[str, str, dict]:
     return (f"{UNATTRIBUTED} ({_calling_module()})", "", {})
 
 
+def current_scope() -> tuple[str, str]:
+    """The calling thread's ``(stage, item)``; ``("unattributed", "")`` when unscoped."""
+    value = getattr(_scope, "value", None)
+    return (value[0], value[1]) if value else (UNATTRIBUTED, "")
+
+
 # --------------------------------------------------------------------------- #
 # The recorder.
 # --------------------------------------------------------------------------- #

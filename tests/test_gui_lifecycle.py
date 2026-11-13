@@ -204,6 +204,9 @@ def _cost_preview_app(gui, tk, monkeypatch):
         _current_context_text=lambda: "", _current_governing=lambda: [],
         _checklists=[], _atlas_choice=None, _save_tiles_var=var(value=False),
         _confirm_full_qc_var=var(value=True), _prefs_path=None,
+        _budget_on_var=var(value=False), _budget_var=tk.StringVar(value=""),
+        _spend=None, _budget_entry=None,
+        spend_label=types.SimpleNamespace(configure=lambda **kw: None),
         _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,
         _refresh_files_panel=lambda: None, _reveal_files=lambda: None,
         summary_label=types.SimpleNamespace(configure=lambda **kw: summaries.append(kw["text"])),
@@ -211,7 +214,9 @@ def _cost_preview_app(gui, tk, monkeypatch):
     )
     for name in ("_add_pdfs", "_refresh_profile_suggestions", "_apply_profile_suggestions",
                  "_usable_preflight_bases", "_refresh_summary", "_selected_profiles", "_on_process",
-                 "_on_confirm_full_qc_toggle"):
+                 "_on_confirm_full_qc_toggle", "_budget_cap", "_mark_budget_entry",
+                 "_on_budget_change", "_confirm_stopping_cap", "_refresh_spend_line",
+                 "_tick_spend"):
         setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
     return app, workers, callbacks, summaries
 
@@ -684,14 +689,93 @@ def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
         )
         app._processing_mode_var.set("XFast")
         app._save_tiles_var.set(True)
+        app._budget_on_var.set(True)
+        app._budget_var.set("$1,250")
         app._on_process()
         (args,) = started
         (pdfs, focus, specs, qc, _vo, _audit, _ink, profiles, use_batch,
-         critique_batch, _cancel, governing, context, fast_mode, save_tiles) = args
+         critique_batch, _cancel, governing, context, fast_mode, save_tiles, spend) = args
     assert pdfs == [pdf] and specs == "SPEC TEXT" and context == "BASIS OF DESIGN"
     assert checklist in profiles
     assert governing == ["NFPA 13 2025", "IBC 2024"]
     assert (use_batch, critique_batch, fast_mode, save_tiles) == (False, False, True, True)
+    # The run's monitor carries the typed cap and starts from the quoted estimate.
+    quoted = spend.snapshot()
+    assert spend.budget == 1250.0 and 0 < quoted.quoted_low <= quoted.projected_high
+
+
+@pytest.mark.parametrize("typed", ["", "abc", "0", "-5", "nan", "inf"])
+def test_an_unreadable_budget_cap_blocks_analyze_instead_of_running_uncapped(
+    tmp_path, monkeypatch, typed,
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-no-network")
+    with _gui_module() as (gui, tk):
+        app, started, _ = _inputs_app(gui, tk, monkeypatch)
+        app._pdfs = [_preview_pdf(tmp_path)]
+        app._budget_on_var.set(True)
+        app._budget_var.set(typed)
+        shown = []
+        tk.messagebox.showerror = lambda title, message: shown.append(title)
+        app._on_process()
+    assert started == [] and len(shown) == 1
+
+
+def test_the_budget_cap_can_be_changed_and_turned_off_while_a_run_works(tmp_path):
+    from drawing_analyzer.cancellation import CancelToken
+    from drawing_analyzer.core import preferences
+    from drawing_analyzer.live_spend import SpendMonitor
+    from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+
+    prefs = tmp_path / "config" / "gui_preferences.json"
+    with _gui_module() as (gui, tk):
+        token = CancelToken()
+        monitor = SpendMonitor(budget=20.0)
+        monitor.bind_cancel(token)
+        monitor.note_response(                               # $5 on Opus 5
+            FakeMessage(content=[FakeTextBlock(text="ok")],
+                        usage=FakeUsage(input_tokens=1_000_000, output_tokens=0)),
+            stage="digest", item="S:p0", model="claude-opus-5",
+        )
+        answers = []
+        tk.messagebox.askyesno = lambda *a, **k: answers.pop(0)
+        app = types.SimpleNamespace(
+            _busy=True, _spend=monitor, _prefs_path=prefs, _budget_entry=None,
+            _budget_on_var=tk.BooleanVar(value=True), _budget_var=tk.StringVar(value="20"),
+            _log=lambda *a, **k: None,
+            spend_label=types.SimpleNamespace(configure=lambda **kw: None),
+        )
+        for name in ("_budget_cap", "_on_budget_change", "_mark_budget_entry",
+                     "_confirm_stopping_cap", "_refresh_spend_line"):
+            setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
+
+        app._budget_var.set("12.50")
+        app._on_budget_change()
+        assert monitor.budget == 12.5
+
+        # Something unreadable leaves the cap in force rather than lifting it.
+        app._budget_var.set("twelve")
+        app._on_budget_change()
+        assert monitor.budget == 12.5
+
+        # A cap under the spend would stop the run: declining keeps the old one.
+        answers.append(False)
+        app._budget_var.set("3")
+        app._on_budget_change()
+        assert monitor.budget == 12.5 and not token.cancelled
+        assert float(app._budget_var.get()) == 12.5
+
+        app._budget_on_var.set(False)
+        app._on_budget_change()
+        assert monitor.budget is None
+        assert preferences.get_bool(prefs, preferences.BUDGET_CAP_ENABLED) is False
+
+        # ...and accepting it stops the run at once.
+        answers.append(True)
+        app._budget_on_var.set(True)
+        app._budget_var.set("3")
+        app._on_budget_change()
+        assert token.cancelled and monitor.snapshot().budget_hit.limit == 3.0
+        assert preferences.get_str(prefs, preferences.BUDGET_CAP_AMOUNT) == "3"
 
 
 def test_full_qc_confirmation_opt_out_persists_and_can_be_turned_back_on(tmp_path, monkeypatch):

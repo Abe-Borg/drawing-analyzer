@@ -1,7 +1,8 @@
 """Small persisted GUI preferences (``gui_preferences.json`` in the config dir).
 
 Holds user choices that should survive a restart but are not secrets and not
-run inputs — today only whether the full-QC cost confirmation is shown. Every
+run inputs — whether the full-QC cost confirmation is shown, and the budget
+cap. Every
 read tolerates a missing, unreadable, or corrupt file (it reads as "no
 preference set"), and every write is best-effort: a preference that cannot be
 saved must never block a run.
@@ -19,6 +20,10 @@ PREFERENCES_FILENAME = "gui_preferences.json"
 # confirmation and proceeds. The QC section's "Confirm estimated cost" box
 # turns it back off.
 SKIP_FULL_QC_CONFIRM = "skip_full_qc_cost_confirm"
+# The budget cap beside the Analyze button: whether it is on, and the dollar
+# amount as the user typed it (kept as text so an off cap keeps its figure).
+BUDGET_CAP_ENABLED = "budget_cap_enabled"
+BUDGET_CAP_AMOUNT = "budget_cap_amount"
 
 
 def default_preferences_path() -> Path:
@@ -38,6 +43,12 @@ def get_bool(path: str | Path, key: str, default: bool = False) -> bool:
     """One boolean preference; anything that is not a real bool reads as ``default``."""
     value = load_preferences(path).get(key, default)
     return value if isinstance(value, bool) else default
+
+
+def get_str(path: str | Path, key: str, default: str = "") -> str:
+    """One text preference; anything that is not a string reads as ``default``."""
+    value = load_preferences(path).get(key, default)
+    return value if isinstance(value, str) else default
 
 
 def set_preference(path: str | Path, key: str, value) -> bool:

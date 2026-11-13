@@ -64,6 +64,9 @@ Module layout::
                       events.csv, 00_summary.md)
     cancellation.py   the run kill switch: CancelToken / RunCancelled, the
                       per-thread binding, remote batch cancels on a stop
+    live_spend.py     the run's live spend (SpendMonitor): billed / in flight /
+                      projected total while the run works, and the budget cap
+                      that stops the run through the kill switch
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored
                       per-tile notes builders (no PyMuPDF import)
     export.py         folder export: findings.csv/json, sheet text, evidence,
@@ -81,6 +84,7 @@ from __future__ import annotations
 
 from .cancellation import CancelToken, RunCancelled
 from .digest import SheetDigest
+from .live_spend import SpendMonitor, SpendSnapshot
 from .models import (
     AdoptedCode,
     RunConfiguration,
@@ -112,6 +116,8 @@ __all__ = [
     "resolve_run_configuration",
     "roll_up_qc_status",
     "RunCancelled",
+    "SpendMonitor",
+    "SpendSnapshot",
     "extract_drawing_context",
     "estimate_image_tokens_for_set",
     "__version__",

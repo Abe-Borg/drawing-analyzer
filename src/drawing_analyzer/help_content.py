@@ -390,6 +390,20 @@ _HOW_TO_USE = HelpDocument(
                 "and requests already made are billed."
             ),
             _bullet(
+                "The line under the Analyze row shows the run's spend as it happens: "
+                "what has been billed so far, what is in flight in the batch queue, and "
+                "a projected total that narrows as stages finish. It prices the tokens "
+                "the API reports with this app's price table, so it is an estimate, not "
+                "your invoice."
+            ),
+            _bullet(
+                "Stop the run at $ — tick the box and type an amount to set a budget "
+                "cap. When the run's spend reaches it, the run is stopped exactly as "
+                "Stop does. You can change the amount or untick the box while a run is "
+                "working; the change applies to that run. Work already sent is still "
+                "billed, so a queued batch can finish slightly above the cap."
+            ),
+            _bullet(
                 "Nothing paid is thrown away: finished sheets stay in the cache, so "
                 "re-running the same files reuses them for free, and the next run collects "
                 "anything a canceled batch finished first. If a batch cannot be canceled, "

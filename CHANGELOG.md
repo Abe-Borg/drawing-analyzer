@@ -6,6 +6,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Live spend line in the GUI.** While a run works, the line under the
+  Analyze row shows what has been billed so far, what is in flight in the
+  Batch queue, and a projected total, refreshed every second. Each response is
+  priced as it arrives with the usage ledger's own rule; the line ends on the
+  ledger's final cost.
+- **Converging projected total.** The projection starts at the quoted estimate
+  and narrows as the run learns: a stage's remaining items are priced at a rate
+  that moves from the estimate's per-item figure to the stage's own observed
+  average, a finished stage counts what it billed, and a cached or unneeded
+  stage drops out.
+- **Budget cap** (*Stop the run at $*, `SpendMonitor(budget=...)`): stops the
+  run through the kill switch when its spend reaches the amount. The cap can
+  be changed or turned off while the run works, and is remembered between
+  sessions.
+- `drawing_analyzer.live_spend.SpendMonitor` / `SpendSnapshot`
+  (`extract_drawing_context(spend=...)`) and `cost.spend_forecast(estimate)`
+  for library callers. `CancelToken.cancel(reason)` records why a run was
+  stopped when it was not the user.
+
 ## [1.13.0] - 2026-11-13
 
 ### Added
