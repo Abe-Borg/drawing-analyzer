@@ -203,13 +203,15 @@ def _cost_preview_app(gui, tk, monkeypatch):
         _current_focus=lambda: "", _current_specs_text=lambda: "",
         _current_context_text=lambda: "", _current_governing=lambda: [],
         _checklists=[], _atlas_choice=None, _save_tiles_var=var(value=False),
+        _confirm_full_qc_var=var(value=True), _prefs_path=None,
         _refresh_section_headers=lambda: None, _sync_dropzone_section=lambda: None,
         _refresh_files_panel=lambda: None, _reveal_files=lambda: None,
         summary_label=types.SimpleNamespace(configure=lambda **kw: summaries.append(kw["text"])),
         after=lambda delay, callback: callbacks.append(callback),
     )
     for name in ("_add_pdfs", "_refresh_profile_suggestions", "_apply_profile_suggestions",
-                 "_usable_preflight_bases", "_refresh_summary", "_selected_profiles", "_on_process"):
+                 "_usable_preflight_bases", "_refresh_summary", "_selected_profiles", "_on_process",
+                 "_on_confirm_full_qc_toggle"):
         setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
     return app, workers, callbacks, summaries
 
@@ -255,8 +257,15 @@ def test_loading_files_without_profiles_uses_measured_costs_in_gui(tmp_path, mon
 
         prompts = []
         tk.messagebox.askyesno = lambda title, prompt: prompts.append(prompt) or False
+        # The full-QC dialog: declined with "Don't show this again" ticked.
+        monkeypatch.setattr(
+            gui, "_ask_cost_confirmation",
+            lambda parent, title, prompt: (prompts.append(prompt) or False, True),
+        )
         app._on_process()
         assert len(prompts) == 1
+        # Declining never remembers the opt-out: skipping the dialog means proceeding.
+        assert app._confirm_full_qc_var.get() is True
         assert "measured size and text layer" in prompts[0]
         assert "pages have not been measured" not in prompts[0]
         assert "adaptive thinking, which is billed as output" in prompts[0]
@@ -683,6 +692,62 @@ def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
     assert checklist in profiles
     assert governing == ["NFPA 13 2025", "IBC 2024"]
     assert (use_batch, critique_batch, fast_mode, save_tiles) == (False, False, True, True)
+
+
+def test_full_qc_confirmation_opt_out_persists_and_can_be_turned_back_on(tmp_path, monkeypatch):
+    from drawing_analyzer.core import preferences
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-no-network")
+    pdf = _preview_pdf(tmp_path)
+    prefs = tmp_path / "config" / "gui_preferences.json"
+    with _gui_module() as (gui, tk):
+        app, started, logs = _inputs_app(gui, tk, monkeypatch)
+        app.__dict__.update(_pdfs=[pdf], _prefs_path=prefs)
+        app._qc_markups_var.set(True)
+        asked = []
+        answer = (True, True)    # "Yes" with "Don't show this again" ticked
+        monkeypatch.setattr(
+            gui, "_ask_cost_confirmation",
+            lambda parent, title, prompt: asked.append(prompt) or answer,
+        )
+
+        app._on_process()
+        assert len(asked) == 1 and len(started) == 1
+        assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is True
+
+        # A restarted GUI reads the stored choice: no dialog, the run starts,
+        # and the estimate still reaches the log.
+        app._busy = False
+        app._confirm_full_qc_var.set(
+            not preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM)
+        )
+        logs.clear()
+        app._on_process()
+        assert len(asked) == 1 and len(started) == 2
+        assert any("confirmation skipped" in line and "$" in line for line in logs)
+
+        # The QC-section box turns the dialog back on, and a plain "Yes" keeps it on.
+        app._busy = False
+        app._confirm_full_qc_var.set(True)
+        app._on_confirm_full_qc_toggle()
+        answer = (True, False)
+        app._on_process()
+        assert len(asked) == 2 and len(started) == 3
+        assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is False
+
+
+@pytest.mark.parametrize("content", [None, "{not json", "[1, 2]", '{"skip_full_qc_cost_confirm": "yes"}'])
+def test_unusable_preferences_read_as_default_and_writes_keep_other_keys(tmp_path, content):
+    from drawing_analyzer.core import preferences
+
+    path = tmp_path / "gui_preferences.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    assert preferences.get_bool(path, preferences.SKIP_FULL_QC_CONFIRM) is False
+    assert preferences.set_preference(path, "other", 3)
+    assert preferences.set_preference(path, preferences.SKIP_FULL_QC_CONFIRM, True)
+    assert preferences.get_bool(path, preferences.SKIP_FULL_QC_CONFIRM) is True
+    assert preferences.load_preferences(path)["other"] == 3
 
 
 def test_remove_drops_one_drawing_and_remeasures_the_rest(tmp_path, monkeypatch):

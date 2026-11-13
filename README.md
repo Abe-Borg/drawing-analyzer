@@ -324,6 +324,14 @@ Two **QC review** checkboxes sit beside the focus:
   the conservative opt-in that suppresses unverified ink) and **Include rejected
   (grey)** (also inks verifier-rejected findings, struck grey). Because it runs the
   whole stack, it costs substantially more than a plain digest; the cost line says so.
+  Analyze shows the full per-stage estimate in a **Confirm full QC run** dialog
+  before anything is sent. Ticking **Don't show this again** there (and clicking
+  *Yes*) skips that dialog on later full QC runs — the choice is remembered in
+  `gui_preferences.json` in the app's config folder (on Windows,
+  `%LOCALAPPDATA%\DrawingAnalyzer\`), and the estimate is written to the activity
+  log instead. The **Confirm estimated cost before each full QC run** box under QC
+  Markups brings the dialog back. Ticking the box and clicking *No* remembers
+  nothing. The standard (non-QC) cost confirmation is unaffected.
 - **Deterministic audit only** — a free, zero-API pass that adds the whole
   deterministic auditor battery (references, arithmetic, naming, title-block, and
   sheet-index — see [Deterministic auditors](#deterministic-auditors)) on top of the
