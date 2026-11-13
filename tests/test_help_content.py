@@ -24,6 +24,7 @@ from drawing_analyzer.help_content import (
     HelpDocument,
     HelpSection,
     help_document,
+    processing_fast_mode,
     processing_transports,
     transport_hint,
 )
@@ -234,12 +235,15 @@ def test_runtime_transparency_discloses_the_full_outbound_inventory() -> None:
         ("Economy", (True, True), ("lowest",)),
         ("Hybrid", (False, True), ("initial", "critique", "queue")),
         ("Fast", (False, False), ("fastest",)),
+        ("XFast", (False, False), ("fast mode",)),
     ],
 )
 def test_processing_modes_resolve_digest_and_critique_transport(
     mode, expected, hint_needles
 ) -> None:
     assert processing_transports(mode) == expected
+    # Only XFast asks for API fast mode; it rides Fast's real-time transport.
+    assert processing_fast_mode(mode) is (mode == "XFast")
     # The hint must describe the branch this mode actually takes.
     hint = transport_hint(mode).lower()
     for needle in hint_needles:

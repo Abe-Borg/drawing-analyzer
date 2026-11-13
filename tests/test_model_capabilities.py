@@ -66,6 +66,9 @@ def test_5_5_documented_capabilities(model):
         supports_web_search=True,
         supports_refusal_fallback=model != HAIKU_5_5,
         supports_structured_outputs=True,
+        # Fast mode is generally available on Opus 5.5 only (fast-mode docs,
+        # 2026-11-13); Sonnet and Haiku 5.5 have none.
+        supports_fast_mode=model == OPUS_5_5,
     )
     assert api.effort_config_for(model=model, phase=api.PHASE_REVIEW) == {"effort": "high"}
     assert api.thinking_config_for(model=model, phase=api.PHASE_REVIEW) == {"type": "adaptive"}

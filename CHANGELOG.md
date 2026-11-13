@@ -10,6 +10,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Loaded files panel in the GUI.** Every input a run will send is listed by
+  category — drawings, specifications, additional context, checklists and the
+  AHJ Atlas Input — with each file's token count (drawings: image + text-layer
+  tokens per digest read, measured once the preflight has scanned the pages)
+  and its own **Remove** button. Uploading specs now *adds* to what is loaded
+  instead of replacing it; picking a file again replaces its earlier copy.
+- **Additional context documents** (*Add context…*, `project_context=`):
+  background that is not the specifications — a basis of design, owner
+  standards, prior review comments — sent with every sheet's digest beside the
+  specs under its own `<project_context>` block (200,000-character budget). A run
+  without context keeps its prompt and digest-cache keys byte-identical.
+- **Checklist files** (*Add checklists…*, `profiles.load_checklist_file`):
+  an Excel (one item per row), Word, PDF, Markdown or text checklist becomes a
+  review profile the QC critique applies item by item; recorded as `uploaded`.
+- **AHJ Atlas Input** (*Load AHJ Atlas Input…*, `ahj_atlas.load_ahj_atlas`):
+  the governing code editions now load from an optional Excel workbook instead
+  of being typed. One-code-per-row, one-column-per-code, one-tab-per-AHJ and
+  free-text layouts are read; spelled-out code names normalize to their
+  designations; a multi-jurisdiction workbook asks which AHJ governs.
+- **XFast processing mode** (`fast_mode=True`): Fast plus the API's fast mode
+  (`speed: "fast"`) on every real-time Opus 5.5 request — up to 2.5x faster
+  output at 2x the standard per-token price ($8 / $40 per MTok). The hint, cost
+  preview, confirmation dialog and usage ledger all price it; a platform that
+  rejects `speed` falls back to standard speed for the process.
+- **Save tile images** checkbox under *Open Diagnostics Log* (seeded from
+  `DRAWING_ANALYZER_SAVE_TILES`).
 - **Charts, tables and memos in the report's Ask AI chat.** A new client tool,
   `create_artifact`, lets the assistant put a chart (bar, horizontal bar, line,
   donut), a sortable table, or a Markdown memo straight into the conversation as
@@ -42,6 +68,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   build would need Artifex's commercial PyMuPDF license or another PDF engine.
 
 ### Changed
+
+- **The typed Governing code editions field is gone from the GUI**; the AHJ
+  Atlas Input replaces it. The library's `governing_editions=` is unchanged and
+  also accepts a list of entries.
+- **Dependencies:** `openpyxl` 3.1.5 (and `et_xmlfile` 2.0.0) added for the AHJ
+  Atlas Input and spreadsheet checklists (`pyproject.toml`, `requirements.txt`,
+  `requirements-release.lock`). Both MIT.
 
 - `write_drawing_export` now writes `report.html` after the other ordinary
   artifacts (still before `run.log` and `run_manifest.json`), so the report's

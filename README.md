@@ -200,6 +200,56 @@ executable, so there was nowhere for the traceback to go — and an exception in
 a button handler is recorded in the diagnostics log and reported, rather than
 looking like the click did nothing.
 
+#### Loaded files — what a run will send
+
+Everything a run uses is listed in the **Loaded files** section, by category,
+with each file's token count and its own **Remove** button (Remove takes out
+that one file; **Clear** still empties everything). The section expands by
+itself whenever you add something and collapses when a run starts, so the
+activity log gets the room. Its buttons add inputs; every pick *adds* to what
+is already loaded, and picking a file again replaces its earlier copy:
+
+| Button | Category | What it does |
+| --- | --- | --- |
+| **Add drawings…** | Drawings | The same as the drop zone / *Browse…*. Each PDF shows its sheet count and its image + text-layer tokens for one digest read — measured from the real page shapes once the background preflight has scanned the files, a conservative per-sheet allowance until then. |
+| **Add specs…** | Specifications | The real project specifications (`.pdf` / `.docx` / `.txt` / `.md`), after the same quality warning as before. Sent with every sheet's digest; conflicts become ordinary findings. |
+| **Add context…** | Additional context | Background that is *not* the specifications — a basis of design, owner or client standards, a code analysis, prior review comments. Same formats as specs. Sent with every sheet beside the specs, under its own `<project_context>` block framed as background; requirements it states are checked like the specs. Budgeted at 200,000 characters (~50k tokens). |
+| **Add checklists…** | Checklists | Your own QC checklists: `.xlsx`/`.xlsm`/`.csv` (one item per row; a header row and item-number cells are dropped), `.docx`, `.pdf`, `.md` or `.txt` (list bullets, or one item per line), or a `.md` in the [review-profile](#review-profiles) format. Each becomes a review profile the QC Markups critique applies item by item. |
+| **Load AHJ Atlas Input…** | AHJ Atlas Input (optional) | An Excel workbook of the code editions the AHJ adopted. Its editions become the run's [governing code editions](#set-identity--the-model-authored-review-plan). If it lists several jurisdictions you pick one. Without it, the editions on the drawings are used. |
+
+Token counts are per digest read of each sheet at ≈4 characters per text token;
+specs and context are added to every sheet's request (prompt-cached after the
+first on the real-time path), and the cost line below the list prices it all.
+
+**AHJ Atlas Input layouts.** There is no fixed template; the loader
+(`drawing_analyzer.ahj_atlas.load_ahj_atlas`) recognizes, per worksheet:
+
+- **one code per row** — a header row with an edition column (`Edition`,
+  `Year`, `Version`, `Adopted`) and a column of code names, with optional
+  `Jurisdiction`/`AHJ`/`City`/`County` and `Amendments`/`Notes` columns (a
+  blank jurisdiction cell continues the one above, as merged cells read);
+- **one column per code** — one row per jurisdiction, a column per code
+  (`IBC`, `IFC`, `NFPA 13`, …) with the edition years in the cells;
+- **one tab per jurisdiction** — either layout above on several tabs, each tab
+  named for its AHJ;
+- **free text** — any cell naming a known code with a year (`NFPA 13 2025`,
+  `2024 IBC`).
+
+Spelled-out names are normalized to their designations (*International
+Building Code* → `IBC`, *Life Safety Code* → `NFPA 101`) so they line up with
+what the identity stage detects; an amendments note rides along as the
+edition's note. `.xlsx`, `.xlsm` and `.csv` are read; an old `.xls` must be
+saved as `.xlsx` first. A row naming a code with no year is skipped with a
+warning in the activity log.
+
+#### Diagnostics: Save tile images
+
+The **Save tile images** checkbox under *Open Diagnostics Log* keeps every tile
+image the run renders; *Export All…* then writes them to a `tiles/` folder with
+per-tile notes, so you can see exactly what the model read. It places no call
+and changes no result. It starts ticked when `DRAWING_ANALYZER_SAVE_TILES` is
+set.
+
 > **GUI export options.** The GUI keeps the buttons a reviewer actually reaches
 > for: the **HTML report** (*Save HTML Report…*), the **marked-up PDFs** (*Save
 > Reviewed PDF(s)…*, after a QC run), and the one-click **full folder export**
@@ -221,7 +271,7 @@ looking like the click did nothing.
 #### Stopping a run (the kill switch)
 
 **Stop** (the red button beside *Analyze Drawings*) is live for as long as an
-analysis runs, in **every processing mode** — Economy, Hybrid and Fast. After a
+analysis runs, in **every processing mode** — Economy, Hybrid, Fast and XFast. After a
 one-click confirmation it:
 
 - **sends nothing new** — every real-time request, Message Batch submission and
@@ -396,8 +446,13 @@ ctx = extract_drawing_context(
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
     #   synthesize=False, identity=False, review_plan=False, absence_check=False,
-    # governing_editions="NFPA 13 2022; IBC 2021" names the code editions that
-    # govern when the drawings state the wrong one (see Set identity below).
+    # governing_editions="NFPA 13 2025; IBC 2024" (or a list of entries) names
+    # the code editions that govern when the drawings state the wrong one (see
+    # Set identity below); load_ahj_atlas(path) reads them from an AHJ Atlas
+    # workbook: governing_editions=entries_for([atlas.jurisdictions[0]]).
+    # project_context="..." adds background documents beside the specs.
+    # fast_mode=True (all real-time) sends Opus requests in API fast mode (XFast).
+    # save_tile_artifacts=True keeps every rendered tile for the export's tiles/.
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
 )
@@ -570,7 +625,7 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   through the Message Batches API, uploading images via the Files API so no request
   body approaches the 32 MB limit. It uses the same models, prompts, inputs, and
   review contract at roughly 50% of the real-time token rate. In the GUI,
-  *Processing* offers **Economy**, **Hybrid**, and **Fast**;
+  *Processing* offers **Economy**, **Hybrid**, **Fast**, and **XFast**;
   the cost preview and confirmation dialog reprice every paid stage to match.
   A library caller can opt every run into Batch globally with
   `DRAWING_ANALYZER_USE_BATCH=1` — no call-site edits — while an explicit
@@ -601,6 +656,22 @@ PDFs → list sheets → render (overview + per-page tiles) + extract vector tex
   (~0.1×) — identical tokens in, so findings are unchanged (see the cost note
   below). What a run cost is what its usage records say it cost; multiplying one
   read's price by three quotes a configuration nobody ran.
+- **XFast mode** (`fast_mode=True`, with both transports real-time) is Fast
+  plus Anthropic's API **fast mode**: every real-time request to a model that
+  supports it carries `speed: "fast"` — the same model and output, up to 2.5x
+  faster output tokens per second, at a premium per-token price. On Opus 5.5
+  that is $8 / $40 per million input / output tokens, **2x** the standard $4 /
+  $20 (prompt-caching multipliers apply on top). Only Opus 5.5 requests (digest,
+  critique, cross-sheet QC, review plan, investigation) go fast; stages on
+  Sonnet or Haiku run at their normal speed and price, so a full QC run costs
+  less than double. The Batch API has no fast mode, so `fast_mode` resolves off
+  whenever either transport batches. The cost preview, the confirmation dialog
+  and the run's usage ledger all price fast responses at the fast rate (a
+  response reports `usage.speed`; each usage record carries `speed: "fast"`). If
+  the account or platform rejects `speed` (a 400), fast mode turns off for the
+  rest of the process and the request is re-sent at standard speed — the run
+  never fails over a speed choice. Fast mode has its own rate limit; its 429s
+  go through the ordinary retry loop.
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
   sheet only re-pays vision for the changed sheet. It is now **two-level** — a
   cheap *pre-render* key recognizes an unchanged sheet before rasterizing, so a
@@ -961,9 +1032,10 @@ edition harvest is the backstop the model cannot argue away.
 **Governing code editions (your override).** Detection reads what the drawings
 say, and the drawings can be wrong or silent: a general note copied from an
 older job, or an AHJ that adopted NFPA 13 a cycle or two behind the current
-edition. Type the editions that actually govern in the QC section's
-**Governing code editions** field (`governing_editions="NFPA 13 2022; IBC 2021"`
-from the library). Separate entries with semicolons or new lines; each needs a
+edition. In the GUI, load your **AHJ Atlas Input** (*Loaded files → Load AHJ
+Atlas Input…*, an Excel workbook — see [Loaded files](#loaded-files--what-a-run-will-send));
+from the library pass `governing_editions="NFPA 13 2025; IBC 2024"` or a list of
+entries. Separate entries with semicolons or new lines; each needs a
 code and a 4-digit year, with an optional note in parentheses
 (`NFPA 13 2022 (state amendments)`). The year is read from the end of the
 entry, so `NFPA 2001 2022` is NFPA 2001, 2022 edition, and one code may be
@@ -1044,6 +1116,13 @@ ctx = extract_drawing_context(
     profiles=["my-office-checklist"],   # names of user profiles to apply
 )
 ```
+
+**Uploaded checklists.** The GUI's *Add checklists…* turns a checklist file —
+Excel (one item per row), Word, PDF, Markdown or text — into a profile for this
+run without installing it (`profiles.load_checklist_file(path)`; pass the
+returned `Profile` in `profiles=` alongside names). Its name is
+`upload:<file name>`, so it never shadows an installed profile, and the run
+manifest records its source as `uploaded`.
 
 Selected profiles' checklists are appended to the critique prompt under *"APPLY
 THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"* (user profiles first, then the
@@ -2191,6 +2270,7 @@ quality decision.
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
+| `DRAWING_ANALYZER_SAVE_TILES` | off | Keep every rendered tile image and export a `tiles/` folder with per-tile notes when `save_tile_artifacts` is not passed. In the GUI it only sets the starting state of the *Save tile images* checkbox. |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
 | `DRAWING_ANALYZER_BATCH_HARVEST_TIMEOUT_MIN` | request-derived (~112 min at 64k) | Maximum minutes to wait for an abandoned batch to settle before harvesting its completed items. Default: largest submitted `max_tokens` / 10 tokens per second + 5 minutes of cancellation grace, including raised retry caps. A positive finite override is floored at one minute; invalid values use the default. Harvest time is additional to the collection budget. Shorter overrides can cause duplicate billing if in-flight generation outlasts the wait. |

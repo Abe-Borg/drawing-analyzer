@@ -598,3 +598,32 @@ def test_the_confirmation_states_the_resolved_critique_count(runs, monkeypatch):
     assert "two critique reads" not in text
     # ...and the component row agrees with the prose.
     assert f"Critique ×{runs}" in text
+
+
+# --------------------------------------------------------------------------- #
+# The GUI's per-file split of the same estimate (Loaded files list)
+# --------------------------------------------------------------------------- #
+
+
+def test_per_file_tokens_split_the_set_estimate_exactly_when_every_sheet_is_measured():
+    from drawing_analyzer.cost import drawing_file_tokens
+
+    bases = [basis(E, text_chars=400), basis(D, text_chars=80), basis(B, text_chars=0)]
+    files = drawing_file_tokens([2, 1], bases, model=OPUS)
+    assert [f.sheets for f in files] == [2, 1]
+    assert all(f.measured for f in files)
+    assert sum(f.image_tokens for f in files) == \
+        estimate_image_tokens_for_bases(bases, model=OPUS).tokens
+    assert [f.text_tokens for f in files] == [120, 0]
+
+
+@pytest.mark.parametrize("bases", [None, [basis(E)]], ids=["unscanned", "partial"])
+def test_per_file_tokens_fall_back_whole_when_the_scan_does_not_cover_every_sheet(bases):
+    from drawing_analyzer.cost import drawing_file_tokens
+
+    files = drawing_file_tokens([2, 1], bases, model=OPUS)
+    assert not any(f.measured for f in files)
+    assert all(f.text_tokens is None for f in files)
+    assert [f.image_tokens for f in files] == [
+        estimate_image_tokens_for_set(2, model=OPUS), estimate_image_tokens_for_set(1, model=OPUS),
+    ]

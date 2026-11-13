@@ -81,6 +81,10 @@ class ModelPrice:
     # threshold. Cached reads/writes count toward the prompt, output does not.
     long_context_threshold: int | None = None
     long_context_multiplier: float = 1.0
+    # Fast mode (``speed: "fast"``) bills at this multiple of the standard
+    # token rates, across the whole context window; prompt-caching multipliers
+    # apply on top. ``None`` when the model has no fast mode.
+    fast_mode_multiplier: float | None = None
 
     def multiplier_for_prompt(self, prompt_tokens: int) -> float:
         """Token-rate multiplier for one request's complete prompt."""
@@ -109,15 +113,20 @@ class ModelPrice:
 MODEL_PRICING: dict[str, ModelPrice] = {
     # https://platform.claude.com/docs/en/about-claude/pricing (2026-10-19).
     # Opus 5.5 reads at $0.20/MTok and Sonnet 5.5 at $0.10/MTok (0.05x of base).
-    "claude-opus-5-5": ModelPrice(4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05),
+    # Fast mode (build-with-claude/fast-mode, checked 2026-11-13): Opus 5.5 at
+    # $8/$40 and Opus 5 / Opus 4.8 at $10/$50 — 2x standard on each.
+    "claude-opus-5-5": ModelPrice(
+        4.00, 20.00, "Opus 5.5", cache_read_multiplier=0.05,
+        fast_mode_multiplier=2.0,
+    ),
     "claude-sonnet-5-5": ModelPrice(2.00, 10.00, "Sonnet 5.5", cache_read_multiplier=0.05),
     "claude-haiku-5-5": ModelPrice(
         0.10, 0.50, "Haiku 5.5", long_context_threshold=100_000,
         long_context_multiplier=5.0,
     ),
-    "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
+    "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5", fast_mode_multiplier=2.0),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
-    "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
+    "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8", fast_mode_multiplier=2.0),
     "claude-opus-4-7": ModelPrice(5.00, 25.00, "Opus 4.7"),
     "claude-opus-4-6": ModelPrice(5.00, 25.00, "Opus 4.6"),
     "claude-sonnet-4-6": ModelPrice(3.00, 15.00, "Sonnet 4.6"),
@@ -148,6 +157,25 @@ def price_for(model: str) -> ModelPrice | None:
     return MODEL_PRICING[best_key] if best_key else None
 
 
+FAST_SPEED = "fast"
+
+
+def fast_mode_price_multiplier(model: str) -> float | None:
+    """The fast-mode multiple of ``model``'s standard rates, or ``None``.
+
+    Read from the pricing table rather than restated, so the GUI's XFast hint
+    and every estimate quote the same figure the ledger bills.
+    """
+    price = price_for(model)
+    return None if price is None else price.fast_mode_multiplier
+
+
+def _speed_factor(price: ModelPrice, speed: str | None) -> float:
+    if speed == FAST_SPEED and price.fast_mode_multiplier:
+        return price.fast_mode_multiplier
+    return 1.0
+
+
 def friendly_model_name(model: str) -> str:
     """Human-friendly label (``"Opus 5"``) for dialogs; falls back to the id."""
     price = price_for(model)
@@ -161,6 +189,7 @@ def estimate_request_cost(
     model: str,
     batch: bool = False,
     prompt_tokens: int | None = None,
+    speed: str | None = None,
 ) -> float | None:
     """Estimated USD cost of a request, or ``None`` if the model is unknown.
 
@@ -169,13 +198,15 @@ def estimate_request_cost(
     ``prompt_tokens`` overrides the tier-selection count when these tokens are
     only one part of a request (for example, its uncached input). Otherwise the
     complete prompt is ``input_tokens``. Never pass aggregate stage/run counts.
+    ``speed="fast"`` prices fast mode on a model that has it (the Batch API has
+    no fast mode, so the two are never combined by this app's callers).
     """
     price = price_for(model)
     if price is None:
         return None
     factor = (BATCH_DISCOUNT if batch else 1.0) * price.multiplier_for_prompt(
         input_tokens if prompt_tokens is None else prompt_tokens
-    )
+    ) * _speed_factor(price, speed)
     cost = (
         (input_tokens / 1_000_000) * price.input_per_mtok
         + (output_tokens / 1_000_000) * price.output_per_mtok
@@ -194,6 +225,7 @@ def usage_record_cost(
     batch: bool = False,
     cache_write_ttl: str | None = None,
     prompt_tokens: int | None = None,
+    speed: str | None = None,
 ) -> "Decimal | None":
     """USD cost of one usage record, priced by its own rate class (§6.3 / §15.7).
 
@@ -215,6 +247,10 @@ def usage_record_cost(
     Long-context tiers use the sum of ordinary input, cached reads and cached
     writes for this request. ``prompt_tokens`` can supply that complete count
     when costing only part of the request; output never selects the tier.
+
+    ``speed="fast"`` (the response's ``usage.speed``) applies the model's
+    fast-mode multiplier to every token rate; cache multipliers stack on top,
+    as the API bills them. Tool fees are not speed-dependent.
     """
     price = price_for(model)
     tool_uses = billable_tool_uses or {}
@@ -227,6 +263,7 @@ def usage_record_cost(
         if prompt_tokens is None else prompt_tokens
     )
     factor = Decimal(str(price.multiplier_for_prompt(full_prompt)))
+    factor *= Decimal(str(_speed_factor(price, speed)))
     if batch:
         factor *= Decimal(str(BATCH_DISCOUNT))
     inp = Decimal(str(price.input_per_mtok))

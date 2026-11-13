@@ -17,6 +17,7 @@ from drawing_analyzer.digest import (
     DIGEST_SYSTEM_PROMPT,
     SheetDigest,
     build_user_content,
+    compose_reference_text,
     digest_sheet,
     digest_system_prompt,
     normalize_specs_text,
@@ -25,6 +26,7 @@ from drawing_analyzer.digest import (
 from drawing_analyzer.digest_cache import DigestCache, digest_cache_key
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.spec_documents import (
+    CONTEXT_TOTAL_CHAR_BUDGET,
     SPEC_FILE_CHAR_BUDGET,
     SPEC_TOTAL_CHAR_BUDGET,
     SpecDocument,
@@ -351,6 +353,34 @@ def test_specs_do_not_change_user_content():
     assert BEAM_SPEC in _system_text(specced.calls[0])
 
 
+BOD_CONTEXT = "Basis of design: data halls use double-interlock pre-action systems."
+
+
+@pytest.mark.parametrize("specs", [BEAM_SPEC, None])
+def test_context_rides_its_own_block_beside_the_specs(specs):
+    reference = compose_reference_text(specs, BOD_CONTEXT)
+    prompt = digest_system_prompt(None, reference)
+    head = prompt[0]["text"]
+    # Its own framing and block, cached with the specs (block 0).
+    assert prompt[0]["cache_control"] == {"type": "ephemeral"}
+    assert "<project_context>" in head and BOD_CONTEXT in head
+    assert ("<project_specifications>" in head) is (specs is not None)
+    assert head.index("<project_context>") > head.find("<project_specifications>")
+    # The context moves the cache key; the same inputs key identically.
+    assert specs_cache_fragment(reference) != specs_cache_fragment(specs)
+    assert specs_cache_fragment(reference) == specs_cache_fragment(
+        compose_reference_text(specs, BOD_CONTEXT)
+    )
+
+
+@pytest.mark.parametrize("context", [None, "", "   "])
+def test_no_context_keeps_the_specs_only_prompt_and_key_byte_identical(context):
+    assert compose_reference_text(BEAM_SPEC, context) == BEAM_SPEC
+    assert digest_system_prompt(None, compose_reference_text(BEAM_SPEC, context)) == \
+        digest_system_prompt(None, BEAM_SPEC)
+    assert compose_reference_text(None, context) is None
+
+
 def test_normalize_specs_text():
     assert normalize_specs_text(None) is None
     assert normalize_specs_text("") is None
@@ -568,6 +598,32 @@ def test_pipeline_no_specs_changes_nothing(tmp_path):
     assert len(calls) == 1
     assert "PROJECT SPECIFICATIONS" not in _system_text(calls[0])
     assert _system_text(calls[0]).startswith(DIGEST_SYSTEM_PROMPT)
+
+
+# Explicit ids: a generated id would carry the 205k-char context, and pytest
+# puts the id in PYTEST_CURRENT_TEST — over Windows' 32,767-char env limit.
+@pytest.mark.parametrize("specs, context, error", [
+    (BEAM_SPEC, BOD_CONTEXT, False),
+    (None, BOD_CONTEXT, False),
+    (None, "c" * (CONTEXT_TOTAL_CHAR_BUDGET + 5_000), True),
+], ids=["specs-and-context", "context-only", "context-over-budget"])
+def test_pipeline_sends_additional_context_with_every_digest(tmp_path, specs, context, error):
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    path = _make_pdf(pymupdf, tmp_path / "set.pdf", page_text="BEAM W10X22 AT GRIDLINE 3")
+    calls: list = []
+    ctx = extract_drawing_context(
+        [path], client=_routing_client(calls, findings=[]), rows=1, cols=1,
+        project_specifications=specs, project_context=context,
+    )
+
+    system = _system_text(calls[0])
+    assert "<project_context>" in system
+    assert ("<project_specifications>" in system) is (specs is not None)
+    assert len(ctx.project_context) <= CONTEXT_TOTAL_CHAR_BUDGET
+    assert ctx.project_context in system
+    assert any("Additional context" in e and "omitted" in e for e in ctx.errors) is error
 
 
 def test_pipeline_specs_truncation_appends_a_warning_to_errors(tmp_path):

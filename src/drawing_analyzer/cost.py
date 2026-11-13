@@ -10,25 +10,114 @@ Pure + hermetic (no PyMuPDF, no network).
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass, replace
+import functools
 import math
 from typing import Any, Sequence
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import REVIEW_MODEL_DEFAULT, model_supports_fast_mode
 from .models import (
     CLASSIFICATION_RASTER,
     CLASSIFICATION_VECTOR,
 )
 from .core.tokenizer import estimate_image_tokens_total
 from .core.pricing import (
+    FAST_SPEED,
     PRICING_EFFECTIVE_DATE,
     estimate_request_cost,
+    fast_mode_price_multiplier,
     friendly_model_name,
     usage_record_cost,
 )
 from . import tiling
 from .batch_digest import _batch_max_elapsed_seconds
 from .pipeline import estimate_image_tokens_for_set
+
+
+# --------------------------------------------------------------------------- #
+# XFast (fast mode) pricing
+# --------------------------------------------------------------------------- #
+#
+# On an XFast run every real-time request to a model with fast mode carries
+# ``speed: "fast"`` (``core.api_config.apply_fast_mode``) and bills at that
+# model's fast-mode multiple. The estimators price exactly that set — the same
+# capability decides both — through the two wrappers below, which every stage
+# price in this module goes through. The flag rides a context variable set by
+# the public estimators (``fast_mode=``) so the many internal helpers need no
+# new parameter; batch-priced stages are never fast (the Batch API has none).
+_FAST_PRICING: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "drawing_analyzer_fast_pricing", default=False,
+)
+
+
+@contextmanager
+def _fast_pricing(on: bool):
+    token = _FAST_PRICING.set(bool(on))
+    try:
+        yield
+    finally:
+        _FAST_PRICING.reset(token)
+
+
+def _speed_for(model: str, batch: bool) -> str | None:
+    if _FAST_PRICING.get() and not batch and model_supports_fast_mode(model):
+        return FAST_SPEED
+    return None
+
+
+def _estimate_request_cost(*args: Any, model: str, batch: bool = False, **kwargs: Any):
+    return estimate_request_cost(
+        *args, model=model, batch=batch, speed=_speed_for(model, batch), **kwargs
+    )
+
+
+def _usage_record_cost(*, model: str, batch: bool = False, **kwargs: Any):
+    return usage_record_cost(
+        model=model, batch=batch, speed=_speed_for(model, batch), **kwargs
+    )
+
+
+def _accepts_fast_mode(fn):
+    """Give an estimator a ``fast_mode=`` keyword (XFast pricing).
+
+    ``None`` (the default) inherits the enclosing estimator's setting, so a
+    nested estimate never silently drops back to standard pricing.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args: Any, fast_mode: bool | None = None, **kwargs: Any):
+        on = _FAST_PRICING.get() if fast_mode is None else bool(fast_mode)
+        with _fast_pricing(on):
+            result = fn(*args, **kwargs)
+        return replace(result, fast_mode=on)
+    return wrapper
+
+
+def xfast_price_multiplier(model: str = REVIEW_MODEL_DEFAULT) -> float | None:
+    """The fast-mode multiple of ``model``'s standard rates (``None``: no fast mode).
+
+    The GUI's XFast hint quotes this, so the warning and the estimate can
+    never disagree about the premium.
+    """
+    if not model_supports_fast_mode(model):
+        return None
+    return fast_mode_price_multiplier(model)
+
+
+def xfast_note(model: str = REVIEW_MODEL_DEFAULT) -> str:
+    """One sentence on what XFast costs, for dialogs and hints."""
+    mult = xfast_price_multiplier(model)
+    if mult is None:
+        return (
+            f"{friendly_model_name(model)} has no fast mode, so XFast runs at the "
+            "standard real-time price and speed."
+        )
+    return (
+        f"XFast sends {friendly_model_name(model)} requests in fast mode: up to "
+        f"2.5x faster output, at {mult:g}x the real-time price per token (input "
+        "and output). Stages on other models run at their normal price."
+    )
 
 
 def _batch_wait_sentence() -> str:
@@ -140,7 +229,7 @@ def _specs_cost_contribution(
     inputs = request_input_tokens if request_input_tokens is not None else [0] * sheet_count
     costs = []
     for index, ordinary_input in enumerate(inputs):
-        cost = usage_record_cost(
+        cost = _usage_record_cost(
             model=model, batch=batch, prompt_tokens=ordinary_input + spec_tokens,
             input_tokens=spec_tokens if batch else 0,
             cache_write_tokens=spec_tokens if not batch and index == 0 else 0,
@@ -156,9 +245,9 @@ def _request_costs(
 ) -> float | None:
     """Sum requests after selecting each request's own token-rate tier."""
     if not inputs:
-        return estimate_request_cost(0, 0, model=model, batch=batch)
+        return _estimate_request_cost(0, 0, model=model, batch=batch)
     return _sum_costs([
-        estimate_request_cost(
+        _estimate_request_cost(
             tokens, output_per_request, model=model, batch=batch,
             prompt_tokens=tokens + shared_prompt_tokens,
         )
@@ -197,6 +286,72 @@ class ImageTokenEstimate:
     def fully_measured(self) -> bool:
         """True when every page contributed real geometry."""
         return self.pages > 0 and self.unknown_pages == 0 and self.unmeasured_pages == 0
+
+
+def estimate_text_tokens(chars: int) -> int:
+    """Rough token count for ``chars`` of extracted text (≈4 chars per token).
+
+    The same ratio the spec-cost estimate uses, so the GUI's per-category
+    token counts and the cost dialog agree.
+    """
+    chars = max(0, int(chars or 0))
+    return -(-chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE)
+
+
+@dataclass(frozen=True)
+class DrawingFileTokens:
+    """One drawing PDF's share of a digest read, for the GUI's file list."""
+
+    sheets: int
+    image_tokens: int
+    #: Tokens of the sheets' text layers, or ``None`` when not yet measured.
+    text_tokens: int | None
+    #: True when every page's image figure came from its measured shape.
+    measured: bool
+
+    @property
+    def total(self) -> int:
+        return self.image_tokens + (self.text_tokens or 0)
+
+
+def drawing_file_tokens(
+    sheet_counts: "Sequence[int]",
+    bases: "Sequence[Any] | None",
+    *,
+    model: str = REVIEW_MODEL_DEFAULT,
+) -> list[DrawingFileTokens]:
+    """Per-file image + text-layer tokens for one digest read of each PDF.
+
+    ``sheet_counts`` is each file's page count, in load order; ``bases`` the
+    preflight's cost bases for the same files in the same order (or ``None``).
+    Bases are used only when they cover every sheet — the same all-or-nothing
+    rule as the cost estimate — so a half-scanned set never shows one file
+    measured and the next guessed from a different scan. Otherwise each file
+    takes the conservative per-sheet allowance and its text is unknown.
+    """
+    counts = [max(0, int(n)) for n in sheet_counts]
+    out: list[DrawingFileTokens] = []
+    if bases is not None and len(bases) == sum(counts):
+        start = 0
+        for n in counts:
+            chunk = list(bases[start:start + n])
+            start += n
+            if not chunk:
+                out.append(DrawingFileTokens(0, 0, 0, True))
+                continue
+            est = estimate_image_tokens_for_bases(chunk, model=model)
+            texts = [getattr(b, "text_chars", None) for b in chunk]
+            text = (
+                estimate_text_tokens(sum(texts))
+                if all(isinstance(t, int) for t in texts) else None
+            )
+            out.append(DrawingFileTokens(n, est.tokens, text, est.fully_measured))
+        return out
+    for n in counts:
+        out.append(DrawingFileTokens(
+            n, estimate_image_tokens_for_set(n, model=model) if n else 0, None, False,
+        ))
+    return out
 
 
 def estimate_image_tokens_for_bases(
@@ -342,12 +497,15 @@ class DrawingCostEstimate:
     #: The legacy output_tokens/total_cost fields carry the upper planning end.
     output_tokens_low: int | None = None
     low_cost: float | None = None
+    #: XFast: Opus-class real-time requests priced at the fast-mode rate.
+    fast_mode: bool = False
 
     @property
     def high_cost(self) -> float | None:
         return self.total_cost
 
 
+@_accepts_fast_mode
 def estimate_drawing_set_cost(
     sheet_count: int,
     *,
@@ -415,7 +573,7 @@ def estimate_drawing_set_cost(
         input_tokens += synth_input
         output_tokens += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
         output_tokens_low += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
-        stage_costs.append(estimate_request_cost(
+        stage_costs.append(_estimate_request_cost(
             synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
             model=stage_models.synthesis, batch=False,
         ))
@@ -426,7 +584,7 @@ def estimate_drawing_set_cost(
         input_tokens += focus_input
         output_tokens += _ASSUMED_FOCUS_OUTPUT_TOKENS
         output_tokens_low += _ASSUMED_FOCUS_OUTPUT_TOKENS
-        stage_costs.append(estimate_request_cost(
+        stage_costs.append(_estimate_request_cost(
             focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
             model=stage_models.focus, batch=False,
         ))
@@ -581,6 +739,8 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             "Nothing is sent until you confirm. Real-time mode skips the queue — "
             "expect roughly 4–6 minutes per sheet, with results as they finish.",
         ]
+        if est.fast_mode:
+            lines.append(xfast_note(est.model) + " The estimate above includes it.")
     lines += ["", "Proceed with the analysis?"]
     return "\n".join(lines)
 
@@ -688,6 +848,8 @@ class ExhaustiveCostEstimate:
     shape_aware: bool = False
     #: Pages that fell back to the conservative allowance inside a measured set.
     unmeasured_pages: int = 0
+    #: XFast: Opus-class real-time requests priced at the fast-mode rate.
+    fast_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -794,7 +956,7 @@ def _component(
 ) -> CostComponent:
     def price(inputs: Sequence[int] | None, inp: int, out: int) -> float | None:
         if inputs is None:
-            return estimate_request_cost(inp, out, model=model, batch=batch)
+            return _estimate_request_cost(inp, out, model=model, batch=batch)
         return _request_costs(inputs, out // len(inputs) if inputs else 0, model=model, batch=batch)
 
     base = price(request_inputs, input_tokens, output_tokens)
@@ -854,7 +1016,7 @@ def _critique_prefix_costs(
     scenarios return the same figure.
     """
     if batch or runs < 2:
-        flat = usage_record_cost(
+        flat = _usage_record_cost(
             model=model, input_tokens=prefix_tokens, output_tokens=output_tokens, batch=batch
         )
         if flat is None:
@@ -862,10 +1024,10 @@ def _critique_prefix_costs(
         total = flat * runs * sheet_count
         return float(total), float(total)
 
-    write = usage_record_cost(
+    write = _usage_record_cost(
         model=model, cache_write_tokens=prefix_tokens, output_tokens=output_tokens, batch=False
     )
-    read = usage_record_cost(
+    read = _usage_record_cost(
         model=model, cache_read_tokens=prefix_tokens, output_tokens=output_tokens, batch=False
     )
     if write is None or read is None:
@@ -939,6 +1101,7 @@ def _cross_qc_component(sheet_count: int, digest_text: int, *, model: str,
     )
 
 
+@_accepts_fast_mode
 def estimate_exhaustive_run_cost(
     sheet_count: int,
     *,
@@ -1103,7 +1266,7 @@ def estimate_exhaustive_run_cost(
     crit_out = runs * sheet_count * crit_read_high
     def critique_cost(output_per_read: int, scenario: int) -> float | None:
         if not crit_prefixes:
-            return estimate_request_cost(0, 0, model=stage_models.critique, batch=critique_batch)
+            return _estimate_request_cost(0, 0, model=stage_models.critique, batch=critique_batch)
         return _sum_costs([
             _critique_prefix_costs(
                 prefix_tokens=prefix, output_tokens=output_per_read,
@@ -1399,6 +1562,11 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             "",
             "Custom transport: digest reads use the Batch queue; critique reads run "
             "at the full real-time rate after the digest batch completes.",
+        ]
+    elif est.fast_mode:
+        lines += [
+            "",
+            "XFast mode: no queue. " + xfast_note(est.model),
         ]
     else:
         lines += [

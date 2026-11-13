@@ -42,6 +42,7 @@ from .digest import (
     finished_digest_entry,
     focus_cache_fragment,
     normalize_focus,
+    compose_reference_text,
     normalize_specs_text,
     sheet_digest_from_cache_entry,
     specs_cache_fragment,
@@ -376,6 +377,7 @@ def _record_usage(
     cache_write_ttl: "str | None" = None,
     request_usage: "list[RequestUsage] | None" = None,
     requested_model: "str | None" = None,
+    speed: "str | None" = None,
 ) -> UsageRecord:
     """Append priced usage, preserving response boundaries for multi-call stages.
 
@@ -393,8 +395,15 @@ def _record_usage(
     ``request_usage`` carries the individual responses before a stage summed
     its tokens. Each becomes its own record, keeping prompt-size tiers exact.
     Aggregate fields remain the fallback for cached and legacy stage results.
+
+    ``speed`` is the response's ``usage.speed`` (``"fast"`` prices fast mode).
+    When a stage does not report it, a real-time record is fast exactly when
+    its request went out fast (:func:`core.api_config.fast_mode_active_for`
+    on this run's binding), so an XFast run is never priced at the standard
+    rate just because a stage summed its tokens before recording them.
     """
-    from .core.pricing import usage_record_cost
+    from .core.api_config import fast_mode_active_for
+    from .core.pricing import FAST_SPEED, usage_record_cost
     from .models import _positive as _positive_count
 
     if request_usage and not cache_hit and transport != "CACHE":
@@ -443,8 +452,13 @@ def _record_usage(
                 ),
                 parent=parent, attempt=number,
                 request_id=request.request_id, cache_write_ttl=cache_write_ttl,
+                speed=getattr(request, "speed", None),
             )
         return record
+
+    if speed is None and transport == "REAL_TIME" and not cache_hit:
+        speed = FAST_SPEED if fast_mode_active_for(model) else None
+    speed = FAST_SPEED if speed == FAST_SPEED else None
 
     cost = usage_record_cost(
         model=model,
@@ -455,6 +469,7 @@ def _record_usage(
         billable_tool_uses=billable_tool_uses,
         batch=(transport == "BATCH"),
         cache_write_ttl=cache_write_ttl,
+        speed=speed,
     )
     return run_usage.add(
         UsageRecord(
@@ -487,6 +502,7 @@ def _record_usage(
             estimated_cost=cost,
             cache_write_ttl=cache_write_ttl,
             requested_model=requested_model,
+            speed=speed,
         )
     )
 
@@ -637,6 +653,10 @@ class DrawingContext:
     # findings, not a new report section (contrast with focus/focus_report_text
     # above, which add a dedicated "Focus Report" section).
     project_specifications: str = ""
+    # The operator's additional project context (background documents; "" when
+    # none), budgeted. Rides the digest prompt beside the specifications under
+    # its own block (digest.py's _CONTEXT_ADDENDUM_TEMPLATE).
+    project_context: str = ""
     # --- QC findings (populated when reference_audit / qc_markups are on) ------
     # Model findings parsed from the digests, anchored and (when qc_markups)
     # verified. ``reference_findings`` are the deterministic-auditor findings
@@ -3030,6 +3050,8 @@ def extract_drawing_context(
     qc_work_dir: Path | None = None,
     confirm_large_set: bool = False,
     cancel: "cancellation.CancelToken | None" = None,
+    project_context: str | None = None,
+    fast_mode: bool = False,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -3113,6 +3135,19 @@ def extract_drawing_context(
     truncation is non-fatal and appended to ``ctx.errors`` (I-3). Folded into
     the digest cache key like ``focus``, and exposed on
     ``DrawingContext.project_specifications``.
+
+    ``project_context`` (optional) is background documents' text — a basis of
+    design, owner standards, prior comments. It rides the same digest prompt
+    slot as the specifications under its own ``<project_context>`` block
+    (:func:`drawing_analyzer.digest.compose_reference_text`), on its own
+    budget (``CONTEXT_TOTAL_CHAR_BUDGET``); with none, prompts and cache keys
+    are exactly the specs-only ones. Exposed on ``DrawingContext.project_context``.
+
+    ``fast_mode=True`` (the GUI's XFast) sends every real-time request to a
+    model with API fast mode (Opus 5.5) with ``speed: "fast"`` — faster output
+    at the model's fast-mode price, which the usage ledger bills. It applies
+    only when both transports are real-time (the Batch API has no fast mode);
+    a platform that rejects it degrades to standard speed for the process.
 
     ``critique=True`` (Phase 11) adds a dedicated **critique pass**: a second
     full-coverage vision read per sheet, under a senior-QA-engineer persona, whose
@@ -3208,6 +3243,26 @@ def extract_drawing_context(
             f"omitted (over the {specs_budget.budget_chars:,}-char budget) — "
             "see run.log for detail."
         )
+    # Additional project context (background documents): budgeted on its own
+    # ceiling, then threaded with the specs into the digest's reference block
+    # (``digest.compose_reference_text``). No context → the specs-only value,
+    # so a run without it keys and prompts exactly as before.
+    from .spec_documents import CONTEXT_TOTAL_CHAR_BUDGET
+
+    try:
+        context_text, context_budget = enforce_specs_budget(
+            project_context, budget_chars=CONTEXT_TOTAL_CHAR_BUDGET,
+        )
+    except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+        context_text, context_budget = "", SpecBudget()
+        specs_errors.append(f"Additional context: {exc}")
+        _log.warning("additional project context budgeting failed: %s", exc)
+    if context_budget.degraded:
+        specs_errors.append(
+            f"Additional context: {context_budget.omitted_chars:,} char(s) "
+            f"omitted (over the {context_budget.budget_chars:,}-char budget)."
+        )
+    reference_text = compose_reference_text(specs_text, context_text)
 
     # Resolve the transport once (L1): explicit arg wins; else the
     # DRAWING_ANALYZER_USE_BATCH env opt-in; else real-time. Done before the
@@ -3242,7 +3297,14 @@ def extract_drawing_context(
         use_batch=use_batch,
         critique_use_batch=critique_use_batch,
         save_tile_artifacts=_resolve_save_tiles(save_tile_artifacts),
+        fast_mode=fast_mode,
     )
+    # XFast: every real-time request this run (and its worker threads) sends
+    # to a fast-mode-capable model carries ``speed: "fast"``. The recorder is
+    # the run's own (``tracked_run``), so a concurrent run is unaffected.
+    _pressure = resource_pressure.current()
+    if _pressure is not None:
+        _pressure.requested_speed = "fast" if config.fast_mode else None
 
     # Tile-artifact staging needs the work dir *before* the digest phase (the
     # QC stages otherwise create it lazily, after rendering) so the render
@@ -3303,6 +3365,7 @@ def extract_drawing_context(
         configuration_kind=config.configuration_kind,
         focus=bool(focus),
         project_specifications=bool(specs_text),
+        project_context=bool(context_text),
     )
     if specs_budget.degraded:
         journal.emit(
@@ -3385,6 +3448,7 @@ def extract_drawing_context(
             sheet_count=0,
             errors=inventory_errors + specs_errors + [block_reason],
             project_specifications=specs_text,
+            project_context=context_text,
             run_journal=journal,
             input_inventory=inventory,
             resource_pressure=pressure,
@@ -3449,6 +3513,7 @@ def extract_drawing_context(
             errors=inventory_errors + specs_errors
             + ["No readable PDF pages found in the selected files."],
             project_specifications=specs_text,
+            project_context=context_text,
             run_journal=journal,
             input_inventory=inventory,
             resource_pressure=pressure,
@@ -3496,7 +3561,7 @@ def extract_drawing_context(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
-            effort=effort, focus=focus or None, specs_text=specs_text or None,
+            effort=effort, focus=focus or None, specs_text=reference_text,
             snapshot_by_path=snapshot_by_path,
             on_page_error=_on_page_error,
         )
@@ -3617,7 +3682,7 @@ def extract_drawing_context(
                     use_thinking=use_thinking, effort=effort, cache=cache,
                     progress=progress, total=miss_total, on_log=on_log,
                     on_status=on_status, focus=focus or None,
-                    specs_text=specs_text or None,
+                    specs_text=reference_text,
                     geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                     reusable_upload_sink=reusable_uploads,
                     on_page_error=_on_page_error, journal=journal, level1_keys=level1_keys,
@@ -3639,7 +3704,7 @@ def extract_drawing_context(
                 client=client, model=model, max_tokens=max_tokens,
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, max_workers=max_workers,
-                focus=focus or None, specs_text=specs_text or None,
+                focus=focus or None, specs_text=reference_text,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error, render_sink=render_sink,
                 journal=journal,
@@ -4619,6 +4684,7 @@ def extract_drawing_context(
         focus=focus,
         focus_report_text=focus_report_text,
         project_specifications=specs_text,
+        project_context=context_text,
         findings=qc.findings,
         reference_findings=qc.reference_findings,
         reviewed_pdf_paths=qc.reviewed_pdf_paths,

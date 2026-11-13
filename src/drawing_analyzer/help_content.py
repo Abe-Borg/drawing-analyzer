@@ -101,10 +101,16 @@ BATCH_COST_PER_SHEET = "around $0.50 per sheet"
 PROCESSING_MODE_ECONOMY = "Economy"
 PROCESSING_MODE_HYBRID = "Hybrid"
 PROCESSING_MODE_FAST = "Fast"
+# Fast's transports plus fast mode (``speed: "fast"``) on Opus requests: the
+# quickest turnaround at a premium per-token price. The premium itself is
+# quoted from the pricing table by the GUI (``cost.xfast_note``), never here —
+# this module carries no engine dependency.
+PROCESSING_MODE_XFAST = "XFast"
 PROCESSING_MODES = (
     PROCESSING_MODE_ECONOMY,
     PROCESSING_MODE_HYBRID,
     PROCESSING_MODE_FAST,
+    PROCESSING_MODE_XFAST,
 )
 
 
@@ -115,9 +121,15 @@ def processing_transports(mode: str) -> tuple[bool, bool]:
         return True, True
     if normalized == PROCESSING_MODE_HYBRID.casefold():
         return False, True
-    if normalized == PROCESSING_MODE_FAST.casefold():
+    if normalized in (PROCESSING_MODE_FAST.casefold(), PROCESSING_MODE_XFAST.casefold()):
         return False, False
     raise ValueError(f"unknown processing mode: {mode!r}")
+
+
+def processing_fast_mode(mode: str) -> bool:
+    """True when a GUI processing mode asks for API fast mode (XFast)."""
+    processing_transports(mode)  # same validation: an unknown mode raises
+    return str(mode or "").strip().casefold() == PROCESSING_MODE_XFAST.casefold()
 
 
 def transport_hint(realtime: bool | str) -> str:
@@ -141,6 +153,8 @@ def transport_hint(realtime: bool | str) -> str:
                 "critique reads use the half-rate Batch queue. Standard analysis is "
                 "fast; a QC run can still wait hours for its critique batch."
             )
+        if processing_fast_mode(realtime):
+            return "Like Fast (no queue), plus API fast mode on Opus requests."
         return (
             f"All reads skip the queue ({REALTIME_TIME_PER_SHEET}); fastest turnaround "
             f"at {REALTIME_COST_PER_SHEET}."
@@ -234,6 +248,12 @@ _HOW_TO_USE = HelpDocument(
                 "Multi-page PDFs are split automatically — every page becomes one sheet, "
                 "and the whole set is analyzed together."
             ),
+            _bullet(
+                "Everything you load is listed under Loaded files, by category — "
+                "drawings, specifications, additional context, checklists and the AHJ "
+                "Atlas Input — with each file's token count and its own Remove button. "
+                "Remove takes out just that file; Clear empties everything."
+            ),
         ),
         _section(
             "3 · (Optional) Add a per-run focus",
@@ -252,12 +272,38 @@ _HOW_TO_USE = HelpDocument(
             ),
         ),
         _section(
-            "4 · (Optional) Attach project specifications",
+            "4 · (Optional) Add specifications, context, checklists and the AHJ Atlas",
             _para(
-                "Upload the real, complete, current project spec documents "
+                "The buttons under Loaded files add reference material. Each pick adds "
+                "to what is already loaded; nothing is replaced until you remove it."
+            ),
+            _bullet(
+                "Add specs… — the real, complete, current project spec documents "
                 "(.pdf / .docx / .txt / .md) so QC can check the drawings against them. "
                 "Any conflict folds into an ordinary finding — there is no separate spec "
                 "report."
+            ),
+            _bullet(
+                "Add context… — background that is not the specifications: a basis of "
+                "design, owner or client standards, a code analysis, prior review "
+                "comments. It rides every sheet's read beside the specs under its own "
+                "heading; requirements it states are checked the same way."
+            ),
+            _bullet(
+                "Add checklists… — your own QC checklists (.xlsx one item per row, "
+                ".docx, .pdf, .md or .txt). On a QC Markups run the critique applies "
+                "every item explicitly, sheet by sheet, alongside the model's own "
+                "review plan."
+            ),
+            _bullet(
+                "Load AHJ Atlas Input… (optional) — an Excel workbook of the code "
+                "editions the AHJ adopted: a code column and an edition/year column, or "
+                "one column per code with the years in the cells. If it lists several "
+                "jurisdictions you pick the one for this project. Its editions replace "
+                "the ones detected on the drawings for the codes it names — in the "
+                "citation check, the review plan, cross-sheet QC and the edition "
+                "audit; the drawing's own edition is kept as a mention. Without it, "
+                "the editions on the drawings are used."
             ),
         ),
         _section(
@@ -288,14 +334,9 @@ _HOW_TO_USE = HelpDocument(
                 "on a QC run the model writes the review plan for this set itself."
             ),
             _bullet(
-                "Governing code editions (optional): type the editions that actually "
-                "govern, separated by semicolons — e.g. NFPA 13 2022; IBC 2021. For each "
-                "code you name, your edition replaces the one detected on the drawings "
-                "for the citation check, the review plan, cross-sheet QC and the edition "
-                "audit; the drawing's own edition is kept as a mention. Use it when the "
-                "AHJ adopted an older edition than the notes state, or the notes are "
-                "wrong. Setting or changing it rewrites the review plan, so every "
-                "sheet's critique re-runs once."
+                "Governing code editions come from the AHJ Atlas Input (step 4). "
+                "Loading or changing one rewrites the review plan, so every sheet's "
+                "critique re-runs once."
             ),
             _para(
                 "Even with neither box checked a run is not throwaway: it still keeps each "
@@ -307,7 +348,7 @@ _HOW_TO_USE = HelpDocument(
             "6 · (Optional) Pick a processing mode",
             _para(
                 "Under Processing, choose how the paid vision reads are sent. The output "
-                "contract is identical in all three — you are only trading money for speed."
+                "contract is identical in every mode — you are only trading money for speed."
             ),
             _bullet(
                 "Economy (default) — every eligible read goes through Anthropic's shared "
@@ -317,7 +358,13 @@ _HOW_TO_USE = HelpDocument(
                 "Hybrid — sheet digests run immediately, the QC critique reads go to the "
                 "batch queue."
             ),
-            _bullet(f"Fast — nothing queues ({REALTIME_TIME_PER_SHEET}); the most expensive option."),
+            _bullet(f"Fast — nothing queues ({REALTIME_TIME_PER_SHEET})."),
+            _bullet(
+                "XFast — like Fast, and every Opus request also runs in the API's fast "
+                "mode: up to 2.5x faster output at a higher price per token for those "
+                "requests (the Processing hint and the cost dialog show the premium). "
+                "The most expensive option."
+            ),
         ),
         _section(
             "7 · Analyze & confirm the cost",
@@ -362,6 +409,12 @@ _HOW_TO_USE = HelpDocument(
                 "the activity log and the diagnostics file instead."
             ),
             _bullet("Open Diagnostics Log — the detailed request-level trace, available any time."),
+            _bullet(
+                "Save tile images — the checkbox under Open Diagnostics Log. When ticked, "
+                "every rendered tile image of the run is kept and Export All writes them "
+                "to a tiles/ folder with per-tile notes, so you can see exactly what the "
+                "model read. It never places a call or changes a result."
+            ),
             _para(
                 "Embed API key in HTML report is off by default, and should usually stay "
                 "off: the report's Ask-AI assistant asks for a key the first time you use "
@@ -522,6 +575,13 @@ _HOW_IT_WORKS = HelpDocument(
                 "Roughly double the batch rate, and running the full QC stack "
                 "real-time is the most expensive configuration — but you get results now. "
                 "Choose it when you're in a rush."
+            ),
+            _bullet(
+                "XFast is Fast plus the API's fast mode on every Opus request: the same "
+                "model and output, up to 2.5x faster output, at a premium per-token "
+                "price on those requests (Opus 5.5 fast mode bills 2x the standard rate). "
+                "Stages on Sonnet or Haiku run at their normal speed and price. If the "
+                "account cannot use fast mode, the run continues at standard speed."
             ),
         ),
         _section(
@@ -970,8 +1030,9 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "you would rather not send, rename the copies before loading them."
             ),
             _bullet(
-                "The text of any spec documents you attached, and the focus sentence you "
-                "typed."
+                "The text of any spec and context documents you attached, the items of "
+                "any checklists you loaded, the editions from an AHJ Atlas Input, and "
+                "the focus sentence you typed."
             ),
             _bullet(
                 "In later stages, much smaller things: a cropped image around one finding, "
@@ -1099,7 +1160,7 @@ RUNTIME_TRANSPARENCY = HelpDocument(
             ),
         ),
         _section(
-            "Per-run focus and spec documents",
+            "Per-run focus, spec and context documents",
             _para(
                 "The focus text you type is added to the prompt for each sheet and drives "
                 "an extra Focus Report. It never replaces the standard digest."
@@ -1109,6 +1170,11 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "plain text, budgeted, and folded into the review prompts as reference "
                 "material. They are treated as ground truth to check the drawings against; "
                 "the app does not modify them and does not produce a separate spec report."
+            ),
+            _para(
+                "Additional context documents are read the same way and ride the same "
+                "per-sheet slot under their own heading, framed as background rather "
+                "than as the specifications. They cost the same way the specs do."
             ),
             _para(
                 "Attaching specs costs money on every sheet, and how much depends on the "

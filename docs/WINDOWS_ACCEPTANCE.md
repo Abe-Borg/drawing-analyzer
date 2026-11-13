@@ -81,6 +81,11 @@ representative real/redacted set):
 | 3.4 | Recovery without restart | After a failed run, a second run works in the same session | |
 | 3.5 | API-key storage | Key persisted via Windows Credential Manager (keyring); session-only fallback when unavailable; no plaintext file without explicit consent | |
 | 3.6 | Cost preview | Exhaustive-run estimate appears before submission and lists paid stages | |
+| 3.7 | Loaded files: add + remove | Add two drawings, a spec, a context doc and an `.xlsx` checklist; each appears under its category with a token count; **Remove** on one drawing drops only that file and the drawing tokens re-measure; **Clear** empties every category | |
+| 3.8 | AHJ Atlas Input | Load a real atlas workbook; a multi-AHJ file asks which jurisdiction governs; the chosen editions show in the list and in the activity log at Analyze; an `.xls` or a sheet with no editions shows a clear error and loads nothing | |
+| 3.9 | XFast | Selecting XFast shows the fast-mode price premium in the hint and the cost dialog; on an account without fast mode the run completes at standard speed (a "fast mode unavailable" line in the diagnostics log) | |
+| 3.10 | Save tile images | Ticking the box under *Open Diagnostics Log* and running, then *Export All…*, writes a `tiles/` folder | |
+| 3.11 | Short window | At the default 820×720 with the file list open, the QC/Processing headers, the Analyze row and the export buttons all remain visible | |
 
 ## 3A. Packaged installer & self-update (see docs/RELEASE_WINDOWS.md)
 

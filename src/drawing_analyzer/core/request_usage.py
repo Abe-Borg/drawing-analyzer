@@ -75,6 +75,9 @@ class RequestUsage:
     parse_success: bool | None = None
     served_model: str | None = None
     hops: tuple[UsageHop, ...] = ()
+    # ``usage.speed`` when the API reports fast mode (``"fast"``); ``None``
+    # for standard speed or a response that does not report it.
+    speed: str | None = None
 
     @classmethod
     def from_message(cls, message: Any) -> RequestUsage:
@@ -102,7 +105,14 @@ class RequestUsage:
             stop_reason=_get(message, "stop_reason"),
             served_model=served,
             hops=hops,
+            speed=_reported_speed(usage),
         )
+
+
+def _reported_speed(usage: Any) -> str | None:
+    """``"fast"`` when ``usage.speed`` says the response ran in fast mode."""
+    speed = _get(usage, "speed")
+    return "fast" if isinstance(speed, str) and speed.strip().lower() == "fast" else None
 
 
 def any_fallback_served(usages: Iterable[RequestUsage | None]) -> bool:
