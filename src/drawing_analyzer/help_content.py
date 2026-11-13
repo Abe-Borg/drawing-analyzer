@@ -328,6 +328,12 @@ _HOW_TO_USE = HelpDocument(
                 "(suppress unverified ink) and Include rejected (grey)."
             ),
             _bullet(
+                "Confirm estimated cost before each full QC run — on by default. Ticking "
+                "\"Don't show this again\" in the full QC cost dialog turns it off (the "
+                "choice is remembered between sessions); the estimate is then written to "
+                "the activity log instead. Tick this box to bring the dialog back."
+            ),
+            _bullet(
                 "Below the checkboxes, Review profiles lists any checklists found in "
                 "your profiles folder, pre-ticking the ones that suit the sheet ids it "
                 "sees. Your manual choice always wins. No profiles ship with the app — "
@@ -371,8 +377,10 @@ _HOW_TO_USE = HelpDocument(
             _para(
                 "Press Analyze Drawings. A dialog shows the estimated cost before any paid "
                 "call is made — confirm to proceed. The estimate is computed entirely on "
-                "your machine; nothing is sent until you accept. The Activity section then "
-                "shows the run as it works: the Live view board, or the log."
+                "your machine; nothing is sent until you accept. If you turned off the "
+                "full QC confirmation, a full QC run starts straight away and its estimate "
+                "is logged instead. The Activity section then shows the run as it works: "
+                "the Live view board, or the log."
             ),
             _bullet(
                 "Live view — an animated board of the run: the pipeline's stages light up "

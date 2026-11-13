@@ -248,7 +248,8 @@ by the **Live view | Log** toggle on its first row:
 entirely; collapse the *Activity* header and nothing is drawn either (during a
 run the collapsed header still shows a one-line summary, e.g. *Activity —
 Critique · 48/48 sheets · ≈$12.40*, refreshed once a second). The choice is
-remembered across launches (`gui_prefs.json` in the app's config folder).
+remembered across launches (`gui_preferences.json` in the app's config folder,
+the same file as the full-QC confirmation choice).
 
 **What it shows, and what it cannot change.** The board is a read-only window
 onto the run's own records: the pipeline hands a
@@ -388,6 +389,14 @@ Two **QC review** checkboxes sit beside the focus:
   the conservative opt-in that suppresses unverified ink) and **Include rejected
   (grey)** (also inks verifier-rejected findings, struck grey). Because it runs the
   whole stack, it costs substantially more than a plain digest; the cost line says so.
+  Analyze shows the full per-stage estimate in a **Confirm full QC run** dialog
+  before anything is sent. Ticking **Don't show this again** there (and clicking
+  *Yes*) skips that dialog on later full QC runs — the choice is remembered in
+  `gui_preferences.json` in the app's config folder (on Windows,
+  `%LOCALAPPDATA%\DrawingAnalyzer\`), and the estimate is written to the activity
+  log instead. The **Confirm estimated cost before each full QC run** box under QC
+  Markups brings the dialog back. Ticking the box and clicking *No* remembers
+  nothing. The standard (non-QC) cost confirmation is unaffected.
 - **Deterministic audit only** — a free, zero-API pass that adds the whole
   deterministic auditor battery (references, arithmetic, naming, title-block, and
   sheet-index — see [Deterministic auditors](#deterministic-auditors)) on top of the

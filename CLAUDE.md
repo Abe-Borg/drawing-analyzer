@@ -400,7 +400,13 @@ map lives in `src/drawing_analyzer/__init__.py`.
   `side="bottom", after=` the footer so a short window clips the log and
   sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
-  or the list cannot shrink. GUI lifecycle tests drive real handlers on a
+  or the list cannot shrink. Persisted GUI preferences (not secrets, not run
+  inputs) live in `core/preferences.py` (`gui_preferences.json`, tolerant read,
+  best-effort atomic write): `SKIP_FULL_QC_CONFIRM`, set by the
+  full-QC cost dialog's "Don't show this again" (`gui._ask_cost_confirmation`,
+  remembered on Yes only) and cleared by the QC section's confirm box, and
+  `LIVE_VIEW`, set by the Activity section's Live view | Log toggle. A
+  skipped dialog logs the estimate. GUI lifecycle tests drive real handlers on a
   `SimpleNamespace` stub — a handler that calls a new method needs it stubbed.
 - **Live view** (`live_view.py` / `live_scene.py` / `live_panel.py`, all
   toolkit-free): `extract_drawing_context(monitor=RunMonitor())` gets the run's
@@ -420,7 +426,7 @@ map lives in `src/drawing_analyzer/__init__.py`.
   restacks from the first created item. `LivePanel` paces at ≤25 fps and ≥3×
   the last frame's cost, polls at 1 Hz while hidden mid-run, and stops when
   idle. GUI: the Activity section's `Live view | Log` toggle
-  (`_show_activity_view`; pref `live_view` in `gui_prefs.json`). Handlers reach
+  (`_show_activity_view`; `core.preferences.LIVE_VIEW`). Handlers reach
   the panel via `getattr(self, "_live", None)`, so stub-driven handler tests
   need no new stubs. The gauntlet `oracle` runs with a monitor.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,

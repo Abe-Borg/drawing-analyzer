@@ -3391,26 +3391,6 @@ def extract_drawing_context(
             budget_chars=specs_budget.budget_chars,
         )
 
-    # Cost nudge (L1): the exhaustive stack reads each sheet's imagery three times
-    # (digest + two critique reads), so running it real-time is the single most
-    # expensive configuration. The Batch API is ~50% cheaper for the same
-    # model/prompt/input/review contract, so surface the opportunity once at run
-    # start rather than letting it stay a silent trap. Purely advisory — no
-    # behavior change; a real-time run may
-    # be a deliberate latency choice, so this only informs.
-    if config.exhaustive_qc and not use_batch and not critique_use_batch:
-        _batch_hint = (
-            "Running the full QC stack in Fast mode — the most expensive "
-            "transport. Economy is ~50% cheaper for identical review inputs and "
-            "outputs: pass "
-            "use_batch=True (or set DRAWING_ANALYZER_USE_BATCH=1) if the batch "
-            "turnaround (often hours, sometimes overnight) is acceptable."
-        )
-        _log.warning(_batch_hint)
-        journal.emit("COST_HINT", level="WARNING", hint=_batch_hint)
-        if on_log is not None:
-            on_log(_batch_hint, level="warning")
-
     # Inventory (Phase 18B): classify every selected input once, so a corrupt /
     # encrypted / zero-page / duplicate file degrades individually and *visibly*
     # instead of vanishing. Downstream stages process only accepted documents.
