@@ -487,6 +487,7 @@ def test_worker_reports_a_stopped_run_as_stopped_not_failed(monkeypatch):
     with _gui_module() as (gui, _tk):
         def stopped_pipeline(*args, **kwargs):
             seen["cancel"] = kwargs.get("cancel")
+            seen["monitor"] = kwargs.get("monitor")
             raise RunCancelled()
 
         monkeypatch.setattr(gui, "extract_drawing_context", stopped_pipeline)
@@ -498,10 +499,11 @@ def test_worker_reports_a_stopped_run_as_stopped_not_failed(monkeypatch):
             _progress_from_thread=lambda *a: None,
             _log_from_thread=lambda *a: None, _status_from_thread=lambda *a: None,
         )
-        token = CancelToken()
-        gui.DrawingAnalyzerApp._worker(stub, [], "", cancel=token)
+        token, monitor = CancelToken(), object()
+        gui.DrawingAnalyzerApp._worker(stub, [], "", cancel=token, monitor=monitor)
     assert outcomes == ["stopped"]
     assert seen["cancel"] is token                # the run got the GUI's switch
+    assert seen["monitor"] is monitor             # ...and the Live view's window
 
 
 def test_a_broken_dialog_cannot_trap_the_user_in_the_window():
@@ -684,10 +686,14 @@ def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
         )
         app._processing_mode_var.set("XFast")
         app._save_tiles_var.set(True)
+        live_monitor = object()
+        app._live = types.SimpleNamespace(begin=lambda: live_monitor)
         app._on_process()
         (args,) = started
         (pdfs, focus, specs, qc, _vo, _audit, _ink, profiles, use_batch,
-         critique_batch, _cancel, governing, context, fast_mode, save_tiles) = args
+         critique_batch, _cancel, governing, context, fast_mode, save_tiles,
+         monitor) = args
+    assert monitor is live_monitor                 # the board watches this run
     assert pdfs == [pdf] and specs == "SPEC TEXT" and context == "BASIS OF DESIGN"
     assert checklist in profiles
     assert governing == ["NFPA 13 2025", "IBC 2024"]
@@ -791,3 +797,49 @@ def test_loading_documents_adds_to_the_category_and_remove_rebuilds_its_text(tmp
         app._apply_documents_result("context", [doc("bod.txt", "CONTEXT")])
         assert app._current_context_text().endswith("CONTEXT")
         assert "CONTEXT" not in app._current_specs_text()
+
+
+# --------------------------------------------------------------------------- #
+# Live view
+# --------------------------------------------------------------------------- #
+
+
+def test_idle_board_previews_the_loaded_set_and_the_planned_stack(tmp_path, monkeypatch):
+    from drawing_analyzer.render import list_sheets
+
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, _workers, _callbacks, _ = _cost_preview_app(gui, tk, monkeypatch)
+        previews = []
+        app._live = types.SimpleNamespace(
+            preview=lambda rows, stages, revision=None: previews.append((rows, stages, revision)))
+        app._live_sheet_key, app._live_sheet_rows = None, []
+        app._refresh_live_preview = types.MethodType(
+            gui.DrawingAnalyzerApp._refresh_live_preview, app)
+        app._pdfs = [pdf]
+        app._refresh_live_preview()
+        app._qc_markups_var.set(True)
+        app._refresh_live_preview()
+        (rows, plain, revision), (_rows, full, _rev) = previews
+        assert [r[1] for r in rows] == [ref.display_label for ref in list_sheets([pdf])]
+        assert revision == gui.sources_fingerprint([pdf])   # file content, not just ids
+        assert "critique" not in plain and {"critique", "verification", "markup"} <= set(full)
+        app._busy = True                            # a run owns the board
+        app._refresh_live_preview()
+        assert len(previews) == 2
+
+
+def test_live_view_choice_is_remembered_beside_other_preferences(tmp_path):
+    from drawing_analyzer.core import preferences
+
+    prefs = tmp_path / "gui_preferences.json"
+    preferences.set_preference(prefs, preferences.SKIP_FULL_QC_CONFIRM, True)
+    assert preferences.get_bool(prefs, preferences.LIVE_VIEW, True) is True   # default: on
+    with _gui_module() as (gui, _tk):
+        toggled = []
+        stub = types.SimpleNamespace(
+            _prefs_path=prefs, _live=types.SimpleNamespace(set_enabled=toggled.append))
+        gui.DrawingAnalyzerApp._remember_live_view(stub, False)
+    assert toggled == [False]
+    assert preferences.get_bool(prefs, preferences.LIVE_VIEW, True) is False
+    assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is True

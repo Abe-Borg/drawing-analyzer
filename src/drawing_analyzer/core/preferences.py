@@ -1,7 +1,8 @@
 """Small persisted GUI preferences (``gui_preferences.json`` in the config dir).
 
 Holds user choices that should survive a restart but are not secrets and not
-run inputs — today only whether the full-QC cost confirmation is shown. Every
+run inputs — whether the full-QC cost confirmation is shown, and whether the
+Activity section shows the Live view board or the log. Every
 read tolerates a missing, unreadable, or corrupt file (it reads as "no
 preference set"), and every write is best-effort: a preference that cannot be
 saved must never block a run.
@@ -19,6 +20,10 @@ PREFERENCES_FILENAME = "gui_preferences.json"
 # confirmation and proceeds. The QC section's "Confirm estimated cost" box
 # turns it back off.
 SKIP_FULL_QC_CONFIRM = "skip_full_qc_cost_confirm"
+
+# Whether the Activity section shows the Live view board (True, the default)
+# or the log. The Live view | Log toggle sets it.
+LIVE_VIEW = "live_view"
 
 
 def default_preferences_path() -> Path:

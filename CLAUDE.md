@@ -402,11 +402,33 @@ map lives in `src/drawing_analyzer/__init__.py`.
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
   or the list cannot shrink. Persisted GUI preferences (not secrets, not run
   inputs) live in `core/preferences.py` (`gui_preferences.json`, tolerant read,
-  best-effort atomic write); today only `SKIP_FULL_QC_CONFIRM`, set by the
+  best-effort atomic write): `SKIP_FULL_QC_CONFIRM`, set by the
   full-QC cost dialog's "Don't show this again" (`gui._ask_cost_confirmation`,
-  remembered on Yes only) and cleared by the QC section's confirm box. A
+  remembered on Yes only) and cleared by the QC section's confirm box, and
+  `LIVE_VIEW`, set by the Activity section's Live view | Log toggle. A
   skipped dialog logs the estimate. GUI lifecycle tests drive real handlers on a
   `SimpleNamespace` stub — a handler that calls a new method needs it stubbed.
+- **Live view** (`live_view.py` / `live_scene.py` / `live_panel.py`, all
+  toolkit-free): `extract_drawing_context(monitor=RunMonitor())` gets the run's
+  journal, `ResourcePressure` (its `.calls` telemetry), config and focus when
+  the host sampler starts, and the sheets after `list_sheets`, both through
+  `live_view.notify_monitor` (swallows everything; a monitor never changes a
+  run). `LiveRunModel.poll` reads only what is new (cursors over the
+  append-only journal events and call records). It re-reads a settled call
+  record for `_SETTLE_WINDOW_SECONDS` (`describe_response` sets `outcome`
+  before the tokens) and retries an open batch record until its `item` is set.
+  Sheets match call records by `sheet_item` (critique appends `:<read>`;
+  `sheet_key_of`) and journal events by display label (sanitized as the
+  journal does), narrowed by `source`. Live spend prices settled records with
+  `core.pricing.usage_record_cost` and is marked `≈`; `finish(ctx)` replaces it
+  with `ctx.total_estimated_cost`. `LiveScene.build` is a pure frame of keyed
+  `Prim`s (`animating` = anything moving); `CanvasPainter` diffs by key and
+  restacks from the first created item. `LivePanel` paces at ≤25 fps and ≥3×
+  the last frame's cost, polls at 1 Hz while hidden mid-run, and stops when
+  idle. GUI: the Activity section's `Live view | Log` toggle
+  (`_show_activity_view`; `core.preferences.LIVE_VIEW`). Handlers reach
+  the panel via `getattr(self, "_live", None)`, so stub-driven handler tests
+  need no new stubs. The gauntlet `oracle` runs with a monitor.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,
   tokenizer, structured-outputs gate. The tokenizer is estimate-only; the exact
   count is `count_tokens_via_api`, and the local path is the conservative

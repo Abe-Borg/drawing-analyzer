@@ -200,13 +200,78 @@ executable, so there was nowhere for the traceback to go — and an exception in
 a button handler is recorded in the diagnostics log and reported, rather than
 looking like the click did nothing.
 
+#### Live view — watch the run
+
+The **Activity** section near the bottom of the window has two views, switched
+by the **Live view | Log** toggle on its first row:
+
+- **Live view** (the default) — an animated board of the run as it happens,
+  drawn on a dark blueprint grid:
+  - **Header** — a pulsing **LIVE** pill (then *COMPLETE* / *PARTIAL* /
+    *STOPPED* / *FAILED*), the elapsed clock, the stages running right now
+    with their progress (`▸ Read 34/120`), and the live figures: tokens per
+    second, calls in flight (or items waiting in the batch queue), total tokens
+    and the **estimated spend so far**.
+  - **Pipeline track** — one node per stage the run's own configuration
+    plans (*Inputs → Read → Identify → Plan → Critique → X-Sheet → Overview →
+    Audit → Harvest → Editions → Anchor → Absence → Verify → Probe → Cite →
+    Markup* for a full QC run; just the first few for a standard run). Active
+    nodes pulse and spin; data packets stream along the track into them — fast
+    and blue while real-time reads stream, slow and amber while work waits in
+    the Message Batch queue. A finished node bursts and settles **green**
+    (complete), **amber** (partial) or **red** (failed); a stage the run never
+    reached ends dimmed.
+  - **Sheet board** — one cell per sheet. Cells cascade in when you load files,
+    shimmer amber while queued in a batch, run a scan line while being read,
+    then flash and settle **green** (read), **teal** (served from the cache,
+    no charge) or **red** (failed). A purple corner marks the critique reads.
+    When the run completes a sweep crosses the board.
+  - **Telemetry** — a live token-throughput chart with counters (calls done,
+    live, queued, retries — a retry flashes the counter). At the end of a QC
+    run it becomes the **findings breakdown**: a bar of verified / uncertain /
+    not checked / rejected findings, the high / medium / low counts, and
+    whether every markup was proven in the saved PDF.
+  - **Ticker** — the latest notable event, typed out (*"6 of 48 sheet(s)
+    already in the cache — free"*, *"Findings ledger sealed: 87 finding(s)"*,
+    *"API busy (overloaded) — backing off 2.0s, then retrying"*).
+  - Hover a cell for that sheet's name, state, critique reads and tokens;
+    hover a stage node for its status, time and call counts.
+
+  Before a run the board previews the loaded set and the stages the current QC
+  options would run (tick *QC Markups* and the track grows the QC stages).
+  After a run the final board stays up until you load a different set.
+- **Log** — the timestamped activity log, as before. While the board is
+  showing, warnings and errors logged behind it are counted beside the toggle
+  (*● 2 warnings in the log*); click it to jump to the log.
+
+**Turning the visuals off.** Pick **Log** and the board stops drawing
+entirely; collapse the *Activity* header and nothing is drawn either (during a
+run the collapsed header still shows a one-line summary, e.g. *Activity —
+Critique · 48/48 sheets · ≈$12.40*, refreshed once a second). The choice is
+remembered across launches (`gui_preferences.json` in the app's config folder,
+the same file as the full-QC confirmation choice).
+
+**What it shows, and what it cannot change.** The board is a read-only window
+onto the run's own records: the pipeline hands a
+`live_view.RunMonitor` (`extract_drawing_context(monitor=…)`) its sanitized
+run journal (the same events `run.log` is rendered from — no key, no path) and
+its per-call telemetry. Nothing the board does can alter, slow or fail a run,
+and a failure inside it is logged once and otherwise ignored. The spend shown
+during a run is an **estimate** (each finished call priced at the model that
+answered it; marked `≈`); when the run returns it is replaced by the run's own
+usage-ledger figure — the same number `run.log` and the report show. Drawing
+paces itself — up to 25 frames a second, backing off so it never takes more
+than about a third of the UI thread (in development testing, a 600-sheet board
+with every cell animating drew in ~11 ms a frame), and it stops completely
+when nothing is moving.
+
 #### Loaded files — what a run will send
 
 Everything a run uses is listed in the **Loaded files** section, by category,
 with each file's token count and its own **Remove** button (Remove takes out
 that one file; **Clear** still empties everything). The section expands by
 itself whenever you add something and collapses when a run starts, so the
-activity log gets the room. Its buttons add inputs; every pick *adds* to what
+Activity section (the Live view board, or the log) gets the room. Its buttons add inputs; every pick *adds* to what
 is already loaded, and picking a file again replaces its earlier copy:
 
 | Button | Category | What it does |
@@ -463,6 +528,8 @@ ctx = extract_drawing_context(
     # save_tile_artifacts=True keeps every rendered tile for the export's tiles/.
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
     cancel=token,                     # optional kill switch (see below)
+    # monitor=RunMonitor() (drawing_analyzer.live_view) is a read-only window a UI
+    # can poll while the run works — what the GUI's Live view draws from.
 )
 print(ctx.combined_text)
 print(ctx.qc_status)            # NOT_REQUESTED | COMPLETE | PARTIAL | FAILED (§3.3)
@@ -487,6 +554,16 @@ The kill switch is a `drawing_analyzer.cancellation.CancelToken`. Call
 the stages' non-fatal `except Exception` guards cannot swallow it; catch it by
 name. `token.wait_for_remote_cancels(timeout)` waits for the stop's remote batch
 cancels to be sent, which matters if the process is about to exit.
+
+To follow a run from your own UI, pass a `drawing_analyzer.live_view.RunMonitor`
+as `monitor=` and poll a `LiveRunModel` from your UI thread
+(`model.begin()`, then `model.poll(monitor)` on a timer, then
+`model.finish(ctx)`). The run attaches its own journal, per-call telemetry,
+resolved configuration and sheet list to the monitor; the model folds them into
+per-stage and per-sheet state, call/token counters, a live spend estimate and a
+ticker of notable events. `live_scene.LiveScene` + `CanvasPainter` render that
+model onto any Tk-like canvas, and `live_panel.LivePanel` is the GUI's
+self-pacing driver. All three are toolkit-free and never raise into the run.
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a

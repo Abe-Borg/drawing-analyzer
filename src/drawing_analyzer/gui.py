@@ -109,7 +109,12 @@ from .help_content import (
     processing_transports,
     transport_hint,
 )
+from .call_telemetry import sheet_item
 from .html_report import build_html_report
+from .live_panel import LivePanel
+from .live_scene import BG as LIVE_BG
+from .live_view import planned_stages
+from .models import resolve_run_configuration
 from .pipeline import DrawingContext, _resolve_save_tiles, extract_drawing_context
 from .render import list_sheets
 from .spec_documents import (
@@ -168,6 +173,10 @@ _log = diagnostics.get_logger()
 _CARET_OPEN = "▾"
 _CARET_SHUT = "▸"
 
+# The Activity section's two views (the toggle's labels).
+_VIEW_LIVE = "Live view"
+_VIEW_LOG = "Log"
+
 
 class CollapsibleSection:
     """A click-to-toggle section: a thin header bar over a hideable body frame.
@@ -196,6 +205,10 @@ class CollapsibleSection:
     its container drops back to ``fill="x"`` without ``expand`` so it leaves
     no empty gap; expanded, it shares the slack with the log again. Its
     position in the packing order never changes (``pack_configure``).
+
+    ``on_toggle(expanded)`` (optional) is told after every collapse/expand —
+    the Activity section uses it to wake the Live view when it is re-opened
+    (collapsed, the board draws nothing).
     """
 
     def __init__(
@@ -208,9 +221,11 @@ class CollapsibleSection:
         pady=(0, 8),
         expand: bool = False,
         hold_when_collapsed: bool = True,
+        on_toggle=None,
     ) -> None:
         self.title = title
         self._expanded = expanded
+        self._on_toggle = on_toggle
         self._summary_provider = summary_provider
         self._expand = expand
         self._hold_when_collapsed = hold_when_collapsed
@@ -257,6 +272,11 @@ class CollapsibleSection:
             else:
                 self.container.pack_configure(fill="x", expand=False)
         self._render_header()
+        if self._on_toggle is not None:
+            try:
+                self._on_toggle(self._expanded)
+            except Exception:  # noqa: BLE001 - a listener must never break the toggle
+                pass
 
     def set_expanded(self, expanded: bool) -> None:
         """Idempotently force a collapse/expand (used by host auto-collapse)."""
@@ -298,11 +318,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         self.title("Drawing Context Analyzer")
         # The optional sections (and the API key when a key is already loaded)
-        # start collapsed; the activity log and the Loaded-files list — the two
-        # expand=True sections — share any slack and grow as sections collapse.
-        # 720 tall fits the file list's minimum beside the QC and Processing
-        # headers with every action row visible (they are packed first).
-        self.geometry("820x720")
+        # start collapsed; the Activity slot (Live view / log) and the
+        # Loaded-files list — the two expand=True sections — share any slack and
+        # grow as sections collapse. 720 tall fits the file list's minimum
+        # beside the QC and Processing headers with every action row visible
+        # (they are packed first); open taller when the screen has room, so
+        # the Live view board gets space to breathe.
+        # CTk scales geometry by its window scaling, so compare in its units.
+        try:
+            scaling = float(ctk.ScalingTracker.get_window_scaling(self)) or 1.0
+            screen_h = int(self.winfo_screenheight() / scaling)
+        except Exception:  # noqa: BLE001 - no screen metrics; keep the old size
+            screen_h = 0
+        height = max(720, min(880, screen_h - 110)) if screen_h else 720
+        self.geometry(f"820x{height}")
         # Width floor: the header must fit the title (~230px) plus the
         # four-button bar (3×112 + 68 + padding ≈ 428px) inside the 32+32px
         # outer/card padding — 640 clipped the row once "About" was added.
@@ -435,6 +464,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._update_downloading = False
         self._update_download_cancelled = False
         self._update_dialog: ctk.CTkToplevel | None = None
+        # Live view (live_panel.py): the animated run board. Built in _build_ui;
+        # None until then (and in handler tests that drive a stub ``self``).
+        # The sheet rows are cached by the files' fingerprint so a QC toggle
+        # does not reopen every PDF.
+        self._live: LivePanel | None = None
+        self._live_selected = False
+        self._live_sheet_key: "tuple | None" = None
+        self._live_sheet_rows: list = []
+        self._log_unseen = 0
 
         self._build_ui()
         self._register_dnd()
@@ -730,7 +768,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._confirm_full_qc_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
         self._reference_audit_check = ctk.CTkCheckBox(
             qc_row, text="Deterministic audit only — no additional API calls",
-            variable=self._reference_audit_var, command=self._refresh_summary,
+            variable=self._reference_audit_var, command=self._on_reference_audit_toggle,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
         )
@@ -833,26 +871,72 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_muted"], anchor="w",
         )
 
-        # Activity log — live status + per-sheet diagnostics. The digest itself
-        # is no longer shown here; it is written only to the saved Markdown file.
+        # Activity — one slot, two views, switched by the toggle on its first row:
+        #   * Live view (live_panel.py / live_scene.py): the animated run board —
+        #     the pipeline track, one cell per sheet, live spend / token flow and
+        #     the findings breakdown at the end. Purely a display of the run's
+        #     own journal and call records; it never changes a run.
+        #   * Log: live status + per-sheet diagnostics. The digest itself is
+        #     not shown here; it is written only to the saved Markdown file.
+        # The toggle is the visuals' on/off switch and is remembered. Sharing
+        # the slot keeps the board from squeezing the log off a short window.
         # Collapsible like the sections above, and the sole ``expand=True``
         # section: it absorbs the slack the collapsed sections hand back, and
         # hands its own space to the action buttons below when collapsed. The
-        # always-visible progress label above keeps the live status in view even
-        # while the log is collapsed.
+        # always-visible progress label above keeps the live status in view
+        # even while the section is collapsed.
+        live_on = preferences.get_bool(self._prefs_path, preferences.LIVE_VIEW, True)
         self._log_sec = CollapsibleSection(
-            outer, "Activity log", expand=True,
+            outer, "Activity", expand=True,
             summary_provider=self._log_summary,
+            on_toggle=lambda _expanded: self._live.kick(),
         )
+        view_row = ctk.CTkFrame(self._log_sec.body, fg_color="transparent")
+        view_row.pack(fill="x", pady=(2, 0))
+        self._activity_switch = ctk.CTkSegmentedButton(
+            view_row, values=[_VIEW_LIVE, _VIEW_LOG], height=24,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._show_activity_view,
+        )
+        self._activity_switch.pack(side="left")
+        # While the board is showing, warnings logged behind it are counted
+        # here (click to read them), so a log-only problem is never missed.
+        self._log_alert = ctk.CTkLabel(
+            view_row, text="", font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["warning"], cursor="hand2",
+        )
+        self._log_alert.pack(side="left", padx=(10, 0))
+        self._log_alert.bind("<Button-1>", lambda _e: self._show_activity_view(_VIEW_LOG))
+        activity = ctk.CTkFrame(self._log_sec.body, fg_color="transparent")
+        activity.pack(fill="both", expand=True)
+        try:
+            live_scale = float(ctk.ScalingTracker.get_widget_scaling(self))
+        except Exception:  # noqa: BLE001 - older CTk: unscaled
+            live_scale = 1.0
+        # Requests the height the log box requests, so the slot asks for the
+        # same space either way; both grow into the window's slack.
+        self.live_canvas = ctk.CTkCanvas(
+            activity, height=int(200 * live_scale), bg=LIVE_BG,
+            highlightthickness=0, bd=0,
+        )
+        self._live = LivePanel(
+            self.live_canvas,
+            schedule=self.after, cancel=self.after_cancel,
+            visible=lambda: self._log_sec.expanded and self._live_selected
+            and bool(self.live_canvas.winfo_viewable()),
+            on_summary=lambda: (not self._log_sec.expanded) and self._log_sec.refresh(),
+            scale=live_scale, enabled=live_on,
+        )
+        self.live_canvas.bind("<Motion>", lambda e: self._live.hover(e.x, e.y))
+        self.live_canvas.bind("<Leave>", lambda _e: self._live.hover(None))
+        self.live_canvas.bind("<Configure>", lambda _e: self._live.kick())
+        self.live_canvas.bind("<Map>", lambda _e: self._live.kick())
         self.log_box = ctk.CTkTextbox(
-            self._log_sec.body, fg_color=COLORS["bg_input"],
+            activity, fg_color=COLORS["bg_input"],
             border_color=COLORS["border"], border_width=2,
             text_color=COLORS["text_secondary"],
             font=ctk.CTkFont(family="Consolas", size=12), wrap="word",
         )
-        # padx comes from the section container (inset 16 from the card); the
-        # 8px below matches the container's own bottom pad before the next row.
-        self.log_box.pack(fill="both", expand=True, pady=(4, 0))
         for _tag, _color in (
             ("muted", COLORS["text_muted"]),
             ("info", COLORS["text_secondary"]),
@@ -864,6 +948,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ):
             self.log_box.tag_config(_tag, foreground=_color)
         self.log_box.configure(state="disabled")
+        # padx comes from the section container (inset 16 from the card).
+        self._show_activity_view(_VIEW_LIVE if live_on else _VIEW_LOG, remember=False)
 
         # HTML report option — embedding the API key makes the report's Ask-AI
         # work on a double-click with no key to paste, but writes the key into
@@ -1916,6 +2002,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         sec = getattr(self, "_files_sec", None)
         if sec is not None:
             sec.refresh()
+        # Every input change lands here, so the Live view previews the set.
+        self._refresh_live_preview()
 
     def _files_total_text(self, groups: list[dict]) -> str:
         if not any(g["rows"] for g in groups):
@@ -1970,6 +2058,77 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 text="Already included in QC Markups." if on else ""
             )
         self._refresh_summary()
+        self._refresh_live_preview()
+
+    def _on_reference_audit_toggle(self) -> None:
+        self._refresh_summary()
+        self._refresh_live_preview()
+
+    # --------------------------------------------------------------------- #
+    # Live view (live_panel.py)
+    # --------------------------------------------------------------------- #
+
+    def _refresh_live_preview(self) -> None:
+        """Show the loaded set and the planned pipeline on the idle board.
+
+        The plan comes from the same ``resolve_run_configuration`` the run
+        uses, so the track grows the QC stages the moment QC Markups is
+        ticked. Ignored mid-run (the run's own plan is on the board) and
+        before the panel exists.
+        """
+        live = getattr(self, "_live", None)
+        if live is None or self._busy:
+            return
+        try:
+            key = sources_fingerprint(self._pdfs) if self._pdfs else ()
+            if key != self._live_sheet_key:
+                refs = list_sheets(self._pdfs) if self._pdfs else []
+                self._live_sheet_rows = [
+                    (sheet_item(r), r.display_label, r.source_id) for r in refs
+                ]
+                self._live_sheet_key = key
+            config = resolve_run_configuration(
+                qc_markups=bool(self._qc_markups_var.get()),
+                reference_audit=bool(self._reference_audit_var.get()),
+                synthesize=True,
+            )
+            stages = planned_stages(config, focus=bool(self._current_focus()))
+            if len(self._live_sheet_rows) < 2:
+                # The set overview needs two readable sheets.
+                stages = [s for s in stages if s != "synthesis"]
+            live.preview(self._live_sheet_rows, stages, revision=self._live_sheet_key)
+        except Exception as exc:  # noqa: BLE001 - a preview is decoration
+            _log.debug("live view preview failed: %s", exc)
+
+    def _show_activity_view(self, view: str, *, remember: bool = True) -> None:
+        """Show the Live view board or the log in the Activity slot."""
+        live_on = view == _VIEW_LIVE
+        self._live_selected = live_on
+        if self._activity_switch.get() != view:
+            self._activity_switch.set(view)
+        if live_on:
+            self.log_box.pack_forget()
+            self.live_canvas.pack(fill="both", expand=True, pady=(4, 0))
+        else:
+            self.live_canvas.pack_forget()
+            self.log_box.pack(fill="both", expand=True, pady=(4, 0))
+            self.log_box.see("end")
+            self._log_unseen = 0
+            self._log_alert.configure(text="")
+        if remember:
+            self._remember_live_view(live_on)
+        else:
+            self._live.set_enabled(live_on)
+
+    def _remember_live_view(self, on: bool) -> None:
+        """Turn the visuals on/off and keep the choice for the next launch."""
+        try:
+            preferences.set_preference(self._prefs_path, preferences.LIVE_VIEW, bool(on))
+        except Exception:  # noqa: BLE001 - a preference that cannot be saved is not an error
+            _log.debug("could not save the Live view preference", exc_info=True)
+        live = getattr(self, "_live", None)
+        if live is not None:
+            live.set_enabled(on)
 
     def _on_confirm_full_qc_toggle(self) -> None:
         """Persist the full-QC cost-confirmation preference (best-effort)."""
@@ -2316,6 +2475,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         sec = getattr(self, "_log_sec", None)
         if sec is None or sec.expanded:
             return ""
+        live = getattr(self, "_live", None)
+        if live is not None and getattr(self, "_live_selected", False):
+            # The board is the chosen view: its one-line run state.
+            board = live.model.summary_line()
+            if board:
+                return board
         text = " ".join((self._log_summary_text or "").split())
         return text if len(text) <= 48 else text[:47] + "…"
 
@@ -2599,6 +2764,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 level="muted",
             )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
+        # Arm the Live view: the run attaches its journal and call record to
+        # this monitor, and the board animates from them.
+        live = getattr(self, "_live", None)
+        monitor = live.begin() if live is not None else None
 
         pdfs = list(self._pdfs)
         threading.Thread(
@@ -2606,7 +2775,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
                   use_batch, critique_use_batch, self._run_cancel,
-                  governing_editions, project_context, fast_mode, save_tiles),
+                  governing_editions, project_context, fast_mode, save_tiles,
+                  monitor),
             daemon=True,
         ).start()
 
@@ -2627,6 +2797,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         project_context: str | None = None,
         fast_mode: bool = False,
         save_tile_artifacts: bool = False,
+        monitor=None,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -2653,6 +2824,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 project_context=project_context,
                 fast_mode=fast_mode,
                 cancel=cancel,
+                # The Live view's window onto this run (read-only).
+                monitor=monitor,
             )
         except RunCancelled:
             # The user's Stop (or quitting mid-run). A BaseException, so it is
@@ -2719,6 +2892,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         sec = getattr(self, "_log_sec", None)
         if sec is not None and not sec.expanded:
             sec.refresh()
+        if level in ("warning", "error") and getattr(self, "_live_selected", False):
+            self._log_unseen = getattr(self, "_log_unseen", 0) + 1
+            alert = getattr(self, "_log_alert", None)
+            if alert is not None:
+                n = self._log_unseen
+                alert.configure(text=f"● {n} warning{'s' if n != 1 else ''} in the log")
 
     def _clear_log(self) -> None:
         self.log_box.configure(state="normal")
@@ -2726,6 +2905,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.log_box.configure(state="disabled")
         self._last_log_msg = None
         self._log_summary_text = None
+        self._log_unseen = 0
+        alert = getattr(self, "_log_alert", None)
+        if alert is not None:
+            alert.configure(text="")
         sec = getattr(self, "_log_sec", None)
         if sec is not None:
             sec.refresh()
@@ -2779,6 +2962,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     def _on_cancelled(self) -> None:
         self._busy = False
         self._end_run_controls()
+        live = getattr(self, "_live", None)
+        if live is not None:
+            live.stop()
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
@@ -2793,6 +2979,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
         self._ctx = ctx
+        live = getattr(self, "_live", None)
+        if live is not None:
+            live.finish(ctx)
         if self._end_run_controls():
             self._log(
                 "The stop arrived after the run's last paid request, so the run "
@@ -3038,6 +3227,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     def _on_error(self, message: str) -> None:
         self._busy = False
         self._end_run_controls()
+        live = getattr(self, "_live", None)
+        if live is not None:
+            live.stop(failed=True, message=message)
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self._set_focus_editable(True)
