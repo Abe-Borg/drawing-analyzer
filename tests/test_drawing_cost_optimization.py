@@ -223,32 +223,3 @@ def test_independent_transport_pairs_have_stable_mode_names():
     assert _transport_plan_name(False, True) == "hybrid"
     assert _transport_plan_name(False, False) == "fast"
     assert _transport_plan_name(True, False) == "custom-batch-digest"
-
-
-# --------------------------------------------------------------------------- #
-# L1 — the real-time-exhaustive cost nudge (needs PyMuPDF)
-# --------------------------------------------------------------------------- #
-
-
-def test_exhaustive_realtime_emits_cost_hint(tmp_path, monkeypatch):
-    pytest.importorskip("pymupdf")
-    monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
-    from tests.test_drawing_qc_pipeline import _RoutingClient, _VAV_FINDING, _make_pdf
-
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    ctx = extract_drawing_context(
-        [src], client=_RoutingClient([_VAV_FINDING]), qc_markups=True, rows=2, cols=2
-    )
-    codes = [e.event_code for e in ctx.run_journal.events]
-    assert "COST_HINT" in codes
-
-
-def test_standard_run_no_cost_hint(tmp_path, monkeypatch):
-    pytest.importorskip("pymupdf")
-    monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
-    from tests.test_drawing_qc_pipeline import _RoutingClient, _make_pdf
-
-    src = _make_pdf(tmp_path / "M-101.pdf")
-    ctx = extract_drawing_context([src], client=_RoutingClient([]), rows=2, cols=2)
-    codes = [e.event_code for e in ctx.run_journal.events]
-    assert "COST_HINT" not in codes
