@@ -971,6 +971,9 @@ class ResourcePressure:
         # worker thread the run opens; ``core.api_config.apply_fast_mode``
         # reads it per request.
         self.requested_speed: str | None = None
+        # The caller's live spend monitor (:mod:`~drawing_analyzer.live_spend`),
+        # or ``None``. Here for the same reason: every worker reaches it.
+        self.spend: Any = None
 
     # -- wiring ------------------------------------------------------------- #
 

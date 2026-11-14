@@ -283,6 +283,35 @@ map lives in `src/drawing_analyzer/__init__.py`.
   `cancellation.on_stop` (run on the run thread after unwinding — e.g. the
   retained digest uploads). Stage starts `check()` up to markup writing, the
   last stop point.
+- **Live spend** (`live_spend.py`): `extract_drawing_context(spend=SpendMonitor)`
+  (the GUI's spend line and **Stop the run at $** box). The usage ledger fills
+  in at stage ends, so the monitor is fed at the dispatch sites instead:
+  `live_spend.note_response` in `_dispatch_messages`, `note_batch_submit` in
+  `_create_batch`, `note_batch_results` in `read_batch_results`. It rides
+  `ResourcePressure.spend`, so workers reach it through `worker_binding()`;
+  stage and item come from `call_telemetry.current_scope()`.
+  `response_cost` must price a response as `_record_usage` does (per fallback
+  hop, batch rate, inferred fast speed, web searches by value); the gauntlet
+  asserts the live per-family figures equal the ledger's. *In flight* is batch
+  items submitted and unread; a result for an item this monitor never saw
+  submitted (receipt recovery) is not this run's spend. The projection needs a
+  forecast (`cost.spend_forecast(estimate)`, built from each
+  `CostComponent.family` / `items`; empty if any stage is unpriced): per
+  stage, billed plus remaining items at a per-item rate shrunk from the
+  quote's toward the stage's observed mean (`SHRINK_ITEMS`). `_finish_stage`
+  closes a stage (requested or not), `live_spend.expect(family, n)` reports
+  its paid item count after cache lookups, and `finish(run_usage)` replaces
+  the live figures with the ledger's. A new paid stage needs a `family` on its
+  estimate component. The budget cap compares `billed + in_flight_floor` (the
+  low per-item rate, counted only for a `measured` forecast — `shape_aware` —
+  or from the stage's observed mean, never the conservative allowance) and
+  calls `CancelToken.cancel(reason)` (`token.reason`; `bound_run` logs it), so
+  a capped run ends in `RunCancelled` like a user stop. `set_budget` is
+  thread-safe and takes effect at once; a monitor with a budget and no
+  `cancel=` raises `ValueError` at run start. The GUI polls `snapshot()` on
+  `after(SPEND_REFRESH_MS)`; the cap box and amount are never locked during a
+  run and persist in `core/preferences.py` (`BUDGET_CAP_*`). Advisory apart
+  from the cap: every hook swallows its own failures.
 - **Digest path:** `tiling.py` (geometry) → `render.py` (raster) → `digest.py`
   or `batch_digest.py` (Message Batches + Files) → `digest_cache.py` (two-level
   content-keyed cache; a hit skips rendering and restores parsed findings).
@@ -402,7 +431,8 @@ map lives in `src/drawing_analyzer/__init__.py`.
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
   or the list cannot shrink. Persisted GUI preferences (not secrets, not run
   inputs) live in `core/preferences.py` (`gui_preferences.json`, tolerant read,
-  best-effort atomic write): `SKIP_FULL_QC_CONFIRM`, set by the
+  best-effort atomic write): the budget cap (`BUDGET_CAP_*`) and
+  `SKIP_FULL_QC_CONFIRM`, set by the
   full-QC cost dialog's "Don't show this again" (`gui._ask_cost_confirmation`,
   remembered on Yes only) and cleared by the QC section's confirm box, and
   `LIVE_VIEW`, set by the Activity section's Live view | Log toggle. A

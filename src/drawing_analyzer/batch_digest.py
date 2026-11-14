@@ -69,7 +69,7 @@ from typing import Any, Callable, Iterable
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.request_usage import fallback_served_model
 from .core.tokenizer import estimate_image_tokens_total
-from . import call_telemetry, cancellation, resource_pressure
+from . import call_telemetry, cancellation, live_spend, resource_pressure
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -822,6 +822,7 @@ def _create_batch(
             batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
         )
     call_telemetry.note_batch_submit(batch_id, reqs, items=items)
+    live_spend.note_batch_submit(batch_id, reqs, items=items)
     return mb
 
 

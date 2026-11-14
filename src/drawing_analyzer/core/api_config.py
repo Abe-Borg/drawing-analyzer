@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .. import call_telemetry, cancellation, resource_pressure
+from .. import call_telemetry, cancellation, live_spend, resource_pressure
 
 _log = logging.getLogger(__name__)
 
@@ -1676,7 +1676,9 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
 
     Every request that is sent gets one :mod:`~drawing_analyzer.call_telemetry`
     record — what it was given (caps, effort, thinking, tools) and what it used
-    — closed with the response, the error, or the stop.
+    — closed with the response, the error, or the stop. Every response is also
+    priced into the run's live spend (:mod:`~drawing_analyzer.live_spend`),
+    which is where a budget cap stops the run.
 
     It is also the spend-limit gate (:mod:`~drawing_analyzer.resource_pressure`,
     leg 4): an answer saying the organization's spend cap or a Console spend
@@ -1708,4 +1710,5 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
         )
         raise
     call_telemetry.finish(record, message=message)
+    live_spend.note_response(kwargs, message)
     return message

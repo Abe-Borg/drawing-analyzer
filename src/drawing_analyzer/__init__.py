@@ -64,6 +64,9 @@ Module layout::
                       events.csv, 00_summary.md)
     cancellation.py   the run kill switch: CancelToken / RunCancelled, the
                       per-thread binding, remote batch cancels on a stop
+    live_spend.py     the run's live spend (SpendMonitor): billed / in flight /
+                      projected total while the run works, and the budget cap
+                      that stops the run through the kill switch
     live_view.py      RunMonitor (extract_drawing_context(monitor=)) + the
                       LiveRunModel reducer behind the GUI's Live view
     live_scene.py     the Live view's animated scene (draw primitives) and the
@@ -86,6 +89,7 @@ from __future__ import annotations
 
 from .cancellation import CancelToken, RunCancelled
 from .digest import SheetDigest
+from .live_spend import SpendMonitor, SpendSnapshot
 from .models import (
     AdoptedCode,
     RunConfiguration,
@@ -117,6 +121,8 @@ __all__ = [
     "resolve_run_configuration",
     "roll_up_qc_status",
     "RunCancelled",
+    "SpendMonitor",
+    "SpendSnapshot",
     "extract_drawing_context",
     "estimate_image_tokens_for_set",
     "__version__",

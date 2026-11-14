@@ -32,6 +32,7 @@ from .core.pricing import (
     usage_record_cost,
 )
 from . import tiling
+from .live_spend import StageForecast
 from .batch_digest import _batch_max_elapsed_seconds
 from .pipeline import estimate_image_tokens_for_set
 
@@ -499,6 +500,9 @@ class DrawingCostEstimate:
     low_cost: float | None = None
     #: XFast: Opus-class real-time requests priced at the fast-mode rate.
     fast_mode: bool = False
+    #: The total split by usage family, for :func:`spend_forecast`. Empty when
+    #: a price is unknown (and on an older caller's construction).
+    stages: "tuple[StageForecast, ...]" = ()
 
     @property
     def high_cost(self) -> float | None:
@@ -605,6 +609,24 @@ def estimate_drawing_set_cost(
     total_cost = None if total_cost is None or spec_cost is None else total_cost + spec_cost
     low_cost = None if low_cost is None or spec_cost is None else low_cost + spec_cost
     input_tokens += spec_display_tokens
+    stages: tuple[StageForecast, ...] = ()
+    if total_cost is not None and low_cost is not None:
+        text_stages = [
+            StageForecast(family, cost, cost)
+            for family, cost in zip(
+                [f for f, on in (("synthesis", synthesize and sheet_count >= 2),
+                                 ("focus", focus and sheet_count >= 1)) if on],
+                stage_costs[1:],
+            )
+        ]
+        text_total = sum(stage.high for stage in text_stages)
+        stages = (
+            StageForecast(
+                "digest", low_cost - text_total, total_cost - text_total,
+                items_low=sheet_count, items_high=sheet_count,
+            ),
+            *text_stages,
+        )
     return DrawingCostEstimate(
         sheet_count=sheet_count,
         file_count=file_count,
@@ -619,6 +641,40 @@ def estimate_drawing_set_cost(
         spec_chars=spec_chars,
         shape_aware=shape_aware,
         unmeasured_pages=unmeasured,
+        stages=stages,
+    )
+
+
+def spend_forecast(
+    estimate: "DrawingCostEstimate | ExhaustiveCostEstimate | None",
+) -> "tuple[StageForecast, ...]":
+    """The estimate as per-family bands for the live spend projection.
+
+    Empty when any stage has no price: a projection missing a stage would
+    read as a smaller total, the same rule the estimate totals follow.
+    """
+    if estimate is None:
+        return ()
+    # A quote on the conservative image allowance is not a floor for the cap.
+    measured = bool(getattr(estimate, "shape_aware", False))
+    components = getattr(estimate, "components", None)
+    if components is None:
+        return tuple(
+            replace(stage, measured=measured)
+            for stage in getattr(estimate, "stages", ()) or ()
+        )
+    if any(c.cost is None or not c.family for c in components):
+        return ()
+    return tuple(
+        StageForecast(
+            c.family,
+            c.cost if c.low_cost is None else c.low_cost,
+            c.cost,
+            items_low=c.items if c.items_low is None else c.items_low,
+            items_high=c.items,
+            measured=measured,
+        )
+        for c in components
     )
 
 
@@ -823,6 +879,13 @@ class CostComponent:
     low_cost: float | None = None
     output_tokens_low: int | None = None
     input_tokens_low: int | None = None
+    #: The usage-ledger family this stage bills under, and how many work items
+    #: (sheets, reads, findings, refs) the ``cost`` / ``low_cost`` ends assume.
+    #: :func:`spend_forecast` hands both to the live spend projection, which
+    #: divides them into a per-item rate. Additive and defaulted.
+    family: str = ""
+    items: float = 1.0
+    items_low: float | None = None
 
 
 @dataclass(frozen=True)
@@ -953,6 +1016,7 @@ def _component(
     input_tokens_low: int | None = None, output_tokens_low: int | None = None,
     request_inputs: Sequence[int] | None = None,
     request_inputs_low: Sequence[int] | None = None,
+    family: str = "", items: float = 1.0, items_low: float | None = None,
 ) -> CostComponent:
     def price(inputs: Sequence[int] | None, inp: int, out: int) -> float | None:
         if inputs is None:
@@ -973,6 +1037,7 @@ def _component(
         cost=cost, transport="batch" if batch else "real-time", note=note,
         low_cost=None if low_base is None else low_base + extra_cost,
         input_tokens_low=input_tokens_low, output_tokens_low=output_tokens_low,
+        family=family, items=items, items_low=items_low,
     )
 
 
@@ -1098,6 +1163,7 @@ def _cross_qc_component(sheet_count: int, digest_text: int, *, model: str,
         output_tokens_low=(maps_low + rec_low) * min(_ASSUMED_CROSS_QC_OUTPUT_TOKENS, high_out),
         request_inputs=high_inputs, request_inputs_low=low_inputs,
         model=model, batch=False, note=note + "; thinking included", primary_model=primary_model,
+        family="cross_qc", items=maps_high + rec_high, items_low=maps_low + rec_low,
     )
 
 
@@ -1204,6 +1270,7 @@ def estimate_exhaustive_run_cost(
         output_tokens_low=digest_output_low,
         transport="batch" if batch else "real-time",
         note=f"one vision call per sheet; {read_low:,}–{read_high:,} output tokens/read, including thinking",
+        family="digest", items=sheet_count,
     ))
     if sheet_count >= 2:
         synth_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
@@ -1211,6 +1278,7 @@ def estimate_exhaustive_run_cost(
             "Synthesis", synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
             model=stage_models.synthesis, batch=False,
             note="one text-only set overview", primary_model=model,
+            family="synthesis",
         ))
     if focus and sheet_count >= 1:
         focus_input = digest_text + _ASSUMED_PROMPT_TOKENS_PER_SHEET
@@ -1218,6 +1286,7 @@ def estimate_exhaustive_run_cost(
             "Focus report", focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
             model=stage_models.focus, batch=False,
             note="one text-only focused summary", primary_model=model,
+            family="focus",
         ))
 
     # Phase A planning stages — one text-only real-time call each: the set
@@ -1230,6 +1299,7 @@ def estimate_exhaustive_run_cost(
         _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=identity_model, batch=False,
         note=f"one text call with {friendly_model_name(identity_model)} — "
              "disciplines/jurisdiction/adopted codes",
+        family="identity",
     ))
     components.append(_component(
         "Model review plan",
@@ -1237,7 +1307,7 @@ def estimate_exhaustive_run_cost(
         + sheet_count * _ASSUMED_PLAN_INPUT_TOKENS_PER_SHEET,
         _ASSUMED_PLAN_OUTPUT_TOKENS, model=stage_models.review_plan, batch=False,
         note="one text call — the authored review checklist",
-        primary_model=model,
+        primary_model=model, family="review_plan",
     ))
 
     # Critique — N adversarial reads per sheet. In a ``use_batch`` run they ride
@@ -1297,6 +1367,7 @@ def estimate_exhaustive_run_cost(
             f"{crit_read_low:,}–{crit_read_high:,} output tokens/read, including thinking",
             stage_model=stage_models.critique, primary=model,
         ),
+        family="critique", items=runs * sheet_count,
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
@@ -1310,6 +1381,7 @@ def estimate_exhaustive_run_cost(
         _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=harvest_model, batch=False,
         note=f"occasional straggler structuring with "
              f"{friendly_model_name(harvest_model)}",
+        family="harvest",
     ))
 
     # Absence cross-check — every request of 25 absences re-reads the whole
@@ -1338,6 +1410,7 @@ def estimate_exhaustive_run_cost(
         note=f"{absence_low}–{absence_high} text read(s) of the set, one per 25 "
              f"\"not found on this sheet\" findings, with "
              f"{friendly_model_name(absence_model)}",
+        family="absence_check", items=absence_high, items_low=absence_low,
     ))
 
     # Verification & citation scale with volume — quoted as a low–high band below.
@@ -1350,6 +1423,7 @@ def estimate_exhaustive_run_cost(
             request_inputs=[_ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING] * n,
             note=(f"~{n} finding(s) × one crop re-check with "
                   f"{friendly_model_name(verification_model)}"),
+            family="verify", items=n,
         )
 
     def _citation(refs: float) -> CostComponent:
@@ -1375,6 +1449,7 @@ def estimate_exhaustive_run_cost(
                   + (f" + one clause fetch (≤{fetch_tokens:,} tokens)" if fetch_tokens else "")
                   + f" with {friendly_model_name(citation_model)}; "
                   "extra claim chunks/resumes can cost more"),
+            family="citation", items=n,
         )
 
     def _investigate(findings: float, *, high: bool) -> CostComponent:
@@ -1415,6 +1490,7 @@ def estimate_exhaustive_run_cost(
             note=f"~{n} uncertain finding(s) × up to {evidence_rounds} evidence requests "
                  f"+ closing verdict; thinking and history replay included, with "
                  f"{friendly_model_name(stage_models.investigation)}",
+            family="investigate", items=n,
         )
 
     low_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_LOW)
@@ -1450,7 +1526,7 @@ def estimate_exhaustive_run_cost(
     low_cost = _total([low_verify, low_investigate, low_citation], low=True)
     high_cost = _total([high_verify, high_investigate, high_citation])
     components += [replace(hi, low_cost=lo.cost, input_tokens_low=lo.input_tokens,
-                           output_tokens_low=lo.output_tokens)
+                           output_tokens_low=lo.output_tokens, items_low=lo.items)
                    for lo, hi in ((low_verify, high_verify), (low_investigate, high_investigate),
                                   (low_citation, high_citation))]
     return ExhaustiveCostEstimate(

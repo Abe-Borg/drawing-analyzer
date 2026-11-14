@@ -66,16 +66,24 @@ class CancelToken:
         self._remote: dict[str, Callable[[], Any]] = {}
         self._worker: threading.Thread | None = None
         self._submits = 0
+        #: Why the run was stopped, when something other than the user did it
+        #: (the budget cap). ``""`` for the user's own stop.
+        self.reason = ""
 
     @property
     def cancelled(self) -> bool:
         return self._event.is_set()
 
-    def cancel(self) -> None:
-        """Stop the run. Idempotent; remote cancels run on a daemon thread."""
+    def cancel(self, reason: str = "") -> None:
+        """Stop the run. Idempotent; remote cancels run on a daemon thread.
+
+        ``reason`` names a stop the user did not ask for; the first stop's
+        reason is the one kept.
+        """
         with self._lock:
             if self._event.is_set():
                 return
+            self.reason = str(reason or "")
             self._event.set()
             pending = list(self._remote.items())
             self._remote.clear()
@@ -195,7 +203,11 @@ def bound_run(fn: Callable[..., Any]) -> Callable[..., Any]:
         try:
             return fn(*args, **kwargs)
         except RunCancelled:
-            _log.warning("===== run stopped by the user =====")
+            reason = getattr(kwargs.get("cancel"), "reason", "")
+            _log.warning(
+                "===== run stopped: %s =====" if reason else "===== run stopped by the user =====",
+                *([reason] if reason else []),
+            )
             for hook in hooks:
                 try:
                     hook()

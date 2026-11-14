@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diagnostics
-from . import call_telemetry, cancellation, resource_pressure
+from . import call_telemetry, cancellation, live_spend, resource_pressure
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
 from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
@@ -80,6 +80,7 @@ def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[
                 close()
     results = _read_with_retry(read, sleep=sleep)
     call_telemetry.note_batch_results(batch_id, results)
+    live_spend.note_batch_results(batch_id, results)
     return results
 
 

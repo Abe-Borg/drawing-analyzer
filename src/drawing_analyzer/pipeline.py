@@ -31,7 +31,7 @@ from .core.api_config import (
 from .core.request_usage import RequestUsage, any_fallback_served
 from .core.tokenizer import image_tokens_upper_bound
 from .diagnostics import get_logger
-from . import cancellation, resource_pressure, tiling
+from . import cancellation, live_spend, resource_pressure, tiling
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_TOKENS,
@@ -1413,6 +1413,9 @@ def _finish_stage(stage_results: "list[StageResult]", journal: Any, sr: StageRes
     lists it.
     """
     stage_results.append(sr)
+    # The live spend projection stops forecasting a stage once it has ended
+    # (requested or not): from here it counts what the stage actually billed.
+    live_spend.stage_finished(sr.stage)
     if journal is None or sr.status == "NOT_REQUESTED":
         return
     fields: dict[str, Any] = {"status": sr.status}
@@ -1760,6 +1763,7 @@ def _run_critique_stage(
             progress(total, total, f"Critiquing sheet {done}/{total}")
 
     miss_total = total if only is None else len(only)
+    live_spend.expect("critique", miss_total * runs)
 
     grids_by_ref = {
         _refkey(g.ref): (g.rows, g.cols) for g in sheet_geometries or []
@@ -2411,6 +2415,7 @@ def _run_qc_stages(
         from .verify import verify_findings as _run_verify
 
         _emit("STAGE_START", stage="verification", entries=len(entries))
+        live_spend.expect("verify", len(entries))
         verify_model = default_verify_model()
 
         if work_dir is None:
@@ -2583,6 +2588,10 @@ def _run_qc_stages(
             )
 
             _emit("STAGE_START", stage="investigation", candidates=len(uncertain))
+            live_spend.expect(
+                "investigate",
+                min(len(uncertain), _investigation_max_findings(len(geometries))),
+            )
             inv_model = investigation_model()
             if work_dir is None:
                 import tempfile
@@ -3054,8 +3063,15 @@ def extract_drawing_context(
     project_context: str | None = None,
     fast_mode: bool = False,
     monitor: Any = None,
+    spend: "live_spend.SpendMonitor | None" = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
+
+    ``spend`` (optional) is a :class:`~drawing_analyzer.live_spend.SpendMonitor`
+    the caller reads while the run works: what is billed so far, what is in
+    flight in Message Batches, and a projected total that narrows as stages
+    complete. Its budget cap stops the run through ``cancel``, so a monitor
+    whose budget is set needs ``cancel=`` too (``ValueError`` otherwise).
 
     With rows/cols omitted, each page chooses its grid from displayed physical
     size, preserving the vector/raster ANSI E 6x6 DPI floor. Explicit dimensions
@@ -3313,6 +3329,15 @@ def extract_drawing_context(
     _pressure = resource_pressure.current()
     if _pressure is not None:
         _pressure.requested_speed = "fast" if config.fast_mode else None
+    # Live spend: the monitor rides the same record, so every dispatch on
+    # this run's threads reports to it. Its budget cap acts through the run's
+    # kill switch, which it is handed here.
+    if spend is not None:
+        if cancel is None and spend.budget is not None:
+            raise ValueError("a spend budget stops the run through cancel=; pass a CancelToken")
+        if _pressure is not None:
+            _pressure.spend = spend
+        spend.bind_cancel(cancel)
 
     # Tile-artifact staging needs the work dir *before* the digest phase (the
     # QC stages otherwise create it lazily, after rendering) so the render
@@ -3434,6 +3459,8 @@ def extract_drawing_context(
 
             shutil.rmtree(qc_work_dir, ignore_errors=True)
         pressure.finish()
+        if spend is not None:
+            spend.finish()
         journal.emit("RUN_BLOCKED", level="ERROR", reason=block_reason)
         journal.finish("FAILED")
         return DrawingContext(
@@ -3496,6 +3523,8 @@ def extract_drawing_context(
 
             shutil.rmtree(qc_work_dir, ignore_errors=True)
         pressure.finish()
+        if spend is not None:
+            spend.finish()
         journal.emit(
             "RUN_END", level="ERROR", status="FAILED",
             reason="no readable PDF pages found in the selected files",
@@ -3610,6 +3639,7 @@ def extract_drawing_context(
                 only.discard(rk)
 
     miss_total = total if only is None else len(only)
+    live_spend.expect("digest", miss_total)
 
     # Tile-artifact staging sink (save_tile_artifacts): writes each rendered
     # sheet's overview + tile PNGs into the work dir the moment the render
@@ -4629,6 +4659,9 @@ def extract_drawing_context(
     # Resource-starvation verdict before the run closes, so RESOURCE_SUMMARY
     # precedes USAGE_TOTALS / RUN_END in the trace and the final sample lands.
     pressure.finish()
+    # The run's ledger is now complete: the live figures become its figures.
+    if spend is not None:
+        spend.finish(run_usage)
 
     # Close out the run journal (§18.1): the derived usage totals, then the
     # terminal status the header/footer of run.log lead with.
