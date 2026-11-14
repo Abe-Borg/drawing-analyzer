@@ -17,7 +17,13 @@ import pytest
 from drawing_analyzer import call_telemetry
 from drawing_analyzer.call_telemetry import CallTelemetry, sheet_item
 from drawing_analyzer.core.pricing import usage_record_cost
-from drawing_analyzer.live_panel import AMBIENT_FRAME_MS, FRAME_MS, HIDDEN_POLL_MS, LivePanel
+from drawing_analyzer.live_panel import (
+    AMBIENT_FRAME_MS,
+    FRAME_MS,
+    HIDDEN_POLL_MS,
+    INPUT_QUIET_MS,
+    LivePanel,
+)
 from drawing_analyzer.live_scene import (
     CanvasPainter,
     LiveScene,
@@ -318,6 +324,11 @@ class _FakeCanvas:
         self.stack.append(iid)
         self.calls.append("tag_raise")
 
+    def tag_lower(self, iid, below):
+        self.stack.remove(iid)
+        self.stack.insert(self.stack.index(below), iid)
+        self.calls.append("tag_lower")
+
     def winfo_width(self):
         return self.w
 
@@ -340,7 +351,8 @@ def test_painter_touches_only_what_changed_and_stacks_in_frame_order():
     frame2 = [rect("a", 0, 0, 5, 5, fill="#FFFFFF"), oval("d", 3, 3, 2, fill="#444444"),
               text("c", 2, 2, "x", fill="#333333", size=10)]
     painter.paint(frame2)
-    assert sorted(canvas.calls) == ["create", "delete", "itemconfigure", "tag_raise", "tag_raise"]
+    # The new item is slotted in with one call, not by raising all above it.
+    assert sorted(canvas.calls) == ["create", "delete", "itemconfigure", "tag_lower"]
     assert keys() == ["a", "d", "c"]                 # new item slotted in, not on top
     a_id = painter._items["a"][0]
     assert canvas.items[a_id]["opts"]["fill"] == "#FFFFFF"
@@ -348,6 +360,24 @@ def test_painter_touches_only_what_changed_and_stacks_in_frame_order():
     painter.paint([oval("a", 0, 0, 3)] + frame2[1:])   # kind changed: replaced in place
     assert canvas.items[painter._items["a"][0]]["kind"] == "oval"
     assert keys() == ["a", "d", "c"]
+
+    # Several new items between survivors keep their frame order.
+    frame3 = [oval("a", 0, 0, 3), rect("e", 0, 0, 1, 1), rect("f", 0, 0, 2, 2),
+              oval("d", 3, 3, 2, fill="#444444"), rect("g", 0, 0, 3, 3),
+              text("c", 2, 2, "x", fill="#333333", size=10), rect("h", 0, 0, 4, 4)]
+    painter.paint(frame3)
+    assert keys() == ["a", "e", "f", "d", "g", "c", "h"]
+    # Survivors that swap places are restacked whole.
+    painter.paint([frame3[5], *frame3[:5], frame3[6]])
+    assert keys() == ["c", "a", "e", "f", "d", "g", "h"]
+
+    # A changed option is the only one sent: re-sending a text's font or
+    # string makes Tk lay the item out again.
+    canvas.calls.clear()
+    c_id = painter._items["c"][0]
+    canvas.items[c_id]["opts"] = {}
+    painter.paint([text("c", 2, 2, "x", fill="#FFFFFF", size=10), *frame3[:5], frame3[6]])
+    assert canvas.calls == ["itemconfigure"] and canvas.items[c_id]["opts"] == {"fill": "#FFFFFF"}
 
 
 @pytest.mark.parametrize("n", [1, 7, 48, 600, 2500])
@@ -456,6 +486,18 @@ def test_loop_draws_while_shown_polls_while_hidden_and_rests_when_idle():
     assert isinstance(monitor, RunMonitor)
     assert sched.run_next() == 0          # kicked
     assert sched.pending and sched.pending[0][0] < HIDDEN_POLL_MS
+
+    # Input elsewhere in the window: the next frame waits instead of drawing,
+    # then drawing resumes.
+    sched.run_next()
+    panel.note_input()
+    panel.last_frame_ms = None
+    sched.run_next()
+    assert panel.last_frame_ms is None                       # polled, not drawn
+    assert INPUT_QUIET_MS <= sched.pending[0][0] <= INPUT_QUIET_MS + 1
+    clock.t += INPUT_QUIET_MS / 1000.0 + 0.01
+    sched.run_next()
+    assert panel.last_frame_ms is not None
 
     shown["on"] = False                   # collapsed mid-run
     canvas.calls.clear()

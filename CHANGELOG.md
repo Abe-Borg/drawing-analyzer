@@ -6,6 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The window no longer lags while the Live view animates.** When a read
+  started or finished, the board restacked every item drawn above the new one,
+  up to about 1,200 canvas calls in one frame. It now places each new item with
+  a single call, and changes to an item send only the settings that changed.
+  The frame budget now counts Tk's own repaint and is held to about a fifth of
+  the UI thread (it was a third, of an undercounted cost), and typing,
+  clicking or scrolling elsewhere in the window pauses the drawing for a
+  quarter of a second so input is handled first. The Thinking tab no longer
+  copies every stored reasoning summary on each frame while one is streaming.
+  On a 300-sheet board in development testing, CPU use fell from about 18%
+  to about 14% of one core, and the slowest 5% of input waits fell from about
+  14 ms to about 9 ms.
+
 ## [1.15.0] - 2026-11-13
 
 ### Added

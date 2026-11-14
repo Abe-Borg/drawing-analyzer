@@ -978,6 +978,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.live_canvas.bind("<Button-5>", lambda _e: self._live.scroll(-1))
         self.live_canvas.bind("<Configure>", lambda _e: self._live.kick())
         self.live_canvas.bind("<Map>", lambda _e: self._live.kick())
+        # Typing, clicking or scrolling anywhere else in the window pauses the
+        # board's drawing for a moment, so the window answers the person first.
+        for sequence in ("<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
+            self.bind_all(sequence, self._on_window_input, add="+")
         self.log_box = ctk.CTkTextbox(
             activity, fg_color=COLORS["bg_input"],
             border_color=COLORS["border"], border_width=2,
@@ -2219,6 +2223,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._remember_live_view(live_on)
         else:
             self._live.set_enabled(live_on)
+
+    def _on_window_input(self, event: object = None) -> None:
+        """Input anywhere but the board: let the Live view pause its drawing.
+
+        Input on the board's own canvas (a tab click, a wheel over a list) is
+        what the board answers, so it never pauses it. Never breaks the event.
+        """
+        try:
+            live = getattr(self, "_live", None)
+            if live is None or getattr(event, "widget", None) is getattr(self, "live_canvas", None):
+                return
+            live.note_input()
+        except Exception:  # noqa: BLE001 - decoration must never disturb input
+            pass
 
     def _remember_live_tab(self, tab: str) -> None:
         """Keep the Live view's showing tab for the next launch."""
