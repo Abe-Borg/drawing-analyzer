@@ -328,18 +328,29 @@ than about a third of the UI thread (in development testing, a 600-sheet board
 with every cell animating drew in ~11 ms a frame), and it stops completely
 when nothing is moving.
 
-#### Loaded files — what a run will send
+#### Reference files and Loaded files — what a run will send
 
-Everything a run uses is listed in the **Loaded files** section, by category,
-with each file's token count and its own **Remove** button (Remove takes out
-that one file; **Clear** still empties everything). The section expands by
-itself whenever you add something and collapses when a run starts, so the
-Activity section (the Live view board, or the log) gets the room. Its buttons add inputs; every pick *adds* to what
-is already loaded, and picking a file again replaces its earlier copy:
+Inputs are split into two sections, one above the other:
+
+- **Reference files (optional)** holds the buttons that add reference material
+  (specs, checklists, context and the AHJ Atlas Input). None of them is
+  required: the analysis runs on the drawings alone, and each file gives the
+  review more to check against. Every button has a **?** beside it that opens
+  a short popup on what that input adds (click the same **?** again, press
+  Esc or *Close* to dismiss it; opening another replaces it). Drawings are not
+  in this section: they come from the **Drawing PDFs** drop zone / *Browse…*.
+- **Loaded files** lists everything a run uses, by category, with each file's
+  token count and its own **Remove** button (Remove takes out that one file;
+  **Clear** still empties everything). The section expands by itself whenever
+  you add something and collapses when a run starts, so the Activity section
+  (the Live view board, or the log) gets the room.
+
+Every pick *adds* to what is already loaded, and picking a file again
+replaces its earlier copy:
 
 | Button | Category | What it does |
 | --- | --- | --- |
-| **Add drawings…** | Drawings | The same as the drop zone / *Browse…*. Each PDF shows its sheet count and its image + text-layer tokens for one digest read — measured from the real page shapes once the background preflight has scanned the files, a conservative per-sheet allowance until then. |
+| *Drop zone / Browse…* (Drawing PDFs) | Drawings | Each PDF shows its sheet count and its image + text-layer tokens for one digest read — measured from the real page shapes once the background preflight has scanned the files, a conservative per-sheet allowance until then. |
 | **Add specs…** | Specifications | The real project specifications (`.pdf` / `.docx` / `.txt` / `.md`), after the same quality warning as before. Sent with every sheet's digest; conflicts become ordinary findings. |
 | **Add context…** | Additional context | Background that is *not* the specifications — a basis of design, owner or client standards, a code analysis, prior review comments. Same formats as specs. Sent with every sheet beside the specs, under its own `<project_context>` block framed as background; requirements it states are checked like the specs. Budgeted at 200,000 characters (~50k tokens). |
 | **Add checklists…** | Checklists | Your own QC checklists: `.xlsx`/`.xlsm`/`.csv` (one item per row; a header row and item-number cells are dropped), `.docx`, `.pdf`, `.md` or `.txt` (list bullets, or one item per line), or a `.md` in the [review-profile](#review-profiles) format. Each becomes a review profile the QC Markups critique applies item by item and [answers item by item](#checklist-results). **Scope…** on a loaded checklist limits it to sheets whose number starts with the prefixes you type (`F, FP, SP`); blank applies it to every sheet. |
@@ -1276,8 +1287,8 @@ edition harvest is the backstop the model cannot argue away.
 **Governing code editions (your override).** Detection reads what the drawings
 say, and the drawings can be wrong or silent: a general note copied from an
 older job, or an AHJ that adopted NFPA 13 a cycle or two behind the current
-edition. In the GUI, load your **AHJ Atlas Input** (*Loaded files → Load AHJ
-Atlas Input…*, an Excel workbook — see [Loaded files](#loaded-files--what-a-run-will-send));
+edition. In the GUI, load your **AHJ Atlas Input** (*Reference files → Load AHJ
+Atlas Input…*, an Excel workbook — see [Reference files and Loaded files](#reference-files-and-loaded-files--what-a-run-will-send));
 from the library pass `governing_editions="NFPA 13 2025; IBC 2024"` or a list of
 entries. Separate entries with semicolons or new lines; each needs a
 code and a 4-digit year, with an optional note in parentheses

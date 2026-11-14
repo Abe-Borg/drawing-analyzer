@@ -274,8 +274,11 @@ _HOW_TO_USE = HelpDocument(
         _section(
             "4 · (Optional) Add specifications, context, checklists and the AHJ Atlas",
             _para(
-                "The buttons under Loaded files add reference material. Each pick adds "
-                "to what is already loaded; nothing is replaced until you remove it."
+                "The buttons under Reference files (optional), just above Loaded "
+                "files, add reference material. None is required: the analysis runs "
+                "on the drawings alone. Click the ? beside a button for a short note "
+                "on what that input adds. Each pick adds to what is already loaded; "
+                "nothing is replaced until you remove it."
             ),
             _bullet(
                 "Add specs… — the real, complete, current project spec documents "
@@ -1809,6 +1812,59 @@ STANDALONE_DOCUMENTS: tuple[HelpDocument, ...] = (
     GET_API_KEY,
     RUNTIME_TRANSPARENCY,
 )
+
+
+@dataclass(frozen=True)
+class InputHelp:
+    """The short "?" popup beside one optional-input button in the GUI.
+
+    ``title`` heads the popup; ``body`` is a few plain sentences on how the
+    input helps a run. Kept concise on purpose: the full story is in the
+    *How to use* panel and the README.
+    """
+
+    title: str
+    body: str
+
+
+#: Popups for the optional reference-file buttons, keyed like the GUI's
+#: ``_add_buttons`` (and in the order the buttons appear).
+INPUT_HELP: dict[str, InputHelp] = {
+    "specs": InputHelp(
+        "Specifications",
+        "The project specifications (.pdf, .docx, .txt or .md). Their text is "
+        "sent with every sheet, so the review can catch places where the "
+        "drawings disagree with the specs (products, materials, ratings, "
+        "methods). Each conflict becomes an ordinary finding. Adds text tokens "
+        "to every sheet's request.",
+    ),
+    "checklists": InputHelp(
+        "Checklists",
+        "Your own QC checklists (.xlsx, .csv, .docx, .pdf, .md or .txt; one item "
+        "per row or line). On a QC Markups run every item is checked sheet by "
+        "sheet and answered (violated, met, not applicable or undetermined) in "
+        "the report's Checklist Results and checklist_matrix.csv. Scope… on a "
+        "loaded checklist limits it to one discipline's sheets. Not used without "
+        "QC Markups.",
+    ),
+    "context": InputHelp(
+        "Additional context",
+        "Background that is not the specifications: a basis of design, owner or "
+        "client standards, a code analysis, prior review comments. It is sent "
+        "with every sheet, so the digest and the review understand the "
+        "project's intent, and requirements it states are checked like the "
+        "specs. Adds text tokens to every sheet's request.",
+    ),
+    "atlas": InputHelp(
+        "AHJ Atlas Input",
+        "An Excel workbook (or .csv) of the code editions the authority having "
+        "jurisdiction adopted. Those editions replace the ones found on the "
+        "drawings for the citation check, review plan, cross-sheet QC and "
+        "edition audit, so outdated code references get flagged against the "
+        "edition that actually governs. Without it, the drawings' own editions "
+        "are used.",
+    ),
+}
 
 
 def help_document(key: str) -> HelpDocument:

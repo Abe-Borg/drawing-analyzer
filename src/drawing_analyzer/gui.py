@@ -103,6 +103,7 @@ from .live_spend import SpendMonitor, format_money, format_spend_line
 from .help_content import (
     GET_API_KEY,
     HELP_DOCUMENTS,
+    INPUT_HELP,
     PROCESSING_MODE_ECONOMY,
     PROCESSING_MODE_HYBRID,
     PROCESSING_MODES,
@@ -693,23 +694,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self.focus_expand_btn.pack(side="left", padx=(6, 0))
 
-        # Loaded files — every input this run will send, by category, each
-        # file with its own Remove button and every category with its token
-        # count. Specifications and additional context ride every sheet's
-        # digest prompt; checklists ride the QC critique; the AHJ Atlas Input
-        # sets the governing code editions. Drawings come from the drop zone
-        # above or "Add drawings…" here. Rebuilt by _refresh_files_panel.
-        self._files_sec = CollapsibleSection(
-            outer, "Loaded files", expanded=False,
-            summary_provider=self._files_summary,
-            expand=True, hold_when_collapsed=False,
+        # Optional reference files — the Add buttons, in their own section
+        # right above the Loaded files list so adding and reviewing are not
+        # mixed. Each button has a "?" beside it that opens a short popup on
+        # how that input helps (text in help_content.INPUT_HELP). Drawings are
+        # not here: they are required and come from the drop zone above.
+        self._inputs_sec = CollapsibleSection(
+            outer, "Reference files (optional)", expanded=True,
+            summary_provider=lambda: "not required; click ? to see what each adds",
         )
-        files_body = self._files_sec.body
-        add_row = ctk.CTkFrame(files_body, fg_color="transparent")
-        add_row.pack(fill="x", pady=(2, 4))
+        inputs_body = self._inputs_sec.body
+        add_row = ctk.CTkFrame(inputs_body, fg_color="transparent")
+        add_row.pack(fill="x", pady=(2, 2))
         self._add_buttons: dict[str, ctk.CTkButton] = {}
+        self._input_help_window = None
         for key, text, width, command in (
-            ("drawings", "Add drawings…", 118, self._on_browse),
             ("specs", "Add specs…", 104, self._on_upload_specs),
             ("checklists", "Add checklists…", 124, self._on_add_checklists),
             ("context", "Add context…", 112, self._on_add_context),
@@ -722,8 +721,32 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 border_width=1, border_color=COLORS["border"],
                 text_color=COLORS["text_secondary"], command=command,
             )
-            btn.pack(side="left", padx=(0, 6))
+            btn.pack(side="left", padx=(0, 2))
             self._add_buttons[key] = btn
+            # The "?" stays clickable during a run: it only explains.
+            info = ctk.CTkButton(
+                add_row, text="?", width=24, height=24, corner_radius=12,
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                fg_color="transparent", hover_color=COLORS["bg_input"],
+                border_width=1, border_color=COLORS["border"],
+                text_color=COLORS["accent_glow"],
+            )
+            info.configure(command=lambda k=key, w=info: self._open_input_help(k, w))
+            info.pack(side="left", padx=(0, 14))
+
+        # Loaded files — every input this run will send, by category, each
+        # file with its own Remove button and every category with its token
+        # count. Specifications and additional context ride every sheet's
+        # digest prompt; checklists ride the QC critique; the AHJ Atlas Input
+        # sets the governing code editions. Drawings come from the drop zone
+        # above; the rest from the Reference files buttons. Rebuilt by
+        # _refresh_files_panel.
+        self._files_sec = CollapsibleSection(
+            outer, "Loaded files", expanded=False,
+            summary_provider=self._files_summary,
+            expand=True, hold_when_collapsed=False,
+        )
+        files_body = self._files_sec.body
         # Back-compat handle: the specs button keeps its old attribute name.
         self.upload_specs_btn = self._add_buttons["specs"]
         # A small requested height: the list grows into the window's slack
@@ -733,7 +756,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             files_body, height=90, fg_color=COLORS["bg_input"],
             border_width=1, border_color=COLORS["border"],
         )
-        self._files_list.pack(fill="both", expand=True, pady=(0, 2))
+        self._files_list.pack(fill="both", expand=True, pady=(2, 2))
         # The frame's vertical scrollbar requests a 200 px default height,
         # which overrides ``height`` above as the list's minimum. Lower it so
         # the requested height is honored (the bar still stretches to fill).
@@ -795,12 +818,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._reference_audit_hint.pack(anchor="w", padx=(28, 0))
         self._on_qc_toggle()   # set the sub-toggle's initial enabled state
 
-        # Governing code editions now come from the AHJ Atlas Input (Loaded
+        # Governing code editions now come from the AHJ Atlas Input (Reference
         # files above), not a typed field: say so where the field used to be.
         ctk.CTkLabel(
             qc_row,
             text=("Governing code editions: load an AHJ Atlas Input (Excel) under "
-                  "Loaded files. Optional — without one, the editions on the "
+                  "Reference files. Optional — without one, the editions on the "
                   "drawings are used."),
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"], wraplength=700, justify="left",
@@ -1153,6 +1176,74 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 text_color=COLORS["text_secondary"],
                 command=lambda d=doc: self._open_help_modal(d),
             ).pack(side="left", padx=(6, 0))
+
+    def _open_input_help(self, key: str, anchor=None) -> None:
+        """Open the short "?" popup for one optional-input button.
+
+        One popup at a time: opening another replaces it, and clicking the
+        same "?" again closes it. It sits just below ``anchor`` (the "?"
+        button) and closes on Escape, its Close button, or the window X.
+        Non-modal, so it never blocks the main window.
+        """
+        topic = INPUT_HELP.get(key)
+        if topic is None:
+            return
+        current = getattr(self, "_input_help_window", None)
+        if current is not None:
+            same = getattr(current, "_input_help_key", None) == key
+            self._close_input_help()
+            if same:
+                return
+        win = ctk.CTkToplevel(self)
+        win._input_help_key = key
+        self._input_help_window = win
+        win.title(topic.title)
+        win.configure(fg_color=COLORS["bg_dark"])
+        win.resizable(False, False)
+        win.transient(self)
+        win.bind("<Escape>", lambda _e: self._close_input_help())
+        win.protocol("WM_DELETE_WINDOW", self._close_input_help)
+        card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+        card.pack(fill="both", expand=True, padx=8, pady=8)
+        ctk.CTkLabel(
+            card, text=topic.title,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=COLORS["text_primary"], justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 4))
+        ctk.CTkLabel(
+            card, text=topic.body,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_secondary"], wraplength=340, justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+        ctk.CTkButton(
+            card, text="Close", width=80, height=28,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._close_input_help,
+        ).pack(anchor="e", padx=14, pady=(0, 12))
+        if anchor is not None:
+            try:
+                win.update_idletasks()
+                x = anchor.winfo_rootx()
+                y = anchor.winfo_rooty() + anchor.winfo_height() + 4
+                # Keep it on screen: shift left when it would run off the edge.
+                width = win.winfo_reqwidth()
+                x = max(0, min(x, self.winfo_screenwidth() - width - 8))
+                win.geometry(f"+{x}+{y}")
+            except Exception:  # noqa: BLE001 - placement is cosmetic
+                pass
+        win.after(50, win.focus_force)
+
+    def _close_input_help(self) -> None:
+        """Close the "?" popup, if one is open (safe to call twice)."""
+        win = getattr(self, "_input_help_window", None)
+        self._input_help_window = None
+        if win is None:
+            return
+        try:
+            win.destroy()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
 
     def _open_help_modal(self, doc: HelpDocument, parent=None) -> None:
         """Open (or re-focus) the scrollable modal for one help document.
@@ -1923,7 +2014,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if self._atlas_choice is not None:
             parts.append("AHJ Atlas")
         if not parts:
-            return "add drawings, specs, checklists, context or the AHJ Atlas Input"
+            return "nothing loaded yet"
         return " · ".join(parts)
 
     def _reveal_files(self) -> None:
@@ -1961,7 +2052,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             "title": "Drawings",
             "detail": (f"{len(self._pdfs)} file(s), {sum(counts)} sheet(s) · "
                        f"~{total:,} tokens per digest read") if self._pdfs else "",
-            "empty": "none — drop PDFs above or Add drawings…",
+            "empty": "none — drop PDFs on the drop zone above, or Browse…",
             "rows": rows,
         })
 
@@ -2355,7 +2446,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 parent,
                 text=("Review checklists: authored automatically per set "
                       "(model-planned). Add your own with Add checklists… under "
-                      "Loaded files, or keep .md checklists in "
+                      "Reference files, or keep .md checklists in "
                       "~/.drawing_analyzer/profiles."),
                 font=ctk.CTkFont(family="Segoe UI", size=11),
                 text_color=COLORS["text_muted"], wraplength=520, justify="left",
@@ -2685,7 +2776,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         wiring needed. Guarded because _refresh_summary can fire mid-build.
         """
         for name in (
-            "_key_sec", "_drop_sec", "_files_sec", "_focus_sec",
+            "_key_sec", "_drop_sec", "_inputs_sec", "_files_sec", "_focus_sec",
             "_qc_sec", "_transport_sec", "_log_sec",
         ):
             sec = getattr(self, name, None)

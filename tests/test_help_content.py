@@ -416,6 +416,56 @@ def _fake_gui_toolkit():
                 sys.modules[name] = mod
 
 
+def test_input_help_popup_is_one_at_a_time_and_toggles() -> None:
+    """The "?" beside each optional-input button opens that input's popup.
+
+    Clicking the same "?" again closes it; clicking another replaces it, so
+    popups never stack. Drives the real handlers under the fake toolkit.
+    """
+    from drawing_analyzer.help_content import INPUT_HELP
+
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        class _Popup(ctk.CTkToplevel):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.destroyed = False
+
+            def destroy(self):
+                self.destroyed = True
+
+            def __getattr__(self, name):  # title / transient / after / ...
+                return lambda *a, **k: None
+
+        ctk.CTkToplevel = _Popup
+        app = types.SimpleNamespace(_input_help_window=None)
+        for name in ("_open_input_help", "_close_input_help"):
+            setattr(app, name, types.MethodType(
+                getattr(gui_module.DrawingAnalyzerApp, name), app))
+
+        def shown_text() -> list[str]:
+            win = app._input_help_window
+            return [w.kw.get("text") for w in _FakeWidget.instances
+                    if getattr(w.master, "master", None) is win]
+
+        app._open_input_help("specs")
+        first = app._input_help_window
+        assert first is not None
+        assert INPUT_HELP["specs"].body in shown_text()
+
+        app._open_input_help("atlas")          # another "?" replaces it
+        assert first.destroyed is True
+        second = app._input_help_window
+        assert second is not first
+        assert INPUT_HELP["atlas"].body in shown_text()
+
+        app._open_input_help("atlas")          # the same "?" again closes it
+        assert second.destroyed is True
+        assert app._input_help_window is None
+
+        app._open_input_help("not-an-input")   # unknown key: nothing opens
+        assert app._input_help_window is None
+
+
 @pytest.mark.parametrize("doc", _ALL_DOCUMENTS, ids=lambda d: d.key)
 def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
     with _fake_gui_toolkit() as (gui_module, ctk):
