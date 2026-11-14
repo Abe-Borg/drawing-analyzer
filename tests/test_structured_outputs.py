@@ -283,7 +283,7 @@ def test_critique_schema_carries_no_keyword_the_compiler_rejects():
 
 def test_every_object_in_the_schema_is_closed():
     objects = list(_iter_schema_objects(C.CRITIQUE_FINDINGS_SCHEMA))
-    assert len(objects) == 3  # root, finding item, claim item
+    assert len(objects) == 4  # root, finding item, claim item, checklist answers
     for obj in objects:
         assert obj["additionalProperties"] is False
         assert "required" in obj

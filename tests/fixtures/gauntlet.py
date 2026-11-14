@@ -457,6 +457,8 @@ class ScriptedQCClient(BetaClientMixin):
         self.digest_request_texts: list[str] = []
         self.critique_calls: dict[str, int] = {}
         self.critique_system_prompts: list[str] = []
+        # sheet token → the checklist item ids that sheet's critique was given.
+        self.critique_checklist_ids: dict[str, tuple[str, ...]] = {}
         self.synth_calls = 0
         self.cross_calls = 0
         self.cross_request_texts: list[str] = []
@@ -547,6 +549,18 @@ class ScriptedQCClient(BetaClientMixin):
         if script is not None:
             findings, claims = script.read1 if n % 2 == 1 else script.read2
         body = {"findings": list(findings), "claims": list(claims)}
+        # Answer the checklist the way a reviewer would: the sheet's first
+        # scripted finding is reported against the first item it was given (so
+        # that item is violated); with no finding that item is met; every other
+        # item does not apply.
+        ids = tuple(re.findall(r"^- \[([UM]\d+\.\d+)\]", system, re.M))
+        self.critique_checklist_ids[key] = ids
+        if ids:
+            if body["findings"]:
+                body["findings"][0] = {**body["findings"][0], "checklist_items": [ids[0]]}
+                body["checklist"] = {"violated": [ids[0]], "not_applicable": list(ids[1:])}
+            else:
+                body["checklist"] = {"met": [ids[0]], "not_applicable": list(ids[1:])}
         return _msg(_fenced(body), 400, 60)
 
     def _synthesis(self) -> FakeMessage:

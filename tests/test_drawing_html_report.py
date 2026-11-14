@@ -757,6 +757,41 @@ def _findings_ctx(findings=None, reference=None, geometries=None):
     return ctx
 
 
+def test_checklist_results_card_escapes_items_and_links_findings():
+    from drawing_analyzer import checklist_matrix as CM
+    from drawing_analyzer import profiles as P
+
+    f = _finding()
+    f.qc_id, f.checklist_items = "QC-004", ["U1.1"]
+    f.source_id, f.page_index = "SRC-0001", 0
+    plan = P.ChecklistPlan([P.Profile(
+        name="office", title="Office <b>list</b>",
+        items=("Flag <script>alert(1)</script> signage", "Check drains"),
+    )])
+    sheets = [CM.ChecklistSheet(key=("SRC-0001", 0), ref_key=("a.pdf", 0), label="FP-101")]
+    ctx = _findings_ctx(findings=[f])
+    ctx.checklist_report = CM.build_checklist_report(
+        plan, sheets, {("SRC-0001", 0): {"U1.1": ["MET"], "U1.2": ["UNANSWERED"]}}, [f],
+    )
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
+    card = doc[doc.index('<article class="card" id="checklist"'):]
+    card = card[:card.index("</article>")]
+    # User-authored item text can never become markup.
+    assert "<script>alert(1)</script>" not in card and "Office <b>list</b>" not in card
+    assert "Flag &lt;script&gt;alert(1)&lt;/script&gt; signage" in card
+    # The violated item (a finding stands against it) names that finding and
+    # sorts above the unanswered one; the unanswered check is called out.
+    assert card.index('data-result="VIOLATED"') < card.index('data-result="UNANSWERED"')
+    assert "QC-004" in card and "1 item-on-sheet check(s) were not" in card
+    # The finding row points back at the item that prompted it.
+    assert "[checklist U1.1]" in doc
+    # No checklist → no card and no table-of-contents entry.
+    ctx.checklist_report = None
+    assert 'id="checklist"' not in hr.build_html_report(
+        ctx, source_names=[SRC], now=NOW, include_chat=False,
+    )
+
+
 def test_finding_display_status_priority():
     # REJECTED wins; DETERMINISTIC and VERIFIED next; an unanchored non-empty
     # quote reads UNANCHORED. The two anchored-but-unconfirmed cases stay

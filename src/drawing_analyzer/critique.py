@@ -66,6 +66,7 @@ from .digest import (
     build_user_content,
     claims_from_cache,
     findings_from_cache,
+    parse_checklist_object,
     parse_findings_detailed,
     parse_numeric_claims,
     transient_retry_wait,
@@ -73,6 +74,11 @@ from .digest import (
 from .digest_cache import critique_cache_key
 from .auditors.sheet_ids import normalize_sheet_id
 from .models import (
+    CHECK_MET,
+    CHECK_NOT_APPLICABLE,
+    CHECK_UNANSWERED,
+    CHECK_UNDETERMINED,
+    CHECK_VIOLATED,
     CLAIM_KINDS,
     CONFIDENCE_NOT_APPLICABLE,
     CONFIDENCE_NOT_ASSESSED_PARTIAL,
@@ -85,10 +91,10 @@ from .models import (
     source_page_key,
 )
 from .profiles import (
+    ChecklistPlan,
     Profile,
-    build_checklist_prompt,
-    flatten_items,
-    profiles_cache_fragment,
+    SheetChecklist,
+    normalize_item_id,
 )
 
 _log = get_logger()
@@ -109,7 +115,7 @@ def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
     Public so the batch-critique transport (Phase 23C) builds the identical
     per-read checklists the real-time path does.
     """
-    full = build_checklist_prompt(flatten_items(profiles or []))
+    full = ChecklistPlan(profiles or []).for_scope(None).prompt
     return [full] * runs
 
 
@@ -325,6 +331,7 @@ _CRITIQUE_FINDING_ITEM_SCHEMA: dict = {
         "anchor_hint": {"type": "string", "enum": ["SHEET"]},
         "tile_label": {"type": "string"},
         "refs": {"type": "array", "items": {"type": "string"}},
+        "checklist_items": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
         "sheet_id",
@@ -357,11 +364,34 @@ _CRITIQUE_CLAIM_ITEM_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+# The reply keys of the per-item checklist answers, in the order that decides a
+# read that listed one id twice (the same precedence as
+# ``models.CHECK_READ_PRECEDENCE``: a violation is never hidden).
+_CHECKLIST_REPLY_KEYS: tuple[tuple[str, str], ...] = (
+    ("violated", CHECK_VIOLATED),
+    ("undetermined", CHECK_UNDETERMINED),
+    ("met", CHECK_MET),
+    ("not_applicable", CHECK_NOT_APPLICABLE),
+)
+
+# Optional (absent from ``required``): only a request that carried a checklist
+# block asks for it, and that block — not this schema — states the contract.
+_CRITIQUE_CHECKLIST_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        key: {"type": "array", "items": {"type": "string"}}
+        for key, _status in _CHECKLIST_REPLY_KEYS
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
 CRITIQUE_FINDINGS_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "findings": {"type": "array", "items": _CRITIQUE_FINDING_ITEM_SCHEMA},
         "claims": {"type": "array", "items": _CRITIQUE_CLAIM_ITEM_SCHEMA},
+        "checklist": _CRITIQUE_CHECKLIST_SCHEMA,
     },
     "required": ["findings", "claims"],
     "additionalProperties": False,
@@ -881,6 +911,15 @@ def _union_sources(findings: list[Finding]) -> list[str]:
     return out
 
 
+def _union_checklist_items(findings: list[Finding]) -> list[str]:
+    out: list[str] = []
+    for f in findings:
+        for item_id in f.checklist_items:
+            if item_id not in out:
+                out.append(item_id)
+    return out
+
+
 def _union_prose_item_ids(findings: list[Finding]) -> list[str]:
     out: list[str] = []
     for f in findings:
@@ -950,6 +989,7 @@ def _representative(
         supporting_quotes=supporting,
         sources=_union_sources(cluster),
         prose_item_ids=_union_prose_item_ids(cluster),
+        checklist_items=_union_checklist_items(cluster),
         reproduced=reproduced,
         confidence=confidence if confidence is not None else base.confidence,
         id=base.id,
@@ -1088,6 +1128,11 @@ class CritiqueRunOutcome:
     # The response's ``stop_reason`` ("" when no response arrived). A read that
     # failed at ``max_tokens`` is replaced at a raised cap, not the same one.
     stop_reason: str = ""
+    # This read's answer to each checklist item the sheet was given (item id →
+    # one of ``models.CHECK_*``). Empty when the sheet was given no checklist.
+    checklist: dict[str, str] = field(default_factory=dict)
+    # Ids the reply named that the sheet was never given (dropped, counted).
+    checklist_unknown: int = 0
 
     @property
     def ok(self) -> bool:
@@ -1128,6 +1173,58 @@ class CritiqueResult:
     # critique analogue of ``SheetDigest.rescued`` (Phase 23C).
     rescued: bool = False
     request_usage: list[RequestUsage] = field(default_factory=list)
+    # Checklist answers for this sheet: item id → one answer per **valid** read
+    # (``models.merged_check_status`` folds them). ``None`` when the sheet was
+    # given no checklist; an id mapped to ``[]`` means no read was valid.
+    checklist: dict[str, list[str]] | None = None
+
+
+def _checklist_from_entry(entry: dict) -> dict[str, list[str]] | None:
+    stored = entry.get("checklist")
+    if not isinstance(stored, dict):
+        return None
+    return {
+        str(item_id): [str(s) for s in statuses]
+        for item_id, statuses in stored.items() if isinstance(statuses, list)
+    }
+
+
+def read_checklist_answers(
+    answers: Any, findings: list[Finding], checklist_ids: "tuple[str, ...]"
+) -> tuple[dict[str, str], int]:
+    """One read's answer to every item its sheet was given → ``(answers, unknown)``.
+
+    ``answers`` is the reply's raw ``checklist`` object (or ``None``). The host
+    decides, the model only reports: an id the sheet was never given is dropped
+    and counted; an id listed twice takes the answer that hides least; a
+    finding that cites an item makes it violated whatever list the item was put
+    in; and an item the reply did not account for is ``UNANSWERED``, never
+    assumed met. Each finding's ``checklist_items`` is narrowed in place to the
+    ids that are real for this sheet.
+    """
+    valid = set(checklist_ids)
+    out: dict[str, str] = {}
+    unknown = 0
+    if isinstance(answers, dict):
+        for key, status in _CHECKLIST_REPLY_KEYS:
+            listed = answers.get(key)
+            if isinstance(listed, str):
+                listed = [listed]
+            if not isinstance(listed, list):
+                continue
+            for raw in listed:
+                item_id = normalize_item_id(raw) if isinstance(raw, str) else ""
+                if item_id not in valid:
+                    unknown += 1
+                    continue
+                out.setdefault(item_id, status)
+    for f in findings:
+        kept = [i for i in f.checklist_items if i in valid]
+        unknown += len(f.checklist_items) - len(kept)
+        f.checklist_items = kept
+        for item_id in kept:
+            out[item_id] = CHECK_VIOLATED
+    return {i: out.get(i, CHECK_UNANSWERED) for i in checklist_ids}, unknown
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -1151,6 +1248,7 @@ def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
         completed_runs=completed,
         error=None,
         cached=True,
+        checklist=_checklist_from_entry(entry),
     )
 
 
@@ -1164,7 +1262,7 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
     permanently deny the requested self-consistency or, worse, cache a malformed read
     as a clean/corroborated sheet. Mirrors ``cache_entry_from_digest``.
     """
-    return {
+    entry = {
         "findings": [f.to_dict() for f in res.findings],
         "claims": [c.to_dict() for c in res.claims],
         "input_tokens": res.input_tokens,
@@ -1174,11 +1272,16 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
         "completed_runs": res.completed_runs,
         "created_ts": time.time(),
     }
+    # Only a sheet that was given a checklist stores answers, so an entry for a
+    # sheet with none keeps the shape it has always had.
+    if res.checklist is not None:
+        entry["checklist"] = {k: list(v) for k, v in res.checklist.items()}
+    return entry
 
 
 def outcome_from_message(
     message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
-    structured: bool = False,
+    structured: bool = False, checklist_ids: "tuple[str, ...]" = (),
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
@@ -1250,6 +1353,17 @@ def outcome_from_message(
         if run_id not in f.sources:
             f.sources = [run_id, *f.sources]
     claims = parse_numeric_claims(raw, ref, bare_json=structured)
+    # ``checklist_ids`` are the items THIS sheet was given. With none, every id
+    # a finding cites is one the model made up, and is cleared the same way.
+    checklist, checklist_unknown = read_checklist_answers(
+        parse_checklist_object(raw, bare_json=structured) if checklist_ids else None,
+        findings, tuple(checklist_ids),
+    )
+    if checklist_unknown:
+        _log.info(
+            "critique: dropped %d checklist id(s) the sheet was not given (%s)",
+            checklist_unknown, getattr(ref, "display_label", ref),
+        )
     if parsed.note:
         _log.info("critique parse: %s (%s)", parsed.note, getattr(ref, "display_label", ref))
     return CritiqueRunOutcome(
@@ -1258,6 +1372,7 @@ def outcome_from_message(
         cache_read_tokens=cr, cache_write_tokens=cw,
         request_usage=request_usage, stop_reason=stop_reason,
         parse_status=parsed.status, parse_note=parsed.note,
+        checklist=checklist, checklist_unknown=checklist_unknown,
     )
 
 
@@ -1274,6 +1389,7 @@ def _critique_read(
     sleep: Any = time.sleep,
     checklist: str = "",
     cache_prefix: bool = False,
+    checklist_ids: "tuple[str, ...]" = (),
 ) -> CritiqueRunOutcome:
     """One real-time critique read → a provenance-stamped :class:`CritiqueRunOutcome`.
 
@@ -1341,7 +1457,7 @@ def _critique_read(
     return outcome_from_message(
         resp, run_id=run_id, ref=rendered.ref,
         rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
-        structured=structured,
+        structured=structured, checklist_ids=checklist_ids,
     )
 
 
@@ -1377,6 +1493,7 @@ def result_from_outcomes(
     *,
     requested_runs: int,
     label: str = "",
+    checklist_ids: "tuple[str, ...]" = (),
 ) -> CritiqueResult:
     """Fold every read's :class:`CritiqueRunOutcome` into one merged :class:`CritiqueResult`.
 
@@ -1400,6 +1517,12 @@ def result_from_outcomes(
     ]
     ok = [oc for oc in all_outcomes if oc.ok]
     errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
+    # One answer per VALID read for every item the sheet was given; a failed
+    # read answers nothing, so a sheet with no valid read maps each id to [].
+    checklist = {
+        item_id: [oc.checklist.get(item_id, CHECK_UNANSWERED) for oc in ok]
+        for item_id in checklist_ids
+    } if checklist_ids else None
 
     if not ok:
         # Every read failed → the critique stage failed. Never report a clean sheet.
@@ -1414,6 +1537,7 @@ def result_from_outcomes(
             requested_runs=requested_runs,
             completed_runs=0,
             error="; ".join(errors) or "critique produced no result",
+            checklist=checklist,
         )
 
     # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
@@ -1446,6 +1570,7 @@ def result_from_outcomes(
             f"critique partial: only {len(ok)}/{requested_runs} read(s) valid"
             + ("; " + "; ".join(errors) if errors else "")
         ) if partial else None,
+        checklist=checklist,
     )
 
 
@@ -1462,6 +1587,7 @@ def critique_sheet_self_consistent(
     max_retries: int = DEFAULT_CRITIQUE_MAX_RETRIES,
     sleep: Any = time.sleep,
     profiles: list[Profile] | None = None,
+    checklist: SheetChecklist | None = None,
 ) -> CritiqueResult:
     """Critique one sheet ``runs`` times and merge (:func:`merge_self_consistency`).
 
@@ -1475,10 +1601,16 @@ def critique_sheet_self_consistent(
     critique prompt; they fold into the cache key (so selecting or editing one
     re-critiques). Every read gets the *same* full checklist so the reads stay
     directly comparable for self-consistency (§14.5).
+
+    ``checklist`` is the part of the run's checklist this sheet receives
+    (:meth:`ChecklistPlan.for_ref`) and replaces ``profiles`` when given; a
+    direct caller that passes only ``profiles`` applies all of them.
     """
     model = model or critique_model()
     runs = critique_runs() if runs is None else max(1, int(runs))
-    run_checklists = _run_checklists(profiles, runs)
+    if checklist is None:
+        checklist = ChecklistPlan(profiles or []).for_scope(None)
+    checklist_block, checklist_ids = checklist.prompt, checklist.ids
 
     # Built twice on purpose — once to LOOK UP, once to STORE — because the
     # structured-outputs latch can flip between them. The lookup key describes
@@ -1498,7 +1630,7 @@ def critique_sheet_self_consistent(
             use_thinking=use_thinking,
             runs=runs,
             sheet_text=rendered.sheet_text,
-            profiles_key=profiles_cache_fragment(profiles or []),
+            profiles_key=checklist.key,
             # Only set when the read actually carried the schema, so a fenced
             # run's key stays byte-identical to every key written before F-01.
             structured_key=CRITIQUE_STRUCTURED_PROMPT_VERSION if structured else None,
@@ -1529,8 +1661,9 @@ def critique_sheet_self_consistent(
             effort=effort,
             max_retries=max_retries,
             sleep=sleep,
-            checklist=run_checklists[i],
+            checklist=checklist_block,
             cache_prefix=cache_prefix,
+            checklist_ids=checklist_ids,
         )
 
     all_outcomes = [_read(i) for i in range(runs)]
@@ -1559,7 +1692,8 @@ def critique_sheet_self_consistent(
         all_outcomes.append(_read(failed_run, cap))
 
     result = result_from_outcomes(
-        all_outcomes, requested_runs=runs, label=rendered.ref.display_label
+        all_outcomes, requested_runs=runs, label=rendered.ref.display_label,
+        checklist_ids=checklist_ids,
     )
     if result.completed_runs == 0:
         return result

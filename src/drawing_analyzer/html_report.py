@@ -963,6 +963,14 @@ def _finding_row_html(
         text_cell += (
             f' <span class="muted provenance-chip">[{html.escape(provenance_label(sources))}]</span>'
         )
+    checklist_ids = [str(i) for i in (getattr(f, "checklist_items", None) or [])]
+    if checklist_ids:
+        # Which review-checklist item(s) this finding reports against; the
+        # item's wording is in the Checklist Results card.
+        text_cell += (
+            ' <a class="muted provenance-chip checklist-chip" href="#checklist">'
+            f'[checklist {html.escape(", ".join(checklist_ids))}]</a>'
+        )
     prose_ids = list(getattr(f, "prose_item_ids", None) or [])
     if prose_ids:
         # Phase 22 §14.6: how many enumerated prose items this entry accounts for.
@@ -1160,6 +1168,103 @@ def _findings_card(
         status="findings",
         body_html=(
             f'<div class="findings-body">{hint}{group_ctl}{tally}{checks}{table}</div>'
+        ),
+    )
+
+
+# Checklist result → chip css suffix (labels come from checklist_matrix).
+_CHECKLIST_CHIP = {
+    "VIOLATED": "violated", "VIOLATED_NO_FINDING": "flagged",
+    "UNDETERMINED": "flagged", "REJECTED": "neutral", "UNANSWERED": "unanswered",
+    "NOT_REVIEWED": "unanswered", "MET": "met", "NOT_APPLICABLE": "neutral",
+    "OUT_OF_SCOPE": "neutral",
+}
+
+
+def _checklist_report(ctx: Any) -> Any:
+    report = getattr(ctx, "checklist_report", None)
+    return report if report and getattr(report, "rows", None) else None
+
+
+def _checklist_card(ctx: Any) -> str:
+    """The Checklist Results card: every item, its result, and the findings
+    against it (``""`` when no checklist reached the critique).
+
+    Rows are ordered by result (what needs a look first), then checklist order.
+    The per-sheet grid is ``checklist_matrix.csv``; this card carries the
+    counts. Everything is escaped: item text is the user's (or the model's).
+    """
+    report = _checklist_report(ctx)
+    if report is None:
+        return ""
+    from .checklist_matrix import CELL_LABELS, CELL_PRECEDENCE
+
+    rank = {status: i for i, status in enumerate(CELL_PRECEDENCE)}
+    ordered = sorted(
+        enumerate(report.rows), key=lambda pair: (rank.get(pair[1].status, 99), pair[0]),
+    )
+    known_qc = {
+        str(getattr(f, "qc_id", "") or "") for f in _report_findings(ctx)
+    } - {""}
+    rows = []
+    for _i, row in ordered:
+        chip = _CHECKLIST_CHIP.get(row.status, "neutral")
+        counts = " · ".join(
+            f"{row.counts[status]} {CELL_LABELS[status].lower()}"
+            for status in CELL_PRECEDENCE
+            if row.counts.get(status) and status != "OUT_OF_SCOPE"
+        ) or "no sheet in scope"
+        findings = ", ".join(
+            html.escape(q) for q in row.qc_ids if q in known_qc
+        ) or '<span class="muted">—</span>'
+        source = "Model plan" if row.origin == "model" else "Your checklist"
+        rows.append(
+            f'<tr data-result="{_esc_attr(row.status)}">'
+            f'<td class="ccol-id">{html.escape(row.id)}</td>'
+            f'<td class="ccol-text">{html.escape(row.text)}'
+            f'<div class="muted ccol-source">{html.escape(source)}: '
+            f"{html.escape(row.checklist)}</div></td>"
+            f'<td class="ccol-result"><span class="fchip cchip-{chip}">'
+            f"{html.escape(CELL_LABELS.get(row.status, row.status))}</span></td>"
+            f'<td class="ccol-counts muted">{html.escape(counts)}</td>'
+            f'<td class="ccol-findings">{findings}</td>'
+            "</tr>"
+        )
+    totals = report.totals()
+    summary = " · ".join(
+        f"{totals[status]} {CELL_LABELS[status].lower()}"
+        for status in CELL_PRECEDENCE if totals.get(status)
+    )
+    unanswered = report.cell_total("UNANSWERED") + report.cell_total("NOT_REVIEWED")
+    warn = (
+        f'<p class="checklist-warn">{unanswered} item-on-sheet check(s) were not '
+        "answered. Those items were not confirmed either way on those sheets; "
+        "<code>checklist_matrix.csv</code> lists which.</p>"
+        if unanswered else ""
+    )
+    intro = (
+        '<p class="findings-hint muted">Each checklist item was put to the '
+        "reviewer on every sheet in its scope. A <b>violated</b> item is backed "
+        "by a numbered finding that went through the same anchoring and "
+        "verification as every other finding. <b>Reported met</b> is the "
+        "reviewer's own statement and was not independently verified. The "
+        "sheet-by-sheet grid is in <code>checklist_matrix.csv</code>.</p>"
+    )
+    table = (
+        '<div class="findings-wrap"><table class="checklist-table">'
+        "<thead><tr><th>Item</th><th>Check</th><th>Result</th>"
+        "<th>Sheets</th><th>Findings</th></tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody></table></div>"
+    )
+    return _card(
+        card_id="checklist",
+        title_html='<span class="seq">☑</span> Checklist Results',
+        badges_html=f'<span class="badge badge-checklist">{len(report.rows)} item(s)</span>',
+        status="checklist",
+        body_html=(
+            '<section class="block" data-category="checklist">'
+            f'{intro}<p class="checklist-summary">{html.escape(summary)}</p>'
+            f"{warn}{table}</section>"
         ),
     )
 
@@ -1422,6 +1527,12 @@ def _toc_html(
             '<a class="toc-item" data-target="findings" href="#findings">'
             '<span class="toc-dot dot-findings"></span>'
             '<span class="toc-label">QC Findings</span></a>'
+        )
+    if _checklist_report(ctx) is not None:
+        rows.append(
+            '<a class="toc-item" data-target="checklist" href="#checklist">'
+            '<span class="toc-dot dot-findings"></span>'
+            '<span class="toc-label">Checklist Results</span></a>'
         )
     rows.append(
         '<a class="toc-item" data-target="overview" href="#overview">'
@@ -1889,6 +2000,9 @@ def build_html_report(
     )
     if findings_card:
         cards.append(findings_card)
+    checklist_card = _checklist_card(ctx)
+    if checklist_card:
+        cards.append(checklist_card)
     cards.append(_overview_card(ctx))
     sheet_roots = _roots(ctx)
     cards += [
@@ -2103,6 +2217,7 @@ a{color:var(--accent); text-decoration:none}
 .card[data-status="overview"] .card-head{border-left-color:var(--overview)}
 .card[data-status="focus"] .card-head{border-left-color:var(--focus)}
 .card[data-status="findings"] .card-head{border-left-color:var(--findings)}
+.card[data-status="checklist"] .card-head{border-left-color:var(--findings)}
 .card-title{font-weight:600; flex:1 1 auto; font-size:15px}
 .seq{color:var(--muted); font-variant-numeric:tabular-nums; margin-right:4px}
 .badges{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
@@ -2244,6 +2359,27 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 .fchip-unverified{background:#f1f3f6; color:var(--muted); border:1px solid #dde1e7}
 .fchip-unanchored{background:#fff; color:var(--conflict); border:1px solid var(--conflict)}
 .fchip-rejected{background:#eef0f3; color:var(--muted); text-decoration:line-through}
+/* Checklist results */
+.checklist-table{border-collapse:collapse; width:100%; font-size:13px}
+.checklist-table th,.checklist-table td{
+  text-align:left; vertical-align:top; padding:7px 10px; border-bottom:1px solid var(--line);
+}
+.checklist-table thead th{background:#f4f6fa; font-weight:600; white-space:nowrap}
+.checklist-table .ccol-id{white-space:nowrap; font-weight:600; color:var(--muted)}
+.checklist-table .ccol-source{font-size:12px; margin-top:2px}
+.checklist-table .ccol-findings{white-space:nowrap; font-weight:600}
+.checklist-summary{font-size:13px; font-weight:600; margin:6px 0}
+.checklist-warn{
+  font-size:13px; margin:6px 0; padding:6px 10px; border-radius:6px;
+  background:var(--coord-soft); color:var(--coord);
+}
+.checklist-chip{text-decoration:none}
+.badge-checklist{background:#fdeaea; color:var(--findings)}
+.cchip-violated{background:#fff; color:var(--conflict); border:1px solid var(--conflict)}
+.cchip-flagged{background:#fbf3df; color:var(--coord)}
+.cchip-unanswered{background:#fbf3df; color:var(--coord); border:1px solid #e5c980}
+.cchip-met{background:#e7f6ee; color:var(--ok)}
+.cchip-neutral{background:#f1f3f6; color:var(--muted); border:1px solid #dde1e7}
 
 /* Per-sheet raw text layer */
 .block-rawtext .rawtext summary{cursor:pointer; color:var(--muted); font-size:13px}
@@ -2694,6 +2830,9 @@ def _findings_data_block(
         citation = _citation_summary(f)
         if citation:
             row["citation"] = citation
+        checklist_ids = [str(i) for i in (getattr(f, "checklist_items", None) or [])]
+        if checklist_ids:
+            row["checklist_items"] = checklist_ids
         items.append(row)
     return (
         f'<script id="da-findings" type="application/json">'
@@ -2737,6 +2876,14 @@ def _summary_data_block(
         "errors": len(list(getattr(ctx, "errors", None) or [])),
         "sources": list(source_names),
     }
+    checklist = _checklist_report(ctx)
+    if checklist is not None:
+        # Item counts by result, so "how did my checklist do?" is answerable
+        # from data; the items themselves are in the Checklist Results card.
+        summary["checklist"] = {
+            "items": len(checklist.rows),
+            "results": {k: v for k, v in checklist.totals().items() if v},
+        }
     return (
         f'<script id="da-summary" type="application/json">'
         f"{_json_for_script(summary)}</script>"

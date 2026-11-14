@@ -1715,6 +1715,38 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if loaded:
             self._reveal_files()
 
+    def _on_scope_checklist(self, profile) -> None:
+        """Ask which sheets a loaded checklist applies to (by number prefix)."""
+        if self._busy:
+            return
+        current = ", ".join(t.upper() for t in profile.disciplines) or "all sheets"
+        dialog = ctk.CTkInputDialog(
+            title="Checklist scope",
+            text=(
+                f"{profile.title}\nCurrently applies to: {current}\n\n"
+                "Sheet-number prefixes this checklist applies to, separated by "
+                "commas (for example: F, FP, SP). Leave blank for all sheets."
+            ),
+        )
+        raw = dialog.get_input()
+        if raw is None:      # cancelled
+            return
+        self._set_checklist_scope(profile, raw)
+
+    def _set_checklist_scope(self, profile, raw: str) -> None:
+        from .profiles import scoped_to
+
+        updated = scoped_to(profile, raw)
+        self._checklists = [updated if p is profile else p for p in self._checklists]
+        scope = ", ".join(t.upper() for t in updated.disciplines)
+        self._log(
+            f"Checklist {updated.title} applies to "
+            + (f"sheets numbered {scope}." if scope else "all sheets."),
+            level="muted",
+        )
+        self._refresh_summary()
+        self._refresh_files_panel()
+
     def _remove_checklist(self, profile) -> None:
         if self._busy:
             return
@@ -1952,7 +1984,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         rows = [
             (p.title, f"{len(p.items)} item(s) · "
-                      f"~{estimate_text_tokens(len(build_checklist_prompt(p.items))):,} tokens",
+                      f"~{estimate_text_tokens(len(build_checklist_prompt(p.items))):,} tokens · "
+                      + (f"applies to sheets {', '.join(t.upper() for t in p.disciplines)}"
+                         if p.disciplines else "applies to all sheets"),
              lambda prof=p: self._remove_checklist(prof))
             for p in self._checklists
         ]
@@ -1964,6 +1998,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                        "tokens, applied by the QC Markups critique") if self._checklists else "",
             "empty": "none — applied by the QC Markups critique",
             "rows": rows,
+            # One extra button per row, parallel to ``rows``: limit a checklist
+            # to the sheets whose number starts with a discipline prefix.
+            "row_actions": [
+                ("Scope…", lambda prof=p: self._on_scope_checklist(prof))
+                for p in self._checklists
+            ],
         })
 
         choice = self._atlas_choice
@@ -2017,7 +2057,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     font=ctk.CTkFont(family="Segoe UI", size=11),
                     text_color=COLORS["text_muted"],
                 ).pack(side="left")
-            for label, detail, remove in group["rows"]:
+            actions = group.get("row_actions") or []
+            for i, (label, detail, remove) in enumerate(group["rows"]):
                 row = ctk.CTkFrame(frame, fg_color="transparent")
                 row.pack(fill="x", padx=(14, 0), pady=1)
                 ctk.CTkButton(
@@ -2027,6 +2068,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     border_width=1, border_color=COLORS["border"],
                     text_color=COLORS["text_secondary"], command=remove, state=state,
                 ).pack(side="right", padx=(6, 4))
+                if i < len(actions) and actions[i]:
+                    action_text, action = actions[i]
+                    ctk.CTkButton(
+                        row, text=action_text, width=70, height=24,
+                        font=ctk.CTkFont(family="Segoe UI", size=11),
+                        fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
+                        border_width=1, border_color=COLORS["border"],
+                        text_color=COLORS["text_secondary"], command=action, state=state,
+                    ).pack(side="right", padx=(6, 0))
                 ctk.CTkLabel(
                     row, text=f"{label}  ·  {detail}",
                     font=ctk.CTkFont(family="Segoe UI", size=11),
@@ -3383,6 +3433,24 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     "see markup_manifest.json in the export and re-run to complete.",
                     level="warning",
                 )
+        # Checklist results: how many items were violated, reported met, or
+        # left unanswered. The detail is in the report and checklist_matrix.csv.
+        checklist_report = getattr(ctx, "checklist_report", None)
+        if checklist_report:
+            try:
+                from .checklist_matrix import (
+                    CELL_NOT_REVIEWED, CELL_UNANSWERED, summary_line,
+                )
+
+                unanswered = (checklist_report.cell_total(CELL_UNANSWERED)
+                              + checklist_report.cell_total(CELL_NOT_REVIEWED))
+                self._log(
+                    summary_line(checklist_report)
+                    + " See Checklist Results in the report.",
+                    level="warning" if unanswered else "accent",
+                )
+            except Exception as exc:  # noqa: BLE001 - a summary line never breaks completion
+                _log.warning("checklist summary failed: %s", exc)
         # Part III coverage tally — every ledger entry accounted for (§18).
         tally_line = getattr(ctx, "ledger_tally_line", "") or ""
         if tally_line:

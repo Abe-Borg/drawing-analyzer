@@ -254,9 +254,79 @@ def test_build_checklist_prompt():
     items = P.flatten_items([fp])
     block = P.build_checklist_prompt(items)
     assert "APPLY THIS REVIEW CHECKLIST" in block
-    assert all(f"- {it}" in block for it in items)
+    # Every item is injected under the id the reviewer answers it by.
+    assert all(f"- [U1.{n}] {it}" in block for n, it in enumerate(items, start=1))
     assert P.build_checklist_prompt([]) == ""
     assert P.build_checklist_prompt(["  ", ""]) == ""       # blank items → empty
+
+
+def _plan_profile(slug, *items):
+    return P.Profile(name=P.MODEL_PLAN_PREFIX + slug, title=slug, disciplines=(slug,),
+                     items=items)
+
+
+@pytest.mark.parametrize("profile, scope, applies", [
+    # A person's checklist is scoped by the sheet-number prefix...
+    (P.Profile(name="fp", title="fp", disciplines=("f", "fp"), items=("x",)),
+     P.SheetScope(token="fp"), True),
+    (P.Profile(name="fp", title="fp", disciplines=("f", "fp"), items=("x",)),
+     P.SheetScope(token="e"), False),
+    # ...and fails open: no tags, or a sheet whose number could not be read.
+    (P.Profile(name="any", title="any", items=("x",)), P.SheetScope(token="e"), True),
+    (P.Profile(name="fp", title="fp", disciplines=("fp",), items=("x",)),
+     P.SheetScope(token=""), True),
+    (P.Profile(name="fp", title="fp", disciplines=("fp",), items=("x",)), None, True),
+    # A model plan is scoped by the identity's discipline, never by the prefix.
+    (_plan_profile("mechanical", "x"), P.SheetScope("fp", "fire-protection"), False),
+    (_plan_profile("fire-protection", "x"), P.SheetScope("fp", "fire-protection"), True),
+    (_plan_profile("mechanical", "x"), P.SheetScope("m", ""), True),         # unclassified
+    # A discipline no plan was written for gets every plan (never nothing).
+    (_plan_profile("mechanical", "x"), P.SheetScope("e", "electrical"), True),
+    (_plan_profile("general", "x"), P.SheetScope("fp", "fire-protection"), True),
+])
+def test_checklist_scope_narrows_only_on_evidence(profile, scope, applies):
+    slugs = frozenset({"mechanical", "fire-protection", "general"})
+    assert P.profile_applies(profile, scope, model_slugs=slugs) is applies
+
+
+def test_scoping_leaves_ids_and_other_sheets_keys_untouched():
+    fp = P.Profile(name="fp", title="fp", disciplines=("fp",), items=("pump check",))
+    office = P.Profile(name="office", title="office", items=("title block check",))
+    plan = _plan_profile("mechanical", "duct check")
+    scopes = {
+        ("s.pdf", 0): P.SheetScope("fp", "fire-protection"),
+        ("s.pdf", 1): P.SheetScope("e", "electrical"),
+        ("s.pdf", 2): P.SheetScope("m", "mechanical"),
+    }
+    cp = P.ChecklistPlan([fp, office, plan], scopes)
+    # Ids are set-wide: the office checklist is U2 on every sheet, including
+    # the ones that never receive U1.
+    assert cp.for_key(("s.pdf", 0)).ids == ("U1.1", "U2.1", "M1.1")   # no FP plan → all plans
+    assert cp.for_key(("s.pdf", 1)).ids == ("U2.1", "M1.1")
+    assert cp.for_key(("s.pdf", 2)).ids == ("U2.1", "M1.1")
+    assert cp.for_key(("unknown.pdf", 0)).ids == ("U1.1", "U2.1", "M1.1")  # unscoped
+    # Editing the fire-protection checklist re-keys only the sheet that got it.
+    edited = P.ChecklistPlan(
+        [P.Profile(name="fp", title="fp", disciplines=("fp",), items=("PUMP check",)),
+         office, plan], scopes,
+    )
+    assert cp.for_key(("s.pdf", 0)).key != edited.for_key(("s.pdf", 0)).key
+    assert cp.for_key(("s.pdf", 1)).key == edited.for_key(("s.pdf", 1)).key
+    # Two uploads can share a file name (and so a profile name); each keeps
+    # its own items and its own scope.
+    twins = P.ChecklistPlan([
+        P.Profile(name="upload:checklist.md", title="checklist.md",
+                  disciplines=("fp",), items=("pump check",)),
+        P.Profile(name="upload:checklist.md", title="checklist.md",
+                  disciplines=("e",), items=("panel check",)),
+    ], scopes)
+    assert twins.for_key(("s.pdf", 0)).ids == ("U1.1",)
+    assert twins.for_key(("s.pdf", 1)).ids == ("U2.1",)
+    assert twins.for_key(("s.pdf", 2)).ids == ()
+    # Narrowing an uploaded checklist to a prefix is a scope change only.
+    scoped = P.scoped_to(office, " F ; fp ")
+    assert scoped.disciplines == ("f", "fp") and scoped.items == office.items
+    assert P.scoped_to(scoped, "").disciplines == ()
 
 
 # --------------------------------------------------------------------------- #

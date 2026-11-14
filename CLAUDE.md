@@ -487,7 +487,7 @@ consume ledger entries and nothing else.
   the **longest** plan each round; overlong items are dropped, never truncated.
   Every code-based item names code + section + edition inline and never invents
   a section. Plans become `Profile` objects injected **after** user profiles
-  (`source="model"`), so `profiles_cache_fragment` stays correct. Both stages
+  (`source="model"`, name prefix `profiles.MODEL_PLAN_PREFIX`), so the checklist block and its key stay correct. Both stages
   cache in `DigestCache` (`stage=identity` / `stage=review_plan`) and ride the
   critique stack (`run_identity` also on with citation alone); the standard run
   stays zero-extra-cost. Artifacts: `set_identity.json`, `review_plan.md`, a
@@ -503,6 +503,41 @@ consume ledger entries and nothing else.
   they replace the detected adoption (`origin="operator"`, no quote needed; the
   edition audit trusts them like text) and move the overruled edition to
   `mentioned_codes`.
+- **Checklists** (`profiles.py`, `checklist_matrix.py`): every item gets an id
+  assigned over the **whole** selection (`U1.3` user, `M2.7` model plan;
+  `checklist_items`), never per sheet, so scoping cannot renumber anything.
+  `ChecklistPlan(profiles, scopes)` is built once per run and
+  `plan.for_ref(ref)` returns that sheet's `SheetChecklist` (`prompt`, `ids`,
+  `key`). **Every** site that builds a critique cache key, request or batch
+  receipt takes the checklist from `for_ref` / `for_key` — the level-1
+  partition, the recovery loop, `_ingest_miss`, the batch `level1_keys`, the
+  real-time read, `submit_critique_batch`. There is no run-wide profiles key;
+  `profiles_cache_fragment` is the unscoped form for direct callers. Scopes
+  come from `build_sheet_scopes` (keyed by `models.sheet_ref_key`): a person's
+  checklist by `discipline_token` of the title-block sheet id, a model plan by
+  the slug of the identity's `sheet_disciplines`. `profile_applies` **fails
+  open** (no tags, unknown sheet, a discipline no plan was written for →
+  applies). The answer-every-item contract lives in `_CHECKLIST_HEADER`, inside
+  the checklist block, so the block's own hash covers it:
+  `CRITIQUE_PROMPT_VERSION`, no-checklist keys and `_CRITIQUE_SCHEMA_VERSION`
+  do not move. Keep it that way: answers are stored in the cache entry only
+  when the sheet was given a checklist, and `Finding.to_dict` writes
+  `checklist_items` only when non-empty. `critique.read_checklist_answers` is
+  the one validator (ids the sheet was not given are dropped and counted, a
+  citing finding makes an item violated, an unmentioned item is `UNANSWERED`);
+  `outcome_from_message` / `result_from_outcomes` need `checklist_ids`, and a
+  batch receipt item carries them for recovery. `CritiqueResult.checklist` is
+  `{id: [one answer per valid read]}`; `models.merged_check_status` folds it.
+  `_representative` and `ledger._merge_into` union `checklist_items`.
+  `build_checklist_report` joins the answers to the **final** findings after
+  `_run_qc_stages`; a cell is `VIOLATED` only when a non-rejected finding
+  stands against the item on that sheet. `MET` is unverified and is worded
+  "Reported met", never "pass". The `checklist` stage is `expected=False`:
+  unanswered checks are a warning and never lower `qc_status`. Outputs: the
+  report's *Checklist Results* card, `checklist_matrix.csv`, the manifest
+  `checklist` key, a `checklist_items` column in `findings.csv`. The gauntlet
+  fake answers the checklist from the ids in the system prompt
+  (`critique_checklist_ids` records what each sheet was given).
 - **Finders:** the digest findings block; `critique.py` (a second full-coverage
   vision read, twice; self-consistency sets `reproduced`). On the real-time path
   the two reads prompt-cache their shared image prefix when `runs>=2`; the batch

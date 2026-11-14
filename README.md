@@ -279,7 +279,7 @@ is already loaded, and picking a file again replaces its earlier copy:
 | **Add drawings…** | Drawings | The same as the drop zone / *Browse…*. Each PDF shows its sheet count and its image + text-layer tokens for one digest read — measured from the real page shapes once the background preflight has scanned the files, a conservative per-sheet allowance until then. |
 | **Add specs…** | Specifications | The real project specifications (`.pdf` / `.docx` / `.txt` / `.md`), after the same quality warning as before. Sent with every sheet's digest; conflicts become ordinary findings. |
 | **Add context…** | Additional context | Background that is *not* the specifications — a basis of design, owner or client standards, a code analysis, prior review comments. Same formats as specs. Sent with every sheet beside the specs, under its own `<project_context>` block framed as background; requirements it states are checked like the specs. Budgeted at 200,000 characters (~50k tokens). |
-| **Add checklists…** | Checklists | Your own QC checklists: `.xlsx`/`.xlsm`/`.csv` (one item per row; a header row and item-number cells are dropped), `.docx`, `.pdf`, `.md` or `.txt` (list bullets, or one item per line), or a `.md` in the [review-profile](#review-profiles) format. Each becomes a review profile the QC Markups critique applies item by item. |
+| **Add checklists…** | Checklists | Your own QC checklists: `.xlsx`/`.xlsm`/`.csv` (one item per row; a header row and item-number cells are dropped), `.docx`, `.pdf`, `.md` or `.txt` (list bullets, or one item per line), or a `.md` in the [review-profile](#review-profiles) format. Each becomes a review profile the QC Markups critique applies item by item and [answers item by item](#checklist-results). **Scope…** on a loaded checklist limits it to sheets whose number starts with the prefixes you type (`F, FP, SP`); blank applies it to every sheet. |
 | **Load AHJ Atlas Input…** | AHJ Atlas Input (optional) | An Excel workbook of the code editions the AHJ adopted. Its editions become the run's [governing code editions](#set-identity--the-model-authored-review-plan). If it lists several jurisdictions you pick one. Without it, the editions on the drawings are used. |
 
 Token counts are per digest read of each sheet at ≈4 characters per text token;
@@ -1087,8 +1087,8 @@ before anchoring — an issue the digest *and* the critique independently raised
 also marked reproduced. The [ledger](#the-findings-ledger-part-iii) applies the
 same rule when it merges across channels, and raises `confidence` with it: an
 entry can never read "corroborated by two channels" and "only one of the two
-reads saw it" at the same time. A long review-profile checklist is sent **identically** to
-both reads (never split across them), so the two stay directly comparable.
+reads saw it" at the same time. The checklist a sheet receives is sent **identically** to
+both of its reads (never split across them), so the two stay directly comparable.
 
 The merged critique is cached under its own key, so a re-run skips the extra
 calls. The digest's images are gone by the time the critique runs (the batch path
@@ -1293,12 +1293,68 @@ manifest records its source as `uploaded`.
 
 Selected profiles' checklists are appended to the critique prompt under *"APPLY
 THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"* (user profiles first, then the
-model-authored plan), and the exact injected checklist text folds into the
-critique cache key — so **editing a checklist re-critiques** the affected
-sheets, while an unchanged selection is served from cache. Every
-self-consistency read receives the complete checklist (identical prompts — the
-merge's `reproduced` flag depends on it). Profiles only take effect with
+model-authored plan). Every item is printed with an **id** — `U1.3` is the third
+item of your first checklist, `M2.7` the seventh of the second model plan — and
+the ids are assigned over the whole selection, so an item keeps one id on every
+sheet. The exact text injected into a sheet's request folds into that sheet's
+critique cache key — so **editing a checklist re-critiques the sheets that
+received it**, while every other sheet is served from cache. Both of a sheet's
+self-consistency reads receive the identical checklist (the merge's
+`reproduced` flag depends on it). Profiles only take effect with
 `critique=True`; unknown names are skipped without failing the run.
+
+### Which sheets get which items
+
+A checklist is no longer sent to every sheet regardless of discipline:
+
+| Checklist | Scoped by | Example |
+|---|---|---|
+| Yours (installed profile or uploaded file) with `disciplines` | the sheet's own number prefix, read from its title block | `disciplines: F, FP` → `FP-101`, `F-D-01-1`; not `E-201` |
+| Yours with no `disciplines` | nothing | every sheet |
+| A model-authored plan | the discipline the [set-identity](#set-identity--the-model-authored-review-plan) stage classified the sheet under | the *mechanical* plan → sheets classified mechanical |
+
+Scoping narrows only on evidence and **fails open** everywhere else. A sheet
+whose number cannot be read, a sheet the identity stage did not classify, and a
+sheet classified under a discipline no plan was written for all receive the
+checklist. A wrong guess costs attention, never a skipped check. An uploaded
+spreadsheet has no header to carry `disciplines`, so the GUI's **Scope…**
+button sets it (`profiles.scoped_to(profile, "F, FP")` from code).
+
+### Checklist results
+
+The reviewer must account for **every** item on every sheet it was given:
+violated, met, not applicable, or undetermined. A finding names the item(s) it
+reports against (`checklist_items`), and that link survives every merge. After
+verification the run rolls this up (`ctx.checklist_report`) into three places:
+
+- **`report.html`** — a *Checklist Results* card: each item, its result, how
+  many sheets ended at each result, and the `QC-###` findings against it. Each
+  finding row shows `[checklist U1.3]`.
+- **`checklist_matrix.csv`** — the full grid, one row per item and one column
+  per sheet (UTF-8 BOM, CRLF, opens in Excel).
+- **`run_manifest.json`** — a `checklist` block with each item's result,
+  per-result sheet counts and finding numbers. `findings.csv` gains a
+  `checklist_items` column.
+
+| Result | What it means |
+|---|---|
+| **Violated** | A finding stands against the item. It went through anchoring and verification like every other finding. |
+| **Flagged, no finding** | The reviewer called it violated but no finding reached the ledger. Nothing backs it. |
+| **Flagged, rejected on verification** | Every finding against it was rejected by the crop re-check. |
+| **Undetermined** | The sheet shows the subject but cannot settle it alone. |
+| **Reported met** | The reviewer says the sheet complies. **Nothing verified this.** It is never worded "pass". |
+| **Not applicable** | The sheet does not show what the item concerns. |
+| **Not answered** | The reviewer did not account for the item. Never assumed met. |
+| **Not reviewed** | The sheet had no valid critique read. |
+| **Out of scope** | The sheet was never given the item. |
+
+The host decides, the model only reports: an id the sheet was never given is
+dropped, a finding that cites an item makes it violated whatever list the reply
+put it in, and when a sheet's two reads disagree the answer that hides least
+wins (violated, then undetermined, then met). An item's set-level result is its
+most attention-worthy sheet, so one unanswered sheet outranks ten that reported
+it met. Unanswered checks are counted in a stage warning and in the GUI's
+completion line; they do **not** lower the run's QC status.
 
 **No built-in checklists ship** — the model authors the review plan per set,
 so the tool carries no discipline bias. A worked NFPA 13 sprinkler example
@@ -2037,6 +2093,7 @@ hashes every file in the folder.
 | `run_manifest.json` | export folder | The same run, machine-readable, plus the sha256 of every exported file. |
 | `diagnostics/` | export folder | Every model call, API retry, host sample and journal event (above). |
 | `markup_manifest.json` | export folder (QC runs) | Every planned markup placement and its reconciled receipt. |
+| `checklist_matrix.csv` | export folder (QC runs with a checklist) | Every checklist item against every sheet: its result and the findings against it. |
 | `evidence/<QC-###>/investigation.json` | export folder (when investigation ran) | The full tool trace of each investigated finding: every crop/search requested and the verdict. |
 | `drawing_analyzer.log` | `%LOCALAPPDATA%\DrawingAnalyzer\logs\` on Windows (the app's settings folder elsewhere) | The app session's rotating diagnostic log: request ids, batch ids, `custom_id`-to-sheet maps, retry detail. Stays on the computer; reset at each app launch. Set `DRAWING_ANALYZER_DEBUG=1` to add the SDK's wire-level request/response lines. |
 

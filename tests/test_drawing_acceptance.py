@@ -963,9 +963,29 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert oracle.client.plan_calls == 1
     assert any(r.stage_family == "review_plan" for r in ctx.run_usage.records)
     assert ctx.review_plan_profiles and ctx.review_plan_markdown
-    assert all("no +30% increase applied" in s
-               for s in oracle.client.critique_system_prompts)
     assert any(s.source == "model" for s in ctx.profile_snapshots)
+    # Each sheet's critique received the plan for ITS discipline (M1 = fire
+    # protection, M2 = mechanical). FP-101 is the file named M-101.pdf in b/:
+    # it is scoped by what the identity classified it as, not by its file
+    # name. Sheets with no plan of their own (electrical) or no classification
+    # (civil) get every plan rather than none.
+    given = oracle.client.critique_checklist_ids
+    assert given[G.Q_F4] == ("M1.1", "M1.2")
+    assert given[G.Q_F1] == ("M2.1",)
+    assert given[G.Q_CQ_LEG] == given[G.Q_F6] == ("M1.1", "M1.2", "M2.1")
+    assert all("no +30% increase applied" in s
+               for s in oracle.client.critique_system_prompts if "[M1.1]" in s)
+    # Checklist results: every item accounted for on every sheet it was given
+    # to, and the violated one tied to the numbered, verified finding.
+    rows = {r.id: r for r in ctx.checklist_report.rows}
+    cited = [f for f in ctx.all_findings if "M2.1" in f.checklist_items]
+    assert [f.text for f in cited] == [G.CR1["text"]]
+    assert rows["M2.1"].status == "VIOLATED" and rows["M2.1"].qc_ids == [cited[0].qc_id]
+    assert rows["M2.1"].counts["OUT_OF_SCOPE"] == 1          # FP-101 never got it
+    assert rows["M1.1"].status == "MET" and rows["M1.1"].counts["OUT_OF_SCOPE"] == 1
+    assert rows["M1.2"].status == "NOT_APPLICABLE"
+    assert ctx.checklist_report.cell_total("UNANSWERED") == 0
+    assert statuses["checklist"] == "COMPLETE"
     # Phase A: the identity context reached the downstream consumers — every
     # citation request carries the jurisdiction + merged-editions lines, and
     # every cross-QC input opens with the set-context preamble.
@@ -1371,6 +1391,19 @@ def test_gauntlet_plan_in_export(oracle):
     assert manifest["configuration"]["run_review_plan"] is True
     # The injected plan appears in the manifest's profiles with source=model.
     assert any(p.get("source") == "model" for p in manifest["profiles"])
+    # Checklist results ship three ways: the grid, the manifest, the report.
+    import csv as _csv
+
+    assert any(a["path"] == "checklist_matrix.csv" for a in manifest["artifacts"])
+    with open(oracle.export / "checklist_matrix.csv", encoding="utf-8-sig", newline="") as fp:
+        grid = {row["Item"]: row for row in _csv.DictReader(fp)}
+    violated = next(r for r in manifest["checklist"]["rows"] if r["id"] == "M2.1")
+    assert violated["status"] == "VIOLATED" and violated["findings"]
+    assert grid["M2.1"]["Findings"] == ", ".join(violated["findings"])
+    assert grid["M2.1"]["FP-101"] == "Out of scope"
+    report_html = (oracle.export / "report.html").read_text(encoding="utf-8")
+    assert 'id="checklist"' in report_html
+    assert "[checklist M2.1]" in report_html
 
 
 def test_gauntlet_identity_failure_never_blocks_the_review(tmp_path):

@@ -56,7 +56,7 @@ from .digest import (
 from .models import ProfileSnapshot
 from .sheet_blocks import sheet_block
 from .set_identity import _as_list
-from .profiles import Profile
+from .profiles import MODEL_PLAN_PREFIX, Profile
 
 DEFAULT_PLAN_MAX_TOKENS = 32_000
 DEFAULT_PLAN_EFFORT = "high"          # judgment work — what WOULD a specialist check?
@@ -369,7 +369,7 @@ def profiles_from_plans(plans: list[DisciplinePlan]) -> list[Profile]:
         rendered = tuple(render_item(it) for it in plan.items)
         content_hash = hashlib.sha256("\n".join(rendered).encode("utf-8")).hexdigest()[:16]
         out.append(Profile(
-            name=f"model-plan-{plan.slug}",
+            name=f"{MODEL_PLAN_PREFIX}{plan.slug}",
             title=plan.title,
             disciplines=(plan.slug,),
             version="1",

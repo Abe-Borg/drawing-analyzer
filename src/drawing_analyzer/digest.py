@@ -1366,6 +1366,27 @@ def _coerce_refs(value: Any) -> list[str]:
     return []
 
 
+def _coerce_checklist_items(value: Any) -> list[str]:
+    """The checklist item ids a finding reports against, canonical and deduped.
+
+    Only the critique asks for these; a digest item never carries the field and
+    stays ``[]``. The ids are checked against the items the sheet was actually
+    given by the critique, which knows them — here they are only shaped.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    from .profiles import normalize_item_id
+
+    out: list[str] = []
+    for raw in value[:40]:
+        item_id = normalize_item_id(raw) if isinstance(raw, str) else ""
+        if item_id and item_id not in out:
+            out.append(item_id)
+    return out
+
+
 def _fallback_sheet_id(ref: SheetRef) -> str:
     return f"{Path(ref.source_name).stem}-p{ref.page_index + 1}"
 
@@ -1420,6 +1441,7 @@ def _validate_finding_item(
         tile=_resolve_tile(item, rows, cols),
         refs=_coerce_refs(item.get("refs")),
         anchor_hint=anchor_hint,
+        checklist_items=_coerce_checklist_items(item.get("checklist_items")),
     )
 
 
@@ -1700,6 +1722,29 @@ def parse_numeric_claims(
         if claim is not None:
             claims.append(claim)
     return claims
+
+
+def parse_checklist_object(raw_text: str, *, bare_json: bool = False) -> dict | None:
+    """The raw ``checklist`` object of a critique reply, or ``None`` if absent.
+
+    Read from the same **last** findings-bearing block the findings come from,
+    under the same ``bare_json`` rule as :func:`parse_findings_detailed`, so the
+    answers can never be taken from a different block than the findings they
+    refer to. Unvalidated: the caller knows which item ids the sheet was given.
+    """
+    last_obj: dict | None = None
+    for c in scan_structured_blocks(raw_text):
+        obj = _tolerant_json_object(c.body)
+        if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+            last_obj = obj
+    if last_obj is None and bare_json:
+        obj = _tolerant_json_object(raw_text)
+        if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+            last_obj = obj
+    if last_obj is None:
+        return None
+    answers = last_obj.get("checklist")
+    return answers if isinstance(answers, dict) else None
 
 
 def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericClaim]:

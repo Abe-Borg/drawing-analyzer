@@ -142,6 +142,11 @@ def _persist_submitted_batch(cache: Any, batch_id: str, slots: list, *,
                 "attempts_submitted": max(1, getattr(slot, "attempts_submitted", 1)),
                 "run_id": by_custom_id[custom_id][1] if by_custom_id else None,
             }
+            # The checklist item ids the sheet's reads were given: a recovered
+            # reply's answers are validated against what was actually sent.
+            checklist_ids = list(getattr(slot, "checklist_ids", ()) or ())
+            if checklist_ids:
+                items[custom_id]["checklist_ids"] = checklist_ids
     created = _get(submitted, "created_at")
     if isinstance(created, str):
         created = datetime.fromisoformat(created.replace("Z", "+00:00"))
@@ -197,9 +202,13 @@ def finish_batch_record(cache: Any, batch_id: str, raw: dict) -> dict[str, dict]
                 grouped.setdefault(slot_index, []).append(_outcome_from_envelope(
                     raw.get(custom_id), run_id=item["run_id"], ref=SheetRef(**ref_data),
                     rows=item["rows"], cols=item["cols"],
+                    checklist_ids=tuple(item.get("checklist_ids") or ()),
                 ))
             for slot_index, outcomes in grouped.items():
-                result = result_from_outcomes(outcomes, requested_runs=record["runs"], label="recovered batch")
+                result = result_from_outcomes(
+                    outcomes, requested_runs=record["runs"], label="recovered batch",
+                    checklist_ids=tuple(metadata[slot_index].get("checklist_ids") or ()),
+                )
                 if result.error is None and result.completed_runs == record["runs"]:
                     entry = critique_cache_entry_from_result(result)
                     item = metadata[slot_index]

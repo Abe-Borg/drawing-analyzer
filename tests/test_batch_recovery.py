@@ -206,14 +206,24 @@ def test_failed_recovery_blocks_new_submissions_and_keeps_receipt(tmp_path):
 def test_critique_receipt_recovers_all_reads_into_fresh_cache(tmp_path):
     path = tmp_path / "digest.sqlite3"
     cache = DigestCache(path)
+    from drawing_analyzer.profiles import Profile
+
     client = CritiqueClient(critique_succeed)
-    batch_critique.submit_critique_batch([_make_sheet(0)], client=client, cache=cache, model=OPUS, runs=2)
+    checklist = [Profile(name="office", title="office", items=("Check the FDC sign",))]
+    batch_critique.submit_critique_batch(
+        [_make_sheet(0)], client=client, cache=cache, model=OPUS, runs=2, profiles=checklist,
+    )
     cache.close()
     cache = DigestCache(path)
-    batch = batch_critique.submit_critique_batch([_make_sheet(0)], client=client, cache=cache, model=OPUS, runs=2)
+    batch = batch_critique.submit_critique_batch(
+        [_make_sheet(0)], client=client, cache=cache, model=OPUS, runs=2, profiles=checklist,
+    )
     assert batch.batch_id is None and len(client.create_calls) == 1
     assert batch.slots[0].result.cached
     assert batch.slots[0].result.completed_runs == 2
+    # The receipt carried which checklist items the reads were given, so the
+    # recovered result accounts for them (the scripted replies answered none).
+    assert batch.slots[0].result.checklist == {"U1.1": ["UNANSWERED", "UNANSWERED"]}
     assert cache.pending_batches() == []
 
 
