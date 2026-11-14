@@ -115,7 +115,7 @@ from .pipeline import (
     extract_drawing_context,
 )
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 __all__ = [
     "AdoptedCode",

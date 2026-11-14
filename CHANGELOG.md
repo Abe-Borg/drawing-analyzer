@@ -6,8 +6,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-13
+
 ### Added
 
+- **Checklist results and per-sheet scope.** Checklist items have stable ids
+  across the selection and receive a per-sheet answer: violated, reported met,
+  not applicable or undetermined; missing answers remain unanswered. Findings
+  link back to the items they report against. Uploaded checklists can be scoped
+  by sheet-number prefix with the **Scope** button, and model checklists follow
+  the set's disciplines. The report's **Checklist Results** card,
+  `checklist_matrix.csv`, run manifest and `findings.csv` carry the results and
+  their links to the final findings. Unanswered checks produce a warning rather
+  than changing the QC status.
 - **Live view tabs: Story, Thinking, Plan and Findings.** The Live view now
   has a row of tabs under its header. **Board** is the existing animated
   board. **Story** is the pipeline as a timeline: a plain sentence on what
@@ -35,6 +46,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `thought_stream`: the run hands its monitor the set identity, the checklist
   plan and its answers, the digests and the findings ledger (read-only
   references), and `LiveRunModel` folds them into the state the new tabs draw.
+
+### Changed
+
+- Checklist edits invalidate critique caches only for sheets receiving the
+  edited checklist. The checklist answer contract changes those sheets' critique
+  keys once; there is no cache schema migration.
+
+### Fixed
+
+- Uploaded checklists with the same filename keep independent items and scopes.
+- A platform's rejection of reasoning summaries falls back without losing a
+  batch read. Critique batches request summaries only after support is known.
+- The Thinking tab clears its text-wrap cache between runs and keys it by text,
+  preventing a later run from displaying an earlier run's reasoning summary.
 
 ## [1.14.0] - 2026-11-13
 
