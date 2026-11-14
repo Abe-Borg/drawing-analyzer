@@ -619,6 +619,18 @@ def _resolve_save_tiles(save_tile_artifacts: bool | None) -> bool:
     return raw.strip().lower() in _BATCH_ENV_TRUE
 
 
+def _interactive_markups_enabled() -> bool:
+    """Whether reviewed PDFs carry the isolate / done behavior (default on).
+
+    ``DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0`` writes plain reviewed PDFs: no
+    per-finding layers, no form fields and no scripts — for an office whose
+    mail filter or PDF policy objects to scripts in a PDF. Resolved at call
+    time.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_INTERACTIVE_MARKUPS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _markup_appendix_enabled() -> bool:
     """Whether the reviewed PDFs get the optional "checked and consistent"
     appendix page (``DRAWING_ANALYZER_MARKUP_APPENDIX=1``; off by default)."""
@@ -2969,6 +2981,7 @@ def _run_qc_stages(
                 geometries=geometries,
                 audit_stats=audit_stats,
                 include_appendix=_markup_appendix_enabled(),
+                interactive=_interactive_markups_enabled(),
                 skip_source_ids=mutated_ids,
                 artifact_run_id=artifact_run_id,
             )

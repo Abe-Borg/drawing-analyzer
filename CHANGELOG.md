@@ -46,6 +46,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each has a comment, and how many show their required action. It sits in
   clear space on its own layer (*QC markups - Sheet notes*), so it adds no row
   to the Markups List and can be switched off.
+- **See one markup on its own.** Clicking a cover-page row in the reviewed PDF
+  jumps to the markup and hides every other markup. A red note beside it says
+  the others are hidden, and one click on the note, on the sheet's stamp or on
+  *Show all markups* brings them back. Reopening the file always shows every
+  markup. Bookmarks jump without hiding.
+- **Done boxes.** Each finding has a Done box on its cover-page row and beside
+  its markup, and the two are the same box. Ticking it replaces the markup
+  with a grey copy marked DONE and greys the cover row; unticking restores it.
+  Ticks are saved with the PDF. A grey copy is not clickable; its comment
+  stays in the Markups List.
+- Both work in Bluebeam Revu, where each mechanism was checked by hand, and
+  use a small script inside the PDF. `DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0`
+  writes reviewed PDFs without scripts, form fields or per-finding layers.
 
 ### Changed
 

@@ -815,6 +815,25 @@ def test_gauntlet_existing_annotations_intact(oracle):
                   if r.output_pdf == "M-101__SRC-0001_reviewed.pdf"]
     assert a_receipts and all(r.ok for r in a_receipts)
 
+    # A pipeline run writes an interactive reviewed PDF: every finding marked
+    # on this source has a Done box on the cover page and one by its markup,
+    # and the interactive parts cost no placement its proof (COMPLETE above).
+    import pymupdf
+
+    from drawing_analyzer.markup_scripts import done_field_name
+
+    doc = pymupdf.open(str(a_pdf))
+    try:
+        boxes: dict = {}
+        for pno in range(doc.page_count):
+            for widget in doc[pno].widgets():
+                boxes.setdefault(widget.field_name, set()).add(pno)
+    finally:
+        doc.close()
+    drawn = {r.placement.qc_id for r in a_receipts if r.status == "WRITTEN"}
+    assert drawn and set(boxes) == {done_field_name(qc) for qc in drawn}
+    assert all(0 in pages and len(pages) >= 2 for pages in boxes.values())
+
 
 # ---- assertion 13: report, CSV, JSON, PDFs, manifests and log agree ---------
 
