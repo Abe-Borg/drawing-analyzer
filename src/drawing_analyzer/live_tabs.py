@@ -11,7 +11,9 @@ These four views show what it is doing and why, from the same
   arrive (:mod:`~drawing_analyzer.thought_stream`), beside the calls in flight.
 * **Plan** — what the set was identified as (disciplines, place, adopted code
   editions) and the review checklist, a person's and the model's, with each
-  item's answers filling in sheet by sheet.
+  item's answers filling in sheet by sheet. Checks of the model's plan can be
+  ticked (or opened with a click) and handed to the host to keep as the
+  reader's own checklist (:class:`ChecklistPicks`, :mod:`checklist_save`).
 * **Findings** — the path from "reported by a read" to "proven on the PDF":
   reported → merged in the ledger → placed on the sheet → re-checked, with
   the findings themselves listed underneath.
@@ -24,7 +26,8 @@ laid out by the scene's width estimate, never by asking a toolkit.
 from __future__ import annotations
 
 import textwrap
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from .live_scene import (
     ACCENT,
@@ -791,7 +794,7 @@ def _mind_now(scene, out, model, x0, y0, x1, y1, s, t) -> None:
 
 def plan(scene: Any, out: list, model: Any, x0, y0, x1, y1, s, t, dt) -> None:
     split = (x1 - x0) >= 560 * s
-    left_x1 = x0 + (x1 - x0) * 0.36 if split else x0
+    left_x1 = x0 + (x1 - x0) * 0.32 if split else x0
     if split:
         _plan_identity(scene, out, model, x0, y0, left_x1 - 8 * s, y1, s, t)
     _plan_checklist(scene, out, model, left_x1 + (6 * s if split else 0), y0, x1, y1, s, t, dt)
@@ -906,8 +909,201 @@ def _plan_empty(model: Any) -> list[str]:
     return ["No review checklist was produced in this run."]
 
 
+# The reader can keep checks from the run's checklist as a checklist of their
+# own: tick rows (or a whole checklist, or everything) and press Save, or click
+# one row for its menu. What is picked is display state on the scene
+# (:class:`ChecklistPicks`); saving and copying are the host's job, handed over
+# as a :class:`SaveRequest` / :class:`CopyRequest` (``LivePanel(on_request=)``).
+# Only the model's plan can be picked: a person's own checks are already saved.
+
+
+@dataclass(frozen=True)
+class PickedRow:
+    """One picked check, with what the save dialog shows beside it."""
+
+    id: str
+    text: str
+    title: str                 # the checklist it came from
+    prefixes: tuple = ()       # sheet-number prefixes that checklist was aimed at
+
+
+@dataclass(frozen=True)
+class SaveRequest:
+    """Picked checks the reader asked to save."""
+
+    checks: tuple              # PickedRow, in checklist order
+    known: tuple               # (id, text) of the reader's own checks this run applied
+    codes: tuple               # adopted code editions the picked checks name
+
+
+@dataclass(frozen=True)
+class CopyRequest:
+    """One check's text for the clipboard."""
+
+    id: str
+    text: str
+
+
+class ChecklistPicks:
+    """What the reader has picked on the Plan tab. Never part of a run."""
+
+    def __init__(self) -> None:
+        self.selected: set[str] = set()
+        self.saved: dict[str, str] = {}     # id -> the checklist it was saved to
+        self.held: dict[str, str] = {}      # id -> where its text already was
+        self.menu: "str | None" = None      # the check whose menu is open
+        self.request: Any = None            # waiting for the host to take it
+
+    def clear(self) -> None:
+        self.selected.clear()
+        self.saved.clear()
+        self.held.clear()
+        self.menu = None
+        self.request = None
+
+    def take_request(self) -> Any:
+        request, self.request = self.request, None
+        return request
+
+    def is_pickable(self, item_id: str) -> bool:
+        return item_id not in self.saved and item_id not in self.held
+
+    def pickable(self, model: Any) -> list[str]:
+        """The ids that can still be picked, in checklist order."""
+        return [it.id for g in model.checklist if g.origin == "model" for it in g.items
+                if self.is_pickable(it.id)]
+
+    def chosen(self, model: Any) -> list[str]:
+        """The selection, in checklist order (ids gone from the list dropped)."""
+        return [i for i in self.pickable(model) if i in self.selected]
+
+    def toggle(self, item_id: str) -> None:
+        if item_id in self.selected:
+            self.selected.discard(item_id)
+        elif self.is_pickable(item_id):
+            self.selected.add(item_id)
+
+    def toggle_many(self, ids: list[str]) -> None:
+        """All of ``ids`` on, unless all already are: then all off."""
+        ids = [i for i in ids if self.is_pickable(i)]
+        if ids and all(i in self.selected for i in ids):
+            self.selected.difference_update(ids)
+        else:
+            self.selected.update(ids)
+
+    def mark_saved(self, ids: Any, label: str, held: "dict | None" = None) -> None:
+        """Saved checks get a tag and leave the selection; ``held`` (id ->
+        where) are checks the save skipped because their text was already kept."""
+        for item_id in ids or ():
+            self.saved[str(item_id)] = str(label)
+        for item_id, where in dict(held or {}).items():
+            self.held[str(item_id)] = str(where)
+        self.selected.difference_update(self.saved)
+        self.selected.difference_update(self.held)
+        self.menu = None
+
+
+def save_request(model: Any, ids: list[str]) -> "SaveRequest | None":
+    """What the host needs to save ``ids`` (``None`` when none is in the list)."""
+    wanted = set(ids)
+    rows = tuple(
+        PickedRow(id=it.id, text=it.text, title=g.title, prefixes=tuple(g.prefixes))
+        for g in model.checklist if g.origin == "model" for it in g.items if it.id in wanted
+    )
+    if not rows:
+        return None
+    known = tuple((it.id, it.text) for g in model.checklist if g.origin != "model"
+                  for it in g.items)
+    named = " ".join(r.text for r in rows).casefold()
+    codes: list[str] = []
+    ident = model.identity
+    for code in (ident.codes if ident is not None else ()):
+        label = " ".join(b for b in (code.code, code.edition) if b)
+        if code.adopted and code.code and code.code.casefold() in named and label not in codes:
+            codes.append(label)
+    return SaveRequest(checks=rows, known=known, codes=tuple(codes))
+
+
+def _hidden(out: list, key: str, kind: str) -> None:
+    """A placeholder that keeps a row slot's key set stable (no recreation)."""
+    if kind == "rect":
+        out.append(rect(key, 0, -10, 0, -10, fill=BG))
+    elif kind == "line":
+        out.append(line(key, (-10, -10, -10, -10), fill=BG, width=1))
+    elif kind == "poly":
+        out.append(poly(key, (-10, -10, -10, -10, -10, -10), fill=BG))
+    else:
+        out.append(text(key, -100, -100, "", fill=BG, size=9))
+
+
+def checkbox(out: list, key: str, x: float, y: float, s: float, *, state: str,
+             fade: float = 1.0, hot: bool = False) -> None:
+    """A check box at ``(x, y)``. ``state``: off | on | mixed | saved | locked.
+
+    Emits the same three keys (``key``, ``_k`` mark line, ``_b`` bookmark) in
+    every state, so toggling a row redraws it instead of recreating it.
+    """
+    r = 5.5 * s
+    box = (x - r, y - r, x + r, y + r)
+    if state == "locked":
+        out.append(poly(key, rounded_rect_points(*box, 2 * s), fill=mix(PANEL, "#16243B", fade),
+                        outline=mix(PANEL, INK_FAINT, fade), width=1, smooth=True))
+        _hidden(out, f"{key}_k", "line")
+        out.append(poly(f"{key}_b", (x - 2.2 * s, y - 3.2 * s, x + 2.2 * s, y - 3.2 * s,
+                                     x + 2.2 * s, y + 3.4 * s, x, y + 1.6 * s,
+                                     x - 2.2 * s, y + 3.4 * s),
+                        fill=mix(PANEL, INK_DIM, fade)))
+        return
+    if state == "saved":
+        out.append(poly(key, rounded_rect_points(*box, r), fill=mix(PANEL, "#123824", fade),
+                        outline=mix(PANEL, GREEN, fade), width=1.2 * s, smooth=True))
+        out.append(line(f"{key}_k", (x - 2.6 * s, y + 0.2 * s, x - 0.7 * s, y + 2.2 * s,
+                                     x + 2.9 * s, y - 2.3 * s),
+                        fill=mix(PANEL, GREEN_GLOW, fade), width=1.5 * s))
+        _hidden(out, f"{key}_b", "poly")
+        return
+    on = state in ("on", "mixed")
+    out.append(poly(key, rounded_rect_points(*box, 2 * s),
+                    fill=mix(PANEL, ACCENT if on else "#0A1424", fade),
+                    outline=mix(PANEL, ACCENT if (on or hot) else INK_DIM, fade),
+                    width=1.2 * s, smooth=True))
+    if state == "on":
+        out.append(line(f"{key}_k", (x - 2.8 * s, y + 0.2 * s, x - 0.8 * s, y + 2.4 * s,
+                                     x + 3.0 * s, y - 2.4 * s),
+                        fill=mix(PANEL, WHITE, fade), width=1.6 * s))
+    elif state == "mixed":
+        out.append(line(f"{key}_k", (x - 2.8 * s, y, x + 2.8 * s, y),
+                        fill=mix(PANEL, WHITE, fade), width=1.6 * s))
+    else:
+        _hidden(out, f"{key}_k", "line")
+    _hidden(out, f"{key}_b", "poly")
+
+
+def button(out: list, key: str, x1: float, y: float, label: str, s: float, *,
+           enabled: bool, hot: bool = False) -> tuple[float, float]:
+    """A filled button ending at ``x1``, centered on ``y``; returns its x span."""
+    size = 9.5 * s
+    w = text_width(label, size) + 22 * s
+    x0 = x1 - w
+    if enabled:
+        fill, edge, fg = (mix(ACCENT, WHITE, 0.15) if hot else ACCENT), ACCENT, WHITE
+    else:
+        fill, edge, fg = "#13233D", "#20324F", INK_FAINT
+    out.append(poly(key, rounded_rect_points(x0, y - 9.5 * s, x1, y + 9.5 * s, 5 * s),
+                    fill=fill, outline=edge, width=1, smooth=True))
+    out.append(text(f"{key}_t", (x0 + x1) / 2.0, y, label, fill=fg, size=size, weight="bold",
+                    anchor="center"))
+    return x0, x1
+
+
+def _hovered(scene: Any, x0, y0, x1, y1) -> bool:
+    h = scene.hover
+    return h is not None and x0 <= h[0] <= x1 and y0 <= h[1] <= y1
+
+
 def _plan_checklist(scene, out, model, x0, y0, x1, y1, s, t, dt) -> None:
     groups = model.checklist
+    picks: ChecklistPicks = scene.picks
     n_items = sum(len(g.items) for g in groups)
     note = ""
     if n_items:
@@ -920,8 +1116,19 @@ def _plan_checklist(scene, out, model, x0, y0, x1, y1, s, t, dt) -> None:
     ix0, ix1 = x0 + 10 * s, x1 - 12 * s
     iy0, iy1 = top + 6 * s, bottom - 6 * s
     if not n_items:
+        picks.menu = None
         placeholder(out, "ck_empty", ix0, iy0, ix1, iy1, _plan_empty(model), s)
         return
+    item_of = {it.id: (g, it) for g in groups for it in g.items}
+    if picks.menu is not None and picks.menu not in item_of:
+        picks.menu = None
+    menu_open = picks.menu is not None
+    pickable = picks.pickable(model)
+    chosen = picks.chosen(model)
+    if any(g.origin == "model" for g in groups):
+        iy0 = _pick_toolbar(scene, out, model, picks, pickable, chosen, x0, x1, ix0, ix1,
+                            top, s, menu_open)
+
     rows: list[tuple] = []
     for g in groups:
         rows.append(("group", g))
@@ -933,7 +1140,10 @@ def _plan_checklist(scene, out, model, x0, y0, x1, y1, s, t, dt) -> None:
     first = max(0, int(off // pitch))
     meter_w = 54 * s
     count_w = 62 * s
-    id_w = 44 * s
+    cb_w = 17 * s
+    id_w = 40 * s
+    cbx = ix0 + 5.5 * s
+    menu_row_y: "float | None" = None
     slot = 0
     for idx in range(first, len(rows)):
         ry = iy0 + idx * pitch - off + pitch / 2.0
@@ -945,25 +1155,87 @@ def _plan_checklist(scene, out, model, x0, y0, x1, y1, s, t, dt) -> None:
         k = f"ck{slot}"
         slot += 1
         kind, obj = rows[idx]
+        ry0, ry1 = ry - pitch / 2.0, ry + pitch / 2.0
         if kind == "group":
-            who = "MODEL'S PLAN" if obj.origin == "model" else "YOUR CHECKLIST"
-            color = PURPLE_GLOW if obj.origin == "model" else ACCENT_GLOW
-            out.append(text(f"{k}_id", ix0, ry, who, fill=mix(PANEL, color, fade), size=9 * s,
-                            weight="bold"))
+            _hidden(out, f"{k}_hl", "rect")
+            _hidden(out, f"{k}_hlb", "rect")
+            mine = obj.origin != "model"
+            ids = [it.id for it in obj.items if picks.is_pickable(it.id)]
+            if mine:
+                state = "locked"
+            elif ids and all(i in picks.selected for i in ids):
+                state = "on"
+            elif any(i in picks.selected for i in ids):
+                state = "mixed"
+            else:
+                state = "off"
+            hot = not mine and bool(ids) and not menu_open and _hovered(
+                scene, ix0 - 4 * s, ry0, ix1, ry1)
+            checkbox(out, f"{k}_cb", cbx, ry, s, state=state, fade=fade, hot=hot)
+            who = "YOUR CHECKLIST" if mine else "MODEL'S PLAN"
+            color = ACCENT_GLOW if mine else PURPLE_GLOW
+            out.append(text(f"{k}_id", ix0 + cb_w, ry, who, fill=mix(PANEL, color, fade),
+                            size=9 * s, weight="bold"))
             ww = caps_width(who, 9 * s) + 8 * s
-            out.append(text(f"{k}_t", ix0 + ww, ry, fit(obj.title, ix1 - ix0 - ww, 10 * s),
+            out.append(text(f"{k}_t", ix0 + cb_w + ww, ry,
+                            fit(obj.title, ix1 - ix0 - cb_w - ww, 10 * s),
                             fill=mix(PANEL, INK, fade), size=10 * s, weight="bold"))
+            _hidden(out, f"{k}_tag", "text")
             out.append(rect(f"{k}_m_bg", 0, -10, 0, -10, fill=BG))
             for status, _label in CHECK_STATUSES:
                 out.append(rect(f"{k}_m_{status}", 0, -10, 0, -10, fill=BG))
             out.append(text(f"{k}_c", -100, -100, "", fill=BG, size=9 * s, anchor="e"))
+            if not mine and ids:
+                scene.add_hit(x0 + 1, ry0, x1 - 1, ry1,
+                              lambda ids=ids: picks.toggle_many(ids))
             continue
-        summary, color = check_summary(obj)
-        out.append(text(f"{k}_id", ix0, ry, obj.id, fill=mix(PANEL, INK_DIM, fade), size=9 * s,
-                        family=MONO))
+
+        item_id = obj.id
+        mine = item_of[item_id][0].origin != "model"
+        on = item_id in picks.selected and picks.is_pickable(item_id)
+        hovered = not menu_open and _hovered(scene, x0, ry0, x1, ry1)
+        if item_id == picks.menu:
+            menu_row_y = ry
+        if on or hovered or item_id == picks.menu:
+            band = "#132A4D" if on else "#111F36"
+            out.append(rect(f"{k}_hl", x0 + 1, ry0 + 1, x1 - 1, ry1 - 1,
+                            fill=mix(PANEL, band, fade)))
+        else:
+            _hidden(out, f"{k}_hl", "rect")
+        if on:
+            out.append(rect(f"{k}_hlb", x0 + 1, ry0 + 1, x0 + 3 * s, ry1 - 1, fill=ACCENT))
+        else:
+            _hidden(out, f"{k}_hlb", "rect")
+        if mine or item_id in picks.held:
+            state = "locked"
+        elif item_id in picks.saved:
+            state = "saved"
+        else:
+            state = "on" if on else "off"
+        cb_hot = state in ("on", "off") and not menu_open and _hovered(
+            scene, ix0 - 4 * s, ry0, ix0 + cb_w, ry1)
+        checkbox(out, f"{k}_cb", cbx, ry, s, state=state, fade=fade, hot=cb_hot)
+        out.append(text(f"{k}_id", ix0 + cb_w, ry, item_id, fill=mix(PANEL, INK_DIM, fade),
+                        size=9 * s, family=MONO))
+        tag = ""
+        tag_color = INK_DIM
+        if item_id in picks.saved:
+            tag, tag_color = f"saved · {picks.saved[item_id]}", GREEN_GLOW
+        elif item_id in picks.held:
+            tag = f"already in your checklist ({picks.held[item_id]})"
+        tx0 = ix0 + cb_w + id_w
         tx1 = ix1 - meter_w - count_w - 8 * s
-        out.append(text(f"{k}_t", ix0 + id_w, ry, fit(obj.text, tx1 - ix0 - id_w, 10 * s),
+        room = tx1 - tx0
+        tag = fit(tag, room * 0.45, 8.5 * s) if tag else ""
+        tag_w = text_width(tag, 8.5 * s) + 10 * s if tag else 0.0
+        out.append(text(f"{k}_t", tx0, ry, fit(obj.text, room - tag_w, 10 * s),
                         fill=mix(PANEL, INK, fade), size=10 * s))
+        if tag:
+            out.append(text(f"{k}_tag", tx1, ry, tag, fill=mix(PANEL, tag_color, fade),
+                            size=8.5 * s, anchor="e"))
+        else:
+            _hidden(out, f"{k}_tag", "text")
+        summary, color = check_summary(obj)
         mx0 = ix1 - meter_w - count_w
         parts = [(status, obj.counts.get(status, 0), mix(PANEL, CHECK_COLOR[status], fade))
                  for status, _label in CHECK_STATUSES]
@@ -976,12 +1248,179 @@ def _plan_checklist(scene, out, model, x0, y0, x1, y1, s, t, dt) -> None:
                 out.append(rect(f"{k}_m_{status}", 0, -10, 0, -10, fill=BG))
         out.append(text(f"{k}_c", ix1, ry, summary, fill=mix(PANEL, color, fade), size=9 * s,
                         anchor="e"))
-        tip = [f"{obj.id}  {obj.text}"]
-        answered = [f"{obj.counts[status]} {label}" for status, label in CHECK_STATUSES
-                    if obj.counts.get(status)]
-        tip.append("Sheets: " + ", ".join(answered) if answered else "Not answered yet")
-        scene.add_tip(ix0, ry - pitch / 2.0, ix1, ry + pitch / 2.0, tip)
+        if not menu_open:
+            tip = [f"{item_id}  {obj.text}"]
+            answered = [f"{obj.counts[status]} {label}" for status, label in CHECK_STATUSES
+                        if obj.counts.get(status)]
+            tip.append("Sheets: " + ", ".join(answered) if answered else "Not answered yet")
+            scene.add_tip(ix0 + cb_w, ry0, ix1, ry1, tip)
+        # The box ticks the row; anywhere else on it opens the row's menu.
+        scene.add_hit(x0 + 1, ry0, x1 - 1, ry1,
+                      lambda i=item_id: setattr(picks, "menu", i))
+        if state in ("on", "off"):
+            scene.add_hit(x0 + 1, ry0, ix0 + cb_w - 2 * s, ry1,
+                          lambda i=item_id: picks.toggle(i))
     scrollbar(out, "ck_sb", x1 - 3 * s, iy0, iy1, off, content, s)
+    if picks.menu is not None:
+        if menu_row_y is None:
+            picks.menu = None                 # scrolled out of view
+        else:
+            group, item = item_of[picks.menu]
+            _check_menu(scene, out, model, picks, group, item, menu_row_y, x0, y0, x1, y1,
+                        ix0, pitch, s)
+
+
+def _pick_toolbar(scene, out, model, picks, pickable, chosen, x0, x1, ix0, ix1, top, s,
+                  menu_open) -> float:
+    """Select all, the count and Save; returns where the list starts."""
+    ty = top + 15 * s
+    all_on = bool(pickable) and len(chosen) == len(pickable)
+    state = "on" if all_on else ("mixed" if chosen else "off")
+    box_hot = bool(pickable) and not menu_open and _hovered(
+        scene, ix0 - 4 * s, ty - 9 * s, ix0 + 90 * s, ty + 9 * s)
+    checkbox(out, "pk_all", ix0 + 5.5 * s, ty, s, state=state, hot=box_hot)
+    label = "Deselect all" if all_on else "Select all"
+    out.append(text("pk_all_t", ix0 + 17 * s, ty, label, fill=INK if pickable else INK_FAINT,
+                    size=10 * s))
+    lw = text_width(label, 10 * s) + 26 * s
+    n = len(chosen)
+    label_btn = f"Save {n} selected…" if n else "Save selected…"
+    bx0 = ix1 - text_width(label_btn, 9.5 * s) - 22 * s
+    save_hot = bool(n) and not menu_open and _hovered(scene, bx0, ty - 10 * s, ix1, ty + 10 * s)
+    button(out, "pk_save", ix1, ty, label_btn, s, enabled=bool(n), hot=save_hot)
+    if n:
+        hint, color = f"{n} of {len(pickable)} selected", ACCENT_GLOW
+    elif pickable:
+        hint, color = "Tick checks, or click one, to keep them for future runs", INK_DIM
+    else:
+        hint, color = "Every check of the model's plan is in your checklists", INK_DIM
+    hx = ix0 + lw + 8 * s
+    out.append(text("pk_hint", hx, ty, fit(hint, max(0.0, bx0 - hx - 10 * s), 9.5 * s),
+                    fill=color, size=9.5 * s))
+    out.append(line("pk_rule", (x0 + 1, ty + 13 * s, x1 - 1, ty + 13 * s), fill=INK_FAINT,
+                    width=1, capstyle="butt"))
+    if pickable:
+        scene.add_hit(ix0 - 4 * s, ty - 10 * s, ix0 + lw, ty + 10 * s,
+                      lambda: picks.toggle_many(pickable))
+    if n:
+        scene.add_hit(bx0, ty - 10 * s, ix1, ty + 10 * s,
+                      lambda: setattr(picks, "request", save_request(model, chosen)))
+    return ty + 16 * s
+
+
+MENU_BG = "#101E34"
+MENU_EDGE = "#2B4470"
+
+
+def _check_menu(scene, out, model, picks, group, item, ry, x0, y0, x1, y1, ix0, pitch,
+                s) -> None:
+    """The menu a click on one check opens: its whole text, how this run
+    answered it, and what can be done with it."""
+    pickable = group.origin == "model" and picks.is_pickable(item.id)
+    w = min(340 * s, x1 - x0 - 24 * s)
+    mx0 = min(ix0 + 30 * s, x1 - w - 8 * s)
+    mx1 = mx0 + w
+    cols = max(20, int((w - 24 * s) / (10 * s * 0.56)))
+    body = scene.wrap(("menu", item.id, cols, item.text), item.text, cols)[:6]
+    answered = ", ".join(f"{item.counts[st]} {lbl}" for st, lbl in CHECK_STATUSES
+                         if item.counts.get(st))
+    status = "This run: " + answered if answered else "Not answered yet"
+    if group.origin != "model":
+        why = f"In your checklist “{group.title}”"
+    elif item.id in picks.saved:
+        why = f"Saved to {picks.saved[item.id]}"
+    elif item.id in picks.held:
+        why = f"Already in your checklist ({picks.held[item.id]})"
+    else:
+        why = ""
+    options: list[tuple[str, str, Callable[[], None]]] = []
+    if pickable:
+        options.append(("save", "Save checklist item…", lambda: _menu_save(picks, model, item.id)))
+        options.append(("sel", "Remove from selection" if item.id in picks.selected
+                        else "Add to selection", lambda: _menu_toggle(picks, item.id)))
+    options.append(("copy", "Copy check text", lambda: _menu_copy(picks, item)))
+    head_h = 30 * s
+    h = head_h + len(body) * 13 * s + 18 * s + (14 * s if why else 0.0) \
+        + len(options) * 22 * s + 10 * s
+    below = ry + pitch / 2.0 + 6 * s
+    above = ry - pitch / 2.0 - 6 * s - h
+    my0 = below if below + h <= y1 else max(y0, above) if above >= y0 else max(y0, y1 - h)
+    my1 = my0 + h
+    for i, a in enumerate((0.25, 0.4, 0.6)):
+        d = (6 - 2 * i) * s
+        out.append(poly(f"pm_sh{i}", rounded_rect_points(mx0 - d + 2 * s, my0 - d + 4 * s,
+                                                         mx1 + d + 2 * s, my1 + d + 4 * s,
+                                                         10 * s),
+                        fill=mix(BG, "#000000", a), smooth=True))
+    out.append(poly("pm_bg", rounded_rect_points(mx0, my0, mx1, my1, 7 * s), fill=MENU_BG,
+                    outline=MENU_EDGE, width=1, smooth=True))
+    # Clicks inside the menu never fall through to the list under it.
+    scene.add_hit(mx0, my0, mx1, my1, lambda: None, menu=True, pointer=False)
+    y = my0 + 15 * s
+    color = PURPLE_GLOW if group.origin == "model" else ACCENT_GLOW
+    out.append(text("pm_id", mx0 + 12 * s, y, item.id, fill=color, size=9.5 * s, family=MONO,
+                    weight="bold"))
+    src = ("MODEL'S PLAN · " if group.origin == "model" else "YOUR CHECKLIST · ") \
+        + group.title.upper()
+    sx = mx0 + 18 * s + text_width(item.id, 9.5 * s, mono=True)
+    out.append(text("pm_src", sx, y, fit(src, mx1 - sx - 12 * s, 8.5 * s), fill=INK_DIM,
+                    size=8.5 * s, weight="bold"))
+    y += 16 * s
+    for i, ln in enumerate(body):
+        out.append(text(f"pm_l{i}", mx0 + 12 * s, y, fit(ln, w - 24 * s, 10 * s), fill=INK,
+                        size=10 * s))
+        y += 13 * s
+    out.append(text("pm_ans", mx0 + 12 * s, y + 2 * s, fit(status, w - 24 * s, 9 * s),
+                    fill=INK_DIM, size=9 * s))
+    y += 14 * s
+    if why:
+        out.append(text("pm_why", mx0 + 12 * s, y + 2 * s, fit(why, w - 24 * s, 9 * s),
+                        fill=GREEN_GLOW if item.id in picks.saved else INK_DIM, size=9 * s))
+        y += 14 * s
+    out.append(line("pm_rule", (mx0 + 1, y, mx1 - 1, y), fill="#22385C", width=1,
+                    capstyle="butt"))
+    y += 4 * s
+    for key, label, action in options:
+        cy = y + 11 * s
+        hot = _hovered(scene, mx0 + 5 * s, cy - 10 * s, mx1 - 5 * s, cy + 10 * s)
+        if hot:
+            out.append(poly(f"pm_{key}_hl", rounded_rect_points(mx0 + 5 * s, cy - 10 * s,
+                                                                mx1 - 5 * s, cy + 10 * s, 4 * s),
+                            fill=ACCENT, smooth=True))
+        glyph = WHITE if hot else ACCENT_GLOW
+        gx = mx0 + 18 * s
+        if key == "save":
+            out.append(poly(f"pm_{key}_g", (gx - 3.5 * s, cy - 5 * s, gx + 3.5 * s, cy - 5 * s,
+                                            gx + 3.5 * s, cy + 5 * s, gx, cy + 2.4 * s,
+                                            gx - 3.5 * s, cy + 5 * s), fill=glyph))
+        elif key == "sel":
+            r = 4.5 * s
+            out.append(rect(f"pm_{key}_g", gx - r, cy - r, gx + r, cy + r, outline=glyph,
+                            width=1.2 * s))
+        else:
+            out.append(rect(f"pm_{key}_g", gx - 3 * s, cy - 4.5 * s, gx + 3.5 * s, cy + 3 * s,
+                            outline=glyph, width=1.1 * s))
+            out.append(rect(f"pm_{key}_g2", gx - 5 * s, cy - 2.5 * s, gx + 1.5 * s, cy + 5 * s,
+                            fill=ACCENT if hot else MENU_BG, outline=glyph, width=1.1 * s))
+        out.append(text(f"pm_{key}_t", mx0 + 32 * s, cy, label, fill=WHITE if hot else INK,
+                        size=10 * s, weight="bold" if hot else "normal"))
+        scene.add_hit(mx0 + 5 * s, cy - 10 * s, mx1 - 5 * s, cy + 10 * s, action, menu=True)
+        y += 22 * s
+
+
+def _menu_save(picks: ChecklistPicks, model: Any, item_id: str) -> None:
+    picks.menu = None
+    picks.request = save_request(model, [item_id])
+
+
+def _menu_toggle(picks: ChecklistPicks, item_id: str) -> None:
+    picks.menu = None
+    picks.toggle(item_id)
+
+
+def _menu_copy(picks: ChecklistPicks, item: Any) -> None:
+    picks.menu = None
+    picks.request = CopyRequest(id=item.id, text=item.text)
 
 
 # --------------------------------------------------------------------------- #

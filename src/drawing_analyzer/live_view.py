@@ -437,6 +437,8 @@ class LiveCheckGroup:
     title: str
     origin: str                       # user | model
     items: list = field(default_factory=list)        # LiveCheckItem
+    profile: str = ""                 # the owning profile's name
+    prefixes: tuple = ()              # sheet-number prefixes it was aimed at
 
 
 @dataclass
@@ -538,6 +540,14 @@ def summarize_findings(findings: Iterable[Any]) -> FindingsSummary:
         if sev:
             by_severity[sev] += 1
     return FindingsSummary(total=total, by_status=dict(by_status), by_severity=dict(by_severity))
+
+
+def _plan_prefixes(plan: Any, profile: str) -> tuple:
+    """The sheet prefixes a run's checklist was aimed at (``()``: unknown)."""
+    try:
+        return tuple(str(p) for p in plan.sheet_prefixes(profile))
+    except Exception:  # noqa: BLE001 - a plan without scopes narrows nothing
+        return ()
 
 
 def _event_epoch(timestamp: str) -> "float | None":
@@ -1006,9 +1016,10 @@ class LiveRunModel:
             key = (str(getattr(it, "origin", "") or ""), item_id.split(".", 1)[0])
             group = by_key.get(key)
             if group is None:
+                profile = str(getattr(it, "profile", "") or "")
                 group = LiveCheckGroup(
-                    title=str(getattr(it, "title", "") or getattr(it, "profile", "") or key[1]),
-                    origin=key[0],
+                    title=str(getattr(it, "title", "") or profile or key[1]),
+                    origin=key[0], profile=profile, prefixes=_plan_prefixes(plan, profile),
                 )
                 by_key[key] = group
                 groups.append(group)
@@ -1468,3 +1479,7 @@ class LiveRunModel:
 
     def _push(self, level: str, text: str) -> None:
         self.ticker.append(TickerItem(at=self._clock(), level=level, text=str(text)[:160]))
+
+    def announce(self, text: str, level: str = "good") -> None:
+        """A line from the host on the ticker (a checklist saved, text copied)."""
+        self._push(level, text)

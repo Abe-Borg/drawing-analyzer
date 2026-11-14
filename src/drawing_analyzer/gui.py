@@ -365,6 +365,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx: DrawingContext | None = None
         self._busy = False
         self._export_busy = False
+        # A checklist saved from the Plan tab while busy (mid-run) is offered
+        # to the loaded set once the work ends (_resume_deferred_suggestions).
+        self._suggest_after_busy = False
         # The running analysis's kill switch (Stop button, and quitting mid-run);
         # None while no analysis runs. See drawing_analyzer.cancellation.
         self._run_cancel: CancelToken | None = None
@@ -838,7 +841,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Review-profile selector (Phase 24 §16.4): a checkbox per available
         # profile, showing its title/version/discipline/source. Applicable profiles
         # are auto-suggested (pre-checked) once files are loaded; manual choice wins.
-        self._build_profile_panel(qc_row)
+        # Its own frame, so a checklist saved from the Live view's Plan tab can
+        # be listed without rebuilding the section (_reload_profile_panel).
+        self._profile_holder = ctk.CTkFrame(qc_row, fg_color="transparent")
+        self._profile_holder.pack(fill="x", anchor="w")
+        self._build_profile_panel(self._profile_holder)
 
         # Processing transport.
         self._transport_sec = CollapsibleSection(
@@ -993,6 +1000,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             and bool(self.live_canvas.winfo_viewable()),
             on_summary=lambda: (not self._log_sec.expanded) and self._log_sec.refresh(),
             on_tab=self._remember_live_tab,
+            on_request=self._on_live_request,
             tab=preferences.get_str(self._prefs_path, preferences.LIVE_TAB, ""),
             scale=live_scale, enabled=live_on,
         )
@@ -1000,6 +1008,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.live_canvas.bind("<Leave>", lambda _e: self._live.hover(None))
         # The board's tabs (Board | Story | Thinking | Plan | Findings) are
         # drawn on the canvas: a click picks one, the wheel scrolls its lists.
+        # On the Plan tab a click also picks checks to keep (_on_live_request).
         self.live_canvas.bind("<Button-1>", lambda e: self._live.click(e.x, e.y))
         self.live_canvas.bind(
             "<MouseWheel>", lambda e: self._live.scroll(_wheel_steps(e.delta)))
@@ -1007,6 +1016,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.live_canvas.bind("<Button-5>", lambda _e: self._live.scroll(-1))
         self.live_canvas.bind("<Configure>", lambda _e: self._live.kick())
         self.live_canvas.bind("<Map>", lambda _e: self._live.kick())
+        # Typing, clicking or scrolling anywhere else in the window pauses the
+        # board's drawing for a moment, so the window answers the person first.
+        for sequence in ("<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
+            self.bind_all(sequence, self._on_window_input, add="+")
         self.log_box = ctk.CTkTextbox(
             activity, fg_color=COLORS["bg_input"],
             border_color=COLORS["border"], border_width=2,
@@ -1686,6 +1699,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _end_extraction(self) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._set_inputs_editable(True)
         self.analyze_btn.configure(state="normal")
         self.clear_btn.configure(state="normal")
@@ -2317,12 +2331,92 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         else:
             self._live.set_enabled(live_on)
 
+    def _on_window_input(self, event: object = None) -> None:
+        """Input anywhere but the board: let the Live view pause its drawing.
+
+        Input on the board's own canvas (a tab click, a wheel over a list) is
+        what the board answers, so it never pauses it. Never breaks the event.
+        """
+        try:
+            live = getattr(self, "_live", None)
+            if live is None or getattr(event, "widget", None) is getattr(self, "live_canvas", None):
+                return
+            live.note_input()
+        except Exception:  # noqa: BLE001 - decoration must never disturb input
+            pass
+
     def _remember_live_tab(self, tab: str) -> None:
         """Keep the Live view's showing tab for the next launch."""
         try:
             preferences.set_preference(self._prefs_path, preferences.LIVE_TAB, str(tab))
         except Exception:  # noqa: BLE001 - a preference that cannot be saved is not an error
             _log.debug("could not save the Live view tab", exc_info=True)
+
+    # --------------------------------------------------------------------- #
+    # Keeping checks from the Live view's Plan tab
+    # --------------------------------------------------------------------- #
+
+    def _on_live_request(self, request) -> None:
+        """The Plan tab asked to save picked checks or copy one check's text."""
+        from .live_tabs import CopyRequest, SaveRequest
+
+        if isinstance(request, CopyRequest):
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(request.text)
+            except Exception as exc:  # noqa: BLE001 - no clipboard (remote session)
+                self._log(f"Could not copy {request.id}: {exc}", level="warning")
+                return
+            live = getattr(self, "_live", None)
+            if live is not None:
+                live.announce(f"Copied {request.id} to the clipboard", "info")
+        elif isinstance(request, SaveRequest):
+            _save_checks_dialog(self, request, on_saved=self._on_checks_saved)
+
+    def _on_checks_saved(self, plan) -> None:
+        """A save went through: mark the rows, say so, and list the checklist."""
+        ids = [c.id for c in plan.adding]
+        # Where a skipped check already was, as its row says it: a run id
+        # (``U1.2``), or the checklist it was being added to.
+        held = {c.id: (plan.name if where.startswith("item ") else where)
+                for c, where in plan.skipped}
+        n = len(ids)
+        message = f"Saved {n} check{'s' if n != 1 else ''} to “{plan.title}”"
+        if held:
+            message += f" · {len(held)} already kept, skipped"
+        live = getattr(self, "_live", None)
+        if live is not None:
+            live.mark_saved(ids, plan.name, held, message=message)
+        self._log(f"{message} ({plan.path.name} in your profiles folder)", level="success")
+        self._reload_profile_panel()
+
+    def _reload_profile_panel(self) -> None:
+        """Re-read the profiles folder into the Review profiles list.
+
+        Ticks the user set are kept; a newly saved checklist is ticked when it
+        matches the loaded set's sheet prefixes, like any installed profile.
+        """
+        holder = getattr(self, "_profile_holder", None)
+        if holder is None:
+            return
+        previous = {name: var.get() for name, var in self._profile_vars.items()}
+        try:
+            for child in holder.winfo_children():
+                child.destroy()
+            self._profile_vars.clear()
+            self._build_profile_panel(holder)
+        except Exception as exc:  # noqa: BLE001 - the list is a convenience
+            _log.warning("could not refresh the review profiles list: %s", exc)
+            return
+        for name, var in self._profile_vars.items():
+            if name in previous:
+                var.set(previous[name])
+        if self._pdfs:
+            if self._busy:
+                # The preflight never runs mid-run; ask again when it ends.
+                self._suggest_after_busy = True
+            else:
+                self._refresh_profile_suggestions()
 
     def _remember_live_view(self, on: bool) -> None:
         """Turn the visuals on/off and keep the choice for the next launch."""
@@ -3313,6 +3407,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_cancelled(self) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._end_run_controls()
         live = getattr(self, "_live", None)
         if live is not None:
@@ -3351,6 +3446,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._ctx = ctx
         live = getattr(self, "_live", None)
         if live is not None:
@@ -3618,6 +3714,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_error(self, message: str) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._end_run_controls()
         live = getattr(self, "_live", None)
         if live is not None:
@@ -4547,6 +4644,297 @@ def _ask_cost_confirmation(parent, title: str, prompt: str) -> tuple[bool, bool]
     win.after(150, grab)
     parent.wait_window(win)
     return result["proceed"], result["proceed"] and bool(dont_show.get())
+
+
+def _resume_deferred_suggestions(app) -> None:
+    """Offer a checklist saved while the app was busy to the loaded set now.
+
+    Called wherever busy ends; a no-op unless a save asked for it (and on the
+    stub apps the handler tests drive, which never set the flag).
+    """
+    if getattr(app, "_suggest_after_busy", False) and not getattr(app, "_busy", True):
+        app._suggest_after_busy = False
+        if getattr(app, "_pdfs", None):
+            app._refresh_profile_suggestions()
+
+
+def _display_path(path: Path) -> str:
+    """``path`` with the home folder shown as ``~`` (shorter, and no user name)."""
+    try:
+        return str(Path("~") / Path(path).resolve().relative_to(Path.home().resolve()))
+    except (ValueError, OSError, RuntimeError):
+        return str(path)
+
+
+def _save_checks_dialog(parent, request, *, on_saved) -> None:
+    """Save checks picked on the Live view's Plan tab into a checklist.
+
+    Non-modal to the event loop (the Save button does the work): the checks
+    go into a new checklist in the profiles folder, or are added to one that
+    is already there (:mod:`checklist_save`). What will be written — the file,
+    the checks added, the ones skipped because their text is already kept —
+    is re-planned as the reader changes the form, and planned once more
+    against the disk when Save is pressed. ``on_saved`` gets the written
+    :class:`~drawing_analyzer.checklist_save.SavePlan`.
+    """
+    from . import checklist_save as cs
+
+    checks = [cs.PickedCheck(id=r.id, text=r.text) for r in request.checks]
+    if not checks:
+        return
+    try:
+        targets = cs.saved_checklists()
+    except Exception as exc:  # noqa: BLE001 - an unreadable folder still allows a new file
+        _log.warning("could not list saved checklists: %s", exc)
+        targets = []
+    labels: list[str] = []
+    for t in targets:
+        label = t.title if t.title not in labels else f"{t.title} ({t.path.name})"
+        labels.append(label)
+    titles = list(dict.fromkeys(r.title for r in request.checks if r.title))
+    prefixes = list(cs.clean_prefixes([p for r in request.checks for p in r.prefixes]))
+    known_ids = {str(k[0]) for k in request.known}
+    n = len(checks)
+
+    win = ctk.CTkToplevel(parent)
+    win.title("Save checks")
+    win.configure(fg_color=COLORS["bg_dark"])
+    win.geometry("700x660")
+    win.minsize(560, 520)
+    win.transient(parent)
+    mode = StringVar(master=win, value="new")
+    name_var = StringVar(master=win, value=titles[0] if len(titles) == 1 else cs.DEFAULT_TITLE)
+    target_var = StringVar(master=win, value=labels[0] if labels else "(no checklists yet)")
+    font = ctk.CTkFont(family="Segoe UI", size=12)
+    small = ctk.CTkFont(family="Segoe UI", size=11)
+
+    def close() -> None:
+        try:
+            win.grab_release()
+        except Exception:  # noqa: BLE001 - platform dependent
+            pass
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", close)
+    win.bind("<Escape>", lambda _e: close())
+
+    card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+    card.pack(fill="both", expand=True, padx=12, pady=12)
+    ctk.CTkLabel(
+        card, text=f"Save {n} check{'s' if n != 1 else ''} to a checklist",
+        font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+        text_color=COLORS["text_primary"],
+    ).pack(anchor="w", padx=18, pady=(16, 2))
+    ctk.CTkLabel(
+        card, text=("Saved checks join your checklists and are sent to the reviewer "
+                    "on future runs, alongside the model's plan."),
+        font=small, text_color=COLORS["text_muted"], wraplength=620, justify="left",
+    ).pack(anchor="w", padx=18, pady=(0, 10))
+
+    # Bottom bar first so pack reserves the bottom edge before the list expands.
+    bottom = ctk.CTkFrame(card, fg_color="transparent")
+    bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
+    save_btn = ctk.CTkButton(
+        bottom, text="Save", width=130, height=34,
+        font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+    )
+    save_btn.pack(side="right")
+    ctk.CTkButton(
+        bottom, text="Cancel", width=90, height=34, font=font,
+        fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+        border_width=1, border_color=COLORS["border"],
+        text_color=COLORS["text_secondary"], command=close,
+    ).pack(side="right", padx=(0, 8))
+    path_label = ctk.CTkLabel(
+        bottom, text="", font=ctk.CTkFont(family="Consolas", size=11),
+        text_color=COLORS["text_muted"], anchor="w",
+    )
+    path_label.pack(side="left", fill="x", expand=True)
+    # The notes sit above the bar, also reserved before the list expands.
+    notes = ctk.CTkLabel(card, text="", font=small, text_color=COLORS["text_secondary"],
+                         wraplength=640, justify="left", anchor="w")
+    notes.pack(side="bottom", fill="x", padx=18, pady=(8, 4))
+
+    form = ctk.CTkFrame(card, fg_color="transparent")
+    form.pack(fill="x", padx=18)
+    form.grid_columnconfigure(1, weight=1)
+
+    def field_label(row: int, text: str) -> None:
+        ctk.CTkLabel(form, text=text, font=font, text_color=COLORS["text_secondary"]).grid(
+            row=row, column=0, sticky="w", padx=(0, 14), pady=5)
+
+    field_label(0, "Save to")
+    radios = ctk.CTkFrame(form, fg_color="transparent")
+    radios.grid(row=0, column=1, sticky="w", pady=5)
+    ctk.CTkRadioButton(
+        radios, text="A new checklist", variable=mode, value="new", font=font,
+        text_color=COLORS["text_primary"], command=lambda: refresh(),
+    ).pack(side="left", padx=(0, 24))
+    ctk.CTkRadioButton(
+        radios, text="Add to an existing one" if targets else "Add to an existing one (none yet)",
+        variable=mode, value="existing", font=font, text_color=COLORS["text_primary"],
+        state="normal" if targets else "disabled", command=lambda: refresh(),
+    ).pack(side="left")
+
+    field_label(1, "Name")
+    name_entry = ctk.CTkEntry(
+        form, textvariable=name_var, height=30, font=font,
+        fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+        text_color=COLORS["text_primary"],
+    )
+    name_entry.grid(row=1, column=1, sticky="ew", pady=5)
+    name_entry.bind("<KeyRelease>", lambda _e: refresh())
+
+    field_label(2, "Existing")
+    target_menu = ctk.CTkOptionMenu(
+        form, values=labels or [target_var.get()], variable=target_var, font=font,
+        fg_color=COLORS["bg_input"], button_color=COLORS["border"],
+        button_hover_color=COLORS["accent_hover"], text_color=COLORS["text_primary"],
+        command=lambda _v: refresh(),
+    )
+    target_menu.grid(row=2, column=1, sticky="ew", pady=5)
+
+    field_label(3, "Applies to")
+    applies = ctk.CTkFrame(form, fg_color="transparent")
+    applies.grid(row=3, column=1, sticky="ew", pady=5)
+    chip_box = ctk.CTkFrame(applies, fg_color="transparent")
+    chip_box.pack(side="left")
+    prefix_entry = ctk.CTkEntry(
+        applies, width=130, height=28, font=small, placeholder_text="+ sheet prefix",
+        fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+        text_color=COLORS["text_primary"],
+    )
+    prefix_entry.pack(side="left")
+
+    ctk.CTkLabel(
+        card, text="CHECKS TO SAVE", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+        text_color=COLORS["text_muted"],
+    ).pack(anchor="w", padx=18, pady=(12, 2))
+    listing = ctk.CTkTextbox(
+        card, height=150, fg_color=COLORS["bg_dark"], text_color=COLORS["text_primary"],
+        font=font, wrap="word",
+    )
+    listing.pack(fill="both", expand=True, padx=18)
+    listing.insert("1.0", "\n".join(f"{c.id}    {c.text}" for c in checks))
+    listing.configure(state="disabled")
+
+    def target() -> "cs.SavedChecklist | None":
+        try:
+            return targets[labels.index(target_var.get())]
+        except ValueError:
+            return None
+
+    def add_prefixes(_event=None) -> None:
+        for tag in cs.clean_prefixes(prefix_entry.get()):
+            if tag not in prefixes:
+                prefixes.append(tag)
+        prefix_entry.delete(0, "end")
+        refresh()
+
+    def remove_prefix(tag: str) -> None:
+        if tag in prefixes:
+            prefixes.remove(tag)
+        refresh()
+
+    prefix_entry.bind("<Return>", add_prefixes)
+
+    def render_chips(existing: bool, chosen) -> None:
+        for child in chip_box.winfo_children():
+            child.destroy()
+        shown = list(chosen.disciplines) if existing and chosen is not None else prefixes
+        for tag in shown:
+            ctk.CTkButton(
+                chip_box, text=tag.upper() if existing else f"{tag.upper()}  ×",
+                width=44, height=26, corner_radius=13, font=small,
+                fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+                border_width=1, border_color=COLORS["accent"],
+                text_color=COLORS["accent_glow"], text_color_disabled=COLORS["accent_glow"],
+                state="disabled" if existing else "normal",
+                command=lambda t=tag: remove_prefix(t),
+            ).pack(side="left", padx=(0, 6))
+        if not shown:
+            ctk.CTkLabel(chip_box, text="every sheet", font=small,
+                         text_color=COLORS["text_muted"]).pack(side="left", padx=(0, 8))
+        prefix_entry.configure(state="disabled" if existing else "normal")
+
+    def refresh() -> None:
+        existing = mode.get() == "existing" and bool(targets)
+        chosen = target() if existing else None
+        name_entry.configure(state="disabled" if existing else "normal")
+        target_menu.configure(state="normal" if existing else "disabled")
+        render_chips(existing, chosen)
+        try:
+            if existing:
+                plan = cs.plan_append(chosen, checks, known=request.known)
+            else:
+                plan = cs.plan_new(name_var.get(), checks, disciplines=prefixes,
+                                   known=request.known)
+        except Exception as exc:  # noqa: BLE001 - shown in the dialog, never raised
+            notes.configure(text=f"Cannot save there: {exc}", text_color=COLORS["error"])
+            save_btn.configure(state="disabled", text="Save")
+            path_label.configure(text="")
+            return
+        lines: list[str] = []
+        for check, where in plan.skipped:
+            if where.startswith("item "):
+                lines.append(f"{check.id} is already in “{plan.title}” ({where}) "
+                             "and will be skipped.")
+            elif where in known_ids:
+                lines.append(f"{check.id} is already in your checklist ({where}) "
+                             "and will be skipped.")
+            else:
+                lines.append(f"{check.id} repeats {where} and will be skipped.")
+        codes = ", ".join(request.codes)
+        lines.append("Code citations are kept as written" + (f" ({codes})" if codes else "")
+                     + ". Re-check them before using this checklist on a set that adopts "
+                     "another edition.")
+        tags = plan.disciplines
+        if tags:
+            lines.append("Suggested automatically for sets whose sheet numbers start with "
+                         + ", ".join(f"{t.upper()}-" for t in tags) + ".")
+        else:
+            lines.append("No sheet prefix: it applies to every sheet; tick it under "
+                         "Review profiles to use it.")
+        notes.configure(text="\n".join(f"•  {ln}" for ln in lines),
+                        text_color=COLORS["text_secondary"])
+        k = len(plan.adding)
+        save_btn.configure(
+            state="normal" if k else "disabled",
+            text=f"Save {k} check{'s' if k != 1 else ''}" if k else "Nothing new to save",
+        )
+        path_label.configure(text="→ " + _display_path(plan.path))
+
+    def save() -> None:
+        if prefix_entry.get().strip():
+            add_prefixes()
+        existing = mode.get() == "existing" and bool(targets)
+        try:
+            if existing:
+                result = cs.save_append(target(), checks, known=request.known)
+            else:
+                result = cs.save_new(name_var.get(), checks, disciplines=prefixes,
+                                     known=request.known)
+        except (OSError, ValueError, TypeError) as exc:
+            notes.configure(text=f"Not saved: {exc}", text_color=COLORS["error"])
+            return
+        close()
+        on_saved(result)
+
+    save_btn.configure(command=save)
+    refresh()
+
+    def grab() -> None:
+        try:
+            if win.winfo_exists():
+                win.grab_set()
+                name_entry.focus_set()
+                name_entry.select_range(0, "end")
+        except Exception:  # noqa: BLE001 - grabbing before viewable can raise
+            pass
+
+    # Grabbing before the toplevel is viewable raises on some platforms.
+    win.after(150, grab)
 
 
 def main() -> None:

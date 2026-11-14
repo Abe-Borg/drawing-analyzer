@@ -39,7 +39,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple
 
 from .live_view import (
     FINDING_BUCKETS,
@@ -375,6 +375,11 @@ class LiveScene:
         self._tips: list[tuple[float, float, float, float, list]] = []
         self._wrapped: dict[Any, list[str]] = {}
         self._scale = 1.0
+        # Clickable regions a view registered on the last frame (add_hit), and
+        # the Plan tab's checklist picks (live_tabs.ChecklistPicks).
+        self._hits: list[tuple] = []        # (x0, y0, x1, y1, action, menu, pointer)
+        self.picks = live_tabs.ChecklistPicks()
+        self.hot = False        # the pointer is over something clickable
 
     # -- tabs --------------------------------------------------------------- #
 
@@ -383,18 +388,47 @@ class LiveScene:
         if tab not in live_tabs.TAB_KEYS or tab == self.tab:
             return False
         self.tab = tab
+        self.picks.menu = None
+        self._hits = []
         return True
 
     def click(self, x: float, y: float) -> bool:
-        """A click at canvas ``(x, y)``: switches tab when it lands on one."""
+        """A click at canvas ``(x, y)``; ``True`` when it switched the tab.
+
+        A tab under it is shown. Otherwise the topmost region a view registered
+        on the last frame acts (``add_hit``). While a menu is open only the
+        menu's own regions act; a click anywhere else just closes it.
+        """
         for x0, y0, x1, y1, key in self._tab_hits:
             if x0 <= x <= x1 and y0 <= y <= y1:
+                self.picks.menu = None
                 return self.set_tab(key)
+        menu_open = self.picks.menu is not None
+        for x0, y0, x1, y1, action, menu, _pointer in reversed(self._hits):
+            if menu_open and not menu:
+                continue
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                action()
+                return False
+        self.picks.menu = None
         return False
+
+    def add_hit(self, x0: float, y0: float, x1: float, y1: float,
+                action: Callable[[], None], *, menu: bool = False,
+                pointer: bool = True) -> None:
+        """Register a clickable region for this frame; the last one registered
+        wins where regions overlap. ``menu``: part of an open menu.
+        ``pointer=False``: a region that only swallows clicks (no hand cursor)."""
+        self._hits.append((x0, y0, x1, y1, action, menu, pointer))
+
+    def take_request(self) -> Any:
+        """A request a click left for the host (save or copy checks), once."""
+        return self.picks.take_request()
 
     def wheel(self, steps: float) -> None:
         """Scroll the showing view by ``steps`` notches (positive = up)."""
         tab = self.tab
+        self.picks.menu = None              # a menu does not scroll with its row
         limit = self._scroll_max.get(tab, 0.0)
         cur = min(max(self.scroll.get(tab, 0.0), 0.0), limit)
         new = min(max(cur - float(steps) * 42.0 * self._scale, 0.0), limit)
@@ -409,6 +443,7 @@ class LiveScene:
         self.follow.clear()
         self._tab_seen.clear()
         self._wrapped.clear()
+        self.picks.clear()
 
     def scroll_offset(self, tab: str, content: float, view: float, dt: float,
                       *, follow: "float | None" = None) -> float:
@@ -482,7 +517,7 @@ class LiveScene:
         bottom_bottom = ticker_y - 14 * s
 
         self._hud(out, model, m, w - m, 6 * s, s, t, dt)
-        self._node_hits, self._cell_hits, self._tips = [], None, []
+        self._node_hits, self._cell_hits, self._tips, self._hits = [], None, [], []
         # The tab strip sits under the HUD: the board, and the four insight
         # views (live_tabs.py) that share its space. A panel too short to fit
         # the strip above the track and a row of cells shows the board alone.
@@ -500,7 +535,22 @@ class LiveScene:
             self._board_view(out, model, m, w, h, body_top, bottom_bottom, s, t, dt)
         self._ticker(out, model, m, w - m, ticker_y, s, t)
         self._tooltip(out, model, w, h, s, t)
+        self.hot = self._pointer_hot()
         return out
+
+    def _pointer_hot(self) -> bool:
+        if self.hover is None:
+            return False
+        hx, hy = self.hover
+        if any(x0 <= hx <= x1 and y0 <= hy <= y1 for x0, y0, x1, y1, _k in self._tab_hits):
+            return True
+        menu_open = self.picks.menu is not None
+        for x0, y0, x1, y1, _a, menu, pointer in reversed(self._hits):
+            if menu_open and not menu:
+                continue
+            if x0 <= hx <= x1 and y0 <= hy <= y1:
+                return pointer
+        return False
 
     def _board_view(self, out, model, m, w, h, top, bottom_bottom, s, t, dt) -> None:
         """The board tab: the pipeline track, the sheet board and telemetry."""
@@ -1238,12 +1288,14 @@ class CanvasPainter:
     Only an item whose coordinates or options changed gets a Tk call; a key
     that disappears is deleted; when new items were created the canvas is
     restacked in frame order (later prims draw on top). ``canvas`` needs
-    ``create_*``, ``coords``, ``itemconfigure``, ``delete`` and ``tag_raise``.
+    ``create_*``, ``coords``, ``itemconfigure``, ``delete``, ``tag_lower`` and
+    ``tag_raise``.
     """
 
     def __init__(self, canvas: Any) -> None:
         self.canvas = canvas
         self._items: dict[str, tuple[Any, Prim]] = {}
+        self._rank: dict[str, int] = {}     # each key's position in the last frame
         self.calls = 0          # Tk calls made by the last paint (for pacing)
 
     def paint(self, prims: Iterable[Prim]) -> int:
@@ -1251,7 +1303,10 @@ class CanvasPainter:
         calls = 0
         seen: set[str] = set()
         order: list[Any] = []
-        first_new: "int | None" = None
+        fresh: list[bool] = []              # created this frame (position-aligned)
+        rank: dict[str, int] = {}
+        last_rank = -1
+        in_order = True                     # surviving items kept their order
         for p in prims:
             if p.key in seen:
                 continue
@@ -1263,28 +1318,50 @@ class CanvasPainter:
                     calls += 1
                 iid = getattr(canvas, _CREATE[p.kind])(*p.coords, **_tk_opts(p))
                 calls += 1
-                if first_new is None:
-                    first_new = len(order)
+                fresh.append(True)
             else:
                 iid, old = cur
                 if old.coords != p.coords:
                     canvas.coords(iid, *p.coords)
                     calls += 1
                 if old.opts != p.opts:
-                    canvas.itemconfigure(iid, **_tk_opts(p))
+                    # Only what changed: re-sending a text item's font or text
+                    # makes Tk lay it out again.
+                    new = _tk_opts(p)
+                    was = _tk_opts(old)
+                    canvas.itemconfigure(
+                        iid, **{k: v for k, v in new.items() if was.get(k) != v})
                     calls += 1
+                fresh.append(False)
+                prev = self._rank.get(p.key, -1)
+                if prev < last_rank:
+                    in_order = False
+                last_rank = max(last_rank, prev)
+            rank[p.key] = len(order)
             self._items[p.key] = (iid, p)
             order.append(iid)
         for key in [k for k in self._items if k not in seen]:
             canvas.delete(self._items.pop(key)[0])
             calls += 1
-        if first_new is not None:
-            # A new item lands on top of the stack; everything that follows it
-            # in frame order is raised after it, so the stack matches the frame.
-            # Items before the first new one are already in order.
-            for iid in order[first_new:]:
+        self._rank = rank
+        if not in_order:
+            # Survivors swapped places (rare): restack the whole frame in order.
+            for iid in order:
                 canvas.tag_raise(iid)
-            calls += len(order) - first_new
+            calls += len(order)
+        elif any(fresh):
+            # A new item lands on top of the stack. Slot each one in just below
+            # the next item that was already there, so the stack matches the
+            # frame with one call per new item, not one per item above it.
+            # Survivors are already in frame order relative to each other.
+            below: Any = None
+            for iid, is_new in zip(reversed(order), reversed(fresh)):
+                if not is_new:
+                    below = iid
+                elif below is not None:
+                    canvas.tag_lower(iid, below)
+                    calls += 1
+                    below = iid             # the next new one goes under this one
         self.calls = calls
         return calls
 
