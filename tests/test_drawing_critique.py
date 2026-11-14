@@ -72,7 +72,9 @@ def _rendered(*, source="s.pdf", page=0, sheet_text="VAV-3 SERVES ROOM 120", row
 
 
 def _block(findings):
-    return "```json\n" + json.dumps({"findings": findings}) + "\n```"
+    # A dict is a whole reply body (e.g. findings plus checklist answers).
+    body = findings if isinstance(findings, dict) else {"findings": findings}
+    return "```json\n" + json.dumps(body) + "\n```"
 
 
 class _StatusError(Exception):
@@ -869,6 +871,56 @@ def test_every_read_gets_the_full_checklist_even_when_long():
     full = P.build_checklist_prompt(P.flatten_items([big]))
     both = _run_checklists([big], 2)
     assert len(both) == 2 and both[0] == both[1] == full   # identical + complete, not sliced
+
+
+_ITEM = {"sheet_id": "F", "category": "code", "severity": "high",
+         "text": "Relief valve setpoint is below the required minimum."}
+
+
+@pytest.mark.parametrize("reads, expected, cited", [
+    # Both reads account for both items; the cited item is violated.
+    ([{"findings": [{**_ITEM, "checklist_items": ["U1.2"]}],
+       "checklist": {"violated": ["U1.2"], "met": ["U1.1"]}}] * 2,
+     {"U1.1": ["MET", "MET"], "U1.2": ["VIOLATED", "VIOLATED"]}, ["U1.2"]),
+    # A finding that cites an item makes it violated even if the reply listed
+    # it as met; brackets and case on an id are tolerated.
+    ([{"findings": [{**_ITEM, "checklist_items": ["[u1.2]"]}],
+       "checklist": {"met": ["U1.1", "U1.2"]}},
+      {"findings": [], "checklist": {"met": ["U1.1"], "not_applicable": ["U1.2"]}}],
+     {"U1.1": ["MET", "MET"], "U1.2": ["VIOLATED", "NOT_APPLICABLE"]}, ["U1.2"]),
+    # An item the reply never mentions is UNANSWERED, never assumed met; an id
+    # listed twice takes the answer that hides least; an id the sheet was not
+    # given (U9.9) is dropped from both the answers and the finding.
+    ([{"findings": [{**_ITEM, "checklist_items": ["U9.9"]}],
+       "checklist": {"met": ["U1.1", "U9.9"], "undetermined": ["U1.1"]}},
+      {"findings": []}],
+     {"U1.1": ["UNDETERMINED", "UNANSWERED"], "U1.2": ["UNANSWERED", "UNANSWERED"]}, []),
+])
+def test_checklist_answers_are_host_validated_per_read(reads, expected, cited):
+    fp = _fp_profile()                      # two items → U1.1, U1.2
+    cache = DigestCache(None, persist=False)
+    res = critique_sheet_self_consistent(
+        _rendered(), client=_CritiqueClient(reads), cache=cache, runs=2,
+        max_retries=0, sleep=_NOOP, profiles=[fp],
+    )
+    assert res.checklist == expected
+    assert [f.checklist_items for f in res.findings] == ([cited] if res.findings else [])
+    # The answers ride the cache entry: a warm hit reports the same results.
+    warm = critique_sheet_self_consistent(
+        _rendered(), client=_CritiqueClient([]), cache=cache, runs=2,
+        max_retries=0, sleep=_NOOP, profiles=[fp],
+    )
+    assert warm.cached and warm.checklist == expected
+
+
+def test_a_sheet_given_no_checklist_reports_no_answers_and_no_item_ids():
+    reply = {"findings": [{**_ITEM, "checklist_items": ["U1.1"]}],
+             "checklist": {"met": ["U1.1"]}}
+    res = critique_sheet_self_consistent(
+        _rendered(), client=_CritiqueClient([reply]), runs=1, max_retries=0, sleep=_NOOP,
+    )
+    assert res.checklist is None
+    assert res.findings[0].checklist_items == []      # an id nobody issued
 
 
 # --------------------------------------------------------------------------- #

@@ -79,7 +79,6 @@ from .critique import (
     critique_sheet_self_consistent,
     outcome_from_message,
     result_from_outcomes,
-    run_checklists,
 )
 from . import call_telemetry, cancellation
 from .diagnostics import get_logger, summarize_exc
@@ -98,7 +97,7 @@ from .file_upload import (
     upload_failure_hint,
     upload_sheet_images,
 )
-from .profiles import Profile, profiles_cache_fragment
+from .profiles import ChecklistPlan, Profile
 
 _log = get_logger()
 
@@ -119,6 +118,9 @@ class _CSlot:
     custom_ids: list[str] = field(default_factory=list)
     file_ids: list[str] = field(default_factory=list)
     cache_key: str | None = None
+    # The checklist item ids THIS sheet's reads were given, so its answers are
+    # validated against what was sent (and survive in the batch receipt).
+    checklist_ids: tuple = ()
     level1_key: str | None = None
     # The sheet's critique was produced via a synchronous real-time fallback (its
     # Files-API upload failed), so the pipeline prices it REAL_TIME not BATCH.
@@ -164,6 +166,7 @@ def submit_critique_batch(
     level1_keys: dict | None = None,
     recovery_state: Any = None,
     on_log: LogCallback | None = None,
+    checklist_plan: ChecklistPlan | None = None,
 ) -> CritiqueBatch:
     """Render-stream → cache-or-upload → submit one Message Batch of critique reads.
 
@@ -194,8 +197,9 @@ def submit_critique_batch(
     """
     model = model or critique_model()
     runs = critique_runs() if runs is None else max(1, int(runs))
-    checklists = run_checklists(profiles, runs)
-    profiles_key = profiles_cache_fragment(profiles or [])
+    # Each sheet's reads carry the part of the checklist that sheet is scoped
+    # to; both reads of a sheet get the identical block (§14.5).
+    plan = checklist_plan if checklist_plan is not None else ChecklistPlan(profiles or [])
     recovery = recovery_state if recovery_state is not None else recover_pending_batches(client, cache, sleep=sleep)
 
     slots: list[_CSlot] = []
@@ -223,7 +227,7 @@ def submit_critique_batch(
         slot.result = critique_sheet_self_consistent(
             sheet, client=client, cache=cache, runs=runs, model=model,
             max_tokens=max_tokens, use_thinking=use_thinking, effort=effort,
-            sleep=sleep, profiles=profiles,
+            sleep=sleep, checklist=plan.for_ref(sheet.ref),
         )
         slot.rescued = True
         # Carry the rescue marker onto the RESULT itself — the pipeline prices each
@@ -249,6 +253,10 @@ def submit_critique_batch(
                 rows=getattr(sheet_input, "rows", 0),
                 cols=getattr(sheet_input, "cols", 0),
             )
+
+            sheet_checklist = plan.for_ref(ref)
+            profiles_key = sheet_checklist.key
+            slot.checklist_ids = sheet_checklist.ids
 
             # A retained upload reaches here only after the pipeline's level-1
             # critique cache miss. A fresh render still probes the historical
@@ -389,7 +397,7 @@ def submit_critique_batch(
                     max_tokens=max_tokens,
                     use_thinking=use_thinking,
                     effort=effort,
-                    checklist=checklists[i],
+                    checklist=sheet_checklist.prompt,
                     # Explicitly OFF on the batch transport, never left to the
                     # env flag. The structured-outputs latch recovers from a
                     # rejection by re-sending the same read unconstrained, and a
@@ -507,7 +515,8 @@ def submit_critique_batch(
 
 
 def _outcome_from_envelope(
-    env: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0
+    env: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
+    checklist_ids: tuple = (),
 ) -> CritiqueRunOutcome:
     """Turn one batch result envelope into a :class:`CritiqueRunOutcome`.
 
@@ -530,7 +539,8 @@ def _outcome_from_envelope(
         detail = str(_get(inner, "message", "") or "").strip() or f"batch item {rtype}"
         return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=detail)
     return outcome_from_message(
-        _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols
+        _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols,
+        checklist_ids=tuple(checklist_ids),
     )
 
 
@@ -622,12 +632,14 @@ def collect_critique_batch(
                     _outcome_from_envelope(
                         raw.get(custom_id), run_id=run_id, ref=slot.ref,
                         rows=getattr(slot, "rows", 0), cols=getattr(slot, "cols", 0),
+                        checklist_ids=slot.checklist_ids,
                     )
                 )
             for slot in submitted:
                 res = result_from_outcomes(
                     outcomes[id(slot)], requested_runs=batch.runs,
                     label=slot.ref.display_label,
+                    checklist_ids=slot.checklist_ids,
                 )
                 slot.result = res
                 # Cache only a *complete* result — every requested read parsed. A

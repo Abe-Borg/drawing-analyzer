@@ -60,6 +60,7 @@ from .models import (
     apply_governing_editions,
     resolve_run_configuration,
     roll_up_qc_status,
+    sheet_ref_key,
     source_page_key,
 )
 from .render import (
@@ -717,6 +718,11 @@ class DrawingContext:
     # the critique is visible via ``profile_snapshots`` (source == "model").
     review_plan_profiles: list = field(default_factory=list)
     review_plan_markdown: str = ""
+    # Checklist results (``checklist_matrix.ChecklistReport``): every checklist
+    # item, on every sheet it was applied to, joined to the final findings.
+    # ``None`` when no checklist reached the critique. Rendered in the report,
+    # ``checklist_matrix.csv`` and the run manifest.
+    checklist_report: Any = None
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -1219,7 +1225,7 @@ def _digest_sheets_via_batch(
 
 def _refkey(ref: Any) -> tuple[str, int]:
     """Full sheet identity (PDF path + page) — the merge/skip key for level-1."""
-    return (str(getattr(ref, "pdf_path", "")), int(getattr(ref, "page_index", 0) or 0))
+    return sheet_ref_key(ref)
 
 
 def _level1_partition(
@@ -1465,7 +1471,7 @@ def _critique_level1_partition(
     cache: Any,
     model: str,
     runs: int,
-    profiles_key: str | None,
+    checklist_plan: Any,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
     on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> "tuple[dict, set, dict]":
@@ -1518,7 +1524,7 @@ def _critique_level1_partition(
             effort=DEFAULT_CRITIQUE_EFFORT,
             use_thinking=True,
             runs=runs,
-            profiles_key=profiles_key,
+            profiles_key=checklist_plan.for_ref(ref).key,
             # Probed with the contract this run INTENDS to send. Without it a
             # warm run turning structured outputs on would hit a stored fenced
             # entry here — before any render or request — and return it, so the
@@ -1560,6 +1566,8 @@ def _run_critique_stage(
     reusable_uploads: "list[Any] | None" = None,
     sheet_geometries: "list[SheetGeometry] | None" = None,
     recovery_state: Any = None,
+    checklist_plan: Any = None,
+    checklist_out: "dict | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -1597,11 +1605,19 @@ def _run_critique_stage(
         critique_structured_outputs_enabled,
     )
     from .digest_cache import critique_cache_key, critique_cache_key_level1
-    from .profiles import profiles_cache_fragment
+    from .profiles import ChecklistPlan
 
     model = critique_model()
     runs = critique_runs()
-    profiles_key = profiles_cache_fragment(profiles or [])
+    # Each sheet's cache key, request and answers follow the part of the
+    # checklist that sheet is scoped to. A direct caller passing only
+    # ``profiles`` applies all of them to every sheet.
+    plan = checklist_plan if checklist_plan is not None else ChecklistPlan(profiles or [])
+
+    def _note_checklist(res: Any, portable: "tuple[str, int]") -> None:
+        answers = getattr(res, "checklist", None)
+        if checklist_out is not None and answers is not None:
+            checklist_out[tuple(portable)] = answers
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
     level1_identities: dict[tuple[str, int], str] = {}
@@ -1619,7 +1635,7 @@ def _run_critique_stage(
         cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             cache=cache if cache is not None else (recovery_state.recovered if recovery_state else {}),
-            model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
+            model=model, runs=runs, checklist_plan=plan, snapshot_by_path=snapshot_by_path,
             on_page_error=_on_prescan_error,
         )
         if cached_by_ref:
@@ -1640,7 +1656,8 @@ def _run_critique_stage(
             key = critique_cache_key_level1(
                 identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
                 max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
-                use_thinking=True, runs=runs, profiles_key=profiles_key, structured_key=None,
+                use_thinking=True, runs=runs, profiles_key=plan.for_ref(ref).key,
+                structured_key=None,
             )
             entry = recovery_state.recovered.get(key)
             error = recovery_state.blocked.get(key)
@@ -1712,6 +1729,7 @@ def _run_critique_stage(
         findings.extend(res.findings)
         claims.extend(res.claims)
         _record_critique(res, portable_by_key.get(rk, (Path(rk[0]).name, rk[1])))
+        _note_checklist(res, portable_by_key.get(rk, (Path(rk[0]).name, rk[1])))
         done += 1
         if progress is not None:
             progress(total, total, f"Critiquing sheet {done}/{total}")
@@ -1726,6 +1744,7 @@ def _run_critique_stage(
         findings.extend(res.findings)
         claims.extend(res.claims)
         _record_critique(res, source_page_key(ref))
+        _note_checklist(res, source_page_key(ref))
         # Store-under-both: promote a *complete* result to its level-1 key so the
         # next run skips rendering this sheet entirely. A partial (a dropped run) is
         # never cached — mirrors the level-2 guard inside
@@ -1751,7 +1770,7 @@ def _run_critique_stage(
                     effort=DEFAULT_CRITIQUE_EFFORT,
                     use_thinking=True,
                     runs=runs,
-                    profiles_key=profiles_key,
+                    profiles_key=plan.for_ref(ref).key,
                     structured_key=(
                         CRITIQUE_STRUCTURED_PROMPT_VERSION
                         if critique_structured_outputs_enabled(model) else None
@@ -1918,14 +1937,14 @@ def _run_critique_stage(
 
         batch = submit_critique_batch(
             _rendered_for_critique(),
-            client=client, cache=cache, model=model, runs=runs, profiles=profiles,
+            client=client, cache=cache, model=model, runs=runs, checklist_plan=plan,
             progress=progress, total=miss_total, on_status=on_status,
             recovery_state=recovery_state, on_log=on_log,
             level1_keys={
                 rk: critique_cache_key_level1(
                     identity, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
                     max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
-                    use_thinking=True, runs=runs, profiles_key=profiles_key,
+                    use_thinking=True, runs=runs, profiles_key=plan.for_key(rk).key,
                     structured_key=None,  # Batch reads are explicitly unconstrained.
                 ) for rk, identity in level1_identities.items()
             },
@@ -1944,7 +1963,7 @@ def _run_critique_stage(
                     rendered, model=model, prompt_version=CRITIQUE_PROMPT_VERSION,
                     max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS, effort=DEFAULT_CRITIQUE_EFFORT,
                     use_thinking=True, runs=runs, sheet_text=rendered.sheet_text,
-                    profiles_key=profiles_key, structured_key=None,
+                    profiles_key=plan.for_ref(rendered.ref).key, structured_key=None,
                 )
                 entry = recovery_state.recovered.get(key)
                 if entry is not None:
@@ -1952,7 +1971,9 @@ def _run_critique_stage(
                 error = recovery_state.blocked.get(key)
                 if error:
                     return CritiqueResult(findings=[], requested_runs=runs, completed_runs=0, error=error)
-            return critique_sheet_self_consistent(rendered, client=client, cache=cache, profiles=profiles)
+            return critique_sheet_self_consistent(
+                rendered, client=client, cache=cache, checklist=plan.for_ref(rendered.ref),
+            )
 
         with ThreadPoolExecutor(max_workers=workers, **resource_pressure.worker_binding()) as executor:
             in_flight: dict = {}
@@ -4234,6 +4255,25 @@ def extract_drawing_context(
         except Exception as exc:  # noqa: BLE001 - profiles remain usable
             profile_resolution_error = profile_resolution_error or exc
             _log.warning("review-plan profile snapshot failed: %s", exc)
+    # The run's checklist with ids, and which part of it each sheet receives:
+    # a person's checklist is scoped by sheet-number prefix, a model plan by
+    # the discipline the identity stage classified the sheet under. Scoping
+    # fails open (an unknown sheet gets everything); if it cannot be built at
+    # all the whole checklist goes to every sheet, as it always did.
+    checklist_plan: Any = None
+    checklist_sheet_ids: dict = {}
+    checklist_answers: dict = {}
+    if config.run_critique and all_profiles:
+        from .profiles import ChecklistPlan, build_sheet_scopes
+
+        try:
+            scopes, checklist_sheet_ids = build_sheet_scopes(
+                sheet_geometries, set_identity_obj,
+            )
+            checklist_plan = ChecklistPlan(all_profiles, scopes)
+        except Exception as exc:  # noqa: BLE001 - additive; the checklist still applies
+            _log.warning("checklist scoping failed; applying it to every sheet: %s", exc)
+            checklist_plan = ChecklistPlan(all_profiles)
     profile_stage = StageResult(stage="profiles", expected=config.run_critique)
     if config.run_critique:
         profile_stage.items_in = requested_count
@@ -4282,6 +4322,8 @@ def extract_drawing_context(
                 reusable_uploads=reusable_uploads,
                 sheet_geometries=sheet_geometries,
                 recovery_state=recovery_state,
+                checklist_plan=checklist_plan,
+                checklist_out=checklist_answers,
             )
             numeric_claims.extend(c_claims)
             critique_stage.items_out = len(critique_findings)
@@ -4627,6 +4669,51 @@ def extract_drawing_context(
     )
     stage_results.extend(qc.stage_results)
 
+    # Checklist results: every item on every sheet it was applied to, joined to
+    # the FINAL findings (numbered, merged, verified). Reporting only — it
+    # never gates the run (``expected=False``): an item the reviewer did not
+    # answer is shown as such and counted in a warning, not held against the
+    # QC status.
+    checklist_report = None
+    checklist_stage = StageResult(stage="checklist", expected=False)
+    if checklist_plan:
+        try:
+            from .checklist_matrix import (
+                CELL_NOT_REVIEWED, CELL_UNANSWERED, CELL_VIOLATED, ChecklistSheet,
+                build_checklist_report,
+            )
+
+            checklist_report = build_checklist_report(
+                checklist_plan,
+                [
+                    ChecklistSheet(
+                        key=tuple(source_page_key(sd.ref)), ref_key=sheet_ref_key(sd.ref),
+                        label=checklist_sheet_ids.get(sheet_ref_key(sd.ref))
+                        or sd.ref.display_label,
+                    )
+                    for sd in sheets
+                ],
+                checklist_answers,
+                qc.findings,
+            )
+            checklist_stage.items_in = len(checklist_report.rows)
+            checklist_stage.items_out = checklist_report.totals()[CELL_VIOLATED]
+            unanswered = checklist_report.cell_total(CELL_UNANSWERED)
+            not_reviewed = checklist_report.cell_total(CELL_NOT_REVIEWED)
+            if unanswered or not_reviewed:
+                checklist_stage.warnings.append(
+                    f"{unanswered} item-on-sheet check(s) not answered by the "
+                    f"reviewer, {not_reviewed} on sheet(s) with no valid critique read"
+                )
+            checklist_stage.status = "COMPLETE"
+        except Exception as exc:  # noqa: BLE001 - reporting only, never fatal
+            checklist_report = None
+            checklist_stage.status = "FAILED"
+            checklist_stage.errors.append(str(exc))
+            errors.append(f"Checklist results: {exc}")
+            _log.warning("checklist results could not be built: %s", exc)
+    _finish_stage(stage_results, journal, checklist_stage)
+
     # Roll the per-stage outcomes into one overall QC status (§3.3). The
     # completeness gate is open (§18.0): a clean NORMAL exhaustive run is COMPLETE.
     qc_status = roll_up_qc_status(
@@ -4731,6 +4818,7 @@ def extract_drawing_context(
         set_identity=set_identity_obj,
         review_plan_profiles=plan_profiles,
         review_plan_markdown=plan_markdown,
+        checklist_report=checklist_report,
         run_journal=journal,
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,

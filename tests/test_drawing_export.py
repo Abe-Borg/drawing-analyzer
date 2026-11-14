@@ -269,7 +269,7 @@ def test_findings_csv_header_and_row_flattening():
     assert ",r3c4," in row                         # human tile_label column (§17.1)
     # recommended_action precedes the Phase B provenance tail (four cells) and
     # the absence cross-check's three — all empty here.
-    assert row.rstrip().endswith("Verify the clearance on site.,,,,,,,")
+    assert row.rstrip().endswith("Verify the clearance on site.,,,,,,,,")
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id
@@ -298,7 +298,7 @@ def test_findings_csv_provenance_columns_appended_at_tail():
 
     from drawing_analyzer.models import CitationAssessment
 
-    assert dx.FINDINGS_CSV_HEADER[-7:-3] == [
+    assert dx.FINDINGS_CSV_HEADER[-8:-4] == [
         "citation_adopted_edition", "citation_checked_edition",
         "citation_current_edition", "citation_evidence_url",
     ]
@@ -312,9 +312,11 @@ def test_findings_csv_provenance_columns_appended_at_tail():
         CitationAssessment(reference="IMC 403.3", status="CHECKED_SUPPORTS",
                            checked_edition="IMC 2021"),
     ]
+    f.checklist_items = ["U1.3", "M2.1"]
     text = dx.build_findings_csv([f])
     (header, row) = list(_csv.reader(_io.StringIO(text)))[:2]
     cells = dict(zip(header, row))
+    assert cells["checklist_items"] == "U1.3; M2.1"
     assert cells["citation_adopted_edition"] == "NFPA 13 §8.15.1: NFPA 13 2016"
     assert cells["citation_checked_edition"] == (
         "NFPA 13 §8.15.1: NFPA 13 2016; IMC 403.3: IMC 2021"

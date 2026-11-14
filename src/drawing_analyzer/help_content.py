@@ -293,7 +293,17 @@ _HOW_TO_USE = HelpDocument(
                 "Add checklists… — your own QC checklists (.xlsx one item per row, "
                 ".docx, .pdf, .md or .txt). On a QC Markups run the critique applies "
                 "every item explicitly, sheet by sheet, alongside the model's own "
-                "review plan."
+                "review plan, and answers each one: violated, met, not applicable or "
+                "undetermined. Scope… on a loaded checklist limits it to sheets whose "
+                "number starts with the prefixes you type (F, FP, SP); leave it blank "
+                "for every sheet."
+            ),
+            _bullet(
+                "Checklist results appear in the report (the Checklist Results card) "
+                "and in checklist_matrix.csv, one row per item and one column per "
+                "sheet. A violated item points to its numbered finding. \"Reported "
+                "met\" is the reviewer's own statement and is not verified. An item "
+                "the reviewer skipped is shown as Not answered, never as met."
             ),
             _bullet(
                 "Load AHJ Atlas Input… (optional) — an Excel workbook of the code "

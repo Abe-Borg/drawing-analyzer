@@ -500,6 +500,12 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
     for pid in incoming.prose_item_ids:
         if pid not in existing.prose_item_ids:
             existing.prose_item_ids.append(pid)
+    # The checklist items a merged entry reports against are every member's:
+    # which item prompted a finding must survive a merge with a duplicate that
+    # another channel raised unprompted.
+    for item_id in incoming.checklist_items:
+        if item_id not in existing.checklist_items:
+            existing.checklist_items.append(item_id)
     # Keep the strongest self-consistency verdict either member carried (§14.4).
     if _CONFIDENCE_RANK.get(incoming.confidence, 0) > _CONFIDENCE_RANK.get(existing.confidence, 0):
         existing.confidence = incoming.confidence

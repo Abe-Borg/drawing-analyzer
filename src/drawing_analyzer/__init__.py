@@ -34,6 +34,10 @@ Module layout::
                       (text-only; advisory context for the stages below)
     review_planner.py model-authored per-discipline review checklist, injected
                       through the profile machinery (text-only)
+    profiles.py       review checklists: parsing, item ids, per-sheet scoping
+                      (ChecklistPlan) and the injected checklist block
+    checklist_matrix.py  checklist results: per-sheet answers + final findings
+                      -> item x sheet report (pure; no model call)
     ledger.py         the per-run findings ledger every QC channel feeds (Part III)
     auditors/         deterministic zero-API auditors (references, arithmetic,
                       naming, title-block, sheet-index)

@@ -312,6 +312,12 @@ def _index_document(
             if tally:
                 lines.append(f"  - {tally}")
         lines.append("- `findings.json` / `findings.csv` — every finding, all fields")
+        if getattr(ctx, "checklist_report", None):
+            lines.append(
+                "- `checklist_matrix.csv` — every checklist item against every "
+                "sheet: violated (with its QC number), reported met, not "
+                "applicable, or not answered"
+            )
         # Preview the allocator names write_qc_outputs will copy under
         # (DA-033): a hostile or colliding basename is advertised by its
         # on-disk name, not a dead reference. (Pure builder — it cannot stat;
@@ -630,6 +636,15 @@ def build_run_manifest(
             _sanitize_json(ctx.set_identity.to_dict(), roots)
             if getattr(ctx, "set_identity", None) is not None
             and hasattr(ctx.set_identity, "to_dict")
+            else None
+        ),
+        # Checklist results per item (result, per-result sheet counts, the
+        # findings against it); null when no checklist reached the critique.
+        # The per-sheet grid is checklist_matrix.csv. Additive key — schema v1.
+        "checklist": (
+            _sanitize_json(ctx.checklist_report.to_dict(), roots)
+            if getattr(ctx, "checklist_report", None)
+            and hasattr(ctx.checklist_report, "to_dict")
             else None
         ),
         "stages": [
@@ -1026,6 +1041,9 @@ FINDINGS_CSV_HEADER = [
     # was found, and the severity it carried before being lowered — appended so
     # existing column positions are unchanged.
     "located_sheet", "located_quote", "located_lowered_from",
+    # The review-checklist items the finding reports against ("U1.3; M2.7") —
+    # appended so existing column positions are unchanged.
+    "checklist_items",
 ]
 
 
@@ -1140,6 +1158,7 @@ def _finding_row(finding: Any) -> list[str]:
         _excel_safe(_citation_provenance_cell(finding, "current_edition")),
         _excel_safe(_citation_provenance_cell(finding, "evidence_url")),
         *_located_cells(getattr(finding, "located_elsewhere", None)),
+        "; ".join(str(i) for i in (getattr(finding, "checklist_items", None) or [])),
     ]
 
 
@@ -1350,6 +1369,23 @@ def write_qc_outputs(
     )
     write_findings_csv(findings, folder / "findings.csv")
     written += ["findings.json", "findings.csv"]
+
+    # Checklist results: one row per checklist item, one column per sheet.
+    # Written only when a checklist reached the critique. Best-effort like the
+    # evidence copies below: a failure here must not sink the findings above.
+    checklist_report = getattr(ctx, "checklist_report", None)
+    if checklist_report:
+        try:
+            from .checklist_matrix import build_checklist_csv
+
+            with open(folder / "checklist_matrix.csv", "w", encoding="utf-8-sig",
+                      newline="") as fp:
+                fp.write(build_checklist_csv(checklist_report, excel_safe=_excel_safe))
+            written.append("checklist_matrix.csv")
+        except Exception as exc:  # noqa: BLE001 - additive artifact
+            from .diagnostics import get_logger
+
+            get_logger().warning("checklist_matrix.csv could not be written: %s", exc)
 
     if geometries:
         st_dir = folder / "sheet_text"
@@ -1592,6 +1628,9 @@ _EXPORT_FILE_NOTES = {
     "set_identity.json": ("Digests", "Detected project identity and adopted codes"),
     "findings.csv": ("Findings", "Every finding, all fields (opens in Excel)"),
     "findings.json": ("Findings", "Every finding, machine-readable"),
+    "checklist_matrix.csv": (
+        "Findings", "Every checklist item against every sheet (opens in Excel)",
+    ),
     "markup_manifest.json": ("Findings", "Every planned markup and its receipt"),
     "run.log": ("Run record", "Sanitized per-run log"),
     "run_manifest.json": ("Run record", "Machine-readable run summary and file hashes"),

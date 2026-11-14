@@ -112,6 +112,18 @@ def _split_tags(raw: str) -> tuple[str, ...]:
     )
 
 
+def scoped_to(profile: Profile, raw: str) -> Profile:
+    """``profile`` limited to the sheet-number prefixes in ``raw`` (``"F, FP"``).
+
+    A blank ``raw`` clears the scope, so the checklist applies to every sheet.
+    The checklist's content — and so its content hash — is unchanged; which
+    sheets receive it is what moves their critique cache keys.
+    """
+    from dataclasses import replace
+
+    return replace(profile, disciplines=_split_tags(raw))
+
+
 def parse_profile(text: str, *, source_path: Any = None, fallback_name: str = "profile") -> Profile:
     """Parse a profile's Markdown source into a :class:`Profile`.
 
@@ -513,31 +525,285 @@ def snapshot_profiles(profiles: Iterable[Profile]) -> list:
 # --------------------------------------------------------------------------- #
 
 
-def profiles_cache_fragment(profiles: list[Profile]) -> str | None:
-    """The critique-cache-key component for a set of profiles (``None`` if empty).
+MODEL_PLAN_PREFIX = "model-plan-"
+"""Name prefix of the profiles the review planner authors (``source="model"``)."""
 
-    A hash of the **exact checklist text that will be injected** (the same string
-    :func:`build_checklist_prompt` builds), so the key can never collide across
-    *different* checklists — reordered profiles (whose prompt item-order differs),
-    or caller-built :class:`Profile` objects whose ``content_hash`` was left at its
-    default empty value while their ``items`` differ, both change the text and thus
-    the key. Any item edit re-critiques. ``None`` when there is no checklist to
-    inject (no profiles, or profiles with no items) — so the critique key stays
-    byte-identical to a pre-profiles one and existing cache entries remain valid.
+_GENERAL_DISCIPLINE = "general"
+
+
+def is_model_plan(profile: Profile) -> bool:
+    """Whether ``profile`` was authored by the review planner, not a person."""
+    return str(profile.name).startswith(MODEL_PLAN_PREFIX)
+
+
+@dataclass(frozen=True)
+class ChecklistItem:
+    """One checklist line with the id the reviewer answers it by.
+
+    Ids are assigned over the **whole** selection (``U1.3`` = the third item of
+    the first user checklist, ``M2.7`` = the seventh of the second model plan),
+    never per sheet, so an item keeps one id on every sheet it is applied to and
+    scoping a checklist to a discipline cannot renumber another checklist.
     """
-    text = build_checklist_prompt(flatten_items(profiles or []))
-    if not text:
-        return None
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    id: str
+    text: str
+    profile: str          # the owning profile's ``name``
+    title: str            # the owning profile's ``title``
+    origin: str           # "user" | "model"
+    number: int           # 1-based position within its profile
+
+
+def checklist_items(profiles: Iterable[Profile]) -> list[ChecklistItem]:
+    """Every non-blank item across ``profiles``, in order, with its id."""
+    out: list[ChecklistItem] = []
+    counters = {"user": 0, "model": 0}
+    for profile in profiles or []:
+        origin = "model" if is_model_plan(profile) else "user"
+        counters[origin] += 1
+        prefix = f"{'M' if origin == 'model' else 'U'}{counters[origin]}"
+        number = 0
+        for raw in profile.items:
+            text = (raw or "").strip()
+            if not text:
+                continue
+            number += 1
+            out.append(ChecklistItem(
+                id=f"{prefix}.{number}", text=text, profile=profile.name,
+                title=profile.title, origin=origin, number=number,
+            ))
+    return out
+
+
+_ITEM_ID_RE = re.compile(r"^[UM]\d{1,3}\.\d{1,4}$")
+
+
+def normalize_item_id(raw: Any) -> str:
+    """A model-reported item id in canonical form (``""`` when it is not one).
+
+    Tolerates the brackets the checklist block prints around an id, stray
+    whitespace and lower case; anything else is not an id and is dropped by the
+    caller rather than guessed at.
+    """
+    text = str(raw or "").strip().strip("[]").strip().upper()
+    return text if _ITEM_ID_RE.match(text) else ""
+
+
+@dataclass(frozen=True)
+class SheetScope:
+    """What is known about one sheet's discipline (either field may be ``""``).
+
+    ``token`` is the discipline prefix of the sheet's own number (``FP-101`` →
+    ``"fp"``), which a person's checklist is scoped by. ``discipline`` is the
+    slug of the discipline the set-identity stage classified the sheet under
+    (``"fire-protection"``), which a model-authored plan is scoped by.
+    """
+
+    token: str = ""
+    discipline: str = ""
+
+
+def discipline_slug(name: Any) -> str:
+    """The slug a discipline name is compared by (``"Fire Protection"`` →
+    ``"fire-protection"``); the review planner names its plans the same way."""
+    return re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")
+
+
+def profile_applies(
+    profile: Profile, scope: SheetScope | None, *, model_slugs: frozenset = frozenset()
+) -> bool:
+    """Whether ``profile``'s items are applied to a sheet with ``scope``.
+
+    Scoping only ever *narrows on evidence* and fails open everywhere else: a
+    profile with no discipline tags, a sheet whose discipline is unknown, and a
+    sheet classified under a discipline no model plan was written for all get
+    the profile. A wrong guess must cost attention, never a skipped check.
+    """
+    tags = profile.disciplines
+    if scope is None or not tags:
+        return True
+    if is_model_plan(profile):
+        if not scope.discipline or scope.discipline not in model_slugs:
+            return True
+        return scope.discipline in tags or _GENERAL_DISCIPLINE in tags
+    if not scope.token:
+        return True
+    return scope.token in tags
 
 
 _CHECKLIST_HEADER = (
     "APPLY THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM, in addition to your "
-    "own judgment. Treat each item as a check to run against this sheet: report a "
-    "finding when the item is violated (or, for an item about required content, "
-    "when that content is absent), and move on otherwise. Do not restate the "
-    "checklist or report an item that passes."
+    "own judgment. Each item below starts with its id in square brackets. Treat "
+    "each item as a check to run against this sheet: report a finding when the "
+    "item is violated (or, for an item about required content, when that content "
+    "is absent), and give that finding a checklist_items array holding the id of "
+    "every item it reports against. A finding that comes from your own judgment "
+    "carries no checklist_items. Do not write a finding for an item that is met "
+    "or does not apply.\n\n"
+    "Then account for EVERY item. In the same JSON object as the findings "
+    "described below, add \"checklist\": {\"violated\": [...], \"met\": [...], "
+    "\"not_applicable\": [...], \"undetermined\": [...]} and place each item id "
+    "in exactly one list: violated - you reported a finding against it; met - "
+    "the sheet shows what the item concerns and you confirmed it complies; "
+    "not_applicable - the sheet does not show what the item concerns; "
+    "undetermined - the sheet shows what the item concerns but this sheet alone "
+    "cannot settle it. Never list an item as met without having looked for it."
 )
+
+
+def render_checklist_block(items: Iterable[ChecklistItem]) -> str:
+    """The checklist block appended to the critique prompt (``""`` if no items)."""
+    kept = [it for it in items if it.text]
+    if not kept:
+        return ""
+    body = "\n".join(f"- [{it.id}] {it.text}" for it in kept)
+    return "\n\n" + _CHECKLIST_HEADER + "\n\n" + body
+
+
+@dataclass(frozen=True)
+class SheetChecklist:
+    """The checklist one sheet's critique reads receive (possibly empty)."""
+
+    items: tuple[ChecklistItem, ...] = ()
+
+    @property
+    def prompt(self) -> str:
+        return render_checklist_block(self.items)
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return tuple(it.id for it in self.items)
+
+    @property
+    def key(self) -> str | None:
+        """The critique-cache-key component: a hash of the **exact text
+        injected**, ``None`` when nothing is. Any edit to an item, the item
+        order, the ids or the instructions above moves it; an empty checklist
+        leaves the critique key byte-identical to a no-checklist one."""
+        text = self.prompt
+        if not text:
+            return None
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+class ChecklistPlan:
+    """The run's whole checklist plus which part of it each sheet receives.
+
+    Built once per run. ``scopes`` maps a sheet's ``models.sheet_ref_key`` to
+    its :class:`SheetScope`; a sheet with no entry is unscoped and receives
+    every item. Each sheet's cache key is derived from its own injected block,
+    so editing a fire-protection checklist re-critiques only the sheets that
+    received it.
+    """
+
+    def __init__(self, profiles: Iterable[Profile] | None = None, scopes: Any = None):
+        self.profiles: list[Profile] = list(profiles or [])
+        self.items: list[ChecklistItem] = checklist_items(self.profiles)
+        self._scopes: dict = dict(scopes or {})
+        self._model_slugs = frozenset(
+            tag for p in self.profiles if is_model_plan(p) for tag in p.disciplines
+        )
+        by_profile: dict[str, list[ChecklistItem]] = {}
+        for item in self.items:
+            by_profile.setdefault(item.profile, []).append(item)
+        self._by_profile = by_profile
+        self._memo: dict = {}
+
+    def __bool__(self) -> bool:
+        return bool(self.items)
+
+    @property
+    def scoped(self) -> bool:
+        return bool(self._scopes)
+
+    def for_scope(self, scope: SheetScope | None) -> SheetChecklist:
+        if scope not in self._memo:
+            seen: set[str] = set()
+            items: list[ChecklistItem] = []
+            for profile in self.profiles:
+                # Two profiles sharing a name share their items' ids' owner;
+                # each is still emitted once, in selection order.
+                if profile.name in seen:
+                    continue
+                seen.add(profile.name)
+                if profile_applies(profile, scope, model_slugs=self._model_slugs):
+                    items.extend(self._by_profile.get(profile.name, ()))
+            self._memo[scope] = SheetChecklist(tuple(items))
+        return self._memo[scope]
+
+    def for_key(self, key: Any) -> SheetChecklist:
+        return self.for_scope(self._scopes.get(key))
+
+    def for_ref(self, ref: Any) -> SheetChecklist:
+        from .models import sheet_ref_key
+
+        return self.for_key(sheet_ref_key(ref))
+
+
+def build_sheet_scopes(geometries: Iterable[Any], identity: Any = None) -> tuple[dict, dict]:
+    """``(scopes, sheet_ids)`` for a run, both keyed by ``models.sheet_ref_key``.
+
+    ``scopes`` is what :class:`ChecklistPlan` narrows by; ``sheet_ids`` is each
+    sheet's own title-block number where one was found, for labelling results.
+    A sheet's number prefix comes from the shared title-block detector (text
+    only, deterministic). Its discipline comes from the set-identity stage's
+    ``sheet_disciplines``, matched on the sheet number or the display label —
+    whichever of the two the identity used to name the sheet. Anything that
+    cannot be established is left ``""``, which never narrows.
+    """
+    from .auditors.references import detect_sheet_id
+    from .auditors.sheet_ids import discipline_token, normalize_sheet_id
+    from .models import sheet_ref_key
+
+    classified: dict[str, str] = {}
+    for pair in getattr(identity, "sheet_disciplines", None) or ():
+        try:
+            named, discipline = pair
+        except (TypeError, ValueError):
+            continue
+        slug = discipline_slug(discipline)
+        if not slug:
+            continue
+        for form in (normalize_sheet_id(named), str(named or "").strip().casefold()):
+            if form:
+                # Two entries naming one sheet differently is a contradiction
+                # the identity cannot settle; that sheet stays unclassified.
+                classified[form] = slug if classified.get(form, slug) == slug else ""
+
+    scopes: dict = {}
+    sheet_ids: dict = {}
+    for geom in geometries or []:
+        ref = getattr(geom, "ref", None)
+        if ref is None:
+            continue
+        try:
+            sheet_id = detect_sheet_id(geom) or ""
+        except Exception:  # noqa: BLE001 - an unreadable page is simply unscoped
+            sheet_id = ""
+        label = str(getattr(ref, "display_label", "") or "")
+        discipline = ""
+        for form in (normalize_sheet_id(sheet_id), sheet_id.casefold(), label.casefold()):
+            if form and classified.get(form):
+                discipline = classified[form]
+                break
+        key = sheet_ref_key(ref)
+        scopes[key] = SheetScope(
+            token=discipline_token(sheet_id) if sheet_id else "", discipline=discipline,
+        )
+        if sheet_id:
+            sheet_ids[key] = sheet_id
+    return scopes, sheet_ids
+
+
+def profiles_cache_fragment(profiles: list[Profile]) -> str | None:
+    """The critique-cache-key component for an **unscoped** set of profiles.
+
+    ``None`` when there is no checklist to inject (no profiles, or profiles
+    with no items), so the critique key stays byte-identical to a no-profiles
+    one. A run that scopes checklists per sheet uses
+    :attr:`SheetChecklist.key` for each sheet instead.
+    """
+    return ChecklistPlan(profiles or []).for_scope(None).key
 
 
 def flatten_items(profiles: Iterable[Profile]) -> list[str]:
@@ -546,12 +812,14 @@ def flatten_items(profiles: Iterable[Profile]) -> list[str]:
 
 
 def build_checklist_prompt(items: Iterable[str]) -> str:
-    """The checklist block appended to the critique prompt (``""`` if no items)."""
-    kept = [it.strip() for it in items if it and it.strip()]
-    if not kept:
-        return ""
-    body = "\n".join(f"- {it}" for it in kept)
-    return "\n\n" + _CHECKLIST_HEADER + "\n\n" + body
+    """The checklist block for a bare list of item strings (``""`` if none).
+
+    The strings are numbered as one user checklist. Callers that hold profiles
+    use :class:`ChecklistPlan`, which numbers across all of them.
+    """
+    return ChecklistPlan(
+        [Profile(name="checklist", title="checklist", items=tuple(items))]
+    ).for_scope(None).prompt
 
 
 def chunk_items(items: list[str], n: int) -> list[list[str]]:

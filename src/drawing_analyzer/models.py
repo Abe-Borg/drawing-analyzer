@@ -67,6 +67,12 @@ def record_name(candidate: str, used: "set[str]") -> None:
     used.add(candidate.casefold())
 
 
+def sheet_ref_key(ref: Any) -> tuple[str, int]:
+    """Full sheet identity (PDF path + page) for a ref that may not carry a
+    ``source_id`` yet — the key the level-1 scans and the checklist plan share."""
+    return (str(getattr(ref, "pdf_path", "")), int(getattr(ref, "page_index", 0) or 0))
+
+
 def source_page_key(obj: Any) -> tuple[str, int]:
     """The collision-safe ``(source, page_index)`` key for any source-scoped object.
 
@@ -790,6 +796,31 @@ SOURCE_TAGS = frozenset({
 #                          could not be assessed (never silently "reproduced").
 #   NOT_APPLICABLE       — self-consistency did not apply (single-read mode, or a
 #                          non-critique channel: digest / auditors / prose).
+# How one critique read answered one checklist item on one sheet. Ordered by
+# which answer wins when a sheet's reads disagree: a violation is never hidden
+# by another read calling the item met, and "met" is never claimed for an item
+# a read could not settle.
+CHECK_VIOLATED = "VIOLATED"
+CHECK_UNDETERMINED = "UNDETERMINED"
+CHECK_MET = "MET"
+CHECK_NOT_APPLICABLE = "NOT_APPLICABLE"
+CHECK_UNANSWERED = "UNANSWERED"
+CHECK_READ_PRECEDENCE = (
+    CHECK_VIOLATED, CHECK_UNDETERMINED, CHECK_MET, CHECK_NOT_APPLICABLE,
+    CHECK_UNANSWERED,
+)
+
+
+def merged_check_status(read_statuses: "Iterable[str]") -> str:
+    """One sheet's answer to an item from its reads' answers (see the
+    precedence above). No answering read at all is ``UNANSWERED``."""
+    seen = set(read_statuses or ())
+    for status in CHECK_READ_PRECEDENCE:
+        if status in seen:
+            return status
+    return CHECK_UNANSWERED
+
+
 CONFIDENCE_REPRODUCED = "REPRODUCED"
 CONFIDENCE_SINGLETON = "SINGLETON"
 CONFIDENCE_NOT_ASSESSED_PARTIAL = "NOT_ASSESSED_PARTIAL"
@@ -1317,6 +1348,12 @@ class Finding:
     # merge so the harvest's expected-vs-accounted reconciliation can prove every
     # item survived. Empty for non-prose findings.
     prose_item_ids: list[str] = field(default_factory=list)
+    # Ids of the review-checklist items this finding reports against (``U1.3``,
+    # ``M2.7`` — :class:`drawing_analyzer.profiles.ChecklistItem`). Set by the
+    # critique from the model's reply, validated against the items that sheet
+    # was actually given, and unioned on merge. Empty for a finding that came
+    # from the reviewer's own judgment or from any other channel.
+    checklist_items: list[str] = field(default_factory=list)
     id: str = ""
     # WP-03B §8.3: how this finding's own quote fared against host-side text.
     # "" = not assessed (older payload, or a channel that does not classify).
@@ -1376,6 +1413,10 @@ class Finding:
             out["citation"] = self.citation.to_dict()
         if self.located_elsewhere is not None:
             out["located_elsewhere"] = self.located_elsewhere.to_dict()
+        # Written only when set, so a digest finding's stored form (and every
+        # cache entry that predates checklists ids) is unchanged.
+        if self.checklist_items:
+            out["checklist_items"] = list(self.checklist_items)
         return out
 
     @classmethod
@@ -1405,6 +1446,7 @@ class Finding:
             sources=[str(s) for s in (d.get("sources") or [])],
             supporting_quotes=[str(q) for q in (d.get("supporting_quotes") or [])],
             prose_item_ids=[str(p) for p in (d.get("prose_item_ids") or [])],
+            checklist_items=[str(c) for c in (d.get("checklist_items") or [])],
             evidence_state=str(d.get("evidence_state", "") or ""),
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),

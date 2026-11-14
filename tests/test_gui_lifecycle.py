@@ -685,6 +685,11 @@ def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
         app._specs_text, app._context_text = "SPEC TEXT", "BASIS OF DESIGN"
         checklist = Profile(name="upload:fp.xlsx", title="fp.xlsx", items=("Check FDC",))
         app._checklists = [checklist]
+        # Scope… narrows the loaded checklist to sheet-number prefixes.
+        app._refresh_summary = lambda: None
+        app._set_checklist_scope = types.MethodType(
+            gui.DrawingAnalyzerApp._set_checklist_scope, app)
+        app._set_checklist_scope(checklist, "FP, F")
         codes, _ = parse_governing_editions("NFPA 13 2025; IBC 2024")
         app._atlas_choice = AtlasJurisdiction(
             name="Loudoun County, VA", entries=("NFPA 13 2025", "IBC 2024"), codes=codes,
@@ -702,7 +707,9 @@ def test_analyze_hands_every_loaded_input_to_the_run(tmp_path, monkeypatch):
          monitor, spend) = args
     assert monitor is live_monitor                 # the board watches this run
     assert pdfs == [pdf] and specs == "SPEC TEXT" and context == "BASIS OF DESIGN"
-    assert checklist in profiles
+    # The run gets the scoped checklist: same items, limited to FP/F sheets.
+    (sent,) = [p for p in profiles if getattr(p, "name", "") == "upload:fp.xlsx"]
+    assert sent.items == checklist.items and sent.disciplines == ("fp", "f")
     assert governing == ["NFPA 13 2025", "IBC 2024"]
     assert (use_batch, critique_batch, fast_mode, save_tiles) == (False, False, True, True)
     # The run's monitor carries the typed cap and starts from the quoted estimate.

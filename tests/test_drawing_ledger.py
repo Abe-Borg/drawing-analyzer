@@ -57,9 +57,15 @@ def test_ledger_merges_duplicates_and_unions_sources():
     # The critique restates the same issue with a longer quote and higher severity.
     dup = _f("VAV-3 has no clearance to the wall", quote="VAV-3 SERVES ROOM 120",
              sev="high", sources=["critique_1", "critique_2"])
+    dup.checklist_items = ["U1.3"]
     ledger.add([dup])
     assert len(ledger) == 1
     entry = ledger.entries[0]
+    # The checklist item that prompted the critique's copy survives the merge
+    # with the digest's unprompted one, and a cache round trip.
+    assert entry.checklist_items == ["U1.3"]
+    assert Finding.from_dict(entry.to_dict()).checklist_items == ["U1.3"]
+    assert "checklist_items" not in _f("no item").to_dict()
     assert entry.sources == ["digest_json", "critique_1", "critique_2"]
     assert entry.severity == "high"                       # most severe wins
     assert entry.source_quote == "VAV-3 SERVES ROOM 120"  # longest quote wins
