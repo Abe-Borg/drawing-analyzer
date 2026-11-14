@@ -470,15 +470,21 @@ def _quoted(state: str) -> Finding:
 def test_markup_says_why_it_could_not_be_checked():
     from drawing_analyzer.annotate import _annot_content
 
-    content = _annot_content(_quoted(EVIDENCE_UNAVAILABLE), unverified=True, place="SHEET")
-    assert "[NO TEXT TO CHECK]" in content
-    assert "No searchable text on this sheet" in content
-    assert "confirm it visually" in content       # nothing was checked, said plainly
-    assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
+    # A callout box is read on the sheet: one plain lead-in, then the reason
+    # in a sentence. A cloud's popup carries the bracket tag instead.
+    for content, lead in (
+        (_annot_content(_quoted(EVIDENCE_UNAVAILABLE), unverified=True, place="SHEET"), "VERIFY"),
+        (_annot_content(_quoted(EVIDENCE_UNAVAILABLE), unverified=True), "[CHECK] [NO TEXT TO CHECK]"),
+    ):
+        assert content.startswith(lead)
+        assert "No searchable text on this sheet" in content
+        assert "confirm it visually" in content       # nothing was checked, said plainly
+        assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
     # A text-grounded finding's markup is unchanged.
-    grounded = _annot_content(_quoted(EVIDENCE_TEXT_GROUNDED), unverified=True, place="SHEET")
-    assert "[NO TEXT TO CHECK]" not in grounded
-    assert "No searchable text" not in grounded
+    for place in ("SHEET", ""):
+        grounded = _annot_content(_quoted(EVIDENCE_TEXT_GROUNDED), unverified=True, place=place)
+        assert "[NO TEXT TO CHECK]" not in grounded
+        assert "No searchable text" not in grounded
 
 
 def test_report_flags_a_reduced_trust_quote():
@@ -507,12 +513,14 @@ def test_the_reviewer_is_never_told_a_text_bearing_sheet_has_no_text():
     no_quote = Finding(sheet_id="M-1", source_name="hybrid.pdf", page_index=0,
                        category="conflict", severity="high", text="valves disagree",
                        source_quote="", evidence_state=EVIDENCE_UNAVAILABLE)
-    content = _annot_content(no_quote, unverified=True, place="SHEET")
-    assert "No searchable text" not in content
-    assert "gave no quote" in content
-    assert "[NO QUOTE TO CHECK]" in content
-    assert "confirm it visually" in content       # still says nothing was checked
-    assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
+    for place in ("SHEET", ""):                   # the callout box, the cloud popup
+        content = _annot_content(no_quote, unverified=True, place=place)
+        assert "No searchable text" not in content
+        assert "[NO TEXT TO CHECK]" not in content
+        assert "gave no quote" in content
+        assert "confirm it visually" in content   # still says nothing was checked
+        assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
+    assert "[NO QUOTE TO CHECK]" in content       # the popup's own tag
 
     row = _finding_row_html(no_quote, None, link_evidence=False)
     assert "No searchable text" not in row

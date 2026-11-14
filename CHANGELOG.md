@@ -22,6 +22,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under Review profiles. It is ticked when it fits the loaded set, or when the
   run ends if you saved during one. Saving is local and makes no API call.
 
+### Changed
+
+- **The reviewed PDF's cover page is a to-do list.** It now has three columns:
+  ID, Sheet and What to do (the recommended action, then the finding). Severity
+  is the color of the ID. The status column is gone; a finding that was not
+  confirmed starts with `VERIFY:` and a confirmed one carries nothing. A code
+  finding stays `VERIFY:` until the citation check supports its reference.
+- **Findings the re-check ruled out leave the reviewed PDF.** They get no
+  markup, no cover row and no bookmark, and stay in `findings.csv`,
+  `findings.json` and the HTML report. The cover page ends with one line naming
+  the QC numbers that are missing for that reason. A drawing whose only
+  findings were ruled out gets no reviewed copy. *Include rejected (grey)*
+  still draws them, and lists them under *Ruled out*.
+- **Plain words on the sheet.** A callout box leads with `VERIFY:`,
+  `WHOLE SHEET:` or `VERIFY (whole sheet):` instead of bracket tags, and the
+  "Not inked by operator gate" heading (shown only with *Verified &
+  deterministic only*) reads "Not marked on the sheets". Markup comments in the
+  Markups List are unchanged.
+
 ### Fixed
 
 - **The window no longer lags while the Live view animates.** When a read
@@ -36,6 +55,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   On a 300-sheet board in development testing, CPU use fell from about 18%
   to about 14% of one core, and the slowest 5% of input waits fell from about
   14 ms to about 9 ms.
+
+- **Links zoom to the markup.** A cover-page row, a bookmark or a link on the
+  AI Review Notes page used to put the markup's corner at the top-left of the
+  window at whatever zoom you had. Each now opens a view centered on the
+  markup with about ten by seven inches of sheet around it. This uses a
+  rectangle target (`/FitR`), confirmed to work in Bluebeam Revu.
 
 ## [1.15.0] - 2026-11-13
 

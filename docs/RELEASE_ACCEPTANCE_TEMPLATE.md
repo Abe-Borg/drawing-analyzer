@@ -66,7 +66,7 @@ In **Bluebeam Revu**:
 - [ ] Author, subject, contents (severity, quote, verification status, citation notes, provenance, evidence references) survive in the popup.
 - [ ] Exact anchors sit on the intended text — including the rotated (90/180/270), cropped, and repeated-text sheets from the oracle set.
 - [ ] Every cross-sheet leg appears only on its intended source; the duplicate-basename pair shows zero cross-contamination.
-- [ ] Rejected findings appear in the index section, not inked (unless the grey opt-in was used); UNCERTAIN styling is visually distinct.
+- [ ] Rejected findings are absent from the reviewed PDF (no ink, no cover row, no bookmark) and present in `findings.csv` and the HTML report; with the grey opt-in they are inked grey and listed under *Ruled out*. UNCERTAIN styling is visually distinct.
 - [ ] Index rows and review-notes GOTO links navigate to the right page/region.
 - [ ] Pre-existing (non-analyzer) annotations remain unchanged.
 - [ ] Unicode content displays correctly.

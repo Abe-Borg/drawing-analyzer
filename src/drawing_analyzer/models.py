@@ -1574,9 +1574,16 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
 # --------------------------------------------------------------------------- #
 
 # What a planned placement is expected to become in the saved artifact.
-PLACEMENT_KINDS = ("CLOUD", "MARGIN", "REVIEW_NOTES", "REJECTED_INDEX", "GATED_INDEX")
-# The terminal outcome of one placement, read back from the saved artifact.
-RECEIPT_STATUSES = ("WRITTEN", "INDEXED", "FAILED")
+# ``REPORT_ONLY`` is a finding the verifier ruled out: by design it gets no mark
+# and no row in the reviewed PDF (a ruled-out finding on an issued drawing is
+# noise to the engineer reading it) and is kept in ``findings.csv`` and the HTML
+# report instead. It is still a planned placement with a terminal receipt, so
+# every ledger entry stays accounted for.
+PLACEMENT_KINDS = ("CLOUD", "MARGIN", "REVIEW_NOTES", "REPORT_ONLY", "GATED_INDEX")
+# The terminal outcome of one placement. ``WRITTEN`` / ``INDEXED`` are read back
+# from the saved artifact; ``REPORTED`` is the ``REPORT_ONLY`` outcome and proves
+# nothing about the PDF, because nothing was planned for it there.
+RECEIPT_STATUSES = ("WRITTEN", "INDEXED", "REPORTED", "FAILED")
 # A whole run's placement coverage over the ledger.
 COVERAGE_STATUSES = ("NOT_REQUESTED", "COMPLETE", "INCOMPLETE")
 
@@ -1607,7 +1614,7 @@ REQUIRED_COMPONENTS = {
     "CLOUD": ("cloud",),
     "MARGIN": ("callout",),
     "REVIEW_NOTES": ("callout",),
-    "REJECTED_INDEX": ("index_row",),
+    "REPORT_ONLY": (),
     "GATED_INDEX": ("index_row",),
 }
 # Component kinds that are real annotation objects (i.e. "ink"); ``index_row`` is
@@ -1683,8 +1690,9 @@ class MarkupPlacement:
 class MarkupReceipt:
     """The proven outcome of one placement, read back from the saved artifact (§6.4).
 
-    ``WRITTEN`` (ink) / ``INDEXED`` (a generated index/review-notes row) are the
-    two success states; ``FAILED`` carries a sanitized ``error``. ``output_pdf``
+    ``WRITTEN`` (ink) / ``INDEXED`` (a generated index/review-notes row) /
+    ``REPORTED`` (a ruled-out finding kept out of the PDF by design) are the
+    success states; ``FAILED`` carries a sanitized ``error``. ``output_pdf``
     is a **basename only** (no absolute path — the manifest is portable).
     ``annotation_refs`` list the concrete components found again in the reopened
     file as ``"{component}:{xref}"``; ``index_entry_ref`` names the index row's
@@ -1692,7 +1700,7 @@ class MarkupReceipt:
     """
 
     placement: MarkupPlacement
-    status: str                          # WRITTEN | INDEXED | FAILED
+    status: str                          # WRITTEN | INDEXED | REPORTED | FAILED
     output_pdf: str = ""
     output_page_index: int | None = None
     annotation_refs: list[str] = field(default_factory=list)
@@ -1701,7 +1709,7 @@ class MarkupReceipt:
 
     @property
     def ok(self) -> bool:
-        return self.status in ("WRITTEN", "INDEXED")
+        return self.status in ("WRITTEN", "INDEXED", "REPORTED")
 
     def to_dict(self) -> dict:
         return {

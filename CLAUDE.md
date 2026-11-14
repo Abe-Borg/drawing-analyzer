@@ -789,7 +789,19 @@ consume ledger entries and nothing else.
   The prompt-cache split rides `_CheckOutcome` → `CitationCheckResult` → the
   ledger, including `pause_turn` resumes and error or still-paused exits.
   `digest._message_cache_usage` is the shared dict-tolerant reader.
-  `annotate.py` inks every entry except REJECTED/gated (those get index rows).
+  `annotate.py` inks every entry except REJECTED/gated. A gated entry gets an
+  index row; a REJECTED one is `REPORT_ONLY` — nothing in the PDF (no ink, no
+  cover row, no bookmark), receipt `REPORTED`, and a source with nothing else
+  gets no reviewed copy. `ink_rejected` draws it grey and lists it under
+  *Ruled out* instead.
+  **Text an engineer reads at a glance carries one signal.** The cover page is
+  ID / Sheet / What to do (`_what_to_do`: action, then finding; severity is the
+  ID's color) and a callout box leads with `_callout_prefix`; both say
+  `VERIFY:` exactly when `_needs_verify` is true and nothing when it is not.
+  Do not add status words, bracket tags or pipeline terms to either: the
+  bracket tags (`[CHECK]`, `[NO TEXT TO CHECK]`, …) belong to a cloud's popup
+  comment only. The cover's last line (`_omitted_note`) names QC numbers that
+  are missing because they were ruled out.
   Rect-less entries become margin callouts packed into visually clear bands
   (validated against words, a rendered occupancy mask, and siblings);
   overflow goes to an appended *AI Review Notes* page (`REVIEW_NOTES`) with a
@@ -798,12 +810,15 @@ consume ledger entries and nothing else.
   returns `NO_QUOTE` for a quote-less finding. `_clear_bands` gates the
   **padded** band and is column-aware. `_fit_text` / `_base14_safe` fit by
   measured width and fold glyphs Base-14 cannot draw. Return a
-  `MarkupRunResult` (`WRITTEN` / `INDEXED` / `FAILED`) whose receipts derive
+  `MarkupRunResult` (`WRITTEN` / `INDEXED` / `REPORTED` / `FAILED`) whose receipts derive
   `coverage_status`. Place finding annotations on per-severity optional-content
   layers (`QC markups - High/Medium/Low severity`), only for tiers with ink, in
   high→medium→low order; the `/OC` reference is independent of the placement
-  stamp. GOTO destinations, CropBox, and occupancy sampling are in the PyMuPDF
-  gotchas. `export.py` writes `markup_manifest.json`; `html_report.py` renders
+  stamp. Every link and bookmark is a `/FitR` destination built by `_mark_dest`
+  (the drawn mark's own `/Rect`, else the anchor rect, else `/Fit`), padded and
+  grown to a minimum view by `_zoom_box`; `_annotate_units` hands the index and
+  the outline `marks` (placement id → page, xref). GOTO destinations, CropBox,
+  and occupancy sampling are in the PyMuPDF gotchas. `export.py` writes `markup_manifest.json`; `html_report.py` renders
   the report. Opt-in `save_tile_artifacts` (`DRAWING_ANALYZER_SAVE_TILES`,
   `tile_artifacts.py`; the GUI's *Save tile images* checkbox under *Open
   Diagnostics Log*, seeded from the env var, passes it explicitly) bypasses the level-1 render skip so tiles exist on warm
@@ -826,7 +841,9 @@ consume ledger entries and nothing else.
   distinct from `UNVERIFIED` / *Not checked*. `_STATUS_RANK` stays
   integer-valued. A `VERIFIED` code finding is worded as a confirmed drawing
   fact (`models.verified_drawing_fact_only`, the one rule the report chip and
-  `annotate`'s popup and index share); its stored status stays `VERIFIED`. Repeated quotes collapse in the browser only
+  `annotate`'s popup share, and the reason the cover page marks such a finding
+  `VERIFY:` until its citation is `CHECKED_SUPPORTS`); its stored status stays
+  `VERIFIED`. Repeated quotes collapse in the browser only
   (`data-repeat-key` is a sha256 of the normalized quote, never the quote text);
   grouping recomputes after every sort or filter. Journal timestamps render
   through `_local_stamp`. The chat widget wraps the report in a byte-stable
@@ -932,7 +949,9 @@ consume ledger entries and nothing else.
 - **Ledger coverage is artifact-backed:** on markup runs every ledger entry and
   cross-sheet leg becomes a planned `MarkupPlacement`. The writer stamps each
   drawn mark, reopens the saved PDF, and reconciles to one `MarkupReceipt`
-  (`WRITTEN` / `INDEXED` / `FAILED`) per placement. `coverage_status` comes from
+  (`WRITTEN` / `INDEXED` / `REPORTED` / `FAILED`) per placement. `REPORTED` is
+  the `REPORT_ONLY` outcome (a ruled-out finding): nothing was planned for the
+  PDF, so it is the one success that is not read back from it. `coverage_status` comes from
   those receipts, never from `ink_disposition`. A placement counts only when its
   stamped mandatory component is found again; missing, failed, duplicate, or
   unexpected → `INCOMPLETE`. Stamps embed a per-run id, so prior-run annotations
@@ -1005,12 +1024,21 @@ consume ledger entries and nothing else.
   text.
 - PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
   the API calls.
-- **A GOTO destination is a third coordinate space.** `/XYZ` is default user
-  space; `add_*_annot()` and `insert_text()` take the un-rotated CropBox-relative
-  space. `Page.insert_link` maps `to` through `~page.transformation_matrix`;
-  `Document.set_toc` does `y = cropbox.height - y` then `* page.rotation_matrix`.
-  Never share one helper between them. `_derotate_point` is annotation space and
-  is wrong for a destination. Ground truth is an annotation's raw `/Rect`.
+- **A GOTO destination is a third coordinate space.** A destination is default
+  user space; `add_*_annot()` and `insert_text()` take the un-rotated
+  CropBox-relative space. `_derotate_point` / `_derotate_rect` are annotation
+  space and are wrong for a destination; `_view_rect_to_user` is the conversion.
+  Ground truth is an annotation's raw `/Rect`, which is why a link to a drawn
+  mark reads that `/Rect` back instead of converting anything.
+- **PyMuPDF only writes `/XYZ` destinations**, through `insert_link` and
+  `set_toc` alike, and each applies its own transform to the point. The writer
+  creates the object with a plain page jump and replaces `/A` with a `/FitR`
+  action (`_insert_goto_link`; the outline items via `get_outline_xrefs()`).
+  `Page.get_links()` does not report a link inserted earlier in the same
+  session — find it by diffing `/Annots`. `get_links()` / `get_toc()` read a
+  `/FitR` back as a page jump to `Point(0, 0)`, so tests read destinations raw
+  (`tests/fixtures/pdf_links.py`); `get_toc(simple=False)` → `set_toc` therefore
+  flattens any `/Fit*` bookmark the source already had to a page-top `/XYZ`.
 - **`page.cropbox` is top-left; `page.mediabox` is the raw box.** `page.cropbox`
   is in PyMuPDF's top-left convention; `page.mediabox` comes back un-normalized
   in PDF bottom-left. `mediabox.y1 - cropbox.y0` is the CropBox's top edge in

@@ -825,8 +825,9 @@ _WHY_TRUST_IT = HelpDocument(
             ),
             _bullet(
                 "CONFIRMED → VERIFIED (solid cloud). CONTRADICTED → REJECTED "
-                "(pulled from the ink, but kept in an index row). NOT_VISIBLE → "
-                "UNCERTAIN (drawn dashed with an [UNVERIFIED] prefix)."
+                "(kept out of the reviewed PDF; listed in the CSV and the HTML "
+                "report). NOT_VISIBLE → UNCERTAIN (drawn dashed, and marked VERIFY "
+                "on the cover page)."
             ),
             _bullet(
                 "A budget cap or a garbled reply can never mark a finding wrong — it stays "
@@ -844,9 +845,10 @@ _WHY_TRUST_IT = HelpDocument(
             "Nothing is silently dropped",
             _para(
                 "On a QC Markups run every ledger entry gets ink except the ones the "
-                "verifier proved wrong — and even those get a reconciled index row with "
-                "page links. A finding is either on the paper or accounted for in the "
-                "index; it is never simply invisible."
+                "verifier proved wrong. Those are kept out of the reviewed PDF, so the "
+                "drawing shows only open items, and stay in findings.csv and the HTML "
+                "report. A finding is either on the paper or in the report; it is "
+                "never simply invisible."
             ),
         ),
         _section(

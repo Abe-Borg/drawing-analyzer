@@ -572,19 +572,14 @@ def test_set_review_notes_pdf_is_layered_by_severity(tmp_path):
 # --------------------------------------------------------------------------- #
 # GOTO destinations in the reviewed PDF (P7 item 27)
 #
-# The *math* of the destination transform is pinned in
+# Every link and bookmark the writer makes is a ``/FitR`` rectangle the viewer
+# zooms onto. The *math* of the fallback rectangle is pinned in
 # ``tests/test_drawing_geometry.py`` against independent ground truth (an
 # annotation's raw ``/Rect``, which the PDF spec puts in the same default user
-# space as an ``/XYZ`` destination).  What is pinned HERE is the wiring: that
-# every destination the writer emits actually goes through it, at every
-# rotation × CropBox, read as raw ``/XYZ`` out of the saved file rather than
-# through PyMuPDF's own readers — which re-apply the very transform under test
-# and would hide the defect.
-#
-# The load-bearing assertion needs no external truth at all: the index-page row
-# link and the bookmark outline reach the same mark through two *different*
-# PyMuPDF entry points (``insert_link`` and ``set_toc``) whose internal
-# transforms differ, so if either inversion is wrong the two disagree.
+# space as a destination). What is pinned HERE is the wiring: that every
+# destination the writer emits actually frames its mark, at every rotation ×
+# CropBox, read raw out of the saved file rather than through PyMuPDF's own
+# readers — which reduce a rectangle to a point and would hide a wrong one.
 # --------------------------------------------------------------------------- #
 
 _DEST_ROTATIONS = (0, 90, 180, 270)
@@ -611,88 +606,59 @@ def _rotated_cropped_pdf(dir_path: Path, rot: int, crop, name="M-101.pdf") -> Pa
     return path
 
 
-def _raw_destinations(doc) -> dict:
-    """Raw ``/XYZ`` per destination kind, straight out of the PDF objects.
-
-    Returns ``{"link": [(x, y), …], "outline": [(x, y), …]}``.  Deliberately
-    NOT ``page.get_links()`` / ``doc.get_toc()``: both map the stored value back
-    through the same transform being tested, so a wrong destination reads back
-    as the point that was asked for.
-    """
-    import re
-    out = {"link": [], "outline": []}
-    for xref in range(1, doc.xref_length()):
-        try:
-            obj = doc.xref_object(xref)
-        except Exception:            # noqa: BLE001 - a free/odd xref is not a destination
-            continue
-        m = re.search(r"/XYZ\s+([\d.\-]+)\s+([\d.\-]+)", obj)
-        if not m:
-            continue
-        pt = (round(float(m.group(1)), 1), round(float(m.group(2)), 1))
-        if "/Title" in obj:
-            # The 'QC Findings' parent targets the page top, not a mark; only the
-            # per-finding leaves do.  Match on the absence of /First rather than
-            # on the title text — a bookmark title is stored as a hex UTF-16BE
-            # string, so "QC-" never appears literally in the object.
-            if "/First" not in obj:
-                out["outline"].append(pt)
-        elif "/Link" in obj:
-            out["link"].append(pt)
-    return out
-
-
 @pytest.mark.parametrize("rot", _DEST_ROTATIONS)
 @pytest.mark.parametrize("crop", _DEST_CROPBOXES)
-def test_reviewed_pdf_destinations_land_in_user_space(tmp_path, rot, crop):
-    from drawing_analyzer.annotate import _dest_user_point
+def test_reviewed_pdf_destinations_frame_their_marks(tmp_path, rot, crop):
+    from drawing_analyzer.annotate import _view_rect_to_user
+    from tests.fixtures.pdf_links import annot_user_rects, contains, fit_rect_destinations
 
     src = _rotated_cropped_pdf(tmp_path / "src", rot, crop)
-    view_rect = (100.0, 120.0, 260.0, 150.0)
-    f = _finding("drain size wrong", status="VERIFIED", page=0, rect=view_rect,
-                 quote="TARGETWORD0")
-    f.qc_id = "QC-001"
+    drawn_rect = (100.0, 120.0, 260.0, 150.0)
+    listed_rect = (300.0, 320.0, 380.0, 350.0)
+    drawn = _finding("drain size wrong", status="VERIFIED", page=0, rect=drawn_rect,
+                     quote="TARGETWORD0", category="conflict")
+    # Verified-only mode: this one gets a cover row and no mark on the sheet,
+    # so its link has only the anchor rectangle to go by.
+    listed = _finding("maybe a clash", status="UNCERTAIN", page=0, rect=listed_rect,
+                      quote="TARGETWORD0", category="conflict")
+    assign_qc_ids([drawn, listed])
 
-    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    res = write_reviewed_pdfs([drawn, listed], [src], tmp_path / "out",
+                              include_unverified=False)
     doc = pymupdf.open(str(res.reviewed_pdfs[0]))
     try:
-        dests = _raw_destinations(doc)
-        # The mark lives on the source page shifted by the front index page(s).
-        target = doc.page_count - 2 if doc.page_count >= 3 else 0
-        expected_pt = _dest_user_point(doc[target], view_rect[0], view_rect[1])
-        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+        dests = fit_rect_destinations(doc)
+        sheet = doc[1]                       # the source page, behind one index page
+        (cloud,) = annot_user_rects(doc, sheet)
+        listed_user = _view_rect_to_user(sheet, listed_rect)
+        page_box = _view_rect_to_user(sheet, (0, 0, sheet.rect.width, sheet.rect.height))
     finally:
         doc.close()
 
-    assert dests["link"], f"no index-row GOTO link written at rot={rot} crop={crop}"
-    assert dests["outline"], f"no QC bookmark destination written at rot={rot} crop={crop}"
-
-    for got in dests["link"]:
-        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
-            f"index-row /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
-        )
-    for got in dests["outline"]:
-        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
-            f"bookmark /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
-        )
-    # Two entry points, two internal transforms, one mark: they must agree.
-    assert dests["link"][0] == dests["outline"][0], (
-        f"index link {dests['link'][0]} and bookmark {dests['outline'][0]} name "
-        f"different points at rot={rot} crop={crop}"
+    where = f"at rot={rot} crop={crop}"
+    assert len(dests["link"]) == 2, f"expected one link per cover row {where}"
+    assert len(dests["outline"]) == 1, f"expected one bookmark for the drawn mark {where}"
+    drawn_link, listed_link = dests["link"]
+    assert contains(drawn_link, cloud), f"cover link {drawn_link} misses the cloud {cloud} {where}"
+    assert contains(listed_link, listed_user), (
+        f"cover link {listed_link} misses the listed finding {listed_user} {where}"
     )
+    # A cover row and its bookmark open the same view of the same mark.
+    assert dests["outline"][0] == drawn_link, where
+    # …and neither view runs off the visible sheet.
+    assert contains(page_box, drawn_link) and contains(page_box, listed_link), where
 
 
-def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
+def test_overflow_page_backlink_frames_the_finding_on_its_sheet(tmp_path):
     # The third destination site: the AI Review Notes page's GOTO back to the
     # source sheet.  Its rect-bearing branch is defensive — the overflow list is
     # fed only MARGIN placements, which are rect-less — so it is unreachable
     # through write_reviewed_pdfs and has to be exercised directly.  It is the
     # twin of the index-row link, and an untested twin is where this campaign's
     # defects have consistently lived.
-    from drawing_analyzer.annotate import (
-        _dest_user_point, _insert_review_notes_page,
-    )
+    from drawing_analyzer.annotate import _insert_review_notes_page, _view_rect_to_user
     from drawing_analyzer.models import MarkupPlacement
+    from tests.fixtures.pdf_links import contains, fit_rect_destinations
 
     view_rect = (100.0, 120.0, 260.0, 150.0)
     doc = pymupdf.open()
@@ -711,17 +677,13 @@ def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
             leg_id="primary", expected="MARGIN", required_components=["callout"],
         )
         _insert_review_notes_page(doc, [(f, placement)], run_id="r1", author="tester")
-        dests = _raw_destinations(doc)
-        expected_pt = _dest_user_point(doc[0], view_rect[0], view_rect[1])
-        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+        dests = fit_rect_destinations(doc)
+        expected = _view_rect_to_user(doc[0], view_rect)
     finally:
         doc.close()
 
-    assert dests["link"], "the notes page wrote no GOTO back to the source sheet"
-    for got in dests["link"]:
-        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
-            f"notes-page backlink /XYZ {got} != user-space {expected}"
-        )
+    assert len(dests["link"]) == 1, "the notes page wrote no link back to the source sheet"
+    assert contains(dests["link"][0], expected)
 
 
 # --------------------------------------------------------------------------- #
@@ -895,55 +857,55 @@ def test_fit_text_measures_width_not_characters():
 # --------------------------------------------------------------------------- #
 
 
-def test_quote_less_finding_is_not_labelled_quote_not_found():
-    # [QUOTE NOT FOUND] is the hallucination signal: the quote SHOULD have been
-    # findable and was not. A graphics-only finding never offered a quote, so
-    # stamping it with that signal spends the reviewer's trust on a finding that
-    # did nothing wrong — and made it indistinguishable from a fabricated quote.
+def test_callout_box_says_verify_and_only_a_missing_quote_says_not_found():
+    # "The quote was not found" is the hallucination signal: the quote SHOULD
+    # have been findable and was not. A graphics-only finding never offered a
+    # quote, so telling the reader its text was not found spends their trust on
+    # a finding that did nothing wrong. Both boxes lead with the same plain
+    # VERIFY; only the fabricated one says a quote went missing.
     from drawing_analyzer.annotate import _annot_content, _placement_kind
+    from drawing_analyzer.models import EVIDENCE_UNAVAILABLE
+
+    def box(finding, **kw):
+        return _annot_content(finding, unverified=True, rejected=False,
+                              place=_placement_kind(finding), **kw)
 
     graphics_only = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
                              rect=None, quote="")
     graphics_only.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
                                   method="quote_not_found")
     assert _placement_kind(graphics_only) == "NO_QUOTE"
-    first = _annot_content(graphics_only, unverified=True, rejected=False,
-                           place=_placement_kind(graphics_only)).splitlines()[0]
-    assert "[NO QUOTE TO CHECK]" in first
-    assert "[QUOTE NOT FOUND]" not in first
+    assert box(graphics_only).startswith("VERIFY: ")
+    assert "could not find this text" not in box(graphics_only)
 
-    # A real quote that matched nothing still gets the hallucination signal.
+    # A real quote that matched nothing still carries the hallucination signal.
     fabricated = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
                           rect=None, quote="PROVIDE 6 INCH DRAIN")
     fabricated.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
                                method="quote_not_found")
     assert _placement_kind(fabricated) == "UNANCHORED"
-    first = _annot_content(fabricated, unverified=True, rejected=False,
-                           place=_placement_kind(fabricated)).splitlines()[0]
-    assert "[QUOTE NOT FOUND]" in first
-    assert "[NO QUOTE TO CHECK]" not in first
+    assert box(fabricated).startswith("VERIFY: ")
+    assert "could not find this text" in box(fabricated)
 
-    # A sheet-wide finding keeps its own label rather than either of those.
+    # A sheet-wide finding says so, and a confirmed one drops the VERIFY.
     sheet_wide = _finding("Sheet lacks a north arrow", status="UNCERTAIN",
                           rect=None, quote="")
     sheet_wide.anchor_hint = "SHEET"
     sheet_wide.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
                                method="quote_not_found")
     assert _placement_kind(sheet_wide) == "SHEET"
+    assert box(sheet_wide).startswith("VERIFY (whole sheet): ")
+    sheet_wide.verification = Verification(status="DETERMINISTIC")
+    sheet_wide.category = "coordination"
+    assert _annot_content(sheet_wide, unverified=False, place="SHEET").startswith("WHOLE SHEET: ")
 
-
-def test_evidence_tag_is_not_stacked_or_repeated():
-    # The evidence tag must not duplicate a prefix the placement already carries,
-    # nor stack onto the contradictory hallucination signal.
-    from drawing_analyzer.annotate import _annot_content, _placement_kind
-    from drawing_analyzer.models import EVIDENCE_UNAVAILABLE
-
-    f = _finding("Sprinkler omitted", status="UNCERTAIN", rect=None, quote="")
-    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
-    f.evidence_state = EVIDENCE_UNAVAILABLE
-    first = _annot_content(f, unverified=True, rejected=False,
-                           place=_placement_kind(f)).splitlines()[0]
-    assert first.count("[NO QUOTE TO CHECK]") == 1
+    # One lead-in, never two, and no popup tag drawn on the sheet.
+    graphics_only.evidence_state = EVIDENCE_UNAVAILABLE
+    first = box(graphics_only).splitlines()[0]
+    assert first.count("VERIFY") == 1 and "[" not in first
+    # A ruled-out finding inked grey is not an open item to verify.
+    assert _annot_content(graphics_only, unverified=False, rejected=True,
+                          place="NO_QUOTE").startswith("RULED OUT: ")
 
 
 def _overflow_case(tmp_path):

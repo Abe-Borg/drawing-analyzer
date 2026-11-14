@@ -967,7 +967,7 @@ def build_reviewed_pdf_links(
     # margin/notes/index placement, then proven ink (WRITTEN) over a generated
     # row (INDEXED). Mirrors the ledger's own "most representative" preference.
     kind_rank = {
-        "CLOUD": 0, "MARGIN": 1, "REVIEW_NOTES": 2, "REJECTED_INDEX": 3, "GATED_INDEX": 4,
+        "CLOUD": 0, "MARGIN": 1, "REVIEW_NOTES": 2, "GATED_INDEX": 3,
     }
     best: dict[str, tuple] = {}
     for r in receipts:

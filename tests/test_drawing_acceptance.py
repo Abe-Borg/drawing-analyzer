@@ -779,7 +779,7 @@ def test_gauntlet_every_placement_has_terminal_receipt(oracle):
     receipt_ids = [r.placement.placement_id for r in run.receipts]
     assert set(receipt_ids) == expected_ids        # none missing, none unexpected
     assert len(receipt_ids) == len(set(receipt_ids))   # no duplicate receipts
-    assert all(r.status in ("WRITTEN", "INDEXED") for r in run.receipts)
+    assert all(r.ok for r in run.receipts)
     assert ctx.coverage_status == "COMPLETE"
     # The tally counts artifact placements, so the dual-leg conflict contributes
     # one cloud per sheet: entries + extra legs = placements accounted.
@@ -813,7 +813,7 @@ def test_gauntlet_existing_annotations_intact(oracle):
     assert ctx.coverage_status == "COMPLETE"
     a_receipts = [r for r in ctx.markup_run.receipts
                   if r.output_pdf == "M-101__SRC-0001_reviewed.pdf"]
-    assert a_receipts and all(r.status in ("WRITTEN", "INDEXED") for r in a_receipts)
+    assert a_receipts and all(r.ok for r in a_receipts)
 
 
 # ---- assertion 13: report, CSV, JSON, PDFs, manifests and log agree ---------
@@ -1002,16 +1002,18 @@ def test_gauntlet_exhaustive_status_complete(oracle):
 # ---- deterministic arithmetic, raster disclosure                          ----
 
 
-def test_gauntlet_rejected_finding_indexed_not_inked(oracle):
+def test_gauntlet_rejected_finding_is_report_only(oracle):
     ctx = oracle.ctx
     f5 = _one(ctx.all_findings, quote=G.Q_F5)
     assert f5.verification.status == "REJECTED"
     receipts = [r for r in ctx.markup_run.receipts
                 if r.placement.finding_id == f5.id]
     assert len(receipts) == 1
-    assert receipts[0].placement.expected == "REJECTED_INDEX"
-    assert receipts[0].status == "INDEXED"
+    assert receipts[0].placement.expected == "REPORT_ONLY"
+    assert receipts[0].status == "REPORTED"
     assert ctx.ledger_tally.get("rejected", 0) >= 1
+    # Kept out of the reviewed PDFs, kept in the record the engineer can open.
+    assert f5 in ctx.all_findings and f5.qc_id
 
 
 def test_gauntlet_unanchored_finding_gets_margin_placement(oracle):
