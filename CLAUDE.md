@@ -422,10 +422,13 @@ map lives in `src/drawing_analyzer/__init__.py`.
   mid-analysis it stops the run and closes once the stop settles
   (`QUIT_STOP_GRACE_SECONDS`). `_worker` catches `RunCancelled` by name.
   `report_callback_exception` → `_on_callback_exception`. Both reporters swallow
-  every failure of their own channels. Inputs live in the *Loaded files*
-  section (`_file_groups` is the data, `_refresh_files_panel` the widgets; call
-  it on every input change, never from `_refresh_summary`, which fires per
-  keystroke). The bottom rows, progress line and Analyze row are packed
+  every failure of their own channels. The optional-input Add buttons live in
+  their own *Reference files (optional)* section (`_add_buttons`, keyed like
+  `help_content.INPUT_HELP`; each has a "?" that opens `_open_input_help`, one
+  popup at a time) right above the *Loaded files* list (`_file_groups` is the
+  data, `_refresh_files_panel` the widgets; call it on every input change,
+  never from `_refresh_summary`, which fires per keystroke). Drawings are
+  added only from the drop zone. The bottom rows, progress line and Analyze row are packed
   `side="bottom", after=` the footer so a short window clips the log and
   sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
@@ -452,10 +455,19 @@ map lives in `src/drawing_analyzer/__init__.py`.
   journal does), narrowed by `source`. Live spend prices settled records with
   `core.pricing.usage_record_cost` and is marked `≈`; `finish(ctx)` replaces it
   with `ctx.total_estimated_cost`. `LiveScene.build` is a pure frame of keyed
-  `Prim`s (`animating` = anything moving); `CanvasPainter` diffs by key and
-  restacks from the first created item. `LivePanel` paces at ≤25 fps and ≥3×
-  the last frame's cost, polls at 1 Hz while hidden mid-run, and stops when
-  idle. GUI: the Activity section's `Live view | Log` toggle
+  `Prim`s (`animating` = anything moving); `CanvasPainter` diffs by key, sends
+  `itemconfigure` only the options that changed (a re-sent font or text makes
+  Tk lay the item out again), and slots each new item in with one `tag_lower`
+  under the next surviving item; it restacks the whole frame only when
+  survivors swap places. Never go back to raising everything after a new item:
+  a read starting or finishing cost ~1,200 Tk calls in one frame.
+  `LivePanel` paces at ≤25 fps and ≥5× the last frame's cost, and that cost
+  includes Tk's repaint (`_draw` calls the canvas's `update_idletasks`). Input
+  anywhere but the canvas (`gui._on_window_input`, bound with `bind_all`)
+  calls `note_input`, which holds drawing for `INPUT_QUIET_MS` while polling
+  continues. It polls at 1 Hz while hidden mid-run, and stops when idle.
+  `ThoughtStream.snapshot` reuses the copy of every thought that has not
+  changed since the last snapshot, so readers treat copies as read-only. GUI: the Activity section's `Live view | Log` toggle
   (`_show_activity_view`; `core.preferences.LIVE_VIEW`). Handlers reach
   the panel via `getattr(self, "_live", None)`, so stub-driven handler tests
   need no new stubs. The gauntlet `oracle` runs with a monitor.

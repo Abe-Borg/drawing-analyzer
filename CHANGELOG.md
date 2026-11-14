@@ -6,6 +6,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Keep the model's checks as your own checklist.** On the Live view's Plan
+  tab, tick checks from the model's review plan (one at a time, a whole plan
+  from its heading row, or Select all) and press Save selected…, or click a
+  check for its menu: its full text, how the run answered it, Save checklist
+  item…, Add to selection and Copy check text. The save dialog writes the
+  checks to a new checklist in your profiles folder or adds them to one that
+  is already there. It pre-fills the sheet prefixes the plan was aimed at,
+  skips a check whose text you already have and says where it is, and warns
+  that code citations are saved with their edition. A new file never
+  overwrites another, even one saved at the same moment from another window.
+  After a save, the rows are tagged as saved and the checklist is listed
+  under Review profiles. It is ticked when it fits the loaded set, or when the
+  run ends if you saved during one. Saving is local and makes no API call.
+
+### Fixed
+
+- **The window no longer lags while the Live view animates.** When a read
+  started or finished, the board restacked every item drawn above the new one,
+  up to about 1,200 canvas calls in one frame. It now places each new item with
+  a single call, and changes to an item send only the settings that changed.
+  The frame budget now counts Tk's own repaint and is held to about a fifth of
+  the UI thread (it was a third, of an undercounted cost), and typing,
+  clicking or scrolling elsewhere in the window pauses the drawing for a
+  quarter of a second so input is handled first. The Thinking tab no longer
+  copies every stored reasoning summary on each frame while one is streaming.
+  On a 300-sheet board in development testing, CPU use fell from about 18%
+  to about 14% of one core, and the slowest 5% of input waits fell from about
+  14 ms to about 9 ms.
+
 ## [1.15.0] - 2026-11-13
 
 ### Added

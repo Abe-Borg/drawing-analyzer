@@ -1288,12 +1288,14 @@ class CanvasPainter:
     Only an item whose coordinates or options changed gets a Tk call; a key
     that disappears is deleted; when new items were created the canvas is
     restacked in frame order (later prims draw on top). ``canvas`` needs
-    ``create_*``, ``coords``, ``itemconfigure``, ``delete`` and ``tag_raise``.
+    ``create_*``, ``coords``, ``itemconfigure``, ``delete``, ``tag_lower`` and
+    ``tag_raise``.
     """
 
     def __init__(self, canvas: Any) -> None:
         self.canvas = canvas
         self._items: dict[str, tuple[Any, Prim]] = {}
+        self._rank: dict[str, int] = {}     # each key's position in the last frame
         self.calls = 0          # Tk calls made by the last paint (for pacing)
 
     def paint(self, prims: Iterable[Prim]) -> int:
@@ -1301,7 +1303,10 @@ class CanvasPainter:
         calls = 0
         seen: set[str] = set()
         order: list[Any] = []
-        first_new: "int | None" = None
+        fresh: list[bool] = []              # created this frame (position-aligned)
+        rank: dict[str, int] = {}
+        last_rank = -1
+        in_order = True                     # surviving items kept their order
         for p in prims:
             if p.key in seen:
                 continue
@@ -1313,28 +1318,50 @@ class CanvasPainter:
                     calls += 1
                 iid = getattr(canvas, _CREATE[p.kind])(*p.coords, **_tk_opts(p))
                 calls += 1
-                if first_new is None:
-                    first_new = len(order)
+                fresh.append(True)
             else:
                 iid, old = cur
                 if old.coords != p.coords:
                     canvas.coords(iid, *p.coords)
                     calls += 1
                 if old.opts != p.opts:
-                    canvas.itemconfigure(iid, **_tk_opts(p))
+                    # Only what changed: re-sending a text item's font or text
+                    # makes Tk lay it out again.
+                    new = _tk_opts(p)
+                    was = _tk_opts(old)
+                    canvas.itemconfigure(
+                        iid, **{k: v for k, v in new.items() if was.get(k) != v})
                     calls += 1
+                fresh.append(False)
+                prev = self._rank.get(p.key, -1)
+                if prev < last_rank:
+                    in_order = False
+                last_rank = max(last_rank, prev)
+            rank[p.key] = len(order)
             self._items[p.key] = (iid, p)
             order.append(iid)
         for key in [k for k in self._items if k not in seen]:
             canvas.delete(self._items.pop(key)[0])
             calls += 1
-        if first_new is not None:
-            # A new item lands on top of the stack; everything that follows it
-            # in frame order is raised after it, so the stack matches the frame.
-            # Items before the first new one are already in order.
-            for iid in order[first_new:]:
+        self._rank = rank
+        if not in_order:
+            # Survivors swapped places (rare): restack the whole frame in order.
+            for iid in order:
                 canvas.tag_raise(iid)
-            calls += len(order) - first_new
+            calls += len(order)
+        elif any(fresh):
+            # A new item lands on top of the stack. Slot each one in just below
+            # the next item that was already there, so the stack matches the
+            # frame with one call per new item, not one per item above it.
+            # Survivors are already in frame order relative to each other.
+            below: Any = None
+            for iid, is_new in zip(reversed(order), reversed(fresh)):
+                if not is_new:
+                    below = iid
+                elif below is not None:
+                    canvas.tag_lower(iid, below)
+                    calls += 1
+                    below = iid             # the next new one goes under this one
         self.calls = calls
         return calls
 

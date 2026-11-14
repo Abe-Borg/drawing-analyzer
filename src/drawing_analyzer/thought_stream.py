@@ -113,6 +113,11 @@ class ThoughtStream:
         self._items: list[Thought] = []
         self._seq = 0
         self.version = 0            # bumped on every change a reader would see
+        # The reader's copies, reused until their thought changes: a streaming
+        # read changes one thought many times a second, and copying every kept
+        # thought for each frame was a measurable part of the frame's cost.
+        self._copies: dict[int, Thought] = {}
+        self._dirty: set[int] = set()
         self.seen = 0               # calls observed
         self.with_text = 0          # calls that returned a non-empty summary
 
@@ -132,7 +137,7 @@ class ThoughtStream:
             self._items.append(thought)
             self.seen += 1
             self._trim()
-            self.version += 1
+            self._touch(thought)
         return thought
 
     def add_thinking(self, thought: Thought, delta: str) -> None:
@@ -141,7 +146,7 @@ class ThoughtStream:
         with self._lock:
             self._append(thought, delta)
             thought.updated_at = self._clock()
-            self.version += 1
+            self._touch(thought)
 
     def add_output(self, thought: Thought, chars: int) -> None:
         if chars <= 0:
@@ -151,14 +156,14 @@ class ThoughtStream:
             if thought.state == STATE_THINKING:
                 thought.state = STATE_WRITING
             thought.updated_at = self._clock()
-            self.version += 1
+            self._touch(thought)
 
     def new_block(self, thought: Thought) -> None:
         """A further thinking block began: separate it from the last one."""
         with self._lock:
             if thought.text and not thought.text.endswith("\n\n"):
                 self._append(thought, "\n\n")
-                self.version += 1
+                self._touch(thought)
 
     def close(self, thought: Thought, *, message: Any = None, failed: bool = False) -> None:
         """The call ended. A call that produced no summary leaves the list."""
@@ -175,7 +180,7 @@ class ThoughtStream:
                     self._items.remove(thought)
                 except ValueError:
                     pass
-            self.version += 1
+            self._touch(thought)
 
     def record(self, *, stage: str, item: str = "", model: str = "",
                transport: str = TRANSPORT_BATCH, message: Any = None) -> None:
@@ -196,7 +201,12 @@ class ThoughtStream:
             self._items.append(thought)
             self.with_text += 1
             self._trim()
-            self.version += 1
+            self._touch(thought)
+
+    def _touch(self, thought: Thought) -> None:
+        """A change a reader would see (call with the lock held)."""
+        self._dirty.add(thought.seq)
+        self.version += 1
 
     def _append(self, thought: Thought, text: str) -> None:
         room = MAX_THOUGHT_CHARS - len(thought.text)
@@ -223,11 +233,24 @@ class ThoughtStream:
 
     def snapshot(self, since: int = -1) -> "tuple[int, list[Thought]] | None":
         """Copies of every kept thought, oldest first; ``None`` if nothing
-        changed since version ``since``."""
+        changed since version ``since``.
+
+        The run keeps writing the originals, never the copies. A thought that
+        has not changed since the last snapshot is handed out as the same copy
+        again, so a reader must treat copies as read-only."""
         with self._lock:
             if self.version == since:
                 return None
-            return self.version, [replace(t) for t in self._items]
+            copies: dict[int, Thought] = {}
+            out: list[Thought] = []
+            for t in self._items:
+                copy = self._copies.get(t.seq)
+                if copy is None or t.seq in self._dirty:
+                    copy = replace(t)
+                copies[t.seq] = copy
+                out.append(copy)
+            self._copies, self._dirty = copies, set()
+            return self.version, out
 
 
 # --------------------------------------------------------------------------- #

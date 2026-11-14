@@ -9,8 +9,10 @@ decoration, and nothing it does may disturb a run or the window (I-3).
 The loop paces itself. While a run is in flight it polls the run's recorders
 and repaints at up to 25 frames a second when something on the board moves
 quickly, at 10 when only slow ambient motion is showing (an hours-long batch
-wait), backing off so drawing never takes more than about a third of the UI
-thread; while the panel is hidden — collapsed, switched to the log, or the
+wait), backing off so drawing — Tk's own repaint included — takes no more than
+about a fifth of the UI thread. While the person is typing, clicking or
+scrolling elsewhere in the window (:meth:`LivePanel.note_input`) drawing pauses
+for a moment, so the window answers them first. While the panel is hidden — collapsed, switched to the log, or the
 window minimized — it keeps
 polling once a second (so the collapsed header's one-line summary stays live)
 and draws nothing. With no run and nothing animating it stops entirely, and
@@ -48,7 +50,8 @@ FRAME_MS = 40              # fastest pace: 25 frames a second
 AMBIENT_FRAME_MS = 100     # only slow motion on screen (e.g. a batch wait): 10/s
 SLOWEST_FRAME_MS = 250     # a slow machine still gets 4 frames a second
 HIDDEN_POLL_MS = 1000      # panel collapsed during a run: poll, don't draw
-DRAW_BUDGET_FACTOR = 3     # wait >= 3x the last frame's cost before the next
+DRAW_BUDGET_FACTOR = 5     # wait >= 5x the last frame's cost before the next
+INPUT_QUIET_MS = 250       # no drawing this long after input elsewhere in the window
 
 
 class LivePanel:
@@ -88,6 +91,7 @@ class LivePanel:
         self._clock = clock
         self._handle: Any = None
         self._last_summary = float("-inf")
+        self._quiet_until = float("-inf")
         self._reported = False
         self.last_frame_ms: "float | None" = None
 
@@ -165,6 +169,15 @@ class LivePanel:
         self._guard(self.scene.wheel, steps)
         self.kick()
 
+    def note_input(self) -> None:
+        """The person typed, clicked or scrolled somewhere else in the window:
+        hold drawing for :data:`INPUT_QUIET_MS` so their input is handled
+        first. Polling carries on; the frame after the pause catches up."""
+        try:
+            self._quiet_until = self._clock() + INPUT_QUIET_MS / 1000.0
+        except Exception:  # noqa: BLE001
+            pass
+
     def close(self) -> None:
         """Cancel the pending frame (the window is going away)."""
         handle, self._handle = self._handle, None
@@ -188,11 +201,17 @@ class LivePanel:
     def _frame(self) -> None:
         self._handle = None
         drawn_ms: "float | None" = None
+        paused_ms: "int | None" = None
         try:
             if self.monitor is not None:
                 self.model.poll(self.monitor)
+            now = self._clock()
             if self.enabled and self._is_visible():
-                drawn_ms = self._draw()
+                quiet = self._quiet_until - now
+                if quiet > 0:
+                    paused_ms = max(1, int(quiet * 1000.0) + 1)
+                else:
+                    drawn_ms = self._draw()
             now = self._clock()
             if self._on_summary is not None and now - self._last_summary >= 1.0:
                 self._last_summary = now
@@ -201,7 +220,7 @@ class LivePanel:
             if not self._reported:
                 self._reported = True
                 _log.exception("live view frame failed; the panel will keep trying quietly")
-        delay = self._next_delay(drawn_ms)
+        delay = paused_ms if paused_ms is not None else self._next_delay(drawn_ms)
         if delay is not None:
             try:
                 self._handle = self._schedule(delay, self._frame)
@@ -230,6 +249,15 @@ class LivePanel:
             try:
                 self.canvas.configure(cursor="hand2" if self._hot else "")
             except Exception:  # noqa: BLE001 - a canvas without cursors
+                pass
+        # Tk repaints the canvas later, when idle, and on Windows that repaint
+        # can cost as much as building the frame. Do it now so the frame's
+        # measured cost — and so the pace — includes it.
+        flush = getattr(self.canvas, "update_idletasks", None)
+        if flush is not None:
+            try:
+                flush()
+            except Exception:  # noqa: BLE001 - a dying window
                 pass
         self.last_frame_ms = (time.perf_counter() - started) * 1000.0
         return self.last_frame_ms

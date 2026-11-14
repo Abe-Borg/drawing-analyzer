@@ -935,6 +935,16 @@ def test_live_view_choice_is_remembered_beside_other_preferences(tmp_path):
         # delta is read as notches on either platform's convention.
         gui.DrawingAnalyzerApp._remember_live_tab(stub, "findings")
         steps = [gui._wheel_steps(d) for d in (120, -240, 1, -9, 0)]
+        # Input elsewhere in the window pauses the board's drawing; input on
+        # the board itself (a tab click, a wheel over a list) never does.
+        paused = []
+        canvas = object()
+        board = types.SimpleNamespace(_live=types.SimpleNamespace(
+            note_input=lambda: paused.append(1)), live_canvas=canvas)
+        gui.DrawingAnalyzerApp._on_window_input(board, types.SimpleNamespace(widget=object()))
+        gui.DrawingAnalyzerApp._on_window_input(board, types.SimpleNamespace(widget=canvas))
+        gui.DrawingAnalyzerApp._on_window_input(types.SimpleNamespace(), None)  # no board yet
+    assert paused == [1]
     assert toggled == [False]
     assert preferences.get_bool(prefs, preferences.LIVE_VIEW, True) is False
     assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is True
