@@ -45,8 +45,10 @@ from typing import Any
 from .diagnostics_bundle import write_diagnostics_folder
 from .html_report import build_html_report
 from .models import (
+    ACTION_BUCKET_LABELS,
     PRIMARY_LEG_ID,
     name_is_taken,
+    on_sheet_instruction,
     receipt_status_counts,
     record_name,
     source_page_key,
@@ -1044,6 +1046,10 @@ FINDINGS_CSV_HEADER = [
     # The review-checklist items the finding reports against ("U1.3; M2.7") —
     # appended so existing column positions are unchanged.
     "checklist_items",
+    # The action plan: the cover-page group ("Do this first" …), the one-line
+    # instruction, and whether the instruction qualifies to be drawn on the
+    # sheet ("yes" or blank) — appended so existing positions are unchanged.
+    "priority", "instruction", "instruction_on_sheet",
 ]
 
 
@@ -1159,6 +1165,19 @@ def _finding_row(finding: Any) -> list[str]:
         _excel_safe(_citation_provenance_cell(finding, "evidence_url")),
         *_located_cells(getattr(finding, "located_elsewhere", None)),
         "; ".join(str(i) for i in (getattr(finding, "checklist_items", None) or [])),
+        *_action_cells(finding),
+    ]
+
+
+def _action_cells(finding: Any) -> list[str]:
+    """The action plan's three columns ("" until the finding has been ranked)."""
+    action = getattr(finding, "action", None)
+    if action is None:
+        return ["", "", ""]
+    return [
+        ACTION_BUCKET_LABELS.get(str(getattr(action, "bucket", "") or ""), ""),
+        _excel_safe(str(getattr(action, "instruction", "") or "")),
+        "yes" if on_sheet_instruction(finding) else "",
     ]
 
 

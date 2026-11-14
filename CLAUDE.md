@@ -240,7 +240,8 @@ map lives in `src/drawing_analyzer/__init__.py`.
   nothing. **Every call site wraps its request in
   `call_telemetry.scope(stage, item)`**, with `stage` = the usage family
   (`digest`, `critique`, `verify`, `investigate`, `citation`, `harvest`,
-  `absence_check`, `identity`, `review_plan`, `cross_qc`, `synthesis`, `focus`)
+  `absence_check`, `action_plan`, `identity`, `review_plan`, `cross_qc`,
+  `synthesis`, `focus`)
   and `item` = `sheet_item(ref)`, a finding id, a code ref, a chunk label
   (`absences-<n>`), or `SET_ITEM` for one-per-run stages (a shared item is what lets a raised-cap resend read as recovered).
   Item allotments the request does not carry ride the scope
@@ -741,6 +742,28 @@ consume ledger entries and nothing else.
   handle, unparsed, or unfinished leaves those absences UNCHECKED and the stage
   PARTIAL; only complete, non-fallback replies cache (`stage=absence_check`,
   `_CACHE_CONTRACT`), and cached replies are re-grounded on every read.
+- **Action plan** (`action_plan.py`): the last paid stage, after the citation
+  check and only on a markup run (`config.run_action_plan and qc_markups`;
+  `action_plan=False` is a debug override). One text-only call per 80 open
+  findings (REJECTED is never sent) on Sonnet 5.5 at medium effort
+  (`PHASE_ACTION_PLAN`) sets `Finding.action` (`models.ActionItem`: `bucket` in
+  `ACTION_BUCKETS`, `instruction`, `clear_fix`, `source`). The bucket stands as
+  given; `_checked_item` drops (never repairs) an instruction that is over
+  length or carries a number the finding's own material lacks (`_numbers`
+  against `_finding_material` — the model never calculates), and clears
+  `clear_fix` on a hedged line (`_is_hedged`: a hedging verb counts only as a
+  clause's verb, so "check valve" is not a hedge). The pipeline then calls
+  `apply_severity_fallback` so every open finding has a group;
+  `models.action_bucket` / `bucket_is_ranked` are the readers. The stage is
+  `expected=False`: PARTIAL/FAILED is a warning and never lowers `qc_status`.
+  Complete, non-fallback replies cache (`stage=action_plan`, `_CACHE_CONTRACT`)
+  on the exact finding blocks, and a cached reply goes through `_checked_item`
+  again. **What may be drawn on a sheet is `models.on_sheet_instruction`, and
+  nothing else**: the model's `clear_fix` plus the host's own confirmation
+  (`needs_verify` false, VERIFIED/DETERMINISTIC, anchor EXACT/FUZZY, not a
+  question, not `located_elsewhere`). Do not loosen it from the prompt side.
+  `to_dict` writes `action` only when set. A new estimate component
+  (`family="action_plan"`) keeps the live-spend forecast non-empty.
 - **Disposition:** `anchor.py` maps a quote to a PDF rect: EXACT / FUZZY / TILE
   / UNANCHORED (UNANCHORED is the hallucination signal). Both fuzzy tiers carry
   the numeric veto: each digit-bearing token must sit at its own position in
@@ -797,9 +820,15 @@ consume ledger entries and nothing else.
   gets no reviewed copy. `ink_rejected` draws it grey and lists it under
   *Ruled out* instead.
   **Text an engineer reads at a glance carries one signal.** The cover page is
-  ID / Sheet / What to do (`_what_to_do`: action, then finding; severity is the
-  ID's color) and a callout box leads with `_callout_prefix`; both say
-  `VERIFY:` exactly when `_needs_verify` is true and nothing when it is not.
+  ID / Sheet / What to do (`_what_to_do`: the action plan's instruction or the
+  channel's own action, then the finding; severity is the ID's color), listed
+  under the three to-do groups (`_index_rows`; a `note` row discloses any
+  severity fallback; a leg sits in its parent's group and is not counted as a
+  finding), and a callout box leads with `_callout_prefix`; both say
+  `VERIFY:` exactly when `models.needs_verify` is true and nothing when it is not.
+  Bookmarks are filed under the same groups (level 2 folders, level 3
+  entries; destinations are patched by toc index). `_subject` puts the group
+  (`1 - Do this first` …) on every part of a finding's markup.
   Do not add status words, bracket tags or pipeline terms to either: the
   bracket tags (`[CHECK]`, `[NO TEXT TO CHECK]`, …) belong to a cloud's popup
   comment only. The cover's last line (`_omitted_note`) names QC numbers that
@@ -816,7 +845,17 @@ consume ledger entries and nothing else.
   `coverage_status`. Place finding annotations on per-severity optional-content
   layers (`QC markups - High/Medium/Low severity`), only for tiers with ink, in
   high→medium→low order; the `/OC` reference is independent of the placement
-  stamp. Every link and bookmark is a `/FitR` destination built by `_mark_dest`
+  stamp. `_add_instructions_and_stamps` runs after the clouds and callouts:
+  an `instruction` component (optional, never gates coverage) is a native
+  FreeText **callout** (`callout=` leader, `/IT /FreeTextCallout`) placed by
+  `_place_near` only where `_is_clear` passes — a fresh `_page_occupancy`
+  render (so the page's own marks count) plus `taken` (every cloud, every box
+  placed so far); its leader may cross linework but not a word or another
+  mark (`_leader_is_clear`). No clear spot → no box; never relax that to get
+  one. The sheet stamp is **page content** on the `QC markups - Sheet notes`
+  layer (`insert_textbox(oc=…, rotate=page.rotation)`), not an annotation, so
+  annotation counts and the Markups List are unchanged; `_stamp_text` says
+  only what is true of that sheet. Every link and bookmark is a `/FitR` destination built by `_mark_dest`
   (the drawn mark's own `/Rect`, else the anchor rect, else `/Fit`), padded and
   grown to a minimum view by `_zoom_box`; `_annotate_units` hands the index and
   the outline `marks` (placement id → page, xref). GOTO destinations, CropBox,

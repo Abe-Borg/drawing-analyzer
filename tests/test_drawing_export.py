@@ -267,9 +267,12 @@ def test_findings_csv_header_and_row_flattening():
     assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
     assert '"2,3"' in row                          # internal zero-based tile column
     assert ",r3c4," in row                         # human tile_label column (§17.1)
-    # recommended_action precedes the Phase B provenance tail (four cells) and
-    # the absence cross-check's three — all empty here.
-    assert row.rstrip().endswith("Verify the clearance on site.,,,,,,,,")
+    # recommended_action precedes the appended columns (provenance, absence
+    # cross-check, checklist ids, action plan) — all empty here.
+    tail = row.rstrip().split("Verify the clearance on site.")[1]
+    assert tail == "," * (
+        len(dx.FINDINGS_CSV_HEADER) - 1 - dx.FINDINGS_CSV_HEADER.index("recommended_action")
+    )
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id
@@ -298,10 +301,6 @@ def test_findings_csv_provenance_columns_appended_at_tail():
 
     from drawing_analyzer.models import CitationAssessment
 
-    assert dx.FINDINGS_CSV_HEADER[-8:-4] == [
-        "citation_adopted_edition", "citation_checked_edition",
-        "citation_current_edition", "citation_evidence_url",
-    ]
     f = _finding()
     f.citations = [
         CitationAssessment(reference="NFPA 13 §8.15.1", status="CHECKED_MISMATCH",
@@ -325,9 +324,31 @@ def test_findings_csv_provenance_columns_appended_at_tail():
     assert cells["citation_evidence_url"] == (
         "NFPA 13 §8.15.1: https://codes.example.org/nfpa13"
     )
-    # A finding with no assessments leaves the columns empty.
+    # A finding with none of the appended data leaves every one of those
+    # columns empty, and an older reader's column positions are untouched.
     bare = list(_csv.reader(_io.StringIO(dx.build_findings_csv([_finding()]))))[1]
-    assert bare[-7:] == ["", "", "", "", "", "", ""]
+    first_appended = header.index("citation_adopted_edition")
+    assert header[first_appended - 1] == "recommended_action"
+    assert set(bare[first_appended:]) == {""}
+    # The action plan's columns: the group as the cover page words it, the
+    # instruction, and whether that instruction may be drawn on the sheet.
+    from drawing_analyzer.models import ActionItem, Verification
+
+    planned = _finding()
+    planned.category = "coordination"
+    planned.verification = Verification(status="DETERMINISTIC")
+    planned.action = ActionItem(bucket="FIRST", instruction="Correct the total", clear_fix=True)
+    unsure = _finding()
+    unsure.action = ActionItem(bucket="IF_TIME", instruction="Add a note", clear_fix=False)
+    rows = list(_csv.reader(_io.StringIO(dx.build_findings_csv([planned, unsure]))))[1:]
+    got = [
+        tuple(dict(zip(header, r))[k] for k in ("priority", "instruction", "instruction_on_sheet"))
+        for r in rows
+    ]
+    assert got == [
+        ("Do this first", "Correct the total", "yes"),
+        ("If time allows", "Add a note", ""),
+    ]
     # The absence cross-check's columns carry where the item was found.
     from drawing_analyzer.models import LocatedElsewhere
 

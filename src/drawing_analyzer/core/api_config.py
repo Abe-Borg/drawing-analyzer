@@ -175,6 +175,10 @@ CROSS_QC_OUTPUT_CAP = 16_000
 # The absence cross-check: one short verdict per absence finding in a request
 # (at most ``absence_check._MAX_ABSENCES_PER_REQUEST``), thinking included.
 ABSENCE_CHECK_OUTPUT_CAP = 8_000
+# The action-plan pass: one bucket and one short instruction per finding in a
+# request (at most ``action_plan._MAX_FINDINGS_PER_REQUEST``), thinking
+# included. Kept under the cap above which a non-streaming call is refused.
+ACTION_PLAN_OUTPUT_CAP = 16_000
 
 # Token threshold above which a review uses the larger batch cap.
 LARGE_REVIEW_INPUT_THRESHOLD = 200_000
@@ -193,6 +197,7 @@ PHASE_HARVEST = "harvest"
 PHASE_CITATION = "citation"
 PHASE_CROSS_QC = "cross_qc"
 PHASE_ABSENCE_CHECK = "absence_check"
+PHASE_ACTION_PLAN = "action_plan"
 
 
 def output_cap_for_model(model: str, *, requested: int) -> int:
@@ -227,6 +232,7 @@ _PHASE_OUTPUT_BUDGET: dict[str, int] = {
     PHASE_CITATION: CITATION_OUTPUT_CAP,
     PHASE_CROSS_QC: CROSS_QC_OUTPUT_CAP,
     PHASE_ABSENCE_CHECK: ABSENCE_CHECK_OUTPUT_CAP,
+    PHASE_ACTION_PLAN: ACTION_PLAN_OUTPUT_CAP,
 }
 
 
@@ -831,6 +837,10 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     # whatever wording or abbreviation the drawings use. Medium, like the other
     # Haiku 5.5 text stages; the host re-checks every quote it returns.
     PHASE_ABSENCE_CHECK: EFFORT_MEDIUM,
+    # Action plan: sorting finished findings by consequence and wording one
+    # instruction each. Judgment, but over a short text list with no evidence
+    # to weigh, and the host decides what may be drawn on a sheet.
+    PHASE_ACTION_PLAN: EFFORT_MEDIUM,
 }
 
 # Verification phases get the model-aware bump: Opus on verification is

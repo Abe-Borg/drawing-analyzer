@@ -22,6 +22,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under Review profiles. It is ticked when it fits the loaded set, or when the
   run ends if you saved during one. Saving is local and makes no API call.
 
+- **Do this first / Do this later / If time allows.** A new last step of a
+  full QC run reads the finished findings and sorts them into three to-do
+  groups by what happens if each is left alone, and writes each a one-line
+  instruction. The reviewed PDF's cover page and bookmarks are grouped that
+  way, and each row leads with the instruction. The group is also the Subject
+  of every markup, so Bluebeam's Markups List can sort and filter by it, and it
+  is in `findings.csv` (`priority`, `instruction`, `instruction_on_sheet`),
+  `findings.json` and the HTML report. One text-only call per 80 findings on
+  Sonnet 5.5 (`DRAWING_ANALYZER_ACTION_PLAN_MODEL`), included in the cost
+  estimate. If it fails, findings are grouped by severity and the cover page
+  says so; it never lowers the QC status.
+- **Required actions drawn on the sheet.** Where the fix is clear-cut, the
+  instruction is drawn beside its cloud as a callout, in the severity color:
+  `QC-014: CORRECT THE TOTAL DEMAND TO 1400 GPM`. A finding qualifies only when
+  the AI calls the fix clear and the finding was confirmed on re-check or
+  computed from the sheet's own text, its quote was found on the sheet, it is
+  not a question, and any code reference checked out. An instruction that
+  names a number, size or sheet number the finding does not contain is
+  discarded. A box is placed only in clear space and never over linework or
+  text; with no clear spot near the cloud the action stays in the comment.
+- **A stamp on every marked-up sheet** says how many markups it carries, that
+  each has a comment, and how many show their required action. It sits in
+  clear space on its own layer (*QC markups - Sheet notes*), so it adds no row
+  to the Markups List and can be switched off.
+
 ### Changed
 
 - **The reviewed PDF's cover page is a to-do list.** It now has three columns:

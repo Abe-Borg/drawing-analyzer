@@ -1227,6 +1227,144 @@ class CitationAssessment:
         )
 
 
+# The three groups the reviewed PDF's cover page sorts findings into. The values
+# are stored; the labels are what an engineer reads. Order is the reading order.
+ACTION_BUCKETS = ("FIRST", "LATER", "IF_TIME")
+ACTION_BUCKET_LABELS = {
+    "FIRST": "Do this first",
+    "LATER": "Do this later",
+    "IF_TIME": "If time allows",
+}
+# Where a bucket came from: the action-plan pass ranked the finding, or the
+# host fell back to its severity because the pass did not answer for it.
+ACTION_SOURCE_MODEL = "model"
+ACTION_SOURCE_SEVERITY = "severity"
+_BUCKET_BY_SEVERITY = {"high": "FIRST", "medium": "LATER"}
+
+
+@dataclass
+class ActionItem:
+    """What to do about a finding, and how soon — the action-plan pass's answer.
+
+    ``bucket`` is one of :data:`ACTION_BUCKETS`. ``instruction`` is one short
+    imperative line ("" when the pass gave none, or its line failed the host's
+    checks). ``clear_fix`` is the model's own claim that the drawings settle
+    what the fix is; it is necessary, never sufficient, for the instruction to
+    be drawn on a sheet — :func:`on_sheet_instruction` is the whole rule.
+    ``source`` is :data:`ACTION_SOURCE_MODEL` or :data:`ACTION_SOURCE_SEVERITY`.
+    """
+
+    bucket: str
+    instruction: str = ""
+    clear_fix: bool = False
+    source: str = ACTION_SOURCE_MODEL
+
+    def to_dict(self) -> dict:
+        return {
+            "bucket": self.bucket,
+            "instruction": self.instruction,
+            "clear_fix": self.clear_fix,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ActionItem":
+        bucket = str(d.get("bucket", "") or "").upper()
+        return cls(
+            bucket=bucket if bucket in ACTION_BUCKETS else "IF_TIME",
+            instruction=str(d.get("instruction", "") or ""),
+            clear_fix=bool(d.get("clear_fix", False)),
+            source=str(d.get("source", "") or ACTION_SOURCE_MODEL),
+        )
+
+
+def severity_bucket(severity: Any) -> str:
+    """The bucket a finding gets from its severity alone (the host fallback)."""
+    return _BUCKET_BY_SEVERITY.get(str(severity or "").lower(), "IF_TIME")
+
+
+def action_bucket(finding: Any) -> str:
+    """The cover-page group a finding belongs in — always one of
+    :data:`ACTION_BUCKETS`, from the action-plan pass when it ranked the
+    finding and from its severity otherwise."""
+    action = getattr(finding, "action", None)
+    bucket = str(getattr(action, "bucket", "") or "")
+    return bucket if bucket in ACTION_BUCKETS else severity_bucket(
+        getattr(finding, "severity", "")
+    )
+
+
+def bucket_is_ranked(finding: Any) -> bool:
+    """Whether the action-plan pass, not the severity fallback, chose the bucket."""
+    action = getattr(finding, "action", None)
+    return (
+        action is not None
+        and getattr(action, "source", "") == ACTION_SOURCE_MODEL
+        and getattr(action, "bucket", "") in ACTION_BUCKETS
+    )
+
+
+def needs_verify(finding: Any) -> bool:
+    """Whether an engineer should confirm this finding before acting on it.
+
+    The one rule behind the ``VERIFY:`` prefix on a cover row and in a callout
+    box, and half of :func:`on_sheet_instruction`. True when the re-check did
+    not confirm the finding, when its quote could not be checked against the
+    sheet's text, when a located finding has nothing placing it on the sheet,
+    and for a code finding whose drawing fact was confirmed but whose code
+    reference was not (the crop re-check cannot read a code book —
+    :func:`verified_drawing_fact_only`). A ruled-out finding is never
+    "verify": it is not an open item.
+    """
+    status = str(getattr(getattr(finding, "verification", None), "status", "") or "")
+    if status == "REJECTED":
+        return False
+    if status not in ("VERIFIED", "DETERMINISTIC") or reduced_trust_reason(finding):
+        return True
+    anchor = getattr(finding, "anchor", None)
+    placed = anchor is not None and getattr(anchor, "rect_pdf", None) is not None
+    if not placed and str(getattr(finding, "anchor_hint", "") or "") != "SHEET":
+        return True
+    if verified_drawing_fact_only(finding):
+        citation = getattr(finding, "citation", None)
+        return getattr(citation, "status", "") != "CHECKED_SUPPORTS"
+    return False
+
+
+def on_sheet_instruction(finding: Any) -> str:
+    """The instruction to draw beside this finding's markup, or ``""``.
+
+    An instruction on a drawing tells someone to change it, so being wrong
+    costs more than a wrong cloud, which only asks them to look. The model
+    cannot promote its own line onto the sheet: its ``clear_fix`` claim counts
+    only for a finding the host has already confirmed — re-checked or computed
+    (:func:`needs_verify` is false), placed by its own quote found in the
+    sheet's text rather than by a tile guess, not a question, and not an
+    absence the cross-check located elsewhere.
+    """
+    action = getattr(finding, "action", None)
+    line = " ".join(str(getattr(action, "instruction", "") or "").split())
+    if not line or not getattr(action, "clear_fix", False):
+        return ""
+    if getattr(action, "source", "") != ACTION_SOURCE_MODEL:
+        return ""
+    if needs_verify(finding):
+        return ""
+    status = str(getattr(getattr(finding, "verification", None), "status", "") or "")
+    if status not in ("VERIFIED", "DETERMINISTIC"):
+        return ""                         # REJECTED: not an open item
+    if str(getattr(finding, "category", "") or "").lower() == "question":
+        return ""
+    if getattr(finding, "located_elsewhere", None) is not None:
+        return ""
+    anchor = getattr(finding, "anchor", None)
+    if anchor is None or getattr(anchor, "rect_pdf", None) is None:
+        return ""
+    if str(getattr(anchor, "status", "") or "") not in ("EXACT", "FUZZY"):
+        return ""
+    return line
+
+
 @dataclass
 class LocatedElsewhere:
     """Where the absence cross-check found content a finding reported missing.
@@ -1362,6 +1500,10 @@ class Finding:
     # Set by the absence cross-check when content this sheet-level absence
     # reported missing was found, with a host-verified quote (post-seal only).
     located_elsewhere: "LocatedElsewhere | None" = None
+    # Set by the action-plan pass, after verification and the citation check:
+    # the cover-page group and the short instruction. ``None`` until then;
+    # :func:`action_bucket` falls back to severity.
+    action: "ActionItem | None" = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -1417,6 +1559,8 @@ class Finding:
         # cache entry that predates checklists ids) is unchanged.
         if self.checklist_items:
             out["checklist_items"] = list(self.checklist_items)
+        if self.action is not None:
+            out["action"] = self.action.to_dict()
         return out
 
     @classmethod
@@ -1460,6 +1604,10 @@ class Finding:
             located_elsewhere=(
                 LocatedElsewhere.from_dict(d["located_elsewhere"])
                 if isinstance(d.get("located_elsewhere"), dict) else None
+            ),
+            action=(
+                ActionItem.from_dict(d["action"])
+                if isinstance(d.get("action"), dict) else None
             ),
             id=d.get("id", ""),
         )
@@ -1619,7 +1767,7 @@ REQUIRED_COMPONENTS = {
 }
 # Component kinds that are real annotation objects (i.e. "ink"); ``index_row`` is
 # a stamped GOTO link on a generated index page — visible navigation, not ink.
-ANNOTATION_COMPONENTS = frozenset({"cloud", "tag", "callout", "leader"})
+ANNOTATION_COMPONENTS = frozenset({"cloud", "tag", "callout", "leader", "instruction"})
 
 PRIMARY_LEG_ID = "primary"
 SET_LEG_ID = "set_level"
@@ -1857,7 +2005,7 @@ CONFIGURATION_KINDS = ("NORMAL", "DEBUG_OVERRIDE")
 # exhaustive QC and are not individually overridable here.
 _OVERRIDABLE_EXHAUSTIVE_STAGES = (
     "synthesis", "critique", "cross_qc", "verification", "citation",
-    "identity", "review_plan", "investigation", "absence_check",
+    "identity", "review_plan", "investigation", "absence_check", "action_plan",
 )
 
 
@@ -2286,6 +2434,10 @@ class RunConfiguration:
     # The absence cross-check: is content a sheet-level absence reported missing
     # shown elsewhere in the set? Rides the critique, which reports absences.
     run_absence_check: bool = False
+    # The action-plan pass: one text-only read of the final findings that sorts
+    # them into the cover page's three groups and writes each a short
+    # instruction. Rides markup — its output is for the reviewed PDF.
+    run_action_plan: bool = False
     # Markup gating / transport, carried through verbatim (not product-derived).
     markup_verified_only: bool = False
     ink_rejected: bool = False
@@ -2360,6 +2512,7 @@ class RunConfiguration:
             "run_review_plan": self.run_review_plan,
             "run_investigation": self.run_investigation,
             "run_absence_check": self.run_absence_check,
+            "run_action_plan": self.run_action_plan,
             "markup_verified_only": self.markup_verified_only,
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
@@ -2388,6 +2541,7 @@ def resolve_run_configuration(
     review_plan: "bool | None" = None,
     investigate: "bool | None" = None,
     absence_check: "bool | None" = None,
+    action_plan: "bool | None" = None,
     markup_verified_only: bool = False,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
@@ -2481,6 +2635,15 @@ def resolve_run_configuration(
     else:
         run_absence_check = _exhaustive_switch(absence_check, "absence_check")
 
+    # The action-plan pass ranks findings for the reviewed PDF's cover page, so
+    # unspecified it runs exactly when markup does. Like verification, the stage
+    # sits inside the markup run, so an explicit ``action_plan=True`` outside it
+    # never places a call and does not break the zero-API promise below.
+    if action_plan is None:
+        run_action_plan = exhaustive
+    else:
+        run_action_plan = _exhaustive_switch(action_plan, "action_plan")
+
     # ``deterministic_audit_only`` is the "free battery, zero incremental API"
     # promise (DA-013): true ONLY when reference_audit is on, QC is not exhaustive,
     # and no expert flag enabled a model-calling stage. An expert who combines
@@ -2524,6 +2687,7 @@ def resolve_run_configuration(
         run_review_plan=run_review_plan,
         run_investigation=run_investigation,
         run_absence_check=run_absence_check,
+        run_action_plan=run_action_plan,
         markup_verified_only=bool(markup_verified_only),
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
@@ -2602,7 +2766,7 @@ def roll_up_qc_status(
 USAGE_TRANSPORTS = ("REAL_TIME", "BATCH", "CACHE")
 USAGE_STAGE_FAMILIES = (
     "digest", "critique", "synthesis", "focus", "harvest", "cross_qc", "verify", "citation",
-    "identity", "review_plan", "investigate", "absence_check",
+    "identity", "review_plan", "investigate", "absence_check", "action_plan",
 )
 USAGE_TERMINAL_STATUSES = ("COMPLETE", "PARTIAL", "FAILED")
 

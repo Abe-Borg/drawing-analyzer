@@ -106,6 +106,7 @@ STAGE_CATALOG: tuple[tuple[str, str, str], ...] = (
     ("verification", "Verify", "Crop verification"),
     ("investigation", "Probe", "Agentic investigation"),
     ("citation", "Cite", "Code citation check"),
+    ("action_plan", "Plan it", "Sorting findings into what to do first"),
     ("markup", "Markup", "Writing marked-up PDFs"),
 )
 _STAGE_ORDER = {name: i for i, (name, _s, _l) in enumerate(STAGE_CATALOG)}
@@ -125,6 +126,7 @@ _FAMILY_STAGE = {
     "verify": "verification",
     "investigate": "investigation",
     "citation": "citation",
+    "action_plan": "action_plan",
 }
 
 
@@ -177,6 +179,7 @@ def planned_stages(config: Any, *, focus: bool = False) -> list[str]:
         "verification": flag("run_verification"),
         "investigation": flag("run_investigation"),
         "citation": flag("run_citation"),
+        "action_plan": flag("run_action_plan"),
         "markup": flag("run_markup"),
     }
     return [name for name, _s, _l in STAGE_CATALOG if on.get(name)]

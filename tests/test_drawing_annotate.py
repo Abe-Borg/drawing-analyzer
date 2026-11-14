@@ -22,6 +22,7 @@ pymupdf = pytest.importorskip("pymupdf")
 from drawing_analyzer.annotate import (  # noqa: E402
     _SEVERITY_LAYER_NAMES,
     _SEVERITY_LAYER_ORDER,
+    _SHEET_NOTES_LAYER,
     annotate_pdf,
     count_annotations,
     write_set_review_notes_pdf,
@@ -432,10 +433,12 @@ def test_index_severity_ties_break_by_source_page_position(tmp_path):
 
 def test_reviewed_pdf_carries_qc_findings_bookmark_outline(tmp_path):
     # The marked-up set is self-navigable in Bluebeam/Acrobat: a 'QC Findings'
-    # outline with one GOTO child per inked finding, jumping to its page + mark.
+    # outline with one GOTO child per inked finding, jumping to its page + mark,
+    # filed under the same to-do groups as the cover page.
     src = _make_pdf(tmp_path, pages=2)
     a = _finding("clearance", status="VERIFIED", page=0, quote="VAV-3")
-    b = _finding("page 2 issue", status="VERIFIED", page=1, rect=(120, 120, 300, 160), quote="WH-1")
+    b = _finding("page 2 issue", status="VERIFIED", page=1, rect=(120, 120, 300, 160),
+                 quote="WH-1", severity="low")
     a.qc_id, b.qc_id = "QC-001", "QC-002"
 
     res = write_reviewed_pdfs([a, b], [src], tmp_path / "out")
@@ -446,11 +449,16 @@ def test_reviewed_pdf_carries_qc_findings_bookmark_outline(tmp_path):
         doc.close()
 
     parents = [t for t in toc if t[0] == 1]
-    children = [t for t in toc if t[0] == 2]
+    children = [t for t in toc if t[0] == 3]
     assert parents and parents[0][1].startswith("QC Findings")
     assert len(children) == 2
     titles = " ".join(t[1] for t in children)
     assert "QC-001" in titles and "QC-002" in titles
+    # One folder per group in use, each holding its own finding: the high one
+    # first, the low one in the last group.
+    order = [(t[0], t[1]) for t in toc if t[0] in (2, 3)]
+    assert [lvl for lvl, _ in order] == [2, 3, 2, 3]
+    assert "QC-001" in order[1][1] and "QC-002" in order[3][1]
     # Every child is a real GOTO destination (page + zoom) — what makes Bluebeam
     # and Acrobat jump to the mark, not just list a heading.
     for _lvl, _title, page, dest in children:
@@ -499,7 +507,10 @@ def test_severity_layers_created_in_order_all_on_and_carry_their_clouds(tmp_path
         ocgs = doc.get_ocgs()
         # add_ocg allocates increasing xrefs, so sorted-by-xref == creation order.
         ordered = [ocgs[x]["name"] for x in sorted(ocgs)]
-        assert ordered == [_SEVERITY_LAYER_NAMES[t] for t in _SEVERITY_LAYER_ORDER]
+        # The severity layers first, in order; the sheet stamp's own layer after.
+        assert ordered == [
+            *(_SEVERITY_LAYER_NAMES[t] for t in _SEVERITY_LAYER_ORDER), _SHEET_NOTES_LAYER,
+        ]
         assert all(info["on"] for info in ocgs.values())
         names = _layer_names(doc)
         by_layer = {
@@ -532,9 +543,9 @@ def test_single_tier_set_gets_exactly_that_layer(tmp_path, specs, tier):
     res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
     doc = pymupdf.open(str(res.reviewed_pdfs[0]))
     try:
-        assert [i["name"] for i in doc.get_ocgs().values()] == [
-            _SEVERITY_LAYER_NAMES[tier]
-        ]
+        assert [
+            i["name"] for i in doc.get_ocgs().values() if i["name"] != _SHEET_NOTES_LAYER
+        ] == [_SEVERITY_LAYER_NAMES[tier]]
         names = _layer_names(doc)
         for square in (a for page in doc for a in page.annots() if a.type[1] == "Square"):
             assert names[square.get_oc()] == _SEVERITY_LAYER_NAMES[tier]
@@ -817,12 +828,15 @@ def test_index_row_text_fits_its_column(tmp_path):
 
     doc = pymupdf.open(str(res.reviewed_pdfs[0]))
     try:
-        # Table rows only. The page title and the author subtitle sit above
-        # _INDEX_TOP at the same left margin as column 0 and are not table cells.
+        # The finding's own row only. The page title and subtitle sit above
+        # _INDEX_TOP, and a group heading or note runs the full width by design;
+        # none of those is a table cell.
         words = [w for w in doc[0].get_text("words") if w[1] >= _INDEX_TOP - 10]
+        row_y = next(w[1] for w in words if w[4] == "QC-001")
+        words = [w for w in words if abs(w[1] - row_y) < 3]
     finally:
         doc.close()
-    assert words, "no table rows were drawn"
+    assert len(words) > 3, "the finding's row was not drawn"
 
     right_edge = _INDEX_COL_X[-1] + _INDEX_COL_W[-1]
     # No word drawn in the findings column may cross its right edge.
