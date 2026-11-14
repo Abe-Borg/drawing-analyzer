@@ -20,6 +20,14 @@ is testable hermetically. Two pieces:
   live cost figure, a throughput series and a short ticker of notable events.
   It runs on the host's UI thread and never writes to the run.
 
+Beyond the board, the model keeps what the insight tabs show (*Story*,
+*Thinking*, *Plan*, *Findings*): per-stage tokens / spend / model, the set
+identity and the review checklist with its per-sheet answers, the findings
+ledger as it fills, and the models' reasoning summaries
+(:mod:`~drawing_analyzer.thought_stream`). The pipeline hands those over with
+:meth:`RunMonitor.publish`; they are the run's own objects, read here and never
+written.
+
 The live cost is an *estimate*: each settled call record is priced at the
 model that answered it, through :func:`core.pricing.usage_record_cost`. The
 run's own usage ledger is the authority and replaces the estimate in
@@ -118,6 +126,16 @@ _FAMILY_STAGE = {
     "investigate": "investigation",
     "citation": "citation",
 }
+
+
+
+def family_label(family: str) -> str:
+    """The short track label of a usage family (``verify`` → ``Verify``)."""
+    name = _FAMILY_STAGE.get(canonical_stage(str(family or "")))
+    if name is None:
+        return str(family or "call").replace("_", " ")
+    return _STAGE_LABELS[name][0]
+
 
 _COMPLETING = frozenset({OUTCOME_OK, OUTCOME_TOOL_USE})
 # A sheet item is ``SRC-0001:p0``; critique reads append ``:<read id>``.
@@ -233,6 +251,27 @@ class RunMonitor:
         self._config: Any = None
         self._focus = False
         self._sheets: "tuple[tuple[str, str, str], ...] | None" = None
+        self._facts: dict[str, Any] = {}
+
+    def publish(self, kind: str, value: Any) -> None:
+        """Hand the host one of the run's own objects by name.
+
+        ``identity`` (the ``SetIdentity``), ``checklist`` (the
+        ``ChecklistPlan``), ``checklist_answers`` (the dict the critique fills
+        per sheet), ``digests`` (the sheet digests), ``critique_findings`` /
+        ``cross_findings`` and ``ledger`` (the findings ledger). References
+        only: the host reads them and must never write.
+        """
+        try:
+            with self._lock:
+                self._facts[str(kind)] = value
+        except Exception:  # noqa: BLE001 - a display hook never fails a run (I-3)
+            pass
+
+    def facts(self) -> dict:
+        """What has been published so far (a copy of the name → object map)."""
+        with self._lock:
+            return dict(self._facts)
 
     def attach(
         self,
@@ -311,6 +350,13 @@ class LiveStage:
     calls_done: int = 0
     calls_failed: int = 0
     note: str = ""                    # the end event's error / warning, if any
+    tokens_in: int = 0                # input + cache tokens its calls used
+    tokens_out: int = 0
+    cost: Decimal = Decimal(0)        # estimated spend of its settled calls
+    model: str = ""                   # the model its latest call named
+    effort: str = ""                  # ... and the effort that call asked for
+    thinking: str = ""                # ... and its thinking mode
+    batch: bool = False               # its latest call went through the batch queue
 
     def duration(self, wall_now: float) -> "float | None":
         if self.started_at is None:
@@ -350,6 +396,112 @@ class FindingsSummary:
     total: int = 0
     by_status: dict = field(default_factory=dict)     # display bucket -> count
     by_severity: dict = field(default_factory=dict)   # high/medium/low -> count
+
+
+@dataclass
+class LiveCode:
+    """One code edition the set names (the Plan tab)."""
+
+    code: str
+    edition: str = ""
+    origin: str = ""                  # model | regex | operator
+    adopted: bool = True              # False: mentioned on the set, not adopted
+
+
+@dataclass
+class LiveIdentity:
+    """What the identity stage worked out about the set."""
+
+    project_type: str = ""
+    set_type: str = ""
+    place: str = ""                   # jurisdiction / region / country
+    language: str = ""
+    units: str = ""
+    confidence: str = ""
+    disciplines: tuple = ()
+    classified_sheets: int = 0
+    codes: list = field(default_factory=list)       # LiveCode
+
+
+@dataclass
+class LiveCheckItem:
+    id: str
+    text: str
+    counts: dict = field(default_factory=dict)       # answer status -> sheets
+
+
+@dataclass
+class LiveCheckGroup:
+    """One checklist: a person's own, or a plan the model authored."""
+
+    title: str
+    origin: str                       # user | model
+    items: list = field(default_factory=list)        # LiveCheckItem
+
+
+@dataclass
+class LiveFinding:
+    """One ledger entry as the Findings tab lists it."""
+
+    key: int
+    qc_id: str
+    severity: str
+    category: str
+    sheet: str
+    text: str
+    anchor: str                       # exact | fuzzy | tile | unplaced
+    bucket: str                       # a FINDING_BUCKETS key
+    sources: tuple = ()
+    reproduced: bool = False
+
+
+# Checklist answer statuses, in the order the Plan tab stacks them.
+CHECK_STATUSES: tuple[tuple[str, str], ...] = (
+    ("VIOLATED", "violated"),
+    ("UNDETERMINED", "undetermined"),
+    ("MET", "reported met"),
+    ("NOT_APPLICABLE", "n/a"),
+    ("UNANSWERED", "unanswered"),
+)
+# Anchor outcomes, in the order the Findings tab stacks them.
+ANCHOR_BUCKETS: tuple[tuple[str, str], ...] = (
+    ("exact", "exact quote"),
+    ("fuzzy", "close match"),
+    ("tile", "tile only"),
+    ("unplaced", "not placed"),
+)
+_ANCHOR_BUCKET = {"EXACT": "exact", "FUZZY": "fuzzy", "TILE": "tile"}
+# Findings channels (ledger source tags → the label the tab shows).
+SOURCE_LABELS: tuple[tuple[str, str], ...] = (
+    ("digest", "first read"),
+    ("critique", "critique reads"),
+    ("cross_qc", "cross-sheet"),
+    ("auditor", "auditors"),
+    ("prose", "prose harvest"),
+    ("other", "other"),
+)
+# The channels that are model reads (the rest are offline checks).
+_READ_CHANNELS = frozenset({"digest", "critique", "cross_qc"})
+# How often the insight tabs re-read the run's published objects.
+INSIGHT_REFRESH_SECONDS = 0.5
+MAX_LIVE_FINDINGS = 400
+
+
+def source_family(tag: str) -> str:
+    """The channel a ledger source tag belongs to (``critique_2`` → critique)."""
+    tag = str(tag or "").lower()
+    if tag.startswith("digest"):
+        return "digest"
+    if tag.startswith("critique"):
+        return "critique"
+    if tag.startswith("cross"):
+        return "cross_qc"
+    if tag.startswith(("audit", "reference", "arithmetic", "naming", "title", "sheet_index",
+                       "edition", "deterministic")):
+        return "auditor"
+    if tag.startswith(("prose", "synthesis", "focus", "harvest")):
+        return "prose"
+    return "other"
 
 
 # Verification status → the board's bucket. DETERMINISTIC folds into verified
@@ -461,6 +613,23 @@ class LiveRunModel:
         # The loaded files' revision (the host's fingerprint) the board was
         # previewed from: sheet ids encode order and page, not file content.
         self.revision: Any = None
+        # What the insight tabs show (see ``_poll_insights``).
+        self.config: Any = None                 # the run's resolved configuration
+        self.identity: "LiveIdentity | None" = None
+        self.checklist: list[LiveCheckGroup] = []
+        self.checklist_sheets = 0               # sheets whose critique answered
+        self.found: dict = {}                   # channel -> findings reported so far
+        self.ledger_state = ""                  # "" | OPEN | SEALED | NUMBERED
+        self.ledger_findings: list[LiveFinding] = []
+        self.ledger_total = 0
+        self.ledger_offline = 0                 # entries no model read reported
+        self.ledger_by: dict = {"severity": {}, "anchor": {}, "bucket": {}, "source": {}}
+        self.insights_changed_at = 0.0          # animation clock: last insight change
+        self.thoughts: list = []                # thought_stream.Thought copies
+        self.thoughts_enabled: "bool | None" = None   # None: no run has said yet
+        self.thoughts_seen = 0
+        self.thoughts_with_text = 0
+        self.thoughts_changed_at = 0.0
         self._focus = False
         self._reset_cursors()
 
@@ -479,6 +648,9 @@ class LiveRunModel:
         self._sheets_from_run = False
         self._planned_from_run = False
         self._journal_roots: tuple = ()
+        self._thought_version = -1
+        self._insights_at = float("-inf")
+        self._insight_sig: Any = None
 
     def preview(
         self,
@@ -533,6 +705,8 @@ class LiveRunModel:
             st.state, st.status, st.note = STAGE_PLANNED, "", ""
             st.started_at = st.ended_at = None
             st.calls_open = st.calls_queued = st.calls_done = st.calls_failed = 0
+            st.tokens_in = st.tokens_out = 0
+            st.cost, st.model, st.effort, st.thinking, st.batch = Decimal(0), "", "", "", False
             st.changed_at = now
         for sh in sheets:
             sh.state, sh.changed_at, sh.digested = SHEET_PENDING, now, False
@@ -544,6 +718,7 @@ class LiveRunModel:
     def finish(self, ctx: Any = None, monitor: "RunMonitor | None" = None) -> None:
         """The run returned: take its own figures as final."""
         if monitor is not None:
+            self._insights_at = float("-inf")       # the last read is unthrottled
             self.poll(monitor)
         now = self._clock()
         self.phase = PHASE_DONE
@@ -587,6 +762,7 @@ class LiveRunModel:
              monitor: "RunMonitor | None" = None) -> None:
         """The run was stopped (``PHASE_STOPPED``) or raised (``PHASE_FAILED``)."""
         if monitor is not None:
+            self._insights_at = float("-inf")
             self.poll(monitor)
         now = self._clock()
         self.phase = phase
@@ -691,6 +867,7 @@ class LiveRunModel:
                 # plan once; stages it already started stay on the track.
                 self._planned_from_run = True
                 self._focus = parts.focus
+                self.config = parts.config
                 self._plan(planned_stages(parts.config, focus=parts.focus), now,
                            keep_started=True)
             if parts.journal is not None:
@@ -713,6 +890,181 @@ class LiveRunModel:
                 self._poll_calls(calls, now, fast=fast)
         except Exception:  # noqa: BLE001 - the board is decoration; never raise
             pass
+        try:
+            self._poll_thoughts(parts.pressure, now)
+        except Exception:  # noqa: BLE001
+            pass
+        if now - self._insights_at >= INSIGHT_REFRESH_SECONDS:
+            self._insights_at = now
+            try:
+                facts = monitor.facts()
+            except Exception:  # noqa: BLE001 - a monitor without facts shows none
+                facts = {}
+            # Each part is read on its own: the run's threads are still writing
+            # these objects, and one odd read must not blank the other tabs.
+            for read in (self._read_identity, self._read_checklist, self._read_findings):
+                try:
+                    read(facts)
+                except Exception:  # noqa: BLE001
+                    continue
+            sig = (
+                id(self.identity) if self.identity is None else len(self.identity.codes),
+                self.checklist_sheets, sum(len(g.items) for g in self.checklist),
+                self.ledger_total, self.ledger_state, tuple(sorted(self.found.items())),
+                tuple(sorted(self.ledger_by["bucket"].items())),
+                tuple(sorted(self.ledger_by["anchor"].items())),
+            )
+            if sig != self._insight_sig:
+                self._insight_sig, self.insights_changed_at = sig, now
+
+    # -- insight tabs --------------------------------------------------------- #
+
+    def item_label(self, item: str) -> str:
+        """A call item as a person reads it: the sheet's label, else the item."""
+        item = str(item or "")
+        key = sheet_key_of(item)
+        idx = self._sheet_by_item.get(key) if key else None
+        if idx is None:
+            return item
+        label = self.sheets[idx].label or key
+        read = item[len(key):].lstrip(":")
+        return f"{label} · read {read}" if read else label
+
+    def merged_reports(self) -> int:
+        """How many reports the ledger folded into an entry that already said
+        the same thing (0 until the ledger exists, or when it cannot be told)."""
+        if not self.ledger_total:
+            return 0
+        from_reads = self.ledger_total - self.ledger_offline
+        return max(0, sum(self.found.values()) - from_reads)
+
+    def _poll_thoughts(self, pressure: Any, now: float) -> None:
+        stream = getattr(pressure, "thoughts", None)
+        if pressure is None:
+            return
+        if stream is None or not hasattr(stream, "snapshot"):
+            self.thoughts_enabled = False
+            return
+        self.thoughts_enabled = True
+        snap = stream.snapshot(self._thought_version)
+        if snap is None:
+            return
+        self._thought_version, self.thoughts = snap
+        self.thoughts_seen = int(getattr(stream, "seen", 0) or 0)
+        self.thoughts_with_text = int(getattr(stream, "with_text", 0) or 0)
+        self.thoughts_changed_at = now
+
+    def _read_identity(self, facts: dict) -> None:
+        ident = facts.get("identity")
+        if ident is None:
+            return
+        codes = [
+            LiveCode(code=str(getattr(c, "code", "") or ""),
+                     edition=str(getattr(c, "edition", "") or ""),
+                     origin=str(getattr(c, "origin", "") or ""), adopted=adopted)
+            for adopted, name in ((True, "adopted_codes"), (False, "mentioned_codes"))
+            for c in getattr(ident, name, None) or ()
+        ]
+        place = ", ".join(
+            p for p in (str(getattr(ident, n, "") or "").strip()
+                        for n in ("jurisdiction", "region", "country")) if p
+        )
+        self.identity = LiveIdentity(
+            project_type=str(getattr(ident, "project_type", "") or ""),
+            set_type=str(getattr(ident, "set_type", "") or ""),
+            place=place,
+            language=str(getattr(ident, "language", "") or ""),
+            units=str(getattr(ident, "units", "") or ""),
+            confidence=str(getattr(ident, "confidence", "") or ""),
+            disciplines=tuple(str(d) for d in getattr(ident, "disciplines", None) or ()),
+            classified_sheets=len(getattr(ident, "sheet_disciplines", None) or ()),
+            codes=codes,
+        )
+
+    def _read_checklist(self, facts: dict) -> None:
+        plan = facts.get("checklist")
+        items = list(getattr(plan, "items", None) or ())
+        if not items:
+            return
+        # One sheet's answer to an item is its reads' answers folded by the
+        # run's own precedence; the tab counts sheets per answer.
+        from .models import merged_check_status
+
+        answers = facts.get("checklist_answers")
+        per_sheet = list(dict(answers).values()) if answers else []
+        tallies: dict[str, Counter] = {}
+        for sheet_answers in per_sheet:
+            for item_id, reads in dict(sheet_answers or {}).items():
+                tallies.setdefault(str(item_id), Counter())[
+                    merged_check_status(list(reads or ()))] += 1
+        groups: list[LiveCheckGroup] = []
+        by_key: dict[tuple, LiveCheckGroup] = {}
+        for it in items:
+            item_id = str(getattr(it, "id", "") or "")
+            # A checklist is identified by its position in the selection (the
+            # id's prefix): two uploads can share a name and a title.
+            key = (str(getattr(it, "origin", "") or ""), item_id.split(".", 1)[0])
+            group = by_key.get(key)
+            if group is None:
+                group = LiveCheckGroup(
+                    title=str(getattr(it, "title", "") or getattr(it, "profile", "") or key[1]),
+                    origin=key[0],
+                )
+                by_key[key] = group
+                groups.append(group)
+            group.items.append(LiveCheckItem(
+                id=item_id, text=str(getattr(it, "text", "") or ""),
+                counts=dict(tallies.get(item_id, ())),
+            ))
+        self.checklist = groups
+        self.checklist_sheets = len(per_sheet)
+
+    def _read_findings(self, facts: dict) -> None:
+        found: dict[str, int] = {}
+        digests = facts.get("digests")
+        if digests is not None:
+            found["digest"] = sum(len(getattr(sd, "findings", None) or ()) for sd in list(digests))
+        for kind, channel in (("critique_findings", "critique"), ("cross_findings", "cross_qc")):
+            value = facts.get(kind)
+            if value is not None:
+                found[channel] = len(list(value))
+        self.found = found
+        ledger = facts.get("ledger")
+        if ledger is None:
+            return
+        entries = list(getattr(ledger, "entries", None) or ())
+        self.ledger_state = str(getattr(ledger, "state", "") or "")
+        by: dict[str, Counter] = {k: Counter() for k in ("severity", "anchor", "bucket", "source")}
+        rows: list[LiveFinding] = []
+        offline = 0
+        for f in entries:
+            severity = str(getattr(f, "severity", "") or "").lower()
+            anchor = _ANCHOR_BUCKET.get(
+                str(getattr(getattr(f, "anchor", None), "status", "") or "").upper(), "unplaced")
+            bucket = _STATUS_BUCKET.get(
+                str(getattr(getattr(f, "verification", None), "status", "") or ""), "unchecked")
+            sources = tuple(sorted({source_family(t) for t in getattr(f, "sources", None) or ()}))
+            by["severity"][severity] += 1
+            by["anchor"][anchor] += 1
+            by["bucket"][bucket] += 1
+            for src in sources:
+                by["source"][src] += 1
+            if sources and not set(sources) & _READ_CHANNELS:
+                offline += 1
+            rows.append(LiveFinding(
+                key=id(f), qc_id=str(getattr(f, "qc_id", "") or ""), severity=severity,
+                category=str(getattr(f, "category", "") or ""),
+                sheet=str(getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or ""),
+                text=" ".join(str(getattr(f, "text", "") or "").split())[:240],
+                anchor=anchor, bucket=bucket, sources=sources,
+                reproduced=bool(getattr(f, "reproduced", False)),
+            ))
+        rank = {"high": 0, "medium": 1, "low": 2}
+        rows.sort(key=lambda r: (rank.get(r.severity, 3), r.qc_id or "~", r.sheet, r.text))
+        self.ledger_total = len(rows)
+        self.ledger_offline = offline
+        self.ledger_findings = rows[:MAX_LIVE_FINDINGS]
+        self.ledger_by = {k: dict(v) for k, v in by.items()}
 
     # -- journal ------------------------------------------------------------ #
 
@@ -878,6 +1230,10 @@ class LiveRunModel:
                 st.calls_queued += 1
             else:
                 st.calls_open += 1
+            st.model = str(getattr(rec, "model", "") or st.model)
+            st.effort = str(getattr(rec, "effort", "") or "")
+            st.thinking = str(getattr(rec, "thinking", "") or "")
+            st.batch = batch
 
     def _place_call(self, rec: Any, now: float) -> bool:
         """Show an open call on its sheet; ``False`` while it names none yet."""
@@ -961,6 +1317,12 @@ class LiveRunModel:
         sheet = self._sheet_for(rec)
         if sheet is not None:
             sheet.tokens += d_in + d_out
+        st = self._stage(_FAMILY_STAGE.get(
+            canonical_stage(str(getattr(rec, "stage", "") or "")), ""))
+        if st is not None:
+            st.tokens_in += d_in
+            st.tokens_out += d_out
+            st.cost += d_cost
         second = int(now)
         if self.series and self.series[-1][0] == second:
             self.series[-1][1] += d_in

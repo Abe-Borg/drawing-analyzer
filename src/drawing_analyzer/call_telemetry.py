@@ -634,6 +634,11 @@ class CallTelemetry:
         except Exception:  # noqa: BLE001
             pass
 
+    def batch_item(self, batch_id: str, custom_id: str) -> "CallRecord | None":
+        """The record of one batch item this recorder knows, or ``None``."""
+        with self._lock:
+            return self._batch_items.get((str(batch_id or ""), str(custom_id or "")))
+
     def note_batch_results(self, batch_id: str, results: dict) -> None:
         """Fill the consumption side of a batch's items from its results stream.
 

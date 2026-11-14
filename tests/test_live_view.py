@@ -506,3 +506,285 @@ def test_a_batch_wait_is_drawn_at_the_ambient_rate(monkeypatch, batch, expected)
         delay = sched.run_next()
         clock.t += 0.25
     assert sched.pending[0][0] == expected and delay == expected
+
+
+# --------------------------------------------------------------------------- #
+# The insight tabs: Story, Thinking, Plan, Findings
+# --------------------------------------------------------------------------- #
+
+
+def _finding(i: int, severity: str, *, source: str = "digest_json"):
+    from drawing_analyzer.models import Finding
+
+    f = Finding(sheet_id=f"FP-{200 + i}", source_name="M-101.pdf", page_index=i,
+                category="conflict", severity=severity, source_id="SRC-0001",
+                text=f"Schedule and plan disagree about item {i}, " + "which matters " * 12,
+                source_quote=f"quote {i}")
+    f.sources = [source]
+    return f
+
+
+def _insight_run(n_sheets: int = 4, *, items: int = 3, findings: int = 4, thoughts: int = 3):
+    """A QC run mid-critique that has published its plan, answers, ledger and
+    reasoning the way the pipeline does."""
+    from drawing_analyzer.ledger import Ledger
+    from drawing_analyzer.models import AdoptedCode, SetIdentity
+    from drawing_analyzer.profiles import MODEL_PLAN_PREFIX, ChecklistPlan, Profile
+    from drawing_analyzer.thought_stream import ThoughtStream
+
+    refs = _refs(n_sheets)
+    r = _live_run(refs)
+    r.refs = refs
+    r.feed = ThoughtStream(clock=r.clock)
+    r.monitor.parts().pressure.thoughts = r.feed
+    r.journal.emit("RUN_START", files=1)
+    r.journal.emit("STAGE_START", stage="digest", sheets=n_sheets)
+    r.journal.emit("STAGE_END", stage="digest", status="COMPLETE")
+    r.journal.emit("STAGE_START", stage="critique", sheets=n_sheets)
+    r.monitor.publish("identity", SetIdentity(
+        disciplines=("fire protection", "mechanical"), project_type="Data center",
+        jurisdiction="Loudoun County", units="Imperial",
+        adopted_codes=(AdoptedCode(code="NFPA 13", edition="2025", origin="operator"),
+                       AdoptedCode(code="NFPA 72", edition="2022", origin="model")),
+        mentioned_codes=(AdoptedCode(code="NFPA 13", edition="2019", origin="regex"),),
+    ))
+    r.plan = ChecklistPlan([
+        Profile(name="upload:fp.md", title="Office checklist",
+                items=tuple(f"Office check number {i} is satisfied" for i in range(items))),
+        Profile(name=MODEL_PLAN_PREFIX + "fire-protection", title="Fire protection",
+                items=tuple(f"NFPA 13 (2025) section {i}: the plan complies" for i in range(items))),
+    ])
+    r.answers = {}
+    r.monitor.publish("checklist", r.plan)
+    r.monitor.publish("checklist_answers", r.answers)
+    r.ledger = Ledger()
+    r.findings = [_finding(i, ("high", "medium", "low")[i % 3]) for i in range(findings)]
+    r.ledger.add(r.findings)
+    r.monitor.publish("ledger", r.ledger)
+    r.monitor.publish("digests", [SimpleNamespace(findings=[1, 2]) for _ in refs])
+    for i in range(thoughts):
+        th = r.feed.open(stage="critique", item=sheet_item(refs[i % n_sheets]) + ":1",
+                         model="claude-opus-5-5")
+        r.feed.add_thinking(th, f"Thought {i}: " + "the schedule and the plan disagree. " * 6)
+        r.feed.close(th)
+    return r
+
+
+def test_the_insight_tabs_read_the_runs_own_objects_as_they_fill():
+    r = _insight_run(findings=3)
+    r.ledger.add([_finding(9, "low", source="auditor_reference")])
+    u1, m1 = r.plan.items[0].id, r.plan.items[-1].id
+    r.answers[("SRC-0001", 0)] = {u1: ["MET", "VIOLATED"], m1: ["MET", "MET"]}
+    r.answers[("SRC-0001", 1)] = {u1: ["MET"]}
+    r.model.poll(r.monitor)
+    m = r.model
+
+    assert [(c.code, c.edition, c.adopted, c.origin) for c in m.identity.codes] == [
+        ("NFPA 13", "2025", True, "operator"), ("NFPA 72", "2022", True, "model"),
+        ("NFPA 13", "2019", False, "regex")]
+    assert [(g.origin, g.title, len(g.items)) for g in m.checklist] == [
+        ("user", "Office checklist", 3), ("model", "Fire protection", 3)]
+    by_id = {it.id: it.counts for g in m.checklist for it in g.items}
+    # One sheet's two reads disagree: the run's precedence makes that sheet a
+    # violation, so the item is flagged on one sheet and met on the other.
+    assert by_id[u1] == {"VIOLATED": 1, "MET": 1} and by_id[m1] == {"MET": 1}
+    assert m.checklist_sheets == 2
+    assert (m.ledger_total, m.ledger_offline, m.found) == (4, 1, {"digest": 8})
+    assert m.merged_reports() == 5                       # 8 reported, 3 entries from reads
+    assert m.ledger_by["bucket"] == {"unchecked": 4}
+    assert [f.severity for f in m.ledger_findings][:2] == ["high", "medium"]
+    assert m.item_label(m.thoughts[0].item) == r.refs[0].display_label + " · read 1"
+    assert (m.thoughts_seen, m.thoughts_with_text, m.thoughts_enabled) == (3, 3, True)
+
+    # The run keeps working on the same objects: a verdict lands, an anchor is
+    # found, a sheet answers. The tabs pick it up on their next refresh, not
+    # on every frame.
+    r.findings[0].verification.status = "REJECTED"
+    r.findings[1].anchor.status = "EXACT"
+    r.answers[("SRC-0001", 2)] = {u1: ["VIOLATED"]}
+    r.clock.t += 0.1
+    m.poll(r.monitor)
+    assert m.ledger_by["bucket"] == {"unchecked": 4} and m.checklist_sheets == 2
+    changed_before = m.insights_changed_at
+    r.clock.t += 1.0
+    m.poll(r.monitor)
+    assert m.ledger_by["bucket"] == {"rejected": 1, "unchecked": 3}
+    assert m.ledger_by["anchor"] == {"exact": 1, "unplaced": 3}
+    assert {it.id: it.counts for g in m.checklist for it in g.items}[u1] == {
+        "VIOLATED": 2, "MET": 1}
+    assert m.insights_changed_at > changed_before
+
+    # The run's last word is read unthrottled when it returns.
+    r.findings[2].verification.status = "VERIFIED"
+    m.finish(None, r.monitor)
+    assert m.ledger_by["bucket"]["verified"] == 1
+
+
+def test_a_run_without_a_feed_says_so_and_an_odd_published_object_blanks_only_its_tab():
+    r = _insight_run()
+    r.monitor.parts().pressure.thoughts = None
+    r.monitor.publish("checklist", object())             # not a plan
+    r.monitor.publish("identity", 42)
+    r.model.poll(r.monitor)
+    assert r.model.thoughts_enabled is False and r.model.thoughts == []
+    assert r.model.checklist == []
+    assert r.model.ledger_total == 4                      # the other tabs still filled
+
+
+_TABS = ["story", "mind", "plan", "findings"]
+
+
+@pytest.mark.parametrize("tab", _TABS)
+@pytest.mark.parametrize("phase", ["RUNNING", PHASE_DONE])
+@pytest.mark.parametrize("w, h, scale", [(980, 420, 1.0), (520, 230, 1.0), (1400, 600, 1.5)])
+def test_every_tab_is_drawable_stays_inside_the_panel_and_rests_when_the_run_is_over(
+        tab, phase, w, h, scale):
+    r = _insight_run(findings=40, items=30, thoughts=12)
+    r.model.poll(r.monitor)
+    if phase == PHASE_DONE:
+        r.model.finish(None, r.monitor)
+    scene = LiveScene()
+    assert scene.set_tab(tab)
+    scene.hover = (w * 0.5, h * 0.6)
+    prims = scene.build(r.model, w, h, r.clock.t, scale=scale)
+    keys = [p.key for p in prims]
+    assert len(keys) == len(set(keys))
+    assert all(math.isfinite(c) for p in prims for c in p.coords)
+    body = [p for p in prims if p.kind == "text" and dict(p.opts)["text"]
+            and not p.key.startswith(("tip_", "hud_", "tk_", "tab_"))]
+    assert body and all(0 <= p.coords[0] <= w and 0 <= p.coords[1] <= h for p in body)
+    assert not any(p.key.startswith("c") and p.key[1:].isdigit() for p in prims)   # no board
+    if phase == PHASE_DONE:
+        later = r.clock.t + 60
+        scene.build(r.model, w, h, later, scale=scale)
+        scene.build(r.model, w, h, later + 0.04, scale=scale)
+        assert not scene.animating
+
+
+def _texts(prims, prefix: str) -> list[str]:
+    return [dict(p.opts)["text"] for p in prims if p.kind == "text" and p.key.startswith(prefix)]
+
+
+def _settle(scene, model, clock, w=980, h=300):
+    """Draw until the scroll easing has arrived; returns the last frame."""
+    prims = []
+    for _ in range(40):
+        clock.t += 0.1
+        prims = scene.build(model, w, h, clock.t)
+    return prims
+
+
+@pytest.mark.parametrize("tab, prefix, first, last", [
+    ("plan", "ck", "U1.1", "M1.30"),
+    ("findings", "fl", "FP-200", "FP-238"),
+])
+def test_a_long_list_scrolls_from_its_first_row_to_its_last_and_no_further(
+        tab, prefix, first, last):
+    r = _insight_run(findings=40, items=30)
+    r.model.poll(r.monitor)
+    scene = LiveScene()
+    scene.set_tab(tab)
+    shown = _texts(_settle(scene, r.model, r.clock), prefix)
+    assert first in shown and last not in shown
+    scene.wheel(+5)                                       # already at the top
+    assert scene.scroll[tab] == 0.0
+    scene.wheel(-10_000)
+    shown = _texts(_settle(scene, r.model, r.clock), prefix)
+    assert last in shown and first not in shown
+    limit = scene.scroll[tab]
+    scene.wheel(-3)
+    assert scene.scroll[tab] == limit > 0
+
+
+def test_the_thinking_feed_follows_the_newest_until_the_reader_scrolls_away():
+    r = _insight_run(thoughts=14)
+    r.model.poll(r.monitor)
+    scene = LiveScene()
+    scene.set_tab("mind")
+    newest = lambda prims: any("Thought 13:" in t for t in _texts(prims, "mi_l"))   # noqa: E731
+    assert newest(_settle(scene, r.model, r.clock))
+
+    scene.wheel(+4)                                       # reading something older
+    assert not newest(_settle(scene, r.model, r.clock))
+    held = scene.scroll["mind"]
+    th = r.feed.open(stage="verify", item="QC-007", model="claude-opus-5-5")
+    r.feed.add_thinking(th, "A brand new thought about the riser detail.")
+    r.model.poll(r.monitor)
+    prims = _settle(scene, r.model, r.clock)
+    assert scene.scroll["mind"] == held                   # the page did not jump
+    assert not any("brand new thought" in t for t in _texts(prims, "mi_l"))
+    assert _texts(prims, "mi_more")                       # ... and says there is more
+
+    scene.wheel(-10_000)                                  # back to the end: follow again
+    r.feed.add_thinking(th, " And one more line of it to push the feed along. " * 4)
+    r.model.poll(r.monitor)
+    prims = _settle(scene, r.model, r.clock)
+    assert any("brand new thought" in t for t in _texts(prims, "mi_l"))
+    assert not _texts(prims, "mi_more")
+
+
+def test_hovering_a_clipped_finding_shows_all_of_it():
+    r = _insight_run(findings=3)
+    r.findings[0].qc_id = "QC-001"
+    r.model.poll(r.monitor)
+    scene = LiveScene()
+    scene.set_tab("findings")
+    prims = scene.build(r.model, 700, 320, r.clock.t)
+    row = next(p for p in prims if p.key == "fl0_t")
+    full = r.model.ledger_findings[0].text
+    assert dict(row.opts)["text"] != full                 # the row had to cut it
+    scene.hover = (row.coords[0] + 20, row.coords[1])
+    tip = " ".join(_texts(scene.build(r.model, 700, 320, r.clock.t), "tip_l"))
+    assert full in " ".join(tip.split())
+
+
+def test_clicking_a_tab_shows_it_and_a_short_panel_keeps_the_board():
+    canvas, sched, clock = _FakeCanvas(980, 420), _Scheduler(), _Clock()
+    picked: list[str] = []
+    panel = LivePanel(canvas, schedule=sched.schedule, cancel=lambda h: None, clock=clock,
+                      on_tab=picked.append, tab="findings")
+    assert panel.scene.tab == "findings"                  # the remembered tab
+    panel.preview([(sheet_item(ref), ref.display_label, ref.source_id) for ref in _refs(6)],
+                  ["inventory", "digest"])
+    sched.run_next()
+    hits = {key: (x0, y0, x1, y1) for x0, y0, x1, y1, key in panel.scene._tab_hits}
+    x0, y0, x1, y1 = hits["plan"]
+    panel.click((x0 + x1) / 2, (y0 + y1) / 2)
+    assert (panel.scene.tab, picked) == ("plan", ["plan"])
+    panel.click((x0 + x1) / 2, (y0 + y1) / 2)             # already showing
+    panel.click(5, 400)                                   # not a tab
+    assert picked == ["plan"]
+    panel.scroll(-2)                                      # nothing to scroll: harmless
+
+    # Squeezed by the sections above it, the panel has no room for a tab strip:
+    # it shows the board whatever tab was picked.
+    scene = panel.scene
+    prims = scene.build(panel.model, 800, 170, clock.t)
+    assert scene._tab_hits == []
+    assert sum(1 for p in prims if p.key.startswith("c") and p.key[1:].isdigit()) == 6
+
+
+def test_a_new_run_brings_every_view_back_to_following():
+    canvas, sched = _FakeCanvas(980, 300), _Scheduler()
+    panel = LivePanel(canvas, schedule=sched.schedule, cancel=lambda h: None)
+    panel.scene.set_tab("mind")
+    panel.scene._scroll_max["mind"] = 500.0
+    panel.scroll(+3)
+    assert panel.scene.follow["mind"] is False
+    panel.begin()
+    assert panel.scene.follow.get("mind", True) and not panel.scene.scroll
+
+
+def test_insights_report_trouble_at_the_level_it_deserves():
+    from drawing_analyzer.live_tabs import insights
+
+    r = _insight_run()
+    r.model.poll(r.monitor)
+    calm = [level for level, _text in insights(r.model)]
+    assert calm and "warn" not in calm and "bad" not in calm
+    r.journal.emit("API_RETRY", stage="digest", kind="rate_limit", backoff_s=2)
+    r.journal.emit("SPEND_LIMIT", stage="digest")
+    r.model.poll(r.monitor)
+    levels = [level for level, _text in insights(r.model)]
+    assert levels.count("warn") == 1 and levels.count("bad") == 1
+    assert insights(LiveRunModel()) == []                 # nothing loaded: nothing to say

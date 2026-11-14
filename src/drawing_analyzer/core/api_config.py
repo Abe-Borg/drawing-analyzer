@@ -41,7 +41,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .. import call_telemetry, cancellation, live_spend, resource_pressure
+from .. import call_telemetry, cancellation, live_spend, resource_pressure, thought_stream
 
 _log = logging.getLogger(__name__)
 
@@ -1623,6 +1623,84 @@ def _is_fast_mode_rejection(exc: Exception) -> bool:
     return any(marker in text for marker in _FAST_MODE_REJECTION_MARKERS)
 
 
+# ---------------------------------------------------------------------------
+# Reasoning summaries (``thinking.display``) — the live view's Thinking tab
+# ---------------------------------------------------------------------------
+#
+# By default the current models return ``thinking`` blocks with empty text.
+# ``display: "summarized"`` returns a readable summary instead; it changes what
+# is shown, not what is thought or billed, and the raw chain of thought is
+# never returned. A run asks for it only when a live view is attached (its
+# :class:`~drawing_analyzer.thought_stream.ThoughtStream` rides the run's
+# resource record), so a headless run sends exactly what it always sent. No
+# request builder or cache key knows about it: it is attached here and in the
+# batch submit, like fast mode.
+THINKING_DISPLAY = "summarized"
+
+# Whether this process may still ask for summaries. A platform or model that
+# rejects the field answers with a 400 naming it; analysis must not fail for a
+# display choice, so the first such rejection turns it off for the process and
+# the call is re-sent without it (mirrors ``_fast_mode_available``).
+_thinking_display_available = True
+
+_THINKING_DISPLAY_REJECTION_MARKERS = ("display",)
+
+
+def apply_thinking_display(kwargs: dict) -> dict:
+    """Return ``kwargs`` asking for reasoning summaries when the run shows them.
+
+    Returns ``kwargs`` unchanged (the same object) when no live view is
+    attached, the feature latched off, or the request's ``thinking`` is not
+    plain adaptive thinking (absent, another mode, or already carrying a
+    ``display``).
+    """
+    if not _thinking_display_available or thought_stream.current() is None:
+        return kwargs
+    thinking = kwargs.get("thinking")
+    if (
+        not isinstance(thinking, dict)
+        or thinking.get("type") != "adaptive"
+        or "display" in thinking
+    ):
+        return kwargs
+    out = dict(kwargs)
+    out["thinking"] = {**thinking, "display": THINKING_DISPLAY}
+    return out
+
+
+def _is_thinking_display_rejection(exc: Exception) -> bool:
+    """True for a 400 that plausibly names the ``thinking.display`` field."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _THINKING_DISPLAY_REJECTION_MARKERS)
+
+
+def note_batch_item_error(detail: str) -> bool:
+    """A batch item came back errored: if the error names ``thinking.display``
+    on a run that asked for summaries, stop asking for the rest of the process.
+
+    A batch item has no HTTP status to test, so both words must appear. Returns
+    whether the feature was switched off by this call.
+    """
+    global _thinking_display_available
+    text = str(detail or "").lower()
+    if (
+        not _thinking_display_available
+        or thought_stream.current() is None
+        or "display" not in text
+        or "thinking" not in text
+    ):
+        return False
+    _thinking_display_available = False
+    _log.warning(
+        "reasoning summaries rejected in a batch (%s); later requests go out "
+        "without them for the rest of this process.",
+        detail,
+    )
+    return True
+
+
 def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method: str) -> Any:
     """Issue one Messages request, opting capable models into refusal fallback
     (and, on an XFast run, fast mode), self-healing if the platform rejects
@@ -1639,13 +1717,22 @@ def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method:
     ends. Any other exception (transient or not) propagates unchanged to the
     caller's own retry loop.
     """
-    global _refusal_fallback_available, _fast_mode_available
+    global _refusal_fallback_available, _fast_mode_available, _thinking_display_available
     while True:
-        fast = apply_fast_mode(kwargs, model=model)
+        shown = apply_thinking_display(kwargs)
+        fast = apply_fast_mode(shown, model=model)
         attempted = apply_refusal_fallback(fast, model=model)
         try:
             return _dispatch_messages(client, attempted, method)
         except Exception as exc:
+            if shown is not kwargs and _is_thinking_display_rejection(exc):
+                _thinking_display_available = False
+                _log.warning(
+                    "reasoning summaries unavailable (%s); the live view's "
+                    "Thinking tab stays empty for the rest of this process.",
+                    exc,
+                )
+                continue
             if fast is not kwargs and _is_fast_mode_rejection(exc):
                 _fast_mode_available = False
                 _log.warning(
@@ -1690,25 +1777,47 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
     cancellation.check()
     resource_pressure.check_spend_limit()
     record = call_telemetry.begin(kwargs, method=method)
+    # The live view's Thinking tab follows the call (``None`` without one).
+    tap = thought_stream.open_call(kwargs, method=method)
     try:
         if method == "create":
             message = namespace.create(**kwargs)
         else:
             with namespace.stream(**kwargs) as stream:
                 token = cancellation.current()
-                if token is not None:
-                    for _event in stream:
-                        token.raise_if_cancelled()
+                if token is not None or tap is not None:
+                    for event in _stream_events(stream, required=token is not None):
+                        if token is not None:
+                            token.raise_if_cancelled()
+                        if tap is not None:
+                            tap.event(event)
                 message = stream.get_final_message()
     except cancellation.RunCancelled:
         call_telemetry.finish(record, cancelled=True)
+        if tap is not None:
+            tap.finish(failed=True)
         raise
     except Exception as exc:
         call_telemetry.finish(record, error=exc)
+        if tap is not None:
+            tap.finish(failed=True)
         resource_pressure.note_spend_limit(
             exc, stage=call_telemetry.current_stage() or "unattributed",
         )
         raise
     call_telemetry.finish(record, message=message)
     live_spend.note_response(kwargs, message)
+    if tap is not None:
+        tap.finish(message)
     return message
+
+
+def _stream_events(stream: Any, *, required: bool) -> Any:
+    """The stream's events. A stop needs them (``required``); the Thinking tab
+    only wants them, so a stream that cannot be iterated yields nothing."""
+    if required:
+        return stream
+    try:
+        return iter(stream)
+    except TypeError:
+        return ()

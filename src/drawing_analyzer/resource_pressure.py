@@ -974,6 +974,10 @@ class ResourcePressure:
         # The caller's live spend monitor (:mod:`~drawing_analyzer.live_spend`),
         # or ``None``. Here for the same reason: every worker reaches it.
         self.spend: Any = None
+        # The run's reasoning-summary collector
+        # (:mod:`~drawing_analyzer.thought_stream`), or ``None`` when no live
+        # view is attached. Display only; here so every worker reaches it.
+        self.thoughts: Any = None
 
     # -- wiring ------------------------------------------------------------- #
 

@@ -459,6 +459,42 @@ map lives in `src/drawing_analyzer/__init__.py`.
   (`_show_activity_view`; `core.preferences.LIVE_VIEW`). Handlers reach
   the panel via `getattr(self, "_live", None)`, so stub-driven handler tests
   need no new stubs. The gauntlet `oracle` runs with a monitor.
+- **Live view tabs** (`live_tabs.py`, toolkit-free): the canvas carries a tab
+  strip under the HUD (Board | Story | Thinking | Plan | Findings), drawn only
+  when the panel is at least 192 px tall (a shorter one shows the board
+  whatever tab is picked). `LiveScene` owns the state: `tab`, per-tab `scroll`
+  and `follow`, the tab hit boxes and the hover regions a view registers with
+  `add_tip`. The host's inputs are `click` and `wheel` (`LivePanel.click` /
+  `.scroll`; the GUI binds `<Button-1>`, `<MouseWheel>`, `<Button-4/5>`), and
+  `core.preferences.LIVE_TAB` remembers the tab. A canvas cannot clip: a
+  scrolling list emits only the rows inside its rectangle, keyed by **slot**
+  (`ck0`, `fl0`, `mi_l0`), and fades the edge rows. Bold small-caps labels are
+  measured with `caps_width`, not `text_width`. Anything that moves after a run
+  ends keeps the loop awake forever, so a view sets `scene.animating` only for
+  motion that stops (the test that a finished board rests covers every tab).
+  The pipeline hands the run's own objects over with
+  `notify_monitor(monitor, "publish", kind, obj)`: `identity`, `checklist`,
+  `checklist_answers`, `digests`, `critique_findings`, `cross_findings`,
+  `ledger`. They are live references; `LiveRunModel` re-reads them every
+  `INSIGHT_REFRESH_SECONDS` (unthrottled in `finish` / `stop`), each reader in
+  its own `try` so one odd object blanks one tab. A new stage needs a sentence
+  in `live_tabs.STAGE_STORY`.
+- **Reasoning summaries** (`thought_stream.py`): a run with a monitor (and
+  `DRAWING_ANALYZER_SHOW_THINKING` not `0`) puts a `ThoughtStream` on
+  `ResourcePressure.thoughts`, so workers reach it through `worker_binding()`.
+  `core.api_config.apply_thinking_display` then adds `display: "summarized"`
+  to plain adaptive `thinking` in `call_with_refusal_fallback` and in
+  `batch_digest._create_batch` (`with_thinking_display`). No request builder
+  or cache key knows about it, and a run without a monitor sends what it
+  always sent. A 400 naming `display` latches `_thinking_display_available`
+  off and resends; an errored batch item naming it does the same for later
+  batches (`note_batch_item_error`). `_dispatch_messages` taps raw stream events
+  (`content_block_delta` only; the SDK's echo events would double-count) and
+  the final message of a `create`; `read_batch_results` records batch
+  summaries under the item's telemetry label (`CallTelemetry.batch_item`).
+  **Display only:** summaries are model prose about the drawings and are never
+  written to an export, the journal, diagnostics or a cache; call telemetry
+  stays shape-and-counts.
 - **`core/`:** model ids and env overrides (`api_config.py`), key store, pricing,
   tokenizer, structured-outputs gate. The tokenizer is estimate-only; the exact
   count is `count_tokens_via_api`, and the local path is the conservative

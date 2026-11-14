@@ -16,6 +16,11 @@ polling once a second (so the collapsed header's one-line summary stays live)
 and draws nothing. With no run and nothing animating it stops entirely, and
 restarts on the next event that changes the picture (a hover, a resize, a new
 file list, a run starting).
+
+The canvas carries five tabs (the board, and the *Story*, *Thinking*, *Plan*
+and *Findings* views of :mod:`live_tabs`). The host forwards a click and the
+mouse wheel (:meth:`LivePanel.click`, :meth:`LivePanel.scroll`); ``on_tab`` is
+told when the showing tab changes, so the host can remember it.
 """
 from __future__ import annotations
 
@@ -52,6 +57,8 @@ class LivePanel:
         cancel: Callable[[Any], None],
         visible: Callable[[], bool] = lambda: True,
         on_summary: "Callable[[], None] | None" = None,
+        on_tab: "Callable[[str], None] | None" = None,
+        tab: str = "",
         scale: float = 1.0,
         enabled: bool = True,
         clock: Callable[[], float] = time.monotonic,
@@ -67,6 +74,9 @@ class LivePanel:
         self._cancel = cancel
         self._visible = visible
         self._on_summary = on_summary
+        self._on_tab = on_tab
+        if tab:
+            self.scene.set_tab(tab)
         self._clock = clock
         self._handle: Any = None
         self._last_summary = float("-inf")
@@ -88,6 +98,7 @@ class LivePanel:
         """A run is starting: returns the monitor to hand ``extract_drawing_context``."""
         self.monitor = RunMonitor()
         self._guard(self.model.begin)
+        self._guard(self.scene.reset_views)
         self.kick()
         return self.monitor
 
@@ -104,6 +115,24 @@ class LivePanel:
 
     def hover(self, x: "float | None", y: "float | None" = None) -> None:
         self.scene.hover = None if x is None or y is None else (float(x), float(y))
+        self.kick()
+
+    def click(self, x: float, y: float) -> None:
+        """A click on the canvas: a tab under it becomes the showing view."""
+        try:
+            changed = self.scene.click(float(x), float(y))
+        except Exception:  # noqa: BLE001 - the panel is decoration
+            changed = False
+        if changed and self._on_tab is not None:
+            try:
+                self._on_tab(self.scene.tab)
+            except Exception:  # noqa: BLE001 - a host that cannot remember it
+                pass
+        self.kick()
+
+    def scroll(self, steps: float) -> None:
+        """Mouse-wheel notches over the canvas (positive scrolls up)."""
+        self._guard(self.scene.wheel, steps)
         self.kick()
 
     def close(self) -> None:

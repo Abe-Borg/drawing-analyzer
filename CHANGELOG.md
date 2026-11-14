@@ -6,6 +6,36 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Live view tabs: Story, Thinking, Plan and Findings.** The Live view now
+  has a row of tabs under its header. **Board** is the existing animated
+  board. **Story** is the pipeline as a timeline: a plain sentence on what
+  each stage does and why, the running stage's live progress and its recipe
+  (model, effort, thinking mode, batch or real time, calls, tokens, spend), a
+  spend-by-stage chart and a few computed insights. **Thinking** shows the
+  models' own reasoning summaries call by call as they stream in, beside the
+  calls in flight. **Plan** shows what the set was identified as (disciplines,
+  place, adopted code editions) and the review checklist, yours and the
+  model's, with each item's answers filling in sheet by sheet. **Findings**
+  shows the path from report to proof (reported, merged into the ledger,
+  placed on the sheet, re-checked) over a live list of every finding and its
+  status. Tabs show a count and a dot when something new arrives; lists scroll
+  with the mouse wheel; hovering a row shows it in full; the tab you were on
+  is remembered.
+- **Reasoning summaries.** A run with a live view asks the models for a
+  readable summary of their reasoning (`thinking.display: "summarized"`) and
+  collects it for the Thinking tab. It changes neither the answers nor the
+  cost, and no cache key depends on it. The summaries are held in memory and
+  shown on screen only: they are never written to the export, `run.log`, the
+  diagnostics folder or the cache. `DRAWING_ANALYZER_SHOW_THINKING=0` turns
+  the request off, and a platform that rejects the setting turns it off for
+  the session without failing the run.
+- **`RunMonitor.publish` / `facts`** and `drawing_analyzer.live_tabs` /
+  `thought_stream`: the run hands its monitor the set identity, the checklist
+  plan and its answers, the digests and the findings ledger (read-only
+  references), and `LiveRunModel` folds them into the state the new tabs draw.
+
 ## [1.14.0] - 2026-11-13
 
 ### Added

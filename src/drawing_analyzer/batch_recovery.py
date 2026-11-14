@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import diagnostics
-from . import call_telemetry, cancellation, live_spend, resource_pressure
+from . import call_telemetry, cancellation, live_spend, resource_pressure, thought_stream
 from .digest import DEFAULT_DIGEST_MAX_RETRIES, _is_transient_error, _retry_backoff_seconds
 from .digest_cache import DigestCache, cache_schema_version, get_default_digest_cache
 from .models import SheetRef
@@ -81,7 +81,27 @@ def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[
     results = _read_with_retry(read, sleep=sleep)
     call_telemetry.note_batch_results(batch_id, results)
     live_spend.note_batch_results(batch_id, results)
+    thought_stream.note_batch_results(batch_id, results)
+    _note_display_rejections(results)
     return results
+
+
+def _note_display_rejections(results: dict) -> None:
+    """Stop asking for reasoning summaries if a batch item was rejected for
+    them, so the resubmission and every later batch go out without the field."""
+    try:
+        from .core.api_config import note_batch_item_error
+
+        for entry in results.values():
+            result = _get(entry, "result")
+            if str(_get(result, "type") or "") != "errored":
+                continue
+            error = _get(result, "error")
+            detail = _get(error, "message") or _get(_get(error, "error"), "message")
+            if detail and note_batch_item_error(str(detail)):
+                return
+    except Exception:  # noqa: BLE001 - a display setting never fails a results read
+        pass
 
 
 class BatchReceiptError(OSError):

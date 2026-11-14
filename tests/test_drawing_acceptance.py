@@ -1795,3 +1795,20 @@ def test_gauntlet_live_view_agrees_with_the_run(oracle):
     assert model.cost == ctx.total_estimated_cost and model.cost_final
     ids = {f.id for f in ctx.findings} | {f.id for f in ctx.reference_findings}
     assert model.findings.total == len(ids)
+
+    # The insight tabs were handed the run's own plan, answers, ledger and
+    # reasoning feed, and read them to the same figures the run reports.
+    facts = monitor.facts()
+    entries = facts["ledger"].entries
+    assert entries and model.ledger_total == len(entries)
+    assert {f.qc_id for f in model.ledger_findings} == {f.qc_id for f in entries}
+    assert sum(model.ledger_by["bucket"].values()) == len(entries)
+    assert model.found["digest"] == sum(len(sd.findings or ()) for sd in ctx.sheets)
+    given = {i for ids_ in oracle.client.critique_checklist_ids.values() for i in ids_}
+    shown = {it.id: it for g in model.checklist for it in g.items}
+    assert given and given <= set(shown)
+    assert any(shown[i].counts for i in given)             # the sheets' answers arrived
+    assert model.identity is not None and model.identity.disciplines
+    # One feed entry opened per real-time request (the gauntlet uses no batch).
+    feed = ctx.resource_pressure.thoughts
+    assert feed.seen == len(records) and model.thoughts_enabled

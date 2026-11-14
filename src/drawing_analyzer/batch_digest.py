@@ -66,7 +66,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
+from .core.api_config import (
+    REVIEW_MODEL_DEFAULT,
+    apply_thinking_display,
+    output_cap_for_model,
+)
 from .core.request_usage import fallback_served_model
 from .core.tokenizer import estimate_image_tokens_total
 from . import call_telemetry, cancellation, live_spend, resource_pressure
@@ -783,6 +787,16 @@ def _stop_remote_batch(
         )
 
 
+def with_thinking_display(req: dict) -> dict:
+    """One batch request with reasoning summaries requested, when the run has
+    a live view to show them (the same object otherwise)."""
+    params = req.get("params") if isinstance(req, dict) else None
+    if not isinstance(params, dict):
+        return req
+    shown = apply_thinking_display(params)
+    return req if shown is params else {**req, "params": shown}
+
+
 def _create_batch(
     client: Any,
     reqs: list[dict],
@@ -808,6 +822,9 @@ def _create_batch(
     (:func:`~drawing_analyzer.resource_pressure.check_spend_limit`), and a
     submit the API answers with one latches the run for every later request.
     """
+    # A run with a live view asks for readable reasoning summaries (display
+    # only; cache-neutral). The caller's request list is left as it was.
+    reqs = [with_thinking_display(req) for req in reqs]
     with cancellation.submitting():
         resource_pressure.check_spend_limit()
         try:

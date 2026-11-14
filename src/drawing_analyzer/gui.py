@@ -963,10 +963,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             visible=lambda: self._log_sec.expanded and self._live_selected
             and bool(self.live_canvas.winfo_viewable()),
             on_summary=lambda: (not self._log_sec.expanded) and self._log_sec.refresh(),
+            on_tab=self._remember_live_tab,
+            tab=preferences.get_str(self._prefs_path, preferences.LIVE_TAB, ""),
             scale=live_scale, enabled=live_on,
         )
         self.live_canvas.bind("<Motion>", lambda e: self._live.hover(e.x, e.y))
         self.live_canvas.bind("<Leave>", lambda _e: self._live.hover(None))
+        # The board's tabs (Board | Story | Thinking | Plan | Findings) are
+        # drawn on the canvas: a click picks one, the wheel scrolls its lists.
+        self.live_canvas.bind("<Button-1>", lambda e: self._live.click(e.x, e.y))
+        self.live_canvas.bind(
+            "<MouseWheel>", lambda e: self._live.scroll(_wheel_steps(e.delta)))
+        self.live_canvas.bind("<Button-4>", lambda _e: self._live.scroll(1))
+        self.live_canvas.bind("<Button-5>", lambda _e: self._live.scroll(-1))
         self.live_canvas.bind("<Configure>", lambda _e: self._live.kick())
         self.live_canvas.bind("<Map>", lambda _e: self._live.kick())
         self.log_box = ctk.CTkTextbox(
@@ -2210,6 +2219,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._remember_live_view(live_on)
         else:
             self._live.set_enabled(live_on)
+
+    def _remember_live_tab(self, tab: str) -> None:
+        """Keep the Live view's showing tab for the next launch."""
+        try:
+            preferences.set_preference(self._prefs_path, preferences.LIVE_TAB, str(tab))
+        except Exception:  # noqa: BLE001 - a preference that cannot be saved is not an error
+            _log.debug("could not save the Live view tab", exc_info=True)
 
     def _remember_live_view(self, on: bool) -> None:
         """Turn the visuals on/off and keep the choice for the next launch."""
@@ -4296,6 +4312,17 @@ def parse_budget(text: str) -> float:
     if not math.isfinite(amount) or amount <= 0:
         raise ValueError("a budget cap must be greater than zero")
     return amount
+
+
+def _wheel_steps(delta: int) -> float:
+    """Mouse-wheel notches from a Tk ``<MouseWheel>`` delta.
+
+    Windows reports multiples of 120 per notch; macOS reports small integers.
+    """
+    delta = int(delta or 0)
+    if abs(delta) >= 120:
+        return delta / 120.0
+    return float(max(-3, min(3, delta)))
 
 
 def _describe_busy(analysis: bool, export: bool) -> str:
