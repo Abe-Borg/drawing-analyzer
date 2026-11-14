@@ -987,6 +987,22 @@ non-goal:
   and cross-QC calls also overlap the identity/planning/critique path when the real
   SDK client is in use. Results still fold back in input order, so completion timing
   cannot reorder the exported review.
+- **A responsive window during runs.** PyMuPDF holds Python's global
+  interpreter lock (GIL) for the whole of each tile render and PNG encode
+  (about 0.2 s and 0.1 s per tile on a dense D-size plan), and while it does,
+  the window cannot process a click, a resize or a redraw. The GUI therefore
+  rasterizes in one spawned helper process (`render.enable_raster_worker()`)
+  and writes reviewed PDFs in a spawned worker even when there is a single
+  source (`annotate.isolate_writes_from_caller(True)`). The helper opens the
+  same file and renders the same page, clip and zoom with the same PyMuPDF, so
+  the PNG bytes, and therefore every cache key, are identical. On a realistic
+  test sheet, UI stalls longer than 50 ms fell from 66 to 2 per render. Any
+  helper failure falls back to rendering in the app's own process, and after
+  three crashes the helper is given up for the session. The library, the tests
+  and other callers keep the in-process path unless they opt in. The cost
+  summary under the file list also no longer re-opens every PDF on each
+  keystroke in the focus box: page counts are cached against each file's size
+  and modified time, and the summary refreshes once typing pauses.
 - **Blank-tile suppression.** A tile whose pixmap is **pixel-uniform** (a truly
   empty crop of a sparse sheet) carries no information, so it is dropped before
   upload and disclosed to the model (*"Tiles omitted as completely blank: …"*).

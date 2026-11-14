@@ -6,6 +6,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The window no longer freezes while a run renders drawings.** PyMuPDF
+  holds Python's global interpreter lock for the whole of every tile render
+  and PNG encode, so the GUI stalled for 0.2–0.3 s per tile, back to back,
+  whenever an analysis was rendering sheets. The GUI now rasterizes in a
+  spawned helper process and writes reviewed PDFs in a spawned worker even for
+  a single source. Images are byte-identical, so no cached digest is
+  invalidated, and any helper failure falls back to the old in-process path.
+- **Typing in the focus box no longer lags with large sets.** The cost summary
+  re-opened every loaded PDF on each keystroke to count its pages. Page counts
+  are now cached against each file's size and modified time, and the summary
+  refreshes once typing pauses.
+
 ## [1.15.0] - 2026-11-13
 
 ### Added

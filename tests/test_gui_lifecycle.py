@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import itertools
 import sys
 import types
 
@@ -213,7 +214,8 @@ def _cost_preview_app(gui, tk, monkeypatch):
         after=lambda delay, callback: callbacks.append(callback),
     )
     for name in ("_add_pdfs", "_refresh_profile_suggestions", "_apply_profile_suggestions",
-                 "_usable_preflight_bases", "_refresh_summary", "_selected_profiles", "_on_process",
+                 "_usable_preflight_bases", "_refresh_summary", "_sheet_refs", "_selected_profiles",
+                 "_on_process",
                  "_on_confirm_full_qc_toggle", "_budget_cap", "_mark_budget_entry",
                  "_on_budget_change", "_confirm_stopping_cap", "_refresh_spend_line",
                  "_tick_spend"):
@@ -292,6 +294,49 @@ def test_gui_discards_superseded_preflight_and_rewritten_file_bases(tmp_path, mo
         assert app._usable_preflight_bases()
         pdf.write_bytes(pdf.read_bytes() + b"\n%changed\n")
         assert app._usable_preflight_bases() is None
+
+
+def test_typing_refreshes_the_summary_once_per_pause_without_reopening_pdfs(
+    tmp_path, monkeypatch,
+):
+    pdf = _preview_pdf(tmp_path)
+    with _gui_module() as (gui, tk):
+        app, _workers, _callbacks, summaries = _cost_preview_app(gui, tk, monkeypatch)
+        listed = []
+        real_list_sheets = gui.list_sheets
+        monkeypatch.setattr(
+            gui, "list_sheets",
+            lambda paths: listed.append(list(paths)) or real_list_sheets(paths),
+        )
+        pending: dict[int, object] = {}
+        handles = itertools.count(1)
+
+        def after(_delay, callback):
+            handle = next(handles)
+            pending[handle] = callback
+            return handle
+
+        app.after, app.after_cancel = after, lambda handle: pending.pop(handle, None)
+        app.focus_box = types.SimpleNamespace(get=lambda *a: "check the mains")
+        app.focus_popout_box = None
+        for name in ("_sync_focus_boxes", "_refresh_summary_soon", "_refresh_summary_now"):
+            setattr(app, name, types.MethodType(getattr(gui.DrawingAnalyzerApp, name), app))
+
+        app._pdfs = [pdf]
+        app._refresh_summary()
+        assert len(listed) == 1 and len(summaries) == 1
+
+        for _key in range(5):                      # a burst of keystrokes
+            app._sync_focus_boxes(app.focus_box)
+        assert len(summaries) == 1                 # nothing redrawn mid-burst
+        assert len(pending) == 1                   # one refresh queued for the pause
+        pending.popitem()[1]()
+        assert len(summaries) == 2
+        assert len(listed) == 1                    # page counts came from the cache
+
+        pdf.write_bytes(pdf.read_bytes() + b"\n%re-exported\n")
+        app._refresh_summary()
+        assert len(listed) == 2                    # a rewritten file is re-listed
 
 
 def test_gui_measured_estimate_prices_each_pages_physical_grid(tmp_path, monkeypatch):

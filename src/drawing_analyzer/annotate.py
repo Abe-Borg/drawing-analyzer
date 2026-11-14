@@ -2550,6 +2550,22 @@ _PROCESS_WORKER_FUNCTIONS = {
 _PROCESS_WORKER_PYMUPDF_OPEN = pymupdf.open
 
 
+# Off by default: a library caller keeps the in-process path for one source.
+_isolate_writes_from_caller = False
+
+
+def isolate_writes_from_caller(enabled: bool) -> None:
+    """Write reviewed PDFs in a spawned worker even when there is one source.
+
+    The GUI turns this on so writing markups never holds its process's GIL;
+    every safety rule of the multi-source pool (pristine dependencies,
+    picklable payloads, sequential retry when a worker fails before creating
+    its output) still applies.
+    """
+    global _isolate_writes_from_caller
+    _isolate_writes_from_caller = bool(enabled)
+
+
 def _resolve_annotate_workers(max_workers: int | None, total: int) -> int:
     """Resolve the bounded process count for independent source-PDF writes."""
     if max_workers is None:
@@ -2608,9 +2624,18 @@ def _run_reviewed_pdf_jobs(
     PyMuPDF documents never cross a thread or process boundary: each spawned
     worker opens, writes, closes, and reconciles one source using plain pickled
     model data.  The parent retains all routing and artifact bookkeeping.
+
+    With :func:`isolate_writes_from_caller` on (the GUI), even a single source
+    is written in a spawned worker: PyMuPDF holds the GIL for the whole write,
+    which would otherwise freeze the host's window until the PDF is saved.
     """
     workers = _resolve_annotate_workers(max_workers, len(jobs))
-    if len(jobs) < 2 or workers == 1 or not _process_worker_dependencies_pristine():
+    parallel = len(jobs) >= 2 and workers > 1
+    if (
+        not jobs
+        or not (parallel or _isolate_writes_from_caller)
+        or not _process_worker_dependencies_pristine()
+    ):
         return [_execute_reviewed_pdf_job(job) for job in jobs]
     if not _reviewed_pdf_jobs_are_picklable(jobs):
         return [_execute_reviewed_pdf_job(job) for job in jobs]
