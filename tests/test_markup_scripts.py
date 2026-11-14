@@ -21,13 +21,14 @@ IDS = ("QC-001", "QC-002", "QC-003")
 LAYERS = [
     name
     for qc in IDS
-    for name in (M.live_layer_name(qc), M.done_layer_name(qc), M.only_layer_name(qc))
+    for name in (M.live_layer_name(qc), M.done_layer_name(qc), M.only_layer_name(qc),
+                 M.tick_layer_name(qc))
 ] + ["QC markups - High severity", "A-WALL", "QC-001"]
 
 
 def _default_state() -> dict:
     return {
-        name: (M.parse_layer_name(name) or ("x",))[0] not in ("done", "only")
+        name: (M.parse_layer_name(name) or ("x",))[0] not in ("done", "only", "tick")
         for name in LAYERS
     }
 
@@ -35,13 +36,16 @@ def _default_state() -> dict:
 @pytest.mark.parametrize("done, isolate, visible", [
     # Nothing ticked, nothing isolated: every markup, no grey copy, no note.
     (set(), "", {M.live_layer_name(q) for q in IDS}),
-    # A done finding is its grey copy and nothing else.
+    # A done finding is its grey copy (and its cover row's shade), not its markup.
     ({"QC-002"}, "", {M.live_layer_name("QC-001"), M.done_layer_name("QC-002"),
-                      M.live_layer_name("QC-003")}),
-    # Isolating one hides the others — their grey copies too — and shows its note.
-    ({"QC-002"}, "QC-001", {M.live_layer_name("QC-001"), M.only_layer_name("QC-001")}),
+                      M.tick_layer_name("QC-002"), M.live_layer_name("QC-003")}),
+    # Isolating one hides the others — their grey copies too — and shows its
+    # note. The cover page still shades the row of the one that is done.
+    ({"QC-002"}, "QC-001", {M.live_layer_name("QC-001"), M.only_layer_name("QC-001"),
+                            M.tick_layer_name("QC-002")}),
     # Isolating a finding that is done shows it as done, not as live again.
-    ({"QC-002"}, "QC-002", {M.done_layer_name("QC-002"), M.only_layer_name("QC-002")}),
+    ({"QC-002"}, "QC-002", {M.done_layer_name("QC-002"), M.only_layer_name("QC-002"),
+                            M.tick_layer_name("QC-002")}),
 ])
 def test_layer_states_rule(done, isolate, visible):
     states = M.layer_states(LAYERS, _default_state(), done, isolate)
@@ -56,6 +60,7 @@ def test_ticking_a_box_keeps_the_current_isolation():
     after_tick = M.layer_states(LAYERS, current, {"QC-003"}, None)
     assert {n for n, on in after_tick.items() if on} == {
         M.done_layer_name("QC-003"), M.only_layer_name("QC-003"),
+        M.tick_layer_name("QC-003"),
     }
     # With nothing isolated, "keep" means show everything.
     assert M.layer_states(LAYERS, _default_state(), set(), None) == \

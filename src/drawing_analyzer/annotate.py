@@ -1711,6 +1711,7 @@ class _FindingLayers:
     live: int
     done: int
     only: int
+    tick: int             # the cover row's shade: on while done, isolated or not
     markup: int           # OCMD: severity layer AND live layer
     box: int              # OCMD: live layer OR done layer (where its Done box shows)
     isolate_action: int   # the script that isolates this finding
@@ -1767,13 +1768,14 @@ class _MarkupLayers(dict):
                 live = doc.add_ocg(scripts.live_layer_name(qc_id), on=True)
                 done = doc.add_ocg(scripts.done_layer_name(qc_id), on=False)
                 only = doc.add_ocg(scripts.only_layer_name(qc_id), on=False)
+                tick = doc.add_ocg(scripts.tick_layer_name(qc_id), on=False)
                 severity = self.get(_severity_layer_tier(finding))
                 markup = (
                     doc.set_ocmd(ocgs=[severity, live], policy="AllOn") if severity else live
                 )
                 box = doc.set_ocmd(ocgs=[live, done], policy="AnyOn")
                 self.findings[qc_id] = _FindingLayers(
-                    qc_id, live, done, only, markup, box, self._action(qc_id),
+                    qc_id, live, done, only, tick, markup, box, self._action(qc_id),
                 )
             except Exception:  # noqa: BLE001 - drawn as a plain markup instead
                 _log.warning("could not create the layers for %s; it stays a plain markup", qc_id)
@@ -1852,7 +1854,7 @@ class _MarkupLayers(dict):
         ours: set[int] = set()
         for own in self.findings.values():
             if own is not None:
-                ours.update((own.live, own.done, own.only))
+                ours.update((own.live, own.done, own.only, own.tick))
         _edit_ref_array(doc, ["OCProperties", "D", "Order"], remove=ours)
 
 
@@ -2930,11 +2932,13 @@ def _insert_index_pages(
                 )
                 if own is not None and _status(finding) != "REJECTED":
                     try:
-                        # Greyed out with its finding: a veil over the row, on
-                        # the finding's done layer.
+                        # Greyed out while its box is ticked: a veil over the
+                        # row, on the finding's tick layer. Not its done layer,
+                        # which isolating another finding switches off: the
+                        # cover page must keep showing what is done.
                         page.draw_rect(
                             pymupdf.Rect(34, row_top, _INDEX_COL_X[-1] - _INDEX_COL_GUTTER, y + 3),
-                            color=None, fill=(1, 1, 1), fill_opacity=0.72, oc=own.done,
+                            color=None, fill=(1, 1, 1), fill_opacity=0.72, oc=own.tick,
                         )
                         box_x = _INDEX_COL_X[-1] + 6.0
                         layers.add_done_box(

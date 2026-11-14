@@ -2087,9 +2087,11 @@ A reviewed PDF written by a pipeline run is **interactive**: its reader can
 isolate a finding and mark findings done from inside the viewer, with nothing
 installed. Both are layer visibility, driven by a small script the PDF carries.
 
-- **Three layers per drawn finding**, named from its QC number: its markup, its
-  grey *done* copy, and its *showing this one only* note. They are left out of
-  the Layers panel, which still lists the three severity layers and the sheet
+- **Four layers per drawn finding**, named from its QC number: its markup, its
+  grey *done* copy, its *showing this one only* note, and the grey shade over
+  its cover-page row. The shade follows the tick alone, so isolating one
+  finding never makes the cover page forget which others are done. They are
+  left out of the Layers panel, which still lists the three severity layers and the sheet
   notes. A markup's visibility is a membership of **both** its severity layer
   and its own layer, so the panel's severity switches keep working.
 - **The grey copy and the note are page content**, not annotations: they add no

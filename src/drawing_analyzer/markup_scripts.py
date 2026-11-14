@@ -4,12 +4,16 @@ A reviewed PDF lets its reader do two things to a finding from inside the
 viewer: **isolate** it (click its cover-page row: the other markups are hidden
 so this one can be read on its own) and mark it **done** (tick its box: the
 markup is replaced by a grey copy). Both are layer visibility, so each drawn
-finding gets three layers, named from its QC number:
+finding gets four layers, named from its QC number:
 
 - its **live** layer carries the markup itself (cloud, tag, callout,
   instruction);
 - its **done** layer carries the grey stand-in, drawn as page content;
-- its **only** layer carries the "showing this one only" note.
+- its **only** layer carries the "showing this one only" note;
+- its **tick** layer carries the grey shade over its cover-page row. It
+  follows the tick alone, never the isolation: isolating one finding hides the
+  other findings' markups, and must not make the cover page forget which ones
+  are done.
 
 Everything a viewer needs to compute visibility is in the file: the layer
 names, and one checkbox field per finding (:func:`done_field_name`) whose value
@@ -35,6 +39,7 @@ import re
 LAYER_PREFIX = "QC markup "
 _DONE_SUFFIX = " done"
 _ONLY_SUFFIX = " only"
+_TICK_SUFFIX = " tick"
 _FIELD_PREFIX = "da_done_"
 #: A checked box's value is anything but this (the PDF name of the off state).
 FIELD_OFF = "Off"
@@ -63,17 +68,23 @@ def only_layer_name(qc_id: str) -> str:
     return f"{LAYER_PREFIX}{qc_id}{_ONLY_SUFFIX}"
 
 
+def tick_layer_name(qc_id: str) -> str:
+    return f"{LAYER_PREFIX}{qc_id}{_TICK_SUFFIX}"
+
+
 def done_field_name(qc_id: str) -> str:
     return f"{_FIELD_PREFIX}{qc_id}"
 
 
 def parse_layer_name(name: str) -> "tuple[str, str] | None":
     """``(kind, qc_id)`` for one of this module's layers — ``kind`` is
-    ``"live"``, ``"done"`` or ``"only"`` — else ``None``."""
+    ``"live"``, ``"done"``, ``"only"`` or ``"tick"`` — else ``None``."""
     if not name.startswith(LAYER_PREFIX):
         return None
     rest = name[len(LAYER_PREFIX):]
-    for suffix, kind in ((_DONE_SUFFIX, "done"), (_ONLY_SUFFIX, "only")):
+    for suffix, kind in (
+        (_DONE_SUFFIX, "done"), (_ONLY_SUFFIX, "only"), (_TICK_SUFFIX, "tick"),
+    ):
         if rest.endswith(suffix):
             return kind, rest[: -len(suffix)]
     return "live", rest
@@ -95,8 +106,9 @@ def layer_states(
     A finding is *shown* when nothing is isolated or it is the isolated one. A
     shown finding has its live layer on unless it is done, in which case its
     done layer is on instead. The *only* layer is on for the isolated finding
-    and no other. Layers this module does not manage are left out of the
-    result, untouched.
+    and no other. The *tick* layer is on exactly while the finding is done,
+    whatever is isolated. Layers this module does not manage are left out of
+    the result, untouched.
     """
     if isolate is None:
         isolate = ""
@@ -116,6 +128,8 @@ def layer_states(
             out[name] = shown and not done
         elif kind == "done":
             out[name] = shown and done
+        elif kind == "tick":
+            out[name] = done
         else:
             out[name] = isolate == qc_id
     return out
@@ -148,17 +162,22 @@ if (da_o) {
       da_k = "done"; da_t = da_t.substring(0, da_t.length - 5);
     } else if (da_t.substring(da_t.length - 5) == "%(only)s") {
       da_k = "only"; da_t = da_t.substring(0, da_t.length - 5);
+    } else if (da_t.substring(da_t.length - 5) == "%(tick)s") {
+      da_k = "tick"; da_t = da_t.substring(0, da_t.length - 5);
     }
     da_f = this.getField("%(field)s" + da_t);
     da_d = !!da_f && da_f.value != "%(off)s";
     da_s = (da_iso == "" || da_iso == da_t);
     if (da_k == "live") da_o[da_i].state = da_s && !da_d;
     else if (da_k == "done") da_o[da_i].state = da_s && da_d;
+    else if (da_k == "tick") da_o[da_i].state = da_d;
     else da_o[da_i].state = (da_iso == da_t);
   }
 }
 """
-assert len(_DONE_SUFFIX) == len(_ONLY_SUFFIX) == 5, "the script slices suffixes by length 5"
+assert len(_DONE_SUFFIX) == len(_ONLY_SUFFIX) == len(_TICK_SUFFIX) == 5, (
+    "the script slices suffixes by length 5"
+)
 
 
 def sync_script(isolate: "str | None") -> str:
@@ -178,5 +197,5 @@ def sync_script(isolate: "str | None") -> str:
         raise ValueError(f"not a QC number: {isolate!r}")
     return _SYNC_TEMPLATE % {
         "isolate": literal, "prefix": LAYER_PREFIX, "done": _DONE_SUFFIX,
-        "only": _ONLY_SUFFIX, "field": _FIELD_PREFIX, "off": FIELD_OFF,
+        "only": _ONLY_SUFFIX, "tick": _TICK_SUFFIX, "field": _FIELD_PREFIX, "off": FIELD_OFF,
     }

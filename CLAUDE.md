@@ -772,8 +772,10 @@ consume ledger entries and nothing else.
   `DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0` turns it off); the library writer's
   `interactive=` defaults to **off**, which is why the writer's own tests see
   plain files. Each drawn finding with a safe QC number (`is_safe_id` — the id
-  is spliced into a layer name, a field name and a script) gets three layers:
-  live, done, only. `markup_scripts.layer_states` is the rule and
+  is spliced into a layer name, a field name and a script) gets four layers:
+  live, done, only, tick (the cover row's shade: on while done, whatever is
+  isolated — the cover page is never on a layer isolation switches).
+  `markup_scripts.layer_states` is the rule and
   `sync_script` is the same rule in JavaScript; `tests/test_markup_scripts.py`
   runs the script under Node against the Python (skipped only where Node is
   missing). Change one, change both. Every mechanism was checked in Bluebeam

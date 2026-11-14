@@ -93,6 +93,19 @@ def _text_with_every_layer_on(doc, pno: int) -> str:
         copy.close()
 
 
+def _page_layer_refs(doc, page) -> set[int]:
+    """Every object the page's content can name as a layer (its
+    ``/Resources /Properties``)."""
+    kind, value = doc.xref_get_key(page.xref, "Resources")
+    if kind == "xref":
+        value = doc.xref_object(_refs(value)[0], compressed=True)
+    props = re.search(r"/Properties\s*<<(.*?)>>", value or "", re.S)
+    if props is None:
+        ref = re.search(r"/Properties\s+(\d+) 0 R", value or "")
+        return set(_refs(doc.xref_object(int(ref.group(1)), compressed=True))) if ref else set()
+    return set(_refs(props.group(1)))
+
+
 def _page_annots(doc, page) -> list[int]:
     return _refs(doc.xref_get_key(page.xref, "Annots")[1])
 
@@ -115,12 +128,13 @@ def test_each_drawn_finding_can_be_isolated_and_marked_done(tmp_path):
     try:
         layers = _layers(doc)
         drawn = (cloud.qc_id, callout.qc_id)
-        # Three layers per drawn finding, starting as "nothing done, nothing
+        # Four layers per drawn finding, starting as "nothing done, nothing
         # isolated"; none for the finding that is not in the PDF.
         for qc in drawn:
             assert layers[M.live_layer_name(qc)][1] is True
             assert layers[M.done_layer_name(qc)][1] is False
             assert layers[M.only_layer_name(qc)][1] is False
+            assert layers[M.tick_layer_name(qc)][1] is False
         assert M.live_layer_name(ruled_out.qc_id) not in layers
         # The Layers panel still lists only the layers a person uses.
         assert sorted(_panel(doc)) == sorted([
@@ -179,17 +193,23 @@ def test_each_drawn_finding_can_be_isolated_and_marked_done(tmp_path):
                     scripts_here.add(_script_of(doc, _refs(action[1])[0]))
             assert show_all in scripts_here
 
+        # A cover row is shaded on its finding's TICK layer, which isolating
+        # another finding leaves alone, so the cover page keeps showing what is
+        # done. Nothing on the cover page hangs on a layer isolation switches.
+        cover_layers = _page_layer_refs(doc, cover)
+        for qc in drawn:
+            assert layers[M.tick_layer_name(qc)][0] in cover_layers
+            assert layers[M.done_layer_name(qc)][0] not in cover_layers
+            assert layers[M.live_layer_name(qc)][0] not in cover_layers
+
         # The grey copy and the "showing this one only" note are page content
         # on the finding's own done / only layers, so they add no markup.
         text = _text_with_every_layer_on(doc, 1)
-        properties = doc.xref_object(sheet.xref, compressed=True)
-        resources = doc.xref_get_key(sheet.xref, "Resources")
-        if resources[0] == "xref":
-            properties = doc.xref_object(_refs(resources[1])[0], compressed=True)
+        sheet_layers = _page_layer_refs(doc, sheet)
         for qc in drawn:
             assert f"{qc} DONE" in text and f"SHOWING {qc} ONLY" in text
             for name in (M.done_layer_name(qc), M.only_layer_name(qc)):
-                assert f"{layers[name][0]} 0 R" in properties
+                assert layers[name][0] in sheet_layers
         assert f"{ruled_out.qc_id} DONE" not in text
         # As the file opens, neither is showing.
         assert "DONE" not in sheet.get_text() and "ONLY" not in sheet.get_text()
