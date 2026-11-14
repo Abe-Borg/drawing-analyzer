@@ -323,10 +323,13 @@ and a failure inside it is logged once and otherwise ignored. The spend shown
 during a run is an **estimate** (each finished call priced at the model that
 answered it; marked `≈`); when the run returns it is replaced by the run's own
 usage-ledger figure — the same number `run.log` and the report show. Drawing
-paces itself — up to 25 frames a second, backing off so it never takes more
-than about a third of the UI thread (in development testing, a 600-sheet board
-with every cell animating drew in ~11 ms a frame), and it stops completely
-when nothing is moving.
+paces itself — up to 25 frames a second, backing off so drawing, Tk's own
+repaint included, takes no more than about a fifth of the UI thread (in
+development testing, a 300-sheet board mid-run drew in ~10 ms a frame, about
+14% of one core), and it stops completely when nothing is moving. Typing,
+clicking or scrolling anywhere else in the window pauses the drawing for a
+quarter of a second, so the window answers you first; input on the board
+itself (a tab click, the wheel over a list) does not.
 
 #### Reference files and Loaded files — what a run will send
 

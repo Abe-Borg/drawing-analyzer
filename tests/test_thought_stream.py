@@ -335,7 +335,11 @@ def test_the_feed_is_bounded_and_tells_a_reader_only_what_changed():
     assert feed.with_text == MAX_THOUGHTS + 20                          # the counts keep all
     assert feed.snapshot(version) is None
     feed.add_output(live, 12)
-    assert feed.snapshot(version) is not None
+    version2, again = feed.snapshot(version)
+    # Only the thought that changed is copied again; the rest are reused.
+    assert again[0] is not thoughts[0] and again[0].chars_out == 12
+    assert all(a is b for a, b in zip(again[1:], thoughts[1:]))
+    assert feed.snapshot(version2) is None
 
     capped = ThoughtStream()
     th = capped.open(stage="digest")
