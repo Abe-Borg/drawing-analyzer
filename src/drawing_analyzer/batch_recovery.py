@@ -82,24 +82,35 @@ def read_batch_results(client: Any, batch_id: str, *, sleep=time.sleep) -> dict[
     call_telemetry.note_batch_results(batch_id, results)
     live_spend.note_batch_results(batch_id, results)
     thought_stream.note_batch_results(batch_id, results)
-    _note_display_rejections(results)
+    _note_display_rejections(batch_id, results)
     return results
 
 
-def _note_display_rejections(results: dict) -> None:
-    """Stop asking for reasoning summaries if a batch item was rejected for
-    them, so the resubmission and every later batch go out without the field."""
-    try:
-        from .core.api_config import note_batch_item_error
+def _note_display_rejections(batch_id: str, results: dict) -> None:
+    """What a batch's results say about the reasoning-summary field.
 
+    An item rejected for it stops the run asking, so the resubmission and
+    every later batch go out without the field. An item that succeeded in a
+    batch that asked confirms its model accepts it, which is what lets a batch
+    with no resubmission path (the critique's) ask too.
+    """
+    try:
+        from .core.api_config import note_batch_item_error, note_display_batch_succeeded
+
+        succeeded = False
         for entry in results.values():
             result = _get(entry, "result")
-            if str(_get(result, "type") or "") != "errored":
+            kind = str(_get(result, "type") or "")
+            if kind == "succeeded":
+                succeeded = True
+            if kind != "errored":
                 continue
             error = _get(result, "error")
             detail = _get(error, "message") or _get(_get(error, "error"), "message")
             if detail and note_batch_item_error(str(detail)):
                 return
+        if succeeded:
+            note_display_batch_succeeded(batch_id)
     except Exception:  # noqa: BLE001 - a display setting never fails a results read
         pass
 

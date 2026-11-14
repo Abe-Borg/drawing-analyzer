@@ -618,7 +618,8 @@ def thought_feed(scene: Any, model: Any, cols: int, t: float) -> list[tuple]:
                 scene.animating = scene.fast = True
         lines.append(("head", th))
         if body:
-            for ln in scene.wrap(("th", th.seq, len(body), cols), body, cols):
+            # Keyed by the text itself: sequence numbers restart with each run.
+            for ln in scene.wrap(("th", cols, body), body, cols):
                 lines.append(("body", ln, th))
             if th.truncated and len(body) == len(th.text):
                 lines.append(("body", "… (the summary continues; trimmed here)", th))

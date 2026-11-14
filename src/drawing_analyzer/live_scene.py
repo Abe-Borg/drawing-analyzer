@@ -408,6 +408,7 @@ class LiveScene:
         self.scroll.clear()
         self.follow.clear()
         self._tab_seen.clear()
+        self._wrapped.clear()
 
     def scroll_offset(self, tab: str, content: float, view: float, dt: float,
                       *, follow: "float | None" = None) -> float:

@@ -308,8 +308,11 @@ sheet served from the cache makes no call and has none. Some calls return no
 summary at all; the tab counts those. **The summaries are shown on this screen
 only.** They are held in memory for the run and are never written to the
 export folder, `run.log`, the diagnostics folder or the cache. Set
-`DRAWING_ANALYZER_SHOW_THINKING=0` to stop asking for them; a platform that
-rejects the setting turns it off for the session and the run carries on.
+`DRAWING_ANALYZER_SHOW_THINKING=0` to stop asking for them. The setting can
+never cost a sheet read: a request refused for it is sent again without it, a
+batch item refused for it is resubmitted without it, and a batch that has no
+resubmission (the critique's) asks only a model that has already accepted the
+setting in this session. A refusal turns it off for the rest of the session.
 
 **What it shows, and what it cannot change.** The board is a read-only window
 onto the run's own records: the pipeline hands a

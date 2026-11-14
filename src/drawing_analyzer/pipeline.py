@@ -1189,6 +1189,8 @@ def _digest_sheets_via_batch(
         on_status=on_status,
         focus=focus,
         specs_text=specs_text,
+        # The collect below resubmits rejected items (``retry_failed_items``).
+        resubmits_rejected_items=True,
         level1_keys=level1_keys,
         recovery_state=recovery_state,
         on_log=on_log,

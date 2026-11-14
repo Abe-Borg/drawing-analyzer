@@ -86,8 +86,14 @@ class _Client:
 
 
 @pytest.fixture
-def run():
-    """A live run's resource record with a Thinking feed, bound to this thread."""
+def run(monkeypatch):
+    """A live run's resource record with a Thinking feed, bound to this thread.
+
+    The process-wide display state (the latch, the models seen to accept the
+    field) starts fresh and is restored afterwards."""
+    monkeypatch.setattr(api_config, "_thinking_display_available", True)
+    monkeypatch.setattr(api_config, "_thinking_display_confirmed", set())
+    monkeypatch.setattr(api_config, "_display_batches", {})
     pressure = resource_pressure.ResourcePressure()
     pressure.thoughts = ThoughtStream()
     previous = resource_pressure.activate(pressure)
@@ -168,8 +174,7 @@ def test_a_non_streamed_reply_is_read_from_its_blocks_and_a_silent_one_leaves_no
     assert (feed.seen, feed.with_text) == (2, 1)
 
 
-def test_a_platform_that_rejects_the_field_costs_one_resend_and_the_feature(run, monkeypatch):
-    monkeypatch.setattr(api_config, "_thinking_display_available", True)
+def test_a_platform_that_rejects_the_field_costs_one_resend_and_the_feature(run):
     rejection = Exception("thinking.display: Extra inputs are not permitted")
     rejection.status_code = 400
     client = _Client(_message("fine"), fail_first=rejection)
@@ -183,8 +188,7 @@ def test_a_platform_that_rejects_the_field_costs_one_resend_and_the_feature(run,
     assert client.sent[-1]["thinking"] == {"type": "adaptive"}
 
 
-def test_a_failed_call_closes_its_entry_and_an_unrelated_400_is_not_swallowed(run, monkeypatch):
-    monkeypatch.setattr(api_config, "_thinking_display_available", True)
+def test_a_failed_call_closes_its_entry_and_an_unrelated_400_is_not_swallowed(run):
     bad = Exception("messages: at least one message is required")
     bad.status_code = 400
     with pytest.raises(Exception, match="at least one message"):
@@ -216,10 +220,90 @@ def test_batch_items_ask_for_summaries_and_their_results_join_the_feed_by_sheet(
     assert with_thinking_display(req) is req
 
 
+class _Batches:
+    """A recording ``client.messages.batches``; ``refuse`` fails the next create."""
+
+    def __init__(self, refuse=None):
+        self.created: list[list[dict]] = []
+        self.refuse = refuse
+        self.items: dict[str, list] = {}
+
+    def create(self, requests):
+        self.created.append(requests)
+        if self.refuse is not None:
+            exc, self.refuse = self.refuse, None
+            raise exc
+        return SimpleNamespace(id=f"b{len(self.created)}")
+
+    def results(self, batch_id):
+        return iter(self.items[batch_id])
+
+
+def _batch_client(**kw):
+    batches = _Batches(**kw)
+    return SimpleNamespace(messages=SimpleNamespace(batches=batches)), batches
+
+
+def _asked(requests) -> list[bool]:
+    return ["display" in r["params"]["thinking"] for r in requests]
+
+
+def test_a_batch_submit_refused_for_the_field_is_sent_again_without_it(run):
+    from drawing_analyzer.batch_digest import _create_batch
+
+    refusal = Exception("requests.0.params.thinking.display: Extra inputs are not permitted")
+    refusal.status_code = 400
+    client, batches = _batch_client(refuse=refusal)
+    reqs = [{"custom_id": "c0", "params": _request()}]
+    with call_telemetry.scope("digest"):
+        mb = _create_batch(client, reqs, resubmits_rejected_items=True)
+    assert mb.id == "b2"
+    assert [_asked(sent) for sent in batches.created] == [[True], [False]]
+
+    # Any other refusal is the caller's to handle, exactly as before.
+    other = Exception("requests: too many requests in one batch")
+    other.status_code = 400
+    before = api_config._thinking_display_available
+    client, batches = _batch_client(refuse=other)
+    with pytest.raises(Exception, match="too many requests"), call_telemetry.scope("digest"):
+        _create_batch(client, reqs, resubmits_rejected_items=True)
+    assert api_config._thinking_display_available == before
+
+
+def test_a_batch_that_cannot_resubmit_asks_only_a_model_seen_to_accept_the_field(run):
+    """The critique batch has no resubmission: a rejected item would be a lost
+    read. It asks for summaries only once the model has answered a request
+    carrying the field, on either transport."""
+    from drawing_analyzer import batch_recovery
+    from drawing_analyzer.batch_digest import _create_batch
+
+    client, batches = _batch_client()
+    reqs = [{"custom_id": "c0", "params": _request()}]
+    with call_telemetry.scope("critique"):
+        _create_batch(client, reqs)                           # nothing known yet: plain
+        _create_batch(client, reqs, resubmits_rejected_items=True)   # the digest may ask
+    assert [_asked(sent) for sent in batches.created] == [[False], [True]]
+
+    # That digest batch comes back with a success: the model accepts the field.
+    batches.items["b2"] = [{"custom_id": "c0", "result": {
+        "type": "succeeded", "message": _message("fine")}}]
+    batch_recovery.read_batch_results(client, "b2", sleep=lambda s: None)
+    with call_telemetry.scope("critique"):
+        _create_batch(client, reqs)
+    assert _asked(batches.created[-1]) == [True]
+
+    # A real-time answer confirms a model the same way.
+    other = {"custom_id": "c1", "params": {**_request(), "model": "claude-opus-5-5"}}
+    assert with_thinking_display(other, confirmed_only=True) is other
+    api_config.call_with_refusal_fallback(
+        _Client(_message("ok")), {**_request()}, model=MODEL, method="create")
+    assert with_thinking_display(other, confirmed_only=True) is other    # a different model
+    assert with_thinking_display(reqs[0], confirmed_only=True) is not reqs[0]
+
+
 def test_a_batch_item_rejected_for_the_field_stops_later_batches_asking(run, monkeypatch):
     from drawing_analyzer import batch_recovery
 
-    monkeypatch.setattr(api_config, "_thinking_display_available", True)
     req = {"custom_id": "c0", "params": _request()}
 
     def results(message):

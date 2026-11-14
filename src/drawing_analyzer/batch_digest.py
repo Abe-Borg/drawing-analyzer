@@ -69,6 +69,9 @@ from typing import Any, Callable, Iterable
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     apply_thinking_display,
+    is_thinking_display_item_error,
+    note_batch_submit_rejection,
+    note_display_batch,
     output_cap_for_model,
 )
 from .core.request_usage import fallback_served_model
@@ -694,7 +697,15 @@ def _item_retry_params(
         error = _get(result_obj, "error", None)
         inner = _get(error, "error", error) if error is not None else None
         etype = str(_get(inner, "type", "") or "")
-        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else params
+        if etype in _PERMANENT_ITEM_ERROR_TYPES:
+            # One "permanent" rejection is not: an item refused for the
+            # display-only ``thinking.display`` field (attached at submit for
+            # the live view, never part of ``params``). Reading the results
+            # latched the field off, so the resubmission goes out without it.
+            if is_thinking_display_item_error(_get(inner, "message", "")):
+                return params
+            return None
+        return params
     if (
         rtype == "succeeded"
         and digest is not None
@@ -787,13 +798,17 @@ def _stop_remote_batch(
         )
 
 
-def with_thinking_display(req: dict) -> dict:
+def with_thinking_display(req: dict, *, confirmed_only: bool = False) -> dict:
     """One batch request with reasoning summaries requested, when the run has
-    a live view to show them (the same object otherwise)."""
+    a live view to show them (the same object otherwise).
+
+    ``confirmed_only`` limits it to a model already seen to accept the field,
+    for a batch whose rejected items cannot be resubmitted.
+    """
     params = req.get("params") if isinstance(req, dict) else None
     if not isinstance(params, dict):
         return req
-    shown = apply_thinking_display(params)
+    shown = apply_thinking_display(params, confirmed_only=confirmed_only)
     return req if shown is params else {**req, "params": shown}
 
 
@@ -803,8 +818,16 @@ def _create_batch(
     *,
     on_log: LogCallback | None = None,
     items: dict[str, str] | None = None,
+    resubmits_rejected_items: bool = False,
 ) -> Any:
     """Submit one Message Batch: the only place this run creates one.
+
+    A run with a live view asks each item for a readable reasoning summary
+    (display only; cache-neutral; the caller's request list is left as it
+    was). The field must never cost a read. A submit refused for it is sent
+    again without it. A caller that resubmits rejected items
+    (``resubmits_rejected_items``: the digest paths) asks any model; one that
+    cannot (the critique batch) asks only a model already seen to accept it.
 
     Refused once the run is stopped (:mod:`~drawing_analyzer.cancellation`),
     and registered with the run's kill switch on acceptance, so a stop cancels
@@ -822,19 +845,32 @@ def _create_batch(
     (:func:`~drawing_analyzer.resource_pressure.check_spend_limit`), and a
     submit the API answers with one latches the run for every later request.
     """
-    # A run with a live view asks for readable reasoning summaries (display
-    # only; cache-neutral). The caller's request list is left as it was.
-    reqs = [with_thinking_display(req) for req in reqs]
+    plain = reqs
+    reqs = [
+        with_thinking_display(req, confirmed_only=not resubmits_rejected_items)
+        for req in plain
+    ]
+    asked = any(shown is not req for shown, req in zip(reqs, plain))
     with cancellation.submitting():
         resource_pressure.check_spend_limit()
         try:
-            mb = client.messages.batches.create(requests=reqs)
+            try:
+                mb = client.messages.batches.create(requests=reqs)
+            except Exception as exc:
+                if not (asked and note_batch_submit_rejection(exc)):
+                    raise
+                reqs, asked = plain, False
+                mb = client.messages.batches.create(requests=reqs)
         except Exception as exc:
             resource_pressure.note_spend_limit(
                 exc, stage=call_telemetry.current_stage() or "batch_submit",
             )
             raise
         batch_id = _get(mb, "id")
+        if asked:
+            note_display_batch(
+                batch_id, (_get(_get(req, "params"), "model") for req in reqs),
+            )
         cancellation.track_remote_batch(
             batch_id, lambda: _stop_remote_batch(client, batch_id, on_log=on_log),
         )
@@ -1228,6 +1264,7 @@ def _recover_via_batch_resubmit(
                 mb = _create_batch(
                     client, reqs, on_log=on_log,
                     items={s.custom_id: call_telemetry.sheet_item(s.ref) for s, _ in pending},
+                    resubmits_rejected_items=True,
                 )
         except Exception as exc:  # noqa: BLE001 - recovery is best-effort; batch errors stand
             # The backend rejecting even the submit is itself a sick-backend
@@ -1468,8 +1505,14 @@ def submit_drawing_batch(
     sleep: Callable[[float], None] = time.sleep,
     recovery_state: Any = None,
     on_log: LogCallback | None = None,
+    resubmits_rejected_items: bool = False,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
+
+    ``resubmits_rejected_items`` says the caller will collect with
+    ``retry_failed_items=True`` (the pipeline does). Only then may a run with a
+    live view ask a model not yet seen to accept it for reasoning summaries:
+    an item rejected for that display-only field is resubmitted without it.
 
     ``rendered_sheets`` is an iterable of :class:`RenderedSheet` (streamed, so at
     most one sheet's images are held at a time). Cache hits are recorded directly
@@ -1802,6 +1845,7 @@ def submit_drawing_batch(
                         s.custom_id: call_telemetry.sheet_item(s.ref)
                         for s in slots if s.custom_id is not None
                     },
+                    resubmits_rejected_items=resubmits_rejected_items,
                 )
         # A stop that lands between the check above and the submit cleans up
         # exactly like a failed submit.

@@ -1645,14 +1645,54 @@ _thinking_display_available = True
 
 _THINKING_DISPLAY_REJECTION_MARKERS = ("display",)
 
+# Models that have answered a request carrying the field in this process. A
+# real-time rejection costs one resend, and a rejected digest batch item is
+# resubmitted without the field, but a critique batch has no resubmission: it
+# asks for summaries only from a model already seen to accept them.
+_thinking_display_confirmed: set[str] = set()
+# Batches submitted with the field -> the models their items named, so a
+# succeeded result can confirm them. Bounded; old entries are dropped.
+_display_batches: dict[str, frozenset[str]] = {}
+_MAX_DISPLAY_BATCHES = 64
 
-def apply_thinking_display(kwargs: dict) -> dict:
+
+def thinking_display_confirmed(model: str) -> bool:
+    """Whether ``model`` has accepted ``thinking.display`` in this process."""
+    return str(model or "") in _thinking_display_confirmed
+
+
+def note_display_batch(batch_id: str, models: Iterable[str]) -> None:
+    """Remember that ``batch_id`` was submitted asking for summaries."""
+    if not batch_id:
+        return
+    while len(_display_batches) >= _MAX_DISPLAY_BATCHES:
+        _display_batches.pop(next(iter(_display_batches)))
+    _display_batches[str(batch_id)] = frozenset(str(m) for m in models if m)
+
+
+def note_display_batch_succeeded(batch_id: str) -> None:
+    """An item of ``batch_id`` succeeded: its models accept the field."""
+    _thinking_display_confirmed.update(_display_batches.get(str(batch_id), ()))
+
+
+def is_thinking_display_item_error(detail: Any) -> bool:
+    """Whether a batch item's error text names the ``thinking.display`` field.
+
+    A batch item has no HTTP status to test, so both words must appear.
+    """
+    text = str(detail or "").lower()
+    return "display" in text and "thinking" in text
+
+
+def apply_thinking_display(kwargs: dict, *, confirmed_only: bool = False) -> dict:
     """Return ``kwargs`` asking for reasoning summaries when the run shows them.
 
     Returns ``kwargs`` unchanged (the same object) when no live view is
     attached, the feature latched off, or the request's ``thinking`` is not
     plain adaptive thinking (absent, another mode, or already carrying a
-    ``display``).
+    ``display``). ``confirmed_only`` is for a request that cannot be re-sent if
+    the field is rejected: it is attached only for a model already seen to
+    accept it (:func:`thinking_display_confirmed`).
     """
     if not _thinking_display_available or thought_stream.current() is None:
         return kwargs
@@ -1662,6 +1702,8 @@ def apply_thinking_display(kwargs: dict) -> dict:
         or thinking.get("type") != "adaptive"
         or "display" in thinking
     ):
+        return kwargs
+    if confirmed_only and not thinking_display_confirmed(str(kwargs.get("model") or "")):
         return kwargs
     out = dict(kwargs)
     out["thinking"] = {**thinking, "display": THINKING_DISPLAY}
@@ -1676,20 +1718,32 @@ def _is_thinking_display_rejection(exc: Exception) -> bool:
     return any(marker in text for marker in _THINKING_DISPLAY_REJECTION_MARKERS)
 
 
+def note_batch_submit_rejection(exc: Exception) -> bool:
+    """A batch submit carrying the field was refused: if the refusal names it,
+    stop asking for the rest of the process. Returns whether to resend plain."""
+    global _thinking_display_available
+    if not _is_thinking_display_rejection(exc):
+        return False
+    _thinking_display_available = False
+    _log.warning(
+        "reasoning summaries rejected by the batch submit (%s); resending "
+        "without them, and off for the rest of this process.",
+        exc,
+    )
+    return True
+
+
 def note_batch_item_error(detail: str) -> bool:
     """A batch item came back errored: if the error names ``thinking.display``
     on a run that asked for summaries, stop asking for the rest of the process.
 
-    A batch item has no HTTP status to test, so both words must appear. Returns
-    whether the feature was switched off by this call.
+    Returns whether the feature was switched off by this call.
     """
     global _thinking_display_available
-    text = str(detail or "").lower()
     if (
         not _thinking_display_available
         or thought_stream.current() is None
-        or "display" not in text
-        or "thinking" not in text
+        or not is_thinking_display_item_error(detail)
     ):
         return False
     _thinking_display_available = False
@@ -1723,7 +1777,10 @@ def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method:
         fast = apply_fast_mode(shown, model=model)
         attempted = apply_refusal_fallback(fast, model=model)
         try:
-            return _dispatch_messages(client, attempted, method)
+            message = _dispatch_messages(client, attempted, method)
+            if shown is not kwargs:
+                _thinking_display_confirmed.add(str(kwargs.get("model") or model))
+            return message
         except Exception as exc:
             if shown is not kwargs and _is_thinking_display_rejection(exc):
                 _thinking_display_available = False

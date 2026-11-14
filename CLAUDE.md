@@ -486,9 +486,17 @@ map lives in `src/drawing_analyzer/__init__.py`.
   to plain adaptive `thinking` in `call_with_refusal_fallback` and in
   `batch_digest._create_batch` (`with_thinking_display`). No request builder
   or cache key knows about it, and a run without a monitor sends what it
-  always sent. A 400 naming `display` latches `_thinking_display_available`
-  off and resends; an errored batch item naming it does the same for later
-  batches (`note_batch_item_error`). `_dispatch_messages` taps raw stream events
+  always sent. The field must never cost a read. A 400 naming `display`
+  latches `_thinking_display_available` off and resends, real time and batch
+  submit alike. A batch item errored for it latches too
+  (`note_batch_item_error`), and `_item_retry_params` treats that one
+  `invalid_request_error` as retryable, so the digest's resubmission sends the
+  sheet's own `params` (which never carried the field). The critique batch has
+  no resubmission, so `_create_batch` asks it only for a model already seen to
+  accept the field (`confirmed_only`; a real-time answer or a succeeded item of
+  a batch that asked confirms a model). A digest submit passes
+  `resubmits_rejected_items=True` only because its collect retries.
+  `_dispatch_messages` taps raw stream events
   (`content_block_delta` only; the SDK's echo events would double-count) and
   the final message of a `create`; `read_batch_results` records batch
   summaries under the item's telemetry label (`CallTelemetry.batch_item`).

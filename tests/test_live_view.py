@@ -723,6 +723,20 @@ def test_the_thinking_feed_follows_the_newest_until_the_reader_scrolls_away():
     assert not _texts(prims, "mi_more")
 
 
+def test_a_second_runs_reasoning_is_never_shown_as_the_first_runs():
+    """Each run's feed numbers its thoughts from 1, so two runs in one window
+    can hold different text at the same number and the same length."""
+    scene = LiveScene()
+    scene.set_tab("mind")
+    for words in ("alpha beta gamma delta eps", "omega zeta kappa theta phi"):
+        r = _insight_run(thoughts=0)
+        th = r.feed.open(stage="digest", item=sheet_item(r.refs[0]), model="claude-opus-5-5")
+        r.feed.add_thinking(th, words)
+        r.feed.close(th)
+        r.model.poll(r.monitor)
+        assert words in _texts(_settle(scene, r.model, r.clock), "mi_l")
+
+
 def test_hovering_a_clipped_finding_shows_all_of_it():
     r = _insight_run(findings=3)
     r.findings[0].qc_id = "QC-001"
