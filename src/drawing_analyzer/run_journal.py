@@ -846,7 +846,7 @@ def _ledger_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
         lines.append(
             f"  markup placements: {expected} expected · {terminal} receipt(s) "
             f"(WRITTEN {receipts['WRITTEN']}, INDEXED {receipts['INDEXED']}, "
-            f"FAILED {receipts['FAILED']})"
+            f"REPORTED {receipts['REPORTED']}, FAILED {receipts['FAILED']})"
         )
     if coverage in ("COMPLETE", "INCOMPLETE"):
         lines.append(f"  markup coverage: {coverage} (receipt-derived, §13.5)")

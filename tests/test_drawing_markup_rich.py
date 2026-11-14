@@ -99,8 +99,9 @@ def test_clear_band_falls_back_without_words():
 
 from drawing_analyzer.annotate import (  # noqa: E402
     _annot_content,
-    _status_label,
+    _needs_verify,
     _truncate_at_word,
+    _what_to_do,
 )
 
 
@@ -181,13 +182,45 @@ def test_popup_conflict_pointer_is_ascii():
     assert "—" not in content       # ASCII-only: safe on Base-14 pages too
 
 
-def test_index_status_labels_are_reviewer_words():
-    assert _status_label(_f("x", status="VERIFIED", cat="conflict")) == "Verified"
-    assert _status_label(_f("x", status="VERIFIED", cat="code")) == "Fact confirmed"
-    assert _status_label(_f("x", status="DETERMINISTIC")) == "Computed"
-    assert _status_label(_f("x", status="UNCERTAIN")) == "Check"
-    assert _status_label(_f("x", status="SKIPPED")) == "Check"
-    assert _status_label(_f("x", status="REJECTED")) == "Rejected"
+@pytest.mark.parametrize(
+    "status,cat,citation,rect,hint,expected",
+    [
+        ("VERIFIED", "conflict", None, True, "", False),
+        ("DETERMINISTIC", "coordination", None, True, "", False),
+        ("UNCERTAIN", "conflict", None, True, "", True),
+        ("SKIPPED", "conflict", None, True, "", True),
+        ("FAILED", "conflict", None, True, "", True),
+        # Ruled out is not an open item, so it is never "verify".
+        ("REJECTED", "conflict", None, True, "", False),
+        # A crop confirms what the drawing shows, not what the code says: a code
+        # finding is confirmed only once its reference checked out as well.
+        ("VERIFIED", "code", None, True, "", True),
+        ("VERIFIED", "code", "UNRESOLVABLE", True, "", True),
+        ("VERIFIED", "code", "CHECKED_SUPPORTS", True, "", False),
+        # A located finding with nothing placing it on the sheet is unconfirmed
+        # whatever its status; a sheet-wide one has no place to find.
+        ("DETERMINISTIC", "coordination", None, False, "", True),
+        ("DETERMINISTIC", "coordination", None, False, "SHEET", False),
+    ],
+)
+def test_needs_verify_is_the_one_cover_page_signal(status, cat, citation, rect, hint, expected):
+    f = _f("x", status=status, cat=cat, rect=[1, 2, 3, 4] if rect else None,
+           quote="Q", hint=hint)
+    if citation:
+        f.citation = Citation(status=citation)
+    assert _needs_verify(f) is expected
+    assert _what_to_do(f).startswith("VERIFY: ") is expected
+
+
+def test_what_to_do_leads_with_the_action_and_keeps_the_problem():
+    f = _f("Main is 4 in. here and 6 in. on the riser", status="VERIFIED",
+           cat="conflict", rect=[1, 2, 3, 4])
+    f.recommended_action = "Confirm the main size\nwith the engineer"
+    line = _what_to_do(f)
+    assert line.index("Confirm the main size with the engineer") == 0
+    assert "Main is 4 in. here" in line and "\n" not in line
+    f.recommended_action = ""
+    assert _what_to_do(f) == "Main is 4 in. here and 6 in. on the riser"
 
 
 def test_truncate_at_word_never_cuts_mid_word():
@@ -840,8 +873,14 @@ def test_reviewed_pdf_has_tag_index_and_correct_link_targets(tmp_path):
         assert len(links) == 2
         # Index pages shift the originals by one: page 0 -> 1, page 1 -> 2.
         assert links[0]["page"] == 1 and links[1]["page"] == 2
-        # The link lands at the finding's anchor point.
-        assert abs(links[1]["to"].x - 100) < 1 and abs(links[1]["to"].y - 100) < 1
+        # Each row's link frames its own cloud (raw /FitR, top row first).
+        from tests.fixtures.pdf_links import (
+            annot_user_rects, contains, fit_rect_destinations,
+        )
+        dests = fit_rect_destinations(doc)["link"]
+        for dest, pno in zip(dests, (1, 2)):
+            (cloud,) = annot_user_rects(doc, doc[pno])
+            assert contains(dest, cloud)
         # The QC tag rides beside the cloud, in the severity color.
         types = count_annotations_by_type(out)
         assert types.get("Square") == 2 and types.get("FreeText") == 2
@@ -1099,25 +1138,34 @@ def test_multi_page_index_links_work_on_every_index_page(tmp_path):
         doc.close()
 
 
-def test_rejected_not_inked_by_default_but_indexed(tmp_path):
-    # §18: a REJECTED finding carries no ink by default, but is never invisible —
-    # the index page lists it under "Rejected by verification (n)" with a link.
+def test_rejected_stays_out_of_the_pdf_by_default_and_is_still_accounted(tmp_path):
+    # A ruled-out finding is noise on a drawing someone has to act on: no ink,
+    # no cover row. It keeps a terminal receipt, so coverage still closes.
     src = _pdf(tmp_path)
     rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")
-    assign_qc_ids([rejected])
+    live = _f("real", source="M-101.pdf", rect=[10, 50, 60, 70], status="VERIFIED")
+    assign_qc_ids([live, rejected])
     out = tmp_path / "r.pdf"
-    res = annotate_pdf(src, [rejected], out, include_unverified=True)
-    assert res.annots_written == 0             # no ink drawn
-    # The rejected-index row is a proven placement — coverage is COMPLETE.
+    res = annotate_pdf(src, [live, rejected], out, include_unverified=True)
     assert res.coverage_status == "COMPLETE"
-    assert [r.status for r in res.receipts] == ["INDEXED"]
+    by_qc = {r.placement.qc_id: r for r in res.receipts}
+    assert by_qc[rejected.qc_id].status == "REPORTED"
+    assert by_qc[rejected.qc_id].placement.expected == "REPORT_ONLY"
+    assert by_qc[live.qc_id].status == "WRITTEN"
+    assert res.tally == {"cloud": 1, "rejected": 1}
     doc = pymupdf.open(str(out))
     try:
         assert doc.page_count == 2             # index page + source
-        text = doc[0].get_text()
-        assert "Rejected by verification (1)" in text and "wrong" in text
-        links = doc[0].get_links()
-        assert len(links) == 1 and links[0]["page"] == 1
+        cover = doc[0].get_text()
+        # One row, one link, one bookmark: the live finding. The ruled-out
+        # number appears once, in the line saying why it is not listed.
+        assert cover.count(live.qc_id) == 1 and cover.count(rejected.qc_id) == 1
+        note = next(ln for ln in cover.splitlines() if rejected.qc_id in ln)
+        assert "ruled out" in note and "wrong" not in cover
+        assert len(doc[0].get_links()) == 1
+        titles = [t for _lvl, t, *_ in doc.get_toc() if t.startswith("[")]
+        assert len(titles) == 1 and live.qc_id in titles[0]
+        assert sum(1 for a in doc[1].annots() if a.type[1] == "Square") == 1
     finally:
         doc.close()
 
@@ -1151,7 +1199,7 @@ def test_ink_rejected_draws_grey_struck_markup(tmp_path):
 
 def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
     # §18: a quote that matched nothing (the hallucination signal) is flagged on
-    # the page as a [QUOTE NOT FOUND] margin callout — never silently dropped.
+    # the page as a VERIFY margin callout — never silently dropped.
     src = _pdf(tmp_path)
     f = _f("quote matched nothing", source="M-101.pdf", status="UNCERTAIN")
     f.anchor = Anchor(status="UNANCHORED", method="quote_not_found")
@@ -1162,10 +1210,10 @@ def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
     doc = pymupdf.open(str(out))
     try:
         box = next(a for a in doc[1].annots() if a.type[1] == "FreeText")
-        # For FreeText annots /Contents IS the displayed text — the placement
-        # and trust prefixes must both be there.
+        # For FreeText annots /Contents IS the displayed text, so the lead-in
+        # is what the engineer reads on the sheet.
         content = box.info.get("content", "")
-        assert content.startswith("[CHECK] [QUOTE NOT FOUND]")
+        assert content.startswith("VERIFY: ")
         # The unlocatable quote carries its plain-words caution inline.
         assert "treat with caution" in content
     finally:

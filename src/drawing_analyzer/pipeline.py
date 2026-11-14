@@ -2971,6 +2971,7 @@ def _run_qc_stages(
             expected=len(getattr(markup_run, "placements", None) or []),
             written=receipt_counts["WRITTEN"],
             indexed=receipt_counts["INDEXED"],
+            reported=receipt_counts["REPORTED"],
             failed=receipt_counts["FAILED"],
             coverage=coverage_status,
             reviewed_pdfs=len(reviewed_pdf_paths),
@@ -3022,13 +3023,15 @@ def _tally_line(
 ) -> str:
     """The Phase 21 run-summary line, derived from receipts.
 
-    e.g. ``Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated
+    e.g. ``Ledger 47: 39 clouded, 5 margin, 2 ruled out (report only), 1 gated
     (verified-only mode), 0 failed; coverage COMPLETE``. The core three buckets
     are always shown; the optional gated / failed / skipped buckets appear when
-    non-zero, and the coverage verdict is appended when known.
+    non-zero, and the coverage verdict is appended when known. "Ruled out"
+    counts the findings kept out of the reviewed PDFs; one inked grey on request
+    is a cloud or a margin callout like any other.
     """
     parts = [f"{tally.get('cloud', 0)} clouded", f"{tally.get('margin', 0)} margin"]
-    parts.append(f"{tally.get('rejected', 0)} rejected (indexed)")
+    parts.append(f"{tally.get('rejected', 0)} ruled out (report only)")
     if tally.get("gated"):
         parts.append(f"{tally['gated']} gated (verified-only mode)")
     if tally.get("failed"):
@@ -3239,10 +3242,10 @@ def extract_drawing_context(
     ``focus_findings_to_markups`` — the per-sheet Focus sections). Duplicates
     merge with unioned provenance (``Finding.sources``); the exhaustive default
     inks **everything except REJECTED**: anchored entries cloud (UNCERTAIN
-    dashed), rect-less entries become margin callouts (``[SHEET-WIDE]`` /
-    ``[QUOTE NOT FOUND]`` prefixes), and REJECTED entries are listed on the index
-    page's "Rejected by verification" section (inked grey only with
-    ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
+    dashed), rect-less entries become margin callouts (leading with ``VERIFY:``
+    when unconfirmed), and REJECTED entries stay out of the reviewed PDF — they
+    are kept in ``findings.csv`` and the HTML report (inked grey, and listed on
+    the index page under "Ruled out", only with ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
     opt-in that restricts ink to VERIFIED + DETERMINISTIC (it now defaults
     **off** — §18 supersedes the old default). The run-end coverage tally lands
     on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line`` (markup runs only —

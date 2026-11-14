@@ -166,21 +166,21 @@ def test_margin_callout_failure(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 5. Index-page generation failure for a rejected (index-only) finding
+# 5. Index-page generation failure for a gated (index-only) finding
 # --------------------------------------------------------------------------- #
 
 
-def test_index_failure_fails_rejected_placement(tmp_path, monkeypatch):
+def test_index_failure_fails_index_only_placement(tmp_path, monkeypatch):
     src = _pdf(tmp_path)
-    f = _f("wrong", quote="wq", status="REJECTED")
+    f = _f("maybe", quote="mq", status="UNCERTAIN")
     assign_qc_ids([f])
 
     monkeypatch.setattr(
         annotate, "_insert_index_pages",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("index failed")),
     )
-    res = annotate_pdf(src, [f], tmp_path / "r.pdf", include_unverified=True)
-    # The rejected finding's only artifact is its index row — with the index gone,
+    res = annotate_pdf(src, [f], tmp_path / "r.pdf", include_unverified=False)
+    # The gated finding's only artifact is its index row — with the index gone,
     # the placement is FAILED (not silently "planned").
     assert res.coverage_status == "INCOMPLETE"
     assert [r.status for r in res.receipts] == ["FAILED"]
@@ -334,7 +334,7 @@ def test_dual_leg_conflict_one_leg_fails(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 9 & 10. Gated / rejected findings are accounted (INDEXED), never FAILED
+# 9 & 10. Gated / ruled-out findings are accounted, never FAILED
 # --------------------------------------------------------------------------- #
 
 
@@ -350,16 +350,22 @@ def test_gated_finding_is_indexed_not_failed(tmp_path):
     assert res.receipts[0].placement.expected == "GATED_INDEX"
 
 
-def test_rejected_default_has_a_real_index_receipt(tmp_path):
+def test_source_with_only_ruled_out_findings_gets_no_reviewed_copy(tmp_path):
+    # A ruled-out finding is report-only, so a source carrying nothing else has
+    # nothing to add to its PDF: no "reviewed" copy of an untouched drawing, and
+    # the finding (with its cross-sheet leg) still closes with a receipt each.
     src = _pdf(tmp_path)
     f = _f("wrong", quote="wq", status="REJECTED")
+    f.also_on = [ConflictLeg(sheet_id="M-102", source_name=src.name, page_index=0,
+                             source_quote="lq")]
     assign_qc_ids([f])
-    res = annotate_pdf(src, [f], tmp_path / "r.pdf", include_unverified=True)
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out", include_unverified=True)
+    assert res.reviewed_pdfs == []
+    assert not list((tmp_path / "out").glob("*.pdf"))
     assert res.coverage_status == "COMPLETE"
-    assert [r.status for r in res.receipts] == ["INDEXED"]
-    receipt = res.receipts[0]
-    assert receipt.placement.expected == "REJECTED_INDEX"
-    assert receipt.index_entry_ref  # points at the reconciled index row
+    assert [r.status for r in res.receipts] == ["REPORTED", "REPORTED"]
+    assert {r.placement.expected for r in res.receipts} == {"REPORT_ONLY"}
+    assert res.tally == {"rejected": 2}
 
 
 # --------------------------------------------------------------------------- #
@@ -523,7 +529,7 @@ def test_same_page_index_rows_are_matched_to_their_own_link(tmp_path):
             expected=expected, required_components=["index_row"],
         )
 
-    receipts = _reconcile_pdf(out, [_pl(pid_a, "REJECTED_INDEX"), _pl(pid_b, "GATED_INDEX")], run_id)
+    receipts = _reconcile_pdf(out, [_pl(pid_a, "GATED_INDEX"), _pl(pid_b, "GATED_INDEX")], run_id)
     by_id = {r.placement.placement_id: r for r in receipts}
     assert by_id[pid_a].status == "INDEXED"       # its own link is present
     assert by_id[pid_b].status == "FAILED"        # no link at row B's position
@@ -579,7 +585,7 @@ def test_markup_manifest_is_portable_and_receipt_backed(tmp_path):
     assert manifest["coverage_status"] == "COMPLETE"
     assert len(manifest["placements"]) == 2 and len(manifest["receipts"]) == 2
     # Every receipt names a placement and a terminal status.
-    assert {r["status"] for r in manifest["receipts"]} == {"WRITTEN", "INDEXED"}
+    assert {r["status"] for r in manifest["receipts"]} == {"WRITTEN", "REPORTED"}
     # Output hashes describe the concrete reviewed PDF on disk.
     assert manifest["outputs"] and all("sha256" in o for o in manifest["outputs"])
 
@@ -619,7 +625,7 @@ def test_report_coverage_banner():
 
     complete = _coverage_banner_html(SimpleNamespace(
         coverage_status="COMPLETE",
-        ledger_tally_line="Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed); coverage COMPLETE",
+        ledger_tally_line="Ledger 3: 2 clouded, 1 margin, 0 ruled out (report only); coverage COMPLETE",
         mutated_sources=[],
     ))
     assert 'data-coverage="COMPLETE"' in complete

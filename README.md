@@ -559,10 +559,12 @@ Two **QC review** checkboxes sit beside the focus:
   CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)). By
   default **every ledger entry gets ink except the ones the verifier proved wrong**
   ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified findings
-  draw dashed with an `[UNVERIFIED]` prefix, rect-less ones become margin callouts.
-  Two sub-toggles adjust that — **Verified & deterministic only** (off by default;
-  the conservative opt-in that suppresses unverified ink) and **Include rejected
-  (grey)** (also inks verifier-rejected findings, struck grey). Because it runs the
+  draw dashed, rect-less ones become margin callouts, and a finding the re-check
+  ruled out stays out of the reviewed PDF (it is kept in the CSV and the HTML
+  report). Two sub-toggles adjust that — **Verified & deterministic only** (off
+  by default; the conservative opt-in that suppresses unverified ink) and
+  **Include rejected (grey)** (also draws ruled-out findings, struck grey, and
+  lists them on the cover page under *Ruled out*). Because it runs the
   whole stack, it costs substantially more than a plain digest; the cost line says so.
   Analyze shows the full per-stage estimate in a **Confirm full QC run** dialog
   before anything is sent. Ticking **Don't show this again** there (and clicking
@@ -581,8 +583,9 @@ Two **QC review** checkboxes sit beside the focus:
 
 After a QC run, the completion summary reports the finding count, how many were
 clouded, and the **receipt-derived** coverage tally
-(`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated (verified-only
-mode), 0 failed; coverage COMPLETE`), and the **Save Reviewed PDF(s)…** button
+(`Ledger 47: 39 clouded, 5 margin, 2 ruled out (report only), 1 gated
+(verified-only mode), 0 failed; coverage COMPLETE`), and the **Save Reviewed
+PDF(s)…** button
 lights up (it copies every `*_reviewed.pdf` into a folder you pick). The standalone
 findings-CSV button is no longer in the GUI (see [GUI export options](#gui) above),
 but the CSV is still written by *Export All…* and the library `write_findings_csv`.
@@ -1687,16 +1690,26 @@ frame and the two transforms are captured in a `PageGeometry` record (matrices a
 plain floats, so no PyMuPDF type leaks past `render.py`).
 
 A **GOTO destination is a third space again**, and the reason a QC bookmark could
-land nowhere near its mark. A `/XYZ` destination is expressed in *default user
-space* — the same space an annotation's `/Rect` uses, which is what lets the two be
+land nowhere near its mark. A destination is expressed in *default user space* —
+the same space an annotation's `/Rect` uses, which is what lets the two be
 compared and is how this was pinned by measurement — while annotation *placement*
 goes through the un-rotated CropBox-relative space above. Handing a destination the
-annotation-space point drops both the CropBox origin and the MediaBox origin.
-Measured across rotation × CropBox × MediaBox-origin, 24 cases: the index and
-overflow links were wrong in **12** of them and the bookmark outline in **22**,
-with errors up to ~550 pt. The two PyMuPDF entry points that write destinations
-apply *different* internal transforms, so each is inverted separately, composed
-from PyMuPDF's own published matrices rather than a hard-coded offset. Generated
+annotation-space point drops both the CropBox origin and the MediaBox origin;
+measured across rotation × CropBox × MediaBox-origin (24 cases), that error
+reaches ~550 pt.
+
+Every link and bookmark is a **`/FitR` rectangle** that the viewer fits to its
+window, so the markup arrives centered and readable whatever zoom you were at.
+(The earlier `/XYZ` point meant "put this corner at the window's top-left and
+keep the current zoom", which left the markup in a corner; Bluebeam Revu honors
+`/FitR`.) The rectangle is the mark's own `/Rect` read back from the document —
+already default user space, so there is no transform to get wrong — padded by an
+inch, grown to at least a 10 × 7 in. view of the sheet so a small tag still shows
+its surroundings, and kept inside the visible page. A finding listed without a
+mark uses its anchor rectangle, converted to user space and checked against an
+annotation's raw `/Rect` in all 24 cases; one with no location shows the whole
+sheet. PyMuPDF can only write `/XYZ`, so the writer lets it create each link and
+bookmark and then replaces the destination in place. Generated
 index and notes pages also pin an explicit `CropBox` equal to their own
 `MediaBox`, because `/CropBox` is an **inheritable** page-tree attribute and a set
 whose `/Pages` node carries one made a new 612×792 page render as 512×712.
@@ -1776,8 +1789,8 @@ finding status:
 
 | Status | Source | Meaning |
 |---|---|---|
-| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct. For a **code** finding that means the drawing fact it rests on, not the violation: the popup says so, the index reads *Fact confirmed*, and the report chip reads *Drawing fact confirmed* (the citation check is what tests the code reference) |
-| `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
+| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct. For a **code** finding that means the drawing fact it rests on, not the violation: the popup says so, the cover page marks it `VERIFY:` until the citation check supports the reference, and the report chip reads *Drawing fact confirmed* (the citation check is what tests the code reference) |
+| `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — kept out of the reviewed PDF and listed as rejected in the CSV and HTML report (grey struck ink, and a cover-page *Ruled out* row, only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
 | `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when its operands are text-extracted from the quote — a model-transcribed mismatch is `UNCERTAIN` and crop-verified) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
@@ -1905,8 +1918,8 @@ paths never appear in any exported artifact.
   *question*-category finding = **blue**.
 - **Border styles say who found it.** A model finding that verified draws a
   **revision cloud**; a **`DETERMINISTIC`** (auditor) finding draws a **solid**
-  border — the host computed it, no cloud theatrics; an opted-in unverified
-  finding draws **dashed** with an `[UNVERIFIED]` popup prefix.
+  border — the host computed it, no cloud theatrics; an unverified finding
+  draws **dashed** with a `[CHECK]` popup prefix.
 - **Sheet-level / absence findings** (`anchor_hint="SHEET"` — "expected X; not
   found on this sheet") have no rectangle to cloud. They become **callout boxes
   packed into visually-clear bands** — each box validated against the sheet's word
@@ -1922,16 +1935,31 @@ paths never appear in any exported artifact.
   the reported tile when one is known and it would not cross another callout. A
   callout that will not fit any clear band overflows to an appended **"AI Review
   Notes"** page (with a GOTO link back to its source sheet) rather than being
-  stacked over the drawing.
+  stacked over the drawing. A callout box is text drawn on the sheet, so it
+  leads with one plain signal instead of the popup's bracket tags: `VERIFY:`
+  when the finding was not confirmed, `WHOLE SHEET:` (or
+  `VERIFY (whole sheet):`) for a sheet-level one, nothing otherwise. The reason
+  is still there, as a sentence in the same box.
 - **Index page(s).** Each reviewed PDF opens with **"AI DRAFT REVIEW - FINDINGS
-  INDEX"** — a table (ID, sheet, severity, status, one-line finding) where every
-  row is a **GOTO link** that jumps straight to **the page its mark actually
-  landed on** and the rectangle (works in Revu, Acrobat, and Chromium): for a
-  callout that overflowed, that is the *AI Review Notes* page, not its source
-  sheet, so a row never sends you to a page with nothing on it. Multi-page as
-  needed. Every cell is fitted to its column by measured width and folded to
-  characters the page fonts can actually draw, so an uppercase drawing note does
-  not run into the next column and an inch mark does not render as a stray dot.
+  INDEX"** — the cover page an engineer works from. Three columns: **ID**,
+  **Sheet**, and **What to do** (the recommended action, then the finding). The
+  ID is drawn in the severity color, and the only status signal is a `VERIFY:`
+  prefix on a finding that was not confirmed — one whose re-check was
+  inconclusive or did not run, whose quote could not be checked against the
+  sheet, or a code finding whose drawing fact was confirmed but whose code
+  reference was not. Every row is a **GOTO link** that zooms onto **the mark
+  itself**, on the page it actually landed on (works in Revu, Acrobat, and
+  Chromium): for a callout that overflowed, that is the *AI Review Notes* page,
+  not its source sheet, so a row never sends you to a page with nothing on it.
+  Multi-page as needed. Every cell is fitted to its column by measured width and
+  folded to characters the page fonts can actually draw, so an uppercase drawing
+  note does not run into the next column and an inch mark does not render as a
+  stray dot. A finding the re-check ruled out is not listed; because QC numbers
+  are assigned before the re-check, the page ends with one line naming the
+  numbers that are missing for that reason.
+- **Bookmarks.** A **QC Findings** group in the bookmarks panel, one entry per
+  marked finding, each zooming onto its mark exactly as its cover row does. Any
+  bookmarks the source PDF already had are kept.
 - **Popups are exhaustive**: the finding text, the verbatim quote, the
   cross-sheet pointer (dual-anchored conflicts cite each other by QC number),
   verification status + verifier note, code refs plus the
@@ -1951,22 +1979,22 @@ the verifier proved wrong**:
 | Entry | Default ink |
 |---|---|
 | Anchored, `VERIFIED` / `DETERMINISTIC` | cloud (or solid border for deterministic) |
-| Anchored, `UNCERTAIN` / `SKIPPED` | **dashed** cloud, `[UNVERIFIED]` prefix |
-| Rect-less: sheet-level / absence | margin callout, `[SHEET]` prefix |
-| Rect-less: quote matched nothing | margin callout, `[UNANCHORED]` prefix — the hallucination signal, flagged loudly, never dropped |
-| `REJECTED` (verifier contradicted it) | **no ink** — but a reconciled index row under *"Rejected by verification (n)"* with page links, so nothing is invisible. `ink_rejected=True` (GUI: **Include rejected (grey)**) additionally draws them grey and dashed with a `[REJECTED]` prefix. |
-| **Gated** (verified-only mode suppressed the ink) | **no ink** — but a reconciled index row under *"Not inked by operator gate (n)"*, so a deliberately-gated finding is accounted, never silently dropped. |
+| Anchored, `UNCERTAIN` / `SKIPPED` | **dashed** cloud, `[CHECK]` popup prefix |
+| Rect-less: sheet-level / absence | margin callout, `WHOLE SHEET:` lead-in |
+| Rect-less: quote matched nothing | margin callout, `VERIFY:` lead-in — the hallucination signal, said in a sentence in the box, never dropped |
+| `REJECTED` (verifier contradicted it) | **nothing in the PDF** — no ink, no cover row, no bookmark. A ruled-out finding is noise on a drawing someone has to act on; it is kept in `findings.csv`, `findings.json` and the HTML report, and still closes with a receipt (`REPORTED`). `ink_rejected=True` (GUI: **Include rejected (grey)**) draws them grey and dashed with a `[REJECTED]` popup prefix and lists them on the cover under *"Ruled out (n)"*. |
+| **Gated** (verified-only mode suppressed the ink) | **no ink** — but a reconciled index row under *"Not marked on the sheets (n)"*, so a deliberately-gated finding is accounted, never silently dropped. |
 
 The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
 **Verified & deterministic only**, default **off**) suppresses everything but
 `VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated* and get a
-real **"Not inked by operator gate"** index row (a proven placement, not a bare
+real **"Not marked on the sheets"** index row (a proven placement, not a bare
 status), so nothing is invisible.
 
 The index pages read as a punch list (Phase 26B §18.7): rows sort **high →
 medium → low** severity, then source input order, page, and position — the
-stable `QC-###` ids never change, only their display order. The rejected and
-operator-gated sections follow the main table as before.
+stable `QC-###` ids never change, only their display order. The *Ruled out* and
+*Not marked on the sheets* sections, when a run has them, follow the main table.
 
 ### Coverage is artifact-backed (Phase 21, DA-007)
 
@@ -1979,10 +2007,12 @@ source is never touched), then **reopens the saved file and reconciles** — a
 placement counts only when its stamped, mandatory component is found again in the
 artifact. The result is a
 [`MarkupRunResult`](src/drawing_analyzer/models.py): per-placement
-`MarkupReceipt`s (`WRITTEN` / `INDEXED` / `FAILED`), the receipt-derived tally,
-and a `coverage_status`.
+`MarkupReceipt`s (`WRITTEN` / `INDEXED` / `REPORTED` / `FAILED`), the
+receipt-derived tally, and a `coverage_status`. `REPORTED` is the one receipt
+that proves nothing about the PDF: it is the outcome of a ruled-out finding,
+which by design has nothing there to find again.
 
-- The tally (`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated
+- The tally (`Ledger 47: 39 clouded, 5 margin, 2 ruled out (report only), 1 gated
   (verified-only mode), 0 failed; coverage COMPLETE`) appears in the GUI
   completion summary, the report's findings card + a coverage banner, and
   `ctx.ledger_tally` / `ctx.ledger_tally_line`. It describes PDF ink, so runs
@@ -2942,10 +2972,11 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   hybrid sheet's pasted detail is invisible to a text search even though the
   sheet has words. A cross-sheet quote the host cannot check is admitted at
   *reduced trust* rather than discarded — labelled on the drawing with a
-  plain-words reason and flagged beside the quote in the report. The label says
-  which case it is: `[NO TEXT TO CHECK]` where the region carried
+  plain-words reason and flagged beside the quote in the report. A cloud's popup
+  tags which case it is: `[NO TEXT TO CHECK]` where the region carried
   no searchable text, `[NO QUOTE TO CHECK]` where the AI named no quote to look
-  for. A quote that fails to match text the sheet's own region *does* have is
+  for. A callout box and the cover page say `VERIFY:` for both, with the reason
+  as a sentence. A quote that fails to match text the sheet's own region *does* have is
   unchanged: that stays the hallucination signal.
 
   Grounding therefore has **three** outcomes, not two, and the third is the one

@@ -1202,7 +1202,7 @@ def test_ledger_coverage_every_entry_accounted_on_the_pdf(tmp_path):
     assert ctx.ledger_tally == {"cloud": 2, "margin": 1}
     assert sum(ctx.ledger_tally.values()) == ctx.finding_count
     assert ctx.ledger_tally_line == (
-        "Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed); coverage COMPLETE"
+        "Ledger 3: 2 clouded, 1 margin, 0 ruled out (report only); coverage COMPLETE"
     )
     assert not any(e.startswith("Ledger coverage") for e in ctx.errors)
 
@@ -1458,8 +1458,8 @@ def test_exhaustive_run_journal_receipts_and_exported_run_log(tmp_path):
     assert len(receipts) == 1
     fields = receipts[0].fields
     assert int(fields["expected"]) == len(ctx.markup_run.placements)
-    terminal = sum(1 for r in ctx.markup_run.receipts if r.status in ("WRITTEN", "INDEXED", "FAILED"))
-    assert int(fields["written"]) + int(fields["indexed"]) + int(fields["failed"]) == terminal
+    terminal = len(ctx.markup_run.receipts)
+    assert sum(int(fields[k]) for k in ("written", "indexed", "reported", "failed")) == terminal
     assert fields["coverage"] == ctx.coverage_status
 
     from drawing_analyzer.export import write_drawing_export

@@ -8,8 +8,8 @@ result reads like a senior plan-review set (Phase 15):
   in the CSV, ``findings.json``, the HTML report, and the index page;
 - **severity styling**: high = red, medium = orange, low / question = blue;
   DETERMINISTIC (auditor) findings draw a **solid** border, model findings a
-  **revision cloud** (``clouds=2``), opted-in unverified findings **dashed** with
-  a ``[CHECK]`` popup prefix;
+  **revision cloud** (``clouds=2``), unverified findings **dashed** with a
+  ``[CHECK]`` popup prefix (a callout box drawn on the sheet says ``VERIFY:``);
 - **severity layers**: every finding's ink (cloud, QC tag, margin callout, leader
   line, overflow / set-level note) is placed on a per-severity **PDF
   optional-content layer** — ``QC markups - High/Medium/Low severity`` — so a
@@ -24,9 +24,12 @@ result reads like a senior plan-review set (Phase 15):
   sheet's word rectangles), with a **leader Line** arrow to the reported tile's
   centroid when one is known;
 - **findings index pages** are inserted at the front of each reviewed PDF —
-  a table (ID, sheet, severity, status, one-line text) where every row carries a
-  GOTO link jumping to the finding's page and rectangle; labeled
-  "AI DRAFT REVIEW — index";
+  three columns (ID, sheet, what to do) where every row carries a GOTO link
+  that zooms the viewer onto the finding's markup; labeled
+  "AI DRAFT REVIEW — index". The page is written for the engineer who has to
+  act on it: severity is the ID's color, the only status signal is a
+  ``VERIFY:`` prefix on a finding that was not confirmed, and a finding the
+  verifier ruled out is not listed at all (it stays in the CSV / HTML report);
 - an optional **appendix page** (off by default) lists the deterministic checks
   that *passed* — the balance column of a real review;
 - popups are lean and actionable, written for a human reviewer: finding text,
@@ -82,6 +85,7 @@ import itertools
 import multiprocessing
 import os
 import pickle
+import re
 import uuid
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -140,31 +144,33 @@ _REJECTED_COLOR = (0.45, 0.45, 0.45)
 
 # ---- Plain-words trust vocabulary --------------------------------------- #
 # The popup speaks to a human reviewer, not to the pipeline: a short bracket
-# tag on line 1 (it survives the Markups List preview and is the glanceable
-# hallucination signal) plus a full plain sentence at the end of the popup.
+# tag on line 1 of a cloud's comment (it survives the Markups List preview)
+# plus a full plain sentence at the end of the popup.
 # ASCII only — the same strings must be safe on Base-14 ``insert_text`` pages.
 _TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
-#: ``NO_QUOTE`` is distinct from ``UNANCHORED`` on purpose (P7 item 34):
-#: ``[QUOTE NOT FOUND]`` means the quote SHOULD have been findable and was not —
-#: the hallucination signal — while a graphics-only finding never offered a quote
-#: to find, and labelling it with the hallucination signal spends the reviewer's
-#: trust on a finding that did nothing wrong.
-_PLACE_PREFIX = {
-    "SHEET": "[SHEET-WIDE]",
-    "UNANCHORED": "[QUOTE NOT FOUND]",
-    "NO_QUOTE": "[NO QUOTE TO CHECK]",
-}
-#: WP-03B §8.3. Distinct from ``[QUOTE NOT FOUND]``, which means the quote
-#: SHOULD have been findable and was not — the hallucination signal. These mean
-#: there was nothing to search, or nothing to search *for*, so the reviewer's
-#: eyes are the only check. Keyed by :func:`reduced_trust_reason` so the tag on
-#: the drawing and the sentence under it can never disagree.
+#: Reduced-trust evidence tags for a cloud's comment (WP-03B §8.3), keyed by
+#: :func:`reduced_trust_reason` so the tag and the sentence under it can never
+#: disagree. ``[QUOTE NOT FOUND]`` means a quote SHOULD have been findable and
+#: was not; the other two mean there was nothing to search, or nothing to search
+#: *for* — different messages, so they stay different tags.
+_QUOTE_NOT_FOUND_PREFIX = "[QUOTE NOT FOUND]"
+_NO_QUOTE_PREFIX = "[NO QUOTE TO CHECK]"
 _NO_TEXT_EVIDENCE_PREFIX = "[NO TEXT TO CHECK]"
 _EVIDENCE_PREFIX = {
     TRUST_REASON_NO_TEXT: _NO_TEXT_EVIDENCE_PREFIX,
-    TRUST_REASON_NO_QUOTE: "[NO QUOTE TO CHECK]",
-    TRUST_REASON_NOT_FOUND: _PLACE_PREFIX["UNANCHORED"],
+    TRUST_REASON_NO_QUOTE: _NO_QUOTE_PREFIX,
+    TRUST_REASON_NOT_FOUND: _QUOTE_NOT_FOUND_PREFIX,
 }
+# ---- What is DRAWN: the cover page and the callout boxes on a sheet -------- #
+# The bracket tags above belong to the popup comment, where a reviewer who
+# opens a markup wants the reason. Text an engineer reads at a glance (a cover
+# row, a callout box on the sheet) carries one signal instead: nothing when the
+# finding was confirmed, ``VERIFY:`` when it was not. Why it was not confirmed
+# is still said, in a sentence, further down the same comment.
+_VERIFY_PREFIX = "VERIFY: "
+_VERIFY_SHEET_PREFIX = "VERIFY (whole sheet): "
+_SHEET_PREFIX = "WHOLE SHEET: "
+_RULED_OUT_PREFIX = "RULED OUT: "
 _TRUST_NOTE = {
     "VERIFIED": "AI-verified against the drawing.",
     "DETERMINISTIC": "Found by an exact text check of the drawings - not an AI judgment.",
@@ -180,7 +186,6 @@ _TRUST_NOTE_CODE_VERIFIED = (
     "AI-verified that the drawing shows this - whether it breaks the code is "
     "not settled by that check."
 )
-_INDEX_STATUS_CODE_VERIFIED = "Fact confirmed"
 # WP-03B §8.3: a finding standing on evidence the host could not check in text
 # (a scanned sheet, or the pasted raster region of a hybrid one) must not read
 # like a text-corroborated conflict. Said in plain words, on the drawing, where
@@ -218,16 +223,6 @@ _CITATION_PHRASE = {
     "CHECKED_MISMATCH": "Code ref may be outdated",  # "- note (editions: X)" appended
     "UNRESOLVABLE": "Code ref not confirmed - no authoritative text found.",
 }
-# Index-page status column, in reviewer words (raw statuses are pipeline jargon).
-_INDEX_STATUS_LABEL = {
-    "VERIFIED": "Verified",
-    "DETERMINISTIC": "Computed",
-    "UNCERTAIN": "Check",
-    "FAILED": "Verifier failed",
-    "SKIPPED": "Check",
-    "REJECTED": "Rejected",
-}
-
 # Stroke color by severity (RGB 0–1): red / orange / blue, grey fallback. A
 # "question"-category finding is blue regardless of its severity (Phase 15 spec:
 # high = red, medium = orange, question/low = blue).
@@ -273,14 +268,18 @@ _INDEX_PAGE_W, _INDEX_PAGE_H = 612.0, 792.0
 # Widths are DERIVED from the next column's edge so a row's text can be fitted to
 # the space it actually has (item 32) — one definition shared by the header row
 # and the data rows, so the two cannot drift apart.
-_INDEX_COL_X = (36.0, 95.0, 210.0, 258.0, 340.0)
-_INDEX_COL_LABELS = ("ID", "Sheet", "Sev", "Status", "Finding")
+_INDEX_COL_X = (36.0, 95.0, 170.0)
+_INDEX_COL_LABELS = ("ID", "Sheet", "What to do")
 _INDEX_COL_RIGHT = 578.0            # _INDEX_PAGE_W - 34pt right margin
 _INDEX_COL_GUTTER = 4.0             # keep a column off its neighbour's first glyph
 _INDEX_COL_W = tuple(
     (_INDEX_COL_X[i + 1] if i + 1 < len(_INDEX_COL_X) else _INDEX_COL_RIGHT)
     - _INDEX_COL_X[i] - _INDEX_COL_GUTTER
     for i in range(len(_INDEX_COL_X))
+)
+_INDEX_SUBTITLE = (
+    "Click a row to jump to its markup.  "
+    "Red = high, orange = medium, blue = low or a question."
 )
 _INDEX_TOP = 90.0
 _INDEX_ROW_H = 14.0
@@ -402,9 +401,9 @@ def _expected_kind(
 
     Built on the same :func:`ink_disposition` classifier the writer draws from, so
     the plan can never disagree with the ink: ``cloud`` → CLOUD, ``margin`` →
-    MARGIN, ``gated`` → GATED_INDEX (a real "not inked by operator gate" index
+    MARGIN, ``gated`` → GATED_INDEX (a real "Not marked on the sheets" index
     row, §6.4), and a REJECTED finding → its grey CLOUD/MARGIN when
-    ``ink_rejected`` else a REJECTED_INDEX row.
+    ``ink_rejected``, else REPORT_ONLY: nothing in the PDF at all.
     """
     disposition = ink_disposition(
         finding, include_unverified=include_unverified, ink_rejected=ink_rejected
@@ -419,7 +418,7 @@ def _expected_kind(
     if ink_rejected:
         anchored = finding.anchor is not None and finding.anchor.rect_pdf is not None
         return "CLOUD" if anchored else "MARGIN"
-    return "REJECTED_INDEX"
+    return "REPORT_ONLY"
 
 
 def _make_placement(
@@ -561,7 +560,7 @@ def is_margin_callout(finding: Finding, *, include_unverified: bool) -> bool:
     Under the Part III gating amendment (§18) **every rect-less finding** gets a
     callout — sheet-level / absence findings (``anchor_hint="SHEET"``) *and*
     ``UNANCHORED`` ones (the quote-matched-nothing hallucination signals, drawn
-    with a ``[QUOTE NOT FOUND]`` prefix so they read as flagged, never dropped) —
+    with a ``VERIFY:`` lead-in so they read as flagged, never dropped) —
     subject to the same trust gating as clouds.
     """
     anchor = getattr(finding, "anchor", None)
@@ -583,8 +582,8 @@ def ink_disposition(
     """How the run accounts for one ledger entry (Part III's coverage tally).
 
     ``"cloud"`` — anchored, drawn as a Square; ``"margin"`` — rect-less, drawn
-    as a margin callout; ``"rejected"`` — verifier-contradicted, listed in the
-    index's rejected section (and inked grey when ``ink_rejected``); ``"gated"``
+    as a margin callout; ``"rejected"`` — verifier-contradicted, kept out of the
+    PDF (inked grey and listed as ruled out when ``ink_rejected``); ``"gated"``
     — suppressed by the opt-in verified-&-deterministic-only mode. Under the
     exhaustive default (``include_unverified=True``) every entry is exactly one
     of cloud / margin / rejected — the §18 coverage assertion.
@@ -600,6 +599,41 @@ def ink_disposition(
 
 def _is_unverified(finding: Finding) -> bool:
     return _status(finding) not in _TRUSTED
+
+
+def _needs_verify(finding: Finding) -> bool:
+    """Whether an engineer should confirm this finding before acting on it.
+
+    The one rule behind the ``VERIFY:`` prefix on a cover row and in a callout
+    box. True when the re-check did not confirm the finding, when its quote
+    could not be checked against the sheet's text, when a located finding has
+    nothing placing it on the sheet, and for a code finding whose drawing fact
+    was confirmed but whose code reference was not (the crop re-check cannot
+    read a code book — :func:`~drawing_analyzer.models.verified_drawing_fact_only`).
+    A ruled-out finding is never "verify": it is not an open item.
+    """
+    if _status(finding) == "REJECTED":
+        return False
+    if _is_unverified(finding) or reduced_trust_reason(finding):
+        return True
+    anchor = getattr(finding, "anchor", None)
+    if (anchor is None or anchor.rect_pdf is None) and _placement_kind(finding) != "SHEET":
+        return True
+    if verified_drawing_fact_only(finding):
+        citation = getattr(finding, "citation", None)
+        return getattr(citation, "status", "") != "CHECKED_SUPPORTS"
+    return False
+
+
+def _callout_prefix(finding: Finding, place: str, *, rejected: bool) -> str:
+    """The lead-in of a callout box drawn on a sheet (``place`` as in
+    :func:`_placement_kind`)."""
+    if rejected:
+        return _RULED_OUT_PREFIX
+    whole_sheet = place == "SHEET"
+    if _needs_verify(finding):
+        return _VERIFY_SHEET_PREFIX if whole_sheet else _VERIFY_PREFIX
+    return _SHEET_PREFIX if whole_sheet else ""
 
 
 def _color(finding: Finding) -> tuple[float, float, float]:
@@ -719,21 +753,19 @@ def _fit_text(
 
 
 def _placement_kind(finding: Finding) -> str:
-    """The margin-callout **display prefix** key (a ``_PLACE_PREFIX`` key).
+    """What kind of rect-less finding a margin callout carries.
 
     ``"SHEET"`` / ``"NO_QUOTE"`` / ``"UNANCHORED"``. Unrelated to
     :data:`~drawing_analyzer.models.PLACEMENT_KINDS` and to
     ``MarkupPlacement.expected``, despite the name.
 
     A finding that carries **no quote** returns ``"NO_QUOTE"``, not
-    ``"UNANCHORED"`` (P7 item 34). Every rect-less finding used to be stamped
-    ``[QUOTE NOT FOUND]``, which is the hallucination signal, so a graphics-only
-    finding — one the model reported off the drawing itself, with nothing to
-    quote — was indistinguishable from a fabricated quote that matched nothing.
-    Those are opposite messages to a reviewer, and the vocabulary for the honest
-    one already existed (:data:`_EVIDENCE_PREFIX`) but was unreachable here:
-    ``_annot_content`` suppressed the evidence tag on exactly the branch whose
-    prefix was ``[QUOTE NOT FOUND]``.
+    ``"UNANCHORED"`` (P7 item 34): a graphics-only finding the model reported
+    off the drawing itself is not a fabricated quote that matched nothing. The
+    callout box no longer prints that difference — it leads with ``VERIFY:`` for
+    both, and with a whole-sheet lead-in for ``"SHEET"``
+    (:func:`_callout_prefix`) — but the comment's own sentences still say which
+    it was.
     """
     if getattr(finding, "anchor_hint", "") == "SHEET":
         return "SHEET"
@@ -839,10 +871,11 @@ def _annot_content(
     cross-sheet pointers), human-meaningful code refs + the citation verdict in
     plain words, and a closing plain-words trust note. Machine detail (finding
     ids, provenance chips, evidence paths, raw statuses) stays in the CSV/HTML
-    report — never on the drawing. ``place`` is the §18 placement key for
-    margin callouts (``"SHEET"`` / ``"UNANCHORED"``, rendered via
-    ``_PLACE_PREFIX``) — for a FreeText annot ``/Contents`` *is* the displayed
-    text, so the prefix must live here to be visible on the box. ASCII only.
+    report — never on the drawing. ``place`` is given for a callout **box**
+    (:func:`_placement_kind`): a FreeText annot's ``/Contents`` *is* the text
+    drawn on the sheet, so a box leads with the one plain signal an engineer
+    needs (:func:`_callout_prefix`) rather than the bracket tags a popup
+    carries. ASCII only.
     """
     head = f"{finding.qc_id}: " if finding.qc_id else ""
     lines = [f"{head}{finding.text.strip()}"]
@@ -873,17 +906,13 @@ def _annot_content(
     if note:
         lines.append(note)
     content = "\n".join(lines)
+    if place:
+        return f"{_callout_prefix(finding, place, rejected=rejected)}{content}"
     trust = _TRUST_PREFIX["REJECTED"] if rejected else (
         _TRUST_PREFIX["UNVERIFIED"] if unverified else ""
     )
-    prefix = _PLACE_PREFIX.get(place, "")
     evidence_tag = _EVIDENCE_PREFIX.get(reduced_trust_reason(finding), "")
-    # Never stack the evidence tag on the hallucination signal (they contradict
-    # each other), and never repeat a tag the placement prefix already carries —
-    # a quote-less finding now reaches [NO QUOTE TO CHECK] through `place`.
-    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"] and evidence_tag != prefix:
-        prefix = f"{evidence_tag} {prefix}".strip()
-    placement = f"{prefix} " if prefix else ""
+    placement = f"{evidence_tag} " if evidence_tag else ""
     return f"{trust}{placement}{content}"
 
 
@@ -1302,29 +1331,35 @@ def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point"
 # --------------------------------------------------------------------------- #
 # GOTO destinations are NOT annotation space (P7 item 27).
 #
-# A ``/XYZ`` destination is expressed in **default user space** (PDF 32000-1
-# §12.3.2.2), the same space an annotation's ``/Rect`` uses (§12.5.2) — which is
-# what lets the two be compared, and is how the transform below was pinned:
-# stamp a rect annot at a known point, save, and read the raw ``/Rect`` back out
-# of the file.  Annotation *placement*, by contrast, goes through PyMuPDF's
-# un-rotated CropBox-relative space, so :func:`_derotate_point` is only half of
-# the journey and passing its result to a destination drops the CropBox origin
-# and the MediaBox origin.
+# A destination is expressed in **default user space** (PDF 32000-1 §12.3.2.2),
+# the same space an annotation's ``/Rect`` uses (§12.5.2) — which is what lets
+# the two be compared, and is how the transform below was pinned: stamp a rect
+# annot at a known place, save, and read the raw ``/Rect`` back out of the file.
+# Annotation *placement*, by contrast, goes through PyMuPDF's un-rotated
+# CropBox-relative space, so :func:`_derotate_point` is only half of the journey
+# and passing its result to a destination drops the CropBox origin and the
+# MediaBox origin. Measured on PyMuPDF 1.28.2 across rotation × CropBox ×
+# MediaBox-origin (24 cases, ``tests/test_drawing_geometry.py``) that error
+# reaches ~550 pt, i.e. off-sheet.
 #
-# Measured on PyMuPDF 1.28.2 across rotation × CropBox × MediaBox-origin (24
-# cases, ``tests/test_drawing_geometry.py``): feeding ``_derotate_point`` to a
-# destination is wrong for **12** of them via ``insert_link`` and **22** via
-# ``set_toc`` — every rotated page, and every inset CropBox.  Errors reach
-# ~550 pt, i.e. off-sheet.
-#
-# Two entry points, two different internal transforms, so two inversions:
-#   * ``Page.insert_link`` maps the point through ``~page.transformation_matrix``
-#     (``pymupdf.utils.getLinkText``), so hand it ``user * transformation_matrix``.
-#   * ``Document.set_toc`` does ``y = cropbox.height - y`` then
-#     ``* page.rotation_matrix`` (``Document.set_toc``), so invert exactly that.
-# Both are composed from PyMuPDF's own published matrices rather than a
-# hard-coded offset, so each is exact by construction rather than by coincidence.
+# Every link and bookmark the writer makes is a ``/FitR`` destination: a
+# rectangle the viewer fits to its window, so the markup arrives centered and
+# at a readable zoom whatever the reader's zoom was. (The earlier ``/XYZ``
+# point said "put this corner at the window's top-left and keep your zoom",
+# which lands the markup in a corner; Bluebeam Revu honors ``/FitR``.) PyMuPDF
+# can only write ``/XYZ`` — through ``insert_link`` and ``set_toc`` alike — so
+# the writer lets it create the object and then replaces the destination array
+# in place, which also means neither of PyMuPDF's two point transforms is
+# involved any more. Where a mark was drawn, the rectangle is that mark's own
+# ``/Rect`` read back from the document: already default user space, so there
+# is no transform to get wrong.
 # --------------------------------------------------------------------------- #
+
+# The view a link opens: the mark plus this much sheet around it, and never
+# less than a window's worth of drawing — a link that fills the screen with one
+# small tag has lost the context the reader needs to recognize where they are.
+_DEST_PAD_PT = 72.0
+_DEST_MIN_VIEW_PT = (720.0, 504.0)      # width x height as displayed (10 x 7 in.)
 
 
 def _dest_user_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
@@ -1342,26 +1377,129 @@ def _dest_user_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point
     )
 
 
-def _dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
-    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Page.insert_link`.
+def _view_rect_to_user(page: "pymupdf.Page", view_rect: Any) -> "tuple[float, float, float, float]":
+    """A PAGE_VIEW_V2 rectangle → ``(left, bottom, right, top)`` in user space.
 
-    ``insert_link`` re-maps ``to`` through ``~page.transformation_matrix``, so
-    pre-multiplying by that matrix makes the round trip land on the user-space
-    point :func:`_dest_user_point` computed.
+    All four corners are mapped, because on a rotated page the view rect's
+    top-left corner is not the user-space rect's top-left corner.
     """
-    return _dest_user_point(page, x, y) * page.transformation_matrix
+    x0, y0, x1, y1 = (float(v) for v in view_rect)
+    pts = [_dest_user_point(page, x, y) for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1))]
+    xs, ys = [pt.x for pt in pts], [pt.y for pt in pts]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
-def _outline_dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
-    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Document.set_toc`.
+def _annot_user_rect(
+    doc: "pymupdf.Document", xref: int
+) -> "tuple[float, float, float, float] | None":
+    """An annotation's own ``/Rect`` — ``(left, bottom, right, top)`` in user space."""
+    kind, value = doc.xref_get_key(int(xref), "Rect")
+    if kind != "array":
+        return None
+    nums = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", value)]
+    if len(nums) != 4:
+        return None
+    return min(nums[0], nums[2]), min(nums[1], nums[3]), max(nums[0], nums[2]), max(nums[1], nums[3])
 
-    ``set_toc`` flips y about ``cropbox.height`` and then applies
-    ``rotation_matrix``; this inverts both.  ``derotation_matrix`` is the exact
-    inverse of ``rotation_matrix`` (their product is bit-exactly the identity,
-    asserted in ``tests/test_drawing_geometry.py``).
+
+def _zoom_box(
+    page: "pymupdf.Page", user_rect: "tuple[float, float, float, float]"
+) -> "tuple[float, float, float, float]":
+    """The user-space rectangle a link to ``user_rect`` should fit to the window.
+
+    The mark, padded, grown to the minimum view, then slid back inside the
+    visible page (and clipped to it when the page is smaller than the view).
+    The minimum is stated as displayed, so it is swapped on a page rotated a
+    quarter turn, whose user-space width is its on-screen height.
     """
-    q = _dest_user_point(page, x, y) * page.derotation_matrix
-    return pymupdf.Point(q.x, page.cropbox.height - q.y)
+    left, bottom, right, top = user_rect
+    min_w, min_h = _DEST_MIN_VIEW_PT
+    if int(page.rotation or 0) % 180:
+        min_w, min_h = min_h, min_w
+    w = max(right - left + 2.0 * _DEST_PAD_PT, min_w)
+    h = max(top - bottom + 2.0 * _DEST_PAD_PT, min_h)
+    cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
+    # The visible page (CropBox) in user space — see _dest_user_point.
+    page_l, page_r = page.cropbox.x0, page.cropbox.x1
+    page_b = page.mediabox.y1 - page.cropbox.y1
+    page_t = page.mediabox.y1 - page.cropbox.y0
+
+    def _fit(center: float, size: float, lo: float, hi: float) -> "tuple[float, float]":
+        if size >= hi - lo:
+            return lo, hi
+        a = min(max(center - size / 2.0, lo), hi - size)
+        return a, a + size
+
+    x0, x1 = _fit(cx, w, page_l, page_r)
+    y0, y1 = _fit(cy, h, page_b, page_t)
+    return x0, y0, x1, y1
+
+
+def _fit_rect_dest(page: "pymupdf.Page", user_rect: "tuple[float, float, float, float]") -> str:
+    """The destination array that zooms onto ``user_rect`` (padded) on ``page``."""
+    x0, y0, x1, y1 = _zoom_box(page, user_rect)
+    return f"[{page.xref} 0 R/FitR {x0:.2f} {y0:.2f} {x1:.2f} {y1:.2f}]"
+
+
+def _fit_page_dest(page: "pymupdf.Page") -> str:
+    """The destination array that shows the whole of ``page``."""
+    return f"[{page.xref} 0 R/Fit]"
+
+
+def _mark_dest(
+    doc: "pymupdf.Document",
+    page_index: int,
+    *,
+    mark_xref: "int | None" = None,
+    view_rect: Any = None,
+) -> str:
+    """Where a link to a finding on ``doc[page_index]`` should land.
+
+    The drawn mark's own rectangle when there is one; else the finding's anchor
+    rectangle (a finding listed without ink); else the whole sheet.
+    """
+    page = doc[page_index]
+    user_rect = _annot_user_rect(doc, mark_xref) if mark_xref else None
+    if user_rect is None and view_rect:
+        user_rect = _view_rect_to_user(page, view_rect)
+    return _fit_rect_dest(page, user_rect) if user_rect else _fit_page_dest(page)
+
+
+def _page_annot_xrefs(doc: "pymupdf.Document", page: "pymupdf.Page") -> "set[int]":
+    """Every annotation xref on ``page``, read from ``/Annots`` itself.
+
+    ``Page.get_links()`` does not report a link inserted earlier in the same
+    session, so the array is the only way to find the object just created.
+    """
+    kind, value = doc.xref_get_key(page.xref, "Annots")
+    if kind == "xref":
+        kind, value = "array", doc.xref_object(int(value.split()[0]), compressed=True)
+    if kind != "array":
+        return set()
+    return {int(n) for n in re.findall(r"(\d+) 0 R", value)}
+
+
+def _insert_goto_link(
+    doc: "pymupdf.Document", page: "pymupdf.Page", from_rect: "pymupdf.Rect",
+    target_page: int, dest: str,
+) -> None:
+    """A link on ``page`` over ``from_rect`` that jumps to ``dest``.
+
+    ``insert_link`` creates the annotation (and maps ``from_rect`` into the
+    page's own space); the destination it wrote is then replaced with ``dest``.
+    If the new object cannot be identified the link stays a plain jump to the
+    target page — a coarser link, never a missing one.
+    """
+    before = _page_annot_xrefs(doc, page)
+    page.insert_link({
+        "kind": pymupdf.LINK_GOTO, "from": from_rect, "page": int(target_page),
+        "to": pymupdf.Point(0, 0), "zoom": 0,
+    })
+    new = _page_annot_xrefs(doc, page) - before
+    if len(new) == 1:
+        doc.xref_set_key(new.pop(), "A", f"<</S/GoTo/D{dest}>>")
+    else:
+        _log.debug("could not identify a new link on page %d; left as a page jump", page.number)
 
 
 # --------------------------------------------------------------------------- #
@@ -1544,11 +1682,11 @@ def _add_margin_callouts(
         rejected = _status(finding) == "REJECTED"
         unverified = _is_unverified(finding) and not rejected
         color = _REJECTED_COLOR if rejected else _color(finding)
-        # Placement prefix (§18): sheet-level absences read [SHEET-WIDE]; a quote
-        # that matched nothing reads [QUOTE NOT FOUND] — the flagged-loudly
-        # hallucination signal, on the page but never dressed as a placed finding.
-        # For FreeText /Contents IS the displayed text, so the prefixed content
-        # set below is exactly what the box shows.
+        # The box's lead-in (§18): a sheet-level absence reads WHOLE SHEET, and
+        # anything unconfirmed — a quote that matched nothing included — reads
+        # VERIFY, on the page but never dressed as a placed finding. For
+        # FreeText /Contents IS the displayed text, so the prefixed content set
+        # below is exactly what the box shows.
         content = _annot_content(
             finding, unverified=unverified, rejected=rejected,
             place=_placement_kind(finding),
@@ -1615,11 +1753,18 @@ def _add_margin_callouts(
 # --------------------------------------------------------------------------- #
 
 
-def _status_label(finding: Finding) -> str:
-    # Reviewer words on the index page, never raw pipeline statuses.
-    if verified_drawing_fact_only(finding):
-        return _INDEX_STATUS_CODE_VERIFIED
-    return _INDEX_STATUS_LABEL.get(_status(finding), _status(finding))
+def _what_to_do(finding: Finding) -> str:
+    """One cover-page line for a finding: the action first, then what is wrong.
+
+    The action leads because the row is a to-do item; the finding text follows
+    so the row still says what the problem is when the action alone would not
+    ("Coordinate with structural"). A finding that was not confirmed starts
+    with ``VERIFY:`` (:func:`_needs_verify`) — the page's only status signal.
+    """
+    text = " ".join((finding.text or "").split())
+    action = " ".join((getattr(finding, "recommended_action", "") or "").split())
+    line = f"{action} - {text}" if action and text else (action or text)
+    return (_VERIFY_PREFIX if _needs_verify(finding) else "") + line
 
 
 # Severity triage rank for the reviewed-PDF index (§18.7, DA-025): high, then
@@ -1657,13 +1802,15 @@ def _index_groups(
 ) -> "tuple[list, list, list]":
     """``(inked, rejected, gated)`` (finding, placement) rows in triage order.
 
-    The main table lists what's on paper; the rejected section (§18) and the
-    "Not inked by operator gate" section (§6.4) make the verifier-contradicted and
-    the conservatively-gated findings *visible* on the index — nothing is ever
-    silently absent from the record. A gated finding's index row is its **sole
-    artifact**, so it must exist and be reconciled (a bare no-ink status is
-    insufficient). Rows sort severity-first within every section (§18.7): the
-    operator reads the index top-down as a punch list, highest severity first.
+    The main table lists the open findings that are on paper. ``rejected`` is
+    non-empty only when the run chose to ink ruled-out findings
+    (``ink_rejected``): they are drawn grey on the sheets, so the cover lists
+    them, apart, under "Ruled out". Otherwise a ruled-out finding is
+    ``REPORT_ONLY`` and appears in none of the three — it is not in the PDF.
+    ``gated`` is the verified-only mode's findings: a gated finding's index row
+    is its **sole artifact**, so it must exist and be reconciled. Rows sort
+    severity-first within every section (§18.7): the page is read top-down as
+    a punch list.
     """
     def _order(items: list) -> list:
         return sorted(items, key=lambda fp: _severity_first_key(fp[0]))
@@ -1672,10 +1819,11 @@ def _index_groups(
     for finding, placement in pairs:
         if placement.expected == "GATED_INDEX":
             gated.append((finding, placement))
-        elif _status(finding) == "REJECTED":
-            rejected.append((finding, placement))
         elif placement.expected in ("CLOUD", "MARGIN", "REVIEW_NOTES"):
-            inked.append((finding, placement))
+            if _status(finding) == "REJECTED":
+                rejected.append((finding, placement))
+            else:
+                inked.append((finding, placement))
     return _order(inked), _order(rejected), _order(gated)
 
 
@@ -1705,10 +1853,28 @@ def _new_generated_page(doc: "pymupdf.Document", *, pno: int | None = None) -> "
     return page
 
 
-def _index_rows(inked: list, rejected: list, gated: list) -> "list[tuple[str, Any, bool]]":
+def _omitted_note(omitted: "list[str]") -> str:
+    """The cover's one line about QC numbers it does not list ("" for none).
+
+    QC numbers are assigned before the re-check, so a finding it rules out
+    leaves a gap in the list. Saying where the number went costs one line;
+    leaving the reader to wonder whether a finding was lost costs their trust.
+    """
+    ids = sorted({qc for qc in omitted if qc})
+    if not ids:
+        return ""
+    shown = ", ".join(ids[:6]) + (f" and {len(ids) - 6} more" if len(ids) > 6 else "")
+    verb = "was" if len(ids) == 1 else "were"
+    return f"Not listed: {shown} {verb} ruled out on re-check. See the HTML report."
+
+
+def _index_rows(
+    inked: list, rejected: list, gated: list, omitted: "list[str] | None" = None,
+) -> "list[tuple[str, Any, bool]]":
     """The uniform index row stream, shared by the page count and the writer.
 
-    ``("heading", label, False)`` rows carry no link; ``index_only`` marks the
+    ``("heading", label, False)`` and ``("note", text, False)`` rows carry no
+    link; ``index_only`` marks the
     rows whose sole artifact is this index row (so reconciliation must find them).
     One builder, so the page count cannot disagree with what is written (P7
     item 34: the count has to be known *before* any page is inserted, because
@@ -1716,13 +1882,14 @@ def _index_rows(inked: list, rejected: list, gated: list) -> "list[tuple[str, An
     """
     rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
     if rejected:
-        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
-        rows.extend(
-            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
-        )
+        rows.append(("heading", f"Ruled out ({len(rejected)})", False))
+        rows.extend(("rejected", fp, False) for fp in rejected)
     if gated:
-        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
+        rows.append(("heading", f"Not marked on the sheets ({len(gated)})", False))
         rows.extend(("gated", fp, True) for fp in gated)
+    note = _omitted_note(omitted or [])
+    if note and rows:
+        rows.append(("note", note, False))
     return rows
 
 
@@ -1740,29 +1907,33 @@ def _insert_index_pages(
     gated: list,
     *,
     run_id: str,
-    author: str,
-    mark_page_by_finding: "dict[str, int] | None" = None,
+    marks: "dict[str, tuple[int, int]] | None" = None,
+    omitted: "list[str] | None" = None,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
 
-    Every finding row carries a GOTO link to its finding's page + rectangle.
-    ``rejected`` entries follow the main table under a "Rejected by verification"
-    heading, and ``gated`` entries under "Not inked by operator gate"; both carry
-    the same page links. Link targets are offset by the number of index pages,
-    which is computed **before** any page is inserted (inserting at the front
-    shifts every original page down).
+    Every finding row carries a GOTO link that zooms onto its markup
+    (:func:`_mark_dest`). ``marks`` maps a placement id to ``(page, xref)`` —
+    the page its mark landed on, as numbered **before** this insertion, and the
+    mark's annotation — so a row lands on the mark itself rather than on where
+    the finding was expected to be. ``rejected`` entries follow the main table
+    under "Ruled out" and ``gated`` entries under "Not marked on the sheets";
+    ``omitted`` is the QC numbers the cover does not list (:func:`_omitted_note`).
+    Link targets are offset by the number of index pages, which is computed
+    **before** any page is inserted (inserting at the front shifts every
+    original page down).
 
     Each generated index page is stamped analyzer-owned (:data:`_INDEX_PAGE_KEY`
-    == ``run_id``), and the **index-only** placements it hosts (REJECTED_INDEX /
-    GATED_INDEX rows — the ones whose only artifact is the index) are recorded in
+    == ``run_id``), and the **index-only** placements it hosts (GATED_INDEX rows
+    — the ones whose only artifact is the index) are recorded in
     :data:`_INDEX_ROWS_KEY` as ``pid@target`` so reconciliation can prove each
     row exists and links to the right page.
     """
-    rows = _index_rows(inked, rejected, gated)
+    rows = _index_rows(inked, rejected, gated, omitted)
     n_pages = _index_page_count(rows)
     if not n_pages:
         return 0
-    mark_page_by_finding = mark_page_by_finding or {}
+    marks = marks or {}
 
     # Insert EVERY index page before drawing any rows: link targets are numbered
     # for the final document, so drawing while later index pages are still
@@ -1777,10 +1948,7 @@ def _insert_index_pages(
         page.insert_text((36, 42), title, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
             (36, 60),
-            _fit_text(
-                f"Author: {author} - draft review; every row links to its markup.",
-                _INDEX_COL_RIGHT - 36.0, fontsize=8,
-            ),
+            _fit_text(_INDEX_SUBTITLE, _INDEX_COL_RIGHT - 36.0, fontsize=8),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
         # Column headers.
@@ -1802,6 +1970,13 @@ def _insert_index_pages(
                                  color=(0.3, 0.3, 0.3))
                 y += _INDEX_ROW_H
                 continue
+            if kind == "note":
+                page.insert_text(
+                    (36, y), _fit_text(str(payload), _INDEX_COL_RIGHT - 36.0, fontsize=8),
+                    fontsize=8, color=(0.35, 0.35, 0.35),
+                )
+                y += _INDEX_ROW_H
+                continue
             finding, placement = payload
             struck = kind in ("rejected", "gated")
             color = _REJECTED_COLOR if struck else _color(finding)
@@ -1812,9 +1987,7 @@ def _insert_index_pages(
             cells = (
                 (finding.qc_id or "-", "hebo", color),
                 (finding.sheet_id or "", "helv", text_color),
-                (finding.severity or "", "helv", color),
-                (_status_label(finding), "helv", text_color),
-                (finding.text.strip().replace("\n", " "), "helv", text_color),
+                (_what_to_do(finding), "helv", text_color),
             )
             for x, cw, (raw, fontname, cell_color) in zip(_INDEX_COL_X, _INDEX_COL_W, cells):
                 page.insert_text(
@@ -1825,30 +1998,22 @@ def _insert_index_pages(
             # The page the mark ACTUALLY landed on, not the finding's source page
             # (P7 item 34). A callout that overflowed to the AI Review Notes page
             # has no mark on its sheet, so a row pointing at the sheet sent the
-            # reviewer to a page with nothing on it — while the bookmark outline
-            # and the receipt both already named the notes page. Every generated
-            # page in this map predates the front-inserted index, so all of them
-            # shift by exactly ``n_pages``, the same as a source page.
+            # reviewer to a page with nothing on it. Every page in ``marks``
+            # predates the front-inserted index, so all of them shift by exactly
+            # ``n_pages``, the same as a source page.
+            mark_page, mark_xref = marks.get(placement.placement_id, (None, None))
             target_page = int(
-                mark_page_by_finding.get(finding.id, int(finding.page_index))
+                mark_page if mark_page is not None else finding.page_index
             ) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
             if 0 <= target_page < doc.page_count:
-                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target is
-                # default user space, so convert with _dest_point (item 27) — NOT
-                # _derotate_point, which is annotation space and drops the CropBox
-                # and MediaBox origins on a rotated sheet.
-                to = pymupdf.Point(36, 36)
-                if rect:
-                    to = _dest_point(doc[target_page], rect[0], rect[1])
                 row_top = y - 9
-                page.insert_link({
-                    "kind": pymupdf.LINK_GOTO,
-                    "from": pymupdf.Rect(34, row_top, _INDEX_PAGE_W - 34, y + 3),
-                    "page": target_page,
-                    "to": to,
-                    "zoom": 0,
-                })
+                _insert_goto_link(
+                    doc, page,
+                    pymupdf.Rect(34, row_top, _INDEX_PAGE_W - 34, y + 3),
+                    target_page,
+                    _mark_dest(doc, target_page, mark_xref=mark_xref, view_rect=rect),
+                )
                 if index_only:
                     index_only_rows.append(
                         f"{placement.placement_id}@{target_page}@{int(round(row_top))}"
@@ -1866,19 +2031,14 @@ def _insert_index_pages(
     return n_pages
 
 
-def _insert_appendix_page(
-    doc: "pymupdf.Document", audit_stats: dict | None, *, author: str
-) -> None:
+def _insert_appendix_page(doc: "pymupdf.Document", audit_stats: dict | None) -> None:
     """The optional 'checked and consistent' page at the end of the document."""
     stats = audit_stats or {}
     page = _new_generated_page(doc)
     page.insert_text((36, 42), APPENDIX_PAGE_LABEL, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
     page.insert_text(
         (36, 60),
-        _fit_text(
-            f"Author: {author} - deterministic checks that passed (the balance column).",
-            _INDEX_COL_RIGHT - 36.0, fontsize=8,
-        ),
+        _fit_text("Checks that passed.", _INDEX_COL_RIGHT - 36.0, fontsize=8),
         fontsize=8, color=(0.35, 0.35, 0.35),
     )
     lines: list[str] = []
@@ -1939,8 +2099,8 @@ def _insert_review_notes_page(
         page.insert_text(
             (_NOTE_LEFT, 62),
             _fit_text(
-                f"Author: {author} - findings that did not fit a clear band on their "
-                f"sheet; each row links to its source page.",
+                "These notes had no clear space on their sheet. "
+                "Click a note to jump to its sheet.",
                 _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
             ),
             fontsize=8, color=(0.35, 0.35, 0.35),
@@ -1973,23 +2133,16 @@ def _insert_review_notes_page(
                 )
                 # GOTO back to the source page — its index in the document as it
                 # stands RIGHT NOW, with no allowance for the index pages that are
-                # inserted afterwards. `insert_link` bakes the destination as a
-                # reference to the page *object* (`getLinkText` resolves `page=` to
-                # a page xref), so the front insertion shifts the link's target
-                # along with the page itself and the offset must not be
-                # pre-applied. Adding it resolved `doc[target]` to a different
-                # page entirely — with a 2-sheet set, every back-link on the notes
-                # page pointed at the wrong sheet, and the rect-bearing branch
-                # would have read that wrong page's geometry too.
+                # inserted afterwards. The destination names the page *object*, so
+                # the front insertion carries the link's target along with the
+                # page itself and the offset must not be pre-applied.
                 target = int(finding.page_index)
                 if 0 <= target < doc.page_count:
                     rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
-                    to = _dest_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
-                    page.insert_link({
-                        "kind": pymupdf.LINK_GOTO,
-                        "from": pymupdf.Rect(box.x0, box.y0, box.x1, box.y1),
-                        "page": target, "to": to, "zoom": 0,
-                    })
+                    _insert_goto_link(
+                        doc, page, pymupdf.Rect(box.x0, box.y0, box.x1, box.y1),
+                        target, _mark_dest(doc, target, view_rect=rect),
+                    )
             except Exception:  # noqa: BLE001 - one bad note never sinks the file
                 _log.warning("could not draw review note for %s", finding.id)
             # Reroute the placement so the receipt/tally reflect where it went.
@@ -2035,7 +2188,7 @@ _BUCKET_BY_KIND = {
     "CLOUD": "cloud",
     "MARGIN": "margin",
     "REVIEW_NOTES": "review_notes",
-    "REJECTED_INDEX": "rejected",
+    "REPORT_ONLY": "rejected",
     "GATED_INDEX": "gated",
 }
 # A placement skipped because its source changed mid-run (§10.6) is a distinct,
@@ -2053,7 +2206,11 @@ def _receipt_for(
 ) -> MarkupReceipt:
     """Turn one placement + what was found in the reopened file into a receipt."""
     pid = placement.placement_id
-    if placement.expected in ("REJECTED_INDEX", "GATED_INDEX"):
+    if placement.expected == "REPORT_ONLY":
+        # Nothing was planned for the PDF, so there is nothing to find again:
+        # the finding is carried by findings.csv and the HTML report.
+        return MarkupReceipt(placement, "REPORTED")
+    if placement.expected == "GATED_INDEX":
         if pid not in index_rows:
             return MarkupReceipt(
                 placement, "FAILED", output_pdf=out_name,
@@ -2236,28 +2393,27 @@ def _result_from_receipts(
 # --------------------------------------------------------------------------- #
 
 
-_OUTLINE_ZOOM = 1.75            # modest zoom-to-mark for bookmark destinations
-
-
 def _set_findings_outline(
     doc: "pymupdf.Document",
     pairs: "list[tuple[Finding, MarkupPlacement]]",
     final_page_by_pid: "dict[str, int]",
     *,
     n_index: int,
+    mark_xref_by_pid: "dict[str, int] | None" = None,
 ) -> None:
     """Write a ``QC Findings`` bookmark outline into ``doc`` (Phase: HTML↔PDF links).
 
     One child bookmark per finding whose primary mark was actually drawn — in
-    ``QC-###`` order — whose GOTO destination is the page that mark **landed
-    on** (``final_page_by_pid``, keyed by placement id: the source page for an
+    ``QC-###`` order — whose destination is the page that mark **landed on**
+    (``final_page_by_pid``, keyed by placement id: the source page for an
     on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
     that overflowed there), so a bookmark always points at the mark, the same
-    page its HTML deep link and receipt point at. A rect-bearing finding zooms
-    to the rect's top-left via :func:`_outline_dest_point` (moving the
-    PAGE_VIEW_V2 corner into the space ``set_toc`` wants, which is *not* the one
-    the index-page GOTO links want — see :func:`_dest_user_point`); a rect-less
-    one targets the page top.
+    page its HTML deep link and receipt point at. Each bookmark zooms onto the
+    mark exactly as its cover-page row does (:func:`_mark_dest`):
+    ``mark_xref_by_pid`` names the drawn annotation, and a finding without one
+    falls back to its anchor rectangle, then to the whole page. ``set_toc``
+    can only write a point destination, so the entries are created as plain
+    page jumps and their destinations replaced afterwards.
 
     Any outline already on the source PDF (a set's sheet-navigation bookmarks)
     is **preserved** — the QC section is appended, never substituted: the writer
@@ -2267,13 +2423,16 @@ def _set_findings_outline(
     report. No-op when no finding's mark was drawn.
     """
     page_count = doc.page_count
+    mark_xref_by_pid = mark_xref_by_pid or {}
     seen: set[str] = set()
-    entries: list[tuple[Finding, int]] = []
+    entries: list[tuple[Finding, int, "int | None"]] = []
     for finding, placement in pairs:
         # One bookmark per finding, at its own anchor — not per cross-sheet leg
         # or margin/index placement (those share the finding's qc_id).
         if placement.leg_id != PRIMARY_LEG_ID or finding.id in seen:
             continue
+        if placement.expected == "REPORT_ONLY":
+            continue                      # ruled out: not in the PDF, bookmarks included
         # The page the mark actually landed on (overflow → notes page); fall
         # back to the source page + front-index offset when the placement drew
         # nothing recorded (defensive — such a finding has no mark to point at).
@@ -2284,31 +2443,36 @@ def _set_findings_outline(
         if not (0 <= final_page < page_count):
             continue
         seen.add(finding.id)
-        entries.append((finding, final_page))
+        entries.append((finding, final_page, mark_xref_by_pid.get(placement.placement_id)))
     if not entries:
         return
     entries.sort(key=lambda e: (e[0].qc_id or "~", e[0].id))
 
     parent_page = 1 if n_index > 0 else entries[0][1] + 1     # index page, else first mark
     qc_toc: list = [[1, f"QC Findings ({len(entries)})", parent_page]]
-    for finding, final_page in entries:
-        rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
-        if rect:
-            point = _outline_dest_point(doc[final_page], rect[0], rect[1])
-            dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
-        else:
-            dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}
+    for finding, final_page, _xref in entries:
         qc = finding.qc_id or "QC-?"
         sheet = (finding.sheet_id or "").strip()
         text = " ".join((finding.text or "").split())
         if len(text) > 60:
             text = text[:57].rstrip() + "…"
         title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
-        qc_toc.append([2, title, final_page + 1, dest])
+        qc_toc.append([2, title, final_page + 1])
     # Append after the source PDF's own outline (get_toc(simple=False) round-
     # trips through set_toc), so existing sheet bookmarks survive the review copy.
     existing = doc.get_toc(simple=False) or []
     doc.set_toc(existing + qc_toc)
+
+    # The finding bookmarks are the last ``len(entries)`` outline items, in the
+    # order written. A failure here leaves that bookmark a plain page jump.
+    outline_xrefs = doc.get_outline_xrefs()[-len(entries):]
+    for (finding, final_page, mark_xref), item_xref in zip(entries, outline_xrefs):
+        try:
+            rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+            dest = _mark_dest(doc, final_page, mark_xref=mark_xref, view_rect=rect)
+            doc.xref_set_key(item_xref, "A", f"<</S/GoTo/D{dest}>>")
+        except Exception:  # noqa: BLE001 - a coarser bookmark, never a lost one
+            _log.debug("could not set a zoom destination for bookmark %s", finding.qc_id)
 
 
 def _annotate_units(
@@ -2346,8 +2510,8 @@ def _annotate_units(
         page_count = doc.page_count
         # Severity layers (OCGs): one per severity tier that actually carries
         # drawable ink, so a reviewer can toggle a whole tier's markups in
-        # Bluebeam/Acrobat/Chromium. Index-only placements (REJECTED_INDEX /
-        # GATED_INDEX) draw no annotation, so they need no layer. Created here,
+        # Bluebeam/Acrobat/Chromium. Placements that draw nothing (REPORT_ONLY /
+        # GATED_INDEX) need no layer. Created here,
         # once, before any ink; non-fatal (I-3) — an empty map draws everything
         # unlayered, exactly as before.
         tiers_present = {
@@ -2359,8 +2523,8 @@ def _annotate_units(
         callouts_by_page: dict[int, list[tuple[Finding, MarkupPlacement]]] = {}
         for finding, placement in pairs:
             kind = placement.expected
-            if kind in ("REJECTED_INDEX", "GATED_INDEX"):
-                continue                              # index-only; drawn by the index
+            if kind in ("REPORT_ONLY", "GATED_INDEX"):
+                continue                              # no ink: report-only / index row
             page_index = int(finding.page_index)
             if not (0 <= page_index < page_count):
                 _log.warning(
@@ -2421,11 +2585,13 @@ def _annotate_units(
         # returned by the writer.
         index_row_stream: list = []
         index_groups: tuple = ((), (), ())
+        # QC numbers the cover will not list: ruled out, so not in this PDF.
+        omitted = [f.qc_id for f, pl in pairs if pl.expected == "REPORT_ONLY"]
         n_index = 0
         if index_pages:
             try:
                 index_groups = _index_groups(pairs)
-                index_row_stream = _index_rows(*index_groups)
+                index_row_stream = _index_rows(*index_groups, omitted)
                 n_index = _index_page_count(index_row_stream)
             except Exception:  # noqa: BLE001 - the index must not sink the file
                 _log.warning("could not plan the findings index for %s", src.name)
@@ -2433,7 +2599,7 @@ def _annotate_units(
 
         if include_appendix:
             try:
-                _insert_appendix_page(doc, audit_stats, author=author)
+                _insert_appendix_page(doc, audit_stats)
             except Exception:  # noqa: BLE001
                 _log.warning("could not build the appendix for %s", src.name)
 
@@ -2451,20 +2617,23 @@ def _annotate_units(
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
                 _log.warning("could not build the review-notes page for %s", src.name)
 
-        # Where each finding's mark actually sits, before the front-insert shift.
-        # The notes page overrides the finding's source page; the index writer adds
-        # ``n_index`` to whichever it uses.
-        mark_page_by_finding: dict[str, int] = {}
-        for _f, _pl in pairs:
-            for _pid, _comps in notes_collected.items():
-                if _pid == _pl.placement_id and _comps:
-                    mark_page_by_finding[_f.id] = _comps[0][2]
+        # Where each placement's mark actually sits — its page before the
+        # front-insert shift, and the annotation itself, whose /Rect is what a
+        # link zooms onto. The mandatory component is recorded first (the cloud
+        # before its tag, the callout before its leader); the notes page
+        # overrides the source page for a callout that overflowed there.
+        marks: dict[str, tuple[int, int]] = {}
+        for source in (collected, notes_collected):
+            for pid, comps in source.items():
+                for component, xref, page_no in comps:
+                    if component in ("cloud", "callout"):
+                        marks[pid] = (page_no, xref)
+                        break
 
         if index_row_stream:
             try:
                 inserted = _insert_index_pages(
-                    doc, *index_groups, run_id=run_id, author=author,
-                    mark_page_by_finding=mark_page_by_finding,
+                    doc, *index_groups, run_id=run_id, marks=marks, omitted=omitted,
                 )
                 if inserted != n_index:      # planned vs written must agree
                     _log.warning(
@@ -2504,7 +2673,10 @@ def _annotate_units(
             for pid, comps in notes_collected.items():
                 if comps:
                     final_page_by_pid[pid] = comps[0][2] + n_index
-            _set_findings_outline(doc, pairs, final_page_by_pid, n_index=n_index)
+            _set_findings_outline(
+                doc, pairs, final_page_by_pid, n_index=n_index,
+                mark_xref_by_pid={pid: xref for pid, (_page, xref) in marks.items()},
+            )
         except Exception:  # noqa: BLE001
             _log.warning("could not build the findings bookmark outline for %s", src.name)
 
@@ -2808,9 +2980,11 @@ def write_reviewed_pdfs(
     (DA-001), so two inputs that share a basename each receive **only their own**
     findings — the reviewed copies are never cross-contaminated. (A finding that
     predates source ids — e.g. a hand-built test finding — falls back to matching
-    by ``source_name``.) A source with no placement at all gets no reviewed copy;
-    a source whose only findings are rejected / gated still gets one (their index
-    rows keep them visible — §18: nothing is invisible). A cross-sheet finding is
+    by ``source_name``.) A source with nothing for the PDF gets no reviewed copy:
+    no placement at all, or only ruled-out findings — those are ``REPORT_ONLY``
+    and are receipted ``REPORTED`` without the file being opened. A source whose
+    only findings are gated still gets one (their index rows are their sole
+    artifact). A cross-sheet finding is
     placed on **every** sheet it touches, each leg its own reconciled placement.
 
     Every planned placement is reconciled against the reopened output. The
@@ -2917,6 +3091,11 @@ def write_reviewed_pdfs(
         # report the run INCOMPLETE).
         units = list(units_by_sid.get(sid, [])) + units_by_name.pop(pdf_path.name, [])
         if not units:
+            continue
+        if all(u.placement.expected == "REPORT_ONLY" for u in units):
+            # Only ruled-out findings: a "reviewed" copy would be the source
+            # with nothing added. No file; the findings stay in the report.
+            all_receipts.extend(MarkupReceipt(u.placement, "REPORTED") for u in units)
             continue
         pairs = [(u.finding, u.placement) for u in units]
         if stem_counts.get(pdf_path.stem, 0) > 1 and sid:
@@ -3090,8 +3269,7 @@ def write_set_review_notes_pdf(
             page.insert_text(
                 (_NOTE_LEFT, 62),
                 _fit_text(
-                    f"Author: {author} - findings that belong to no single sheet "
-                    f"in the set.",
+                    "These findings apply to the whole set, not to one sheet.",
                     _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
                 ),
                 fontsize=8, color=(0.35, 0.35, 0.35),

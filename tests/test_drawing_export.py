@@ -610,7 +610,9 @@ def test_run_manifest_summarizes_qc_run(tmp_path):
     assert m["findings"] == {"model": 2, "deterministic": 1, "total": 3}
     assert m["prose_accounting"]["items"] == 5
     assert m["markup_coverage"]["placements_expected"] == 3
-    assert m["markup_coverage"]["receipts"] == {"WRITTEN": 2, "INDEXED": 1, "FAILED": 0}
+    assert m["markup_coverage"]["receipts"] == {
+        "WRITTEN": 2, "INDEXED": 1, "REPORTED": 0, "FAILED": 0,
+    }
     assert m["markup_coverage"]["tally"] == {"cloud": 2, "margin": 1}
     assert m["stages"] == [{"stage": "auditors", "expected": True, "status": "COMPLETE"}]
     src = {s["source_id"]: s for s in m["sources"]}
