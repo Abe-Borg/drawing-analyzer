@@ -422,10 +422,13 @@ map lives in `src/drawing_analyzer/__init__.py`.
   mid-analysis it stops the run and closes once the stop settles
   (`QUIT_STOP_GRACE_SECONDS`). `_worker` catches `RunCancelled` by name.
   `report_callback_exception` → `_on_callback_exception`. Both reporters swallow
-  every failure of their own channels. Inputs live in the *Loaded files*
-  section (`_file_groups` is the data, `_refresh_files_panel` the widgets; call
-  it on every input change, never from `_refresh_summary`, which fires per
-  keystroke). The bottom rows, progress line and Analyze row are packed
+  every failure of their own channels. The optional-input Add buttons live in
+  their own *Reference files (optional)* section (`_add_buttons`, keyed like
+  `help_content.INPUT_HELP`; each has a "?" that opens `_open_input_help`, one
+  popup at a time) right above the *Loaded files* list (`_file_groups` is the
+  data, `_refresh_files_panel` the widgets; call it on every input change,
+  never from `_refresh_summary`, which fires per keystroke). Drawings are
+  added only from the drop zone. The bottom rows, progress line and Analyze row are packed
   `side="bottom", after=` the footer so a short window clips the log and
   sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
   requests 200 px and overrides `height=`: lower it (`_scrollbar.configure`)
