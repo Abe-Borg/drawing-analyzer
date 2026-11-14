@@ -749,8 +749,11 @@ consume ledger entries and nothing else.
   (`PHASE_ACTION_PLAN`) sets `Finding.action` (`models.ActionItem`: `bucket` in
   `ACTION_BUCKETS`, `instruction`, `clear_fix`, `source`). The bucket stands as
   given; `_checked_item` drops (never repairs) an instruction that is over
-  length or carries a number the finding's own material lacks (`_numbers`
-  against `_finding_material` — the model never calculates), and clears
+  length or that `_invented` flags against `_finding_material`: a number the
+  finding lacks (`_numbers` — the model never calculates) or a lettered
+  identifier it lacks (`_identifiers`, compared whole and hyphen-folded:
+  FP-501 is not M-501 for sharing its digits; the finding's side is read
+  loosely so "FP 501" counts), and clears
   `clear_fix` on a hedged line (`_is_hedged`: a hedging verb counts only as a
   clause's verb, so "check valve" is not a hedge). The pipeline then calls
   `apply_severity_fallback` so every open finding has a group;

@@ -1793,11 +1793,13 @@ is not on the to-do list and is not sent.
 **What the host does with the answer.** The group is taken as given. The
 instruction and the "clear-cut" claim are checked:
 
-1. **No new numbers.** An instruction may use only numbers that appear in the
-   finding itself — its text, action, quote, cross-sheet legs and code
+1. **No new numbers or names.** An instruction may use only the numbers and
+   the lettered identifiers (sheet numbers, tags, detail marks) that appear in
+   the finding itself — its text, action, quote, cross-sheet legs and code
    references. `Correct the total to 1500 GPM` on a finding that says 1400 is
-   discarded, as is one naming a sheet the finding never mentions. The model
-   never calculates and never supplies a size.
+   discarded, and so is `Remove the reference to FP-501` on a finding about
+   `M-501`: identifiers are compared whole, not by their digits. The model
+   never calculates and never supplies a size, a tag or a sheet number.
 2. **One line.** An over-long instruction is discarded, not cut into something
    the model did not write.
 3. **No hedging.** `Confirm…`, `Verify…`, `Coordinate…`, `…should…` can still

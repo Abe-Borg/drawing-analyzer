@@ -11,8 +11,9 @@ The model also says whether the fix is clear-cut. That claim is only an input.
 An instruction is drawn on a sheet when :func:`models.on_sheet_instruction`
 says so, and that rule requires the host's own confirmation of the finding. Two
 host checks run here as well, on every reply: an instruction may not carry a
-number the finding does not (the model never calculates and never supplies a
-size or a sheet id), and a hedged instruction is never "clear".
+number or a lettered identifier the finding does not (the model never
+calculates and never supplies a size, a tag or a sheet number — and FP-501 is
+not M-501 for sharing its digits), and a hedged instruction is never "clear".
 
 Text-only, real-time, Sonnet 5.5 at medium effort by default
 (``DRAWING_ANALYZER_ACTION_PLAN_MODEL``). Complete chunks cache in the run's
@@ -175,6 +176,15 @@ def _is_hedged(line: str) -> bool:
 # A number as written on a drawing: digits with inner separators (1,250 / 12.5 /
 # 1/2 / 12-6). Compared as written, minus thousands separators.
 _NUMBER_RE = re.compile(r"\d+(?:[.,/]\d+)*")
+# A lettered identifier: a sheet number, a tag, a detail or equipment mark
+# (FP-501, M501, PV-3, A1.2). Its letters are part of what it names — FP-501
+# and M-501 are different sheets that happen to share their digits — so it is
+# compared whole, not by its number. A token that starts with a digit (6",
+# 4IN, 16'-0") is a quantity and stays with the number check.
+_IDENTIFIER_RE = re.compile(r"\b[A-Za-z]{1,6}[-.]?\d[A-Za-z0-9.\-]*")
+# The same, as the finding's own text may write it ("FP 501"): read loosely, so
+# the vocabulary an instruction is checked against is never too small.
+_LOOSE_IDENTIFIER_RE = re.compile(r"\b[A-Za-z]{1,6}[-. ]?\d[A-Za-z0-9.\-]*")
 
 _CITATION_WORDS = {
     "CHECKED_SUPPORTS": "the reference supports the finding",
@@ -213,9 +223,25 @@ def _numbers(text: str) -> set[str]:
     return {m.group(0).replace(",", "") for m in _NUMBER_RE.finditer(text or "")}
 
 
+def _identifiers(text: str, *, loose: bool = False) -> set[str]:
+    """Lettered identifiers in ``text``, folded so FP-501 / FP501 / fp 501 agree."""
+    pattern = _LOOSE_IDENTIFIER_RE if loose else _IDENTIFIER_RE
+    return {
+        re.sub(r"[-\s]", "", m.group(0)).rstrip(".").upper()
+        for m in pattern.finditer(text or "")
+    }
+
+
+def _invented(line: str, material: str) -> bool:
+    """Whether ``line`` names a number or an identifier ``material`` does not."""
+    if _numbers(line) - _numbers(material):
+        return True
+    return bool(_identifiers(line) - _identifiers(material, loose=True))
+
+
 def _finding_material(finding: Finding) -> str:
     """Every string of the finding the model was shown — the instruction's
-    whole vocabulary of numbers."""
+    whole vocabulary of numbers and identifiers."""
     parts = [
         finding.sheet_id, _one_line(finding.text, _TEXT_CAP),
         _one_line(finding.recommended_action, _ACTION_CAP),
@@ -332,8 +358,9 @@ def _checked_item(finding: Finding, reply: dict, result: ActionPlanResult) -> Ac
     """The model's answer for one finding, after the host's checks.
 
     The bucket stands as given. The instruction is dropped — not repaired — when
-    it is not one line or names a number the finding does not, and a hedged or
-    dropped instruction is never ``clear_fix``.
+    it is not one line or names a number or a lettered identifier (a sheet
+    number, a tag) the finding does not, and a hedged or dropped instruction is
+    never ``clear_fix``.
     """
     line = _one_line(reply.get("instruction"), 400).rstrip(".").strip()
     clear = bool(reply.get("clear_fix"))
@@ -342,8 +369,7 @@ def _checked_item(finding: Finding, reply: dict, result: ActionPlanResult) -> Ac
             len(line) > _MAX_INSTRUCTION_CHARS
             or len(line.split()) > _MAX_INSTRUCTION_WORDS
         )
-        invented = _numbers(line) - _numbers(_finding_material(finding))
-        if too_long or invented:
+        if too_long or _invented(line, _finding_material(finding)):
             result.dropped_instructions += 1
             line = ""
     if not line or _is_hedged(line):

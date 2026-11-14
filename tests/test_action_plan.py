@@ -100,6 +100,14 @@ def _all(bucket="FIRST", instruction="Correct the total demand to 1400 GPM", cle
     ("Correct the total demand to 1500 GPM", True, False, False),
     # A sheet id the finding never mentions is an invented number too.
     ("Move the note to FP-502", True, False, False),
+    # ...and so is one that only shares its digits with the finding's own
+    # sheet: M-101 is not FP-101.
+    ("Move the note to M-101", True, False, False),
+    # The finding's own sheet is fine, however the hyphen is written.
+    ("Correct the total demand on FP-101", True, True, True),
+    ("Correct the total demand on FP101", True, True, True),
+    # A quantity with its unit attached is a number, not an identifier.
+    ("Correct the total demand to 1400GPM", True, True, True),
     # A hedged line is kept as text but can never be "clear".
     ("Confirm the total demand with the engineer", True, True, False),
     ("Correct the total, then check the riser", True, True, False),
