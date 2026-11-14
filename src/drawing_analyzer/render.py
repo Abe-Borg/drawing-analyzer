@@ -20,9 +20,13 @@ sheets, and several PDFs flatten into one ordered sheet list.
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import platform
 import re
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -294,30 +298,266 @@ def inspect_inputs(pdf_paths: list[Path]) -> InputInventory:
     return InputInventory(documents=documents)
 
 
-def _render_clip_pix(
+def _render_clip(
     page: "pymupdf.Page",
     rect: "pymupdf.Rect",
     target_long_edge_px: int,
-) -> "pymupdf.Pixmap":
-    """Render a clip region of ``page`` to a Pixmap at the target long edge.
+) -> tuple[bytes, int, int]:
+    """Render a clip region to ``(png_bytes, width_px, height_px)``.
 
     RGB, no alpha (smaller PNGs and all the model needs). Rendering the clip
     directly (rather than the full page then cropping) keeps memory bounded and,
     for vector PDFs, rasterizes each region crisply from the source vectors.
     """
     zoom = tiling.zoom_for_rect(rect.width, rect.height, target_long_edge_px)
-    matrix = pymupdf.Matrix(zoom, zoom)
-    return page.get_pixmap(matrix=matrix, clip=rect, alpha=False)
+    png, w, h = _rasterize(page, rect, zoom)
+    assert png is not None  # drop_uniform=False always returns bytes
+    return png, w, h
 
 
-def _render_clip(
+# --------------------------------------------------------------------------- #
+# Out-of-process rasterization (opt-in; keeps a host's UI thread responsive)
+# --------------------------------------------------------------------------- #
+#
+# PyMuPDF holds the GIL for the whole of ``get_pixmap`` and ``tobytes("png")``
+# (measured ~200 ms and ~125 ms per tile on a dense ARCH D plan, back to back
+# for seconds per sheet). The GUI runs the analysis on a background thread, so
+# every tile froze its window: Tk callbacks need the GIL too. With the raster
+# worker on, that pixel work runs in one spawned process and the caller waits
+# on a pipe with the GIL released.
+#
+# The worker opens the same file and renders the same page with the same clip
+# and matrix through the same PyMuPDF, so the PNG bytes are identical and no
+# cache key moves (I-6). It is an optimization only: any worker failure —
+# boot, pickling, a crash, a page the worker cannot read — falls back to the
+# in-process render, which stays the ground truth. Off by default, so the
+# library, the tests and every non-GUI caller are unchanged. ``spawn`` (never
+# ``fork``), as in :mod:`annotate`: inherited MuPDF state is not a safe
+# isolation boundary, and frozen Windows builds already bootstrap spawned
+# workers through ``multiprocessing.freeze_support()``.
+
+_RASTER_POOL_EXECUTOR = ProcessPoolExecutor
+_RASTER_MAX_POOL_FAILURES = 3
+_raster_lock = threading.Lock()
+_raster_enabled = False
+_raster_pool: "ProcessPoolExecutor | None" = None
+_raster_pool_failures = 0
+_raster_fallback_logged = False
+
+# What a fresh spawned interpreter will run. A test (or a caller) that patches
+# any of these is asking for its own behavior, which the worker would not see,
+# so such a process keeps rendering in-process (same rule as
+# ``annotate._process_worker_dependencies_pristine``).
+_RASTER_PRISTINE_GET_PIXMAP = pymupdf.Page.get_pixmap
+_RASTER_PRISTINE_TOBYTES = pymupdf.Pixmap.tobytes
+_RASTER_PRISTINE_OPEN = pymupdf.open
+
+
+def enable_raster_worker() -> None:
+    """Render pixels in a spawned worker process from now on (idempotent).
+
+    Starts the worker in the background so its PyMuPDF import is paid before
+    the first sheet; returns at once.
+    """
+    global _raster_enabled, _raster_pool_failures
+    with _raster_lock:
+        _raster_enabled = True
+        _raster_pool_failures = 0
+    pool = _raster_pool_or_none()
+    if pool is not None:
+        try:
+            pool.submit(_raster_worker_release)  # boots the process; result unused
+        except Exception:  # noqa: BLE001 - the first real render retries or falls back
+            pass
+
+
+def shutdown_raster_worker() -> None:
+    """Stop rendering out of process and end the worker (idempotent, never raises)."""
+    global _raster_enabled, _raster_pool
+    with _raster_lock:
+        _raster_enabled = False
+        pool, _raster_pool = _raster_pool, None
+    if pool is not None:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001 - a dying worker may refuse
+            pass
+
+
+def raster_worker_enabled() -> bool:
+    return _raster_enabled
+
+
+def _raster_dependencies_pristine() -> bool:
+    return (
+        pymupdf.Page.get_pixmap is _RASTER_PRISTINE_GET_PIXMAP
+        and pymupdf.Pixmap.tobytes is _RASTER_PRISTINE_TOBYTES
+        and pymupdf.open is _RASTER_PRISTINE_OPEN
+    )
+
+
+def _raster_pool_or_none() -> "ProcessPoolExecutor | None":
+    global _raster_pool
+    with _raster_lock:
+        if not _raster_enabled or _raster_pool_failures >= _RASTER_MAX_POOL_FAILURES:
+            return None
+        if _raster_pool is None:
+            try:
+                _raster_pool = _RASTER_POOL_EXECUTOR(
+                    max_workers=1,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_raster_worker_init,
+                )
+            except Exception as exc:  # noqa: BLE001 - no pool => in-process
+                _log.warning("raster worker unavailable; rendering in-process: %s", exc)
+                return None
+        return _raster_pool
+
+
+def _note_raster_pool_failure(pool: "ProcessPoolExecutor", exc: BaseException) -> None:
+    """Drop a broken pool so the next call starts a fresh one (bounded)."""
+    global _raster_pool, _raster_pool_failures
+    with _raster_lock:
+        if _raster_pool is not pool:
+            return
+        _raster_pool = None
+        _raster_pool_failures += 1
+        exhausted = _raster_pool_failures >= _RASTER_MAX_POOL_FAILURES
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:  # noqa: BLE001
+        pass
+    if exhausted:
+        _log.warning(
+            "raster worker failed %d times; rendering in-process for the rest of "
+            "this session: %s", _RASTER_MAX_POOL_FAILURES, exc,
+        )
+
+
+def _remote_source(page: "pymupdf.Page") -> "tuple[str, tuple[int, int], int] | None":
+    """``(path, (size, mtime_ns), page_index)`` when the worker can reopen ``page``.
+
+    Only a file-backed, unmodified, unencrypted document qualifies: the worker
+    must read exactly what the caller would have rendered.
+    """
+    doc = page.parent
+    name = getattr(doc, "name", "") or ""
+    if not name or doc.is_dirty or doc.is_encrypted:
+        return None
+    try:
+        st = os.stat(name)
+    except OSError:
+        return None
+    return name, (st.st_size, st.st_mtime_ns), page.number
+
+
+def _rasterize(
     page: "pymupdf.Page",
-    rect: "pymupdf.Rect",
-    target_long_edge_px: int,
-) -> tuple[bytes, int, int]:
-    """Render a clip region to ``(png_bytes, width_px, height_px)``."""
-    pix = _render_clip_pix(page, rect, target_long_edge_px)
+    clip: "pymupdf.Rect",
+    zoom: float,
+    *,
+    drop_uniform: bool = False,
+) -> "tuple[bytes | None, int, int]":
+    """``(png_bytes, width_px, height_px)`` of ``clip`` at ``zoom``.
+
+    ``png_bytes`` is ``None`` only when ``drop_uniform`` is set and the pixmap
+    is pixel-uniform (a blank tile). Runs in the raster worker when it is on
+    and the page qualifies; otherwise, or on any worker failure, in-process.
+    """
+    global _raster_fallback_logged
+    pool = _raster_pool_or_none() if _raster_enabled else None
+    if pool is not None and _raster_dependencies_pristine():
+        source = _remote_source(page)
+        if source is not None:
+            path, stamp, page_index = source
+            try:
+                future = pool.submit(
+                    _raster_worker_render, path, stamp, page_index,
+                    (clip.x0, clip.y0, clip.x1, clip.y1), float(zoom), drop_uniform,
+                )
+                return future.result()
+            except BrokenProcessPool as exc:
+                _note_raster_pool_failure(pool, exc)
+            except Exception as exc:  # noqa: BLE001 - the in-process render decides
+                if not _raster_fallback_logged:
+                    _raster_fallback_logged = True
+                    _log.info("raster worker could not render a clip; "
+                              "rendering it in-process: %s", exc)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, alpha=False)
+    if drop_uniform and _is_uniform_pixmap(pix):
+        return None, pix.width, pix.height
     return pix.tobytes("png"), pix.width, pix.height
+
+
+def _release_raster_worker_docs() -> None:
+    """Ask the worker to close its open PDF (fire-and-forget).
+
+    Called when a render batch ends, so the worker never keeps a source file
+    open (and locked against rename/delete on Windows) between runs.
+    """
+    pool = _raster_pool if _raster_enabled else None
+    if pool is None:
+        return
+    try:
+        pool.submit(_raster_worker_release)
+    except Exception:  # noqa: BLE001 - a broken pool is replaced on next use
+        pass
+
+
+# -- worker side (runs in the spawned process) ------------------------------ #
+
+_worker_doc: "tuple[tuple[str, tuple[int, int]], pymupdf.Document] | None" = None
+
+
+def _raster_worker_init() -> None:
+    """Exit with the parent, however it ends.
+
+    A normal close shuts the pool down, but a killed or crashed app never runs
+    that code, and an idle worker blocked on its job queue would outlive it.
+    The parent's sentinel becomes ready when the parent exits, on Windows and
+    POSIX alike.
+    """
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+
+    def _watch() -> None:
+        parent.join()
+        os._exit(0)
+
+    threading.Thread(target=_watch, name="raster-parent-watch", daemon=True).start()
+
+
+def _raster_worker_render(
+    path: str,
+    stamp: "tuple[int, int]",
+    page_index: int,
+    clip: "tuple[float, float, float, float]",
+    zoom: float,
+    drop_uniform: bool,
+) -> "tuple[bytes | None, int, int]":
+    global _worker_doc
+    key = (path, tuple(stamp))
+    if _worker_doc is None or _worker_doc[0] != key:
+        _raster_worker_release()
+        _worker_doc = (key, pymupdf.open(path))
+    page = _worker_doc[1][page_index]
+    pix = page.get_pixmap(
+        matrix=pymupdf.Matrix(zoom, zoom), clip=pymupdf.Rect(*clip), alpha=False
+    )
+    if drop_uniform and _is_uniform_pixmap(pix):
+        return None, pix.width, pix.height
+    return pix.tobytes("png"), pix.width, pix.height
+
+
+def _raster_worker_release() -> None:
+    global _worker_doc
+    held, _worker_doc = _worker_doc, None
+    if held is not None:
+        try:
+            held[1].close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _renderer_environment_fingerprint() -> str:
@@ -707,9 +947,9 @@ def render_region(
     zoom = dpi / 72.0
     if long_pt > 0:
         zoom = min(zoom, _VERIFY_MAX_LONG_EDGE_PX / long_pt)
-    matrix = pymupdf.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
-    return pix.tobytes("png"), pix.width, pix.height
+    png, w, h = _rasterize(page, clip, zoom)
+    assert png is not None  # drop_uniform=False always returns bytes
+    return png, w, h
 
 
 def iter_region_crops(
@@ -742,6 +982,7 @@ def iter_region_crops(
                 yield key, None
     finally:
         doc.close()
+        _release_raster_worker_docs()
 
 
 def page_geometry(page: "pymupdf.Page") -> PageGeometry:
@@ -856,22 +1097,22 @@ def render_sheet(
         w_pt, h_pt, rows=rows, cols=cols, overlap_frac=overlap_frac
     ):
         clip = pymupdf.Rect(tr.x0, tr.y0, tr.x1, tr.y1)
-        pix = _render_clip_pix(page, clip, target_px)
+        zoom = tiling.zoom_for_rect(clip.width, clip.height, target_px)
         # Strict: a pixel-uniform tile is empty — drop it (never drops a tile with
         # any mark). Near-blank (opt-in) also drops a tile whose PNG compresses
         # below the byte threshold.
-        if _is_uniform_pixmap(pix):
+        png, tile_w, tile_h = _rasterize(page, clip, zoom, drop_uniform=True)
+        if png is None:
             omitted_tiles.append((tr.row, tr.col))
             continue
-        png = pix.tobytes("png")
         if near_blank and len(png) <= near_blank_bytes:
             omitted_tiles.append((tr.row, tr.col))
             continue
         tiles.append(
             ImageTile(
                 png_bytes=png,
-                width_px=pix.width,
-                height_px=pix.height,
+                width_px=tile_w,
+                height_px=tile_h,
                 kind="tile",
                 row=tr.row,
                 col=tr.col,
@@ -974,6 +1215,7 @@ def iter_rendered_sheets(
                 yield sheet
         finally:
             doc.close()
+            _release_raster_worker_docs()
 
 
 def _sheet_geometry_no_render(

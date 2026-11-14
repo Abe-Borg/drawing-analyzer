@@ -217,6 +217,41 @@ def test_multi_source_jobs_use_spawn_and_fold_in_input_order(tmp_path, monkeypat
     assert result.coverage_status == "COMPLETE"
 
 
+@pytest.mark.parametrize("isolate", [False, True])
+def test_single_source_uses_a_worker_only_when_the_host_asks(tmp_path, monkeypatch, isolate):
+    only = _make_pdf(tmp_path / "only", "A-101.pdf")
+    ids = assign_source_ids([only])
+    findings = [_finding("only issue", source=only.name, source_id=ids[str(only)])]
+    pools: list[tuple[int, str]] = []
+
+    class _ImmediateFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self):
+            return self.value
+
+    class _RecordingPool:
+        def __init__(self, *, max_workers, mp_context):
+            pools.append((max_workers, mp_context.get_start_method()))
+
+        def submit(self, fn, job):
+            return _ImmediateFuture(fn(job))
+
+        def shutdown(self, *, wait):
+            pass
+
+    monkeypatch.setattr(annotate, "_PROCESS_POOL_EXECUTOR", _RecordingPool)
+    monkeypatch.setattr(annotate, "_isolate_writes_from_caller", isolate)
+    result = write_reviewed_pdfs(
+        findings, [only], tmp_path / "out", artifact_run_id="run-single"
+    )
+
+    assert pools == ([(1, "spawn")] if isolate else [])
+    assert result.coverage_status == "COMPLETE"
+    assert [path.name for path in result.reviewed_pdfs] == ["A-101_reviewed.pdf"]
+
+
 def test_parallel_and_single_worker_runs_have_identical_accounting(tmp_path):
     first = _make_pdf(tmp_path / "first", "A-101.pdf")
     second = _make_pdf(tmp_path / "second", "B-202.pdf")

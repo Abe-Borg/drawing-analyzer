@@ -120,7 +120,8 @@ from .live_scene import BG as LIVE_BG
 from .live_view import planned_stages
 from .models import resolve_run_configuration
 from .pipeline import DrawingContext, _resolve_save_tiles, extract_drawing_context
-from .render import list_sheets
+from .annotate import isolate_writes_from_caller
+from .render import enable_raster_worker, list_sheets, shutdown_raster_worker
 from .spec_documents import (
     CONTEXT_TOTAL_CHAR_BUDGET,
     SPEC_TOTAL_CHAR_BUDGET,
@@ -306,7 +307,12 @@ class CollapsibleSection:
                 text = ""
             if text:
                 summary = f"   —  {text}"
-        self.header.configure(text=f"{caret}  {self.title}{summary}")
+        label = f"{caret}  {self.title}{summary}"
+        # Every state change refreshes every header; re-configuring a CTk
+        # button redraws it even when its text is unchanged.
+        if label != getattr(self, "_header_text", None):
+            self._header_text = label
+            self.header.configure(text=label)
 
 
 class DrawingAnalyzerApp(_CTkDnDRoot):
@@ -2795,7 +2801,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 box.insert("1.0", text)
             except Exception:  # noqa: BLE001 - a widget hiccup must not break typing
                 pass
-        self._refresh_summary()
+        self._refresh_summary_soon()
 
     def _set_focus_editable(self, enabled: bool) -> None:
         """Enable/disable the focus box, its Expand button, and the pop-out.
@@ -2887,6 +2893,35 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if sec is not None:
             sec.set_expanded(not self._pdfs)
 
+    def _sheet_refs(self) -> list:
+        """``list_sheets(self._pdfs)``, re-listed only when a file changes on disk.
+
+        Listing opens every PDF to count its pages, which is most of a summary
+        refresh's cost — slow for large sets on a network share or under an
+        antivirus scan. The key is one ``stat`` per file (``sources_fingerprint``),
+        so a set re-exported over the same names is still re-listed.
+        """
+        key = sources_fingerprint(self._pdfs)
+        cached = getattr(self, "_sheet_refs_cache", None)
+        if cached is None or cached[0] != key:
+            cached = (key, list_sheets(self._pdfs))
+            self._sheet_refs_cache = cached
+        return cached[1]
+
+    def _refresh_summary_soon(self) -> None:
+        """Refresh the summary once typing pauses (one refresh per burst of keys)."""
+        pending = getattr(self, "_summary_after", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:  # noqa: BLE001 - already fired
+                pass
+        self._summary_after = self.after(SUMMARY_TYPING_DELAY_MS, self._refresh_summary_now)
+
+    def _refresh_summary_now(self) -> None:
+        self._summary_after = None
+        self._refresh_summary()
+
     def _refresh_summary(self) -> None:
         # Keep the collapsible headers' state summaries live on every state
         # change (this is the central hook). Guarded inside the helper.
@@ -2901,7 +2936,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if not self._pdfs:
             label.configure(text="No drawings selected.")
             return
-        refs = list_sheets(self._pdfs)
+        refs = self._sheet_refs()
         sheets = len(refs)
         files = len({r.pdf_path for r in refs})
         mode = self._processing_mode_var.get()
@@ -4491,6 +4526,8 @@ QUIT_STOP_GRACE_SECONDS = 30.0
 
 # How often the spend line re-reads the run's monitor.
 SPEND_REFRESH_MS = 1000
+# The cost summary follows the focus box once typing pauses this long.
+SUMMARY_TYPING_DELAY_MS = 250
 
 
 def parse_budget(text: str) -> float:
@@ -4910,4 +4947,12 @@ def main() -> None:
     # The app has loaded its saved key; maintenance must not block the UI.
     from .file_upload import start_upload_reaper
     start_upload_reaper()
-    app.mainloop()
+    # PyMuPDF holds the GIL for every tile it rasterizes and for the whole of a
+    # reviewed-PDF write. Run both in spawned workers so this window stays
+    # responsive while an analysis renders and marks up drawings.
+    enable_raster_worker()
+    isolate_writes_from_caller(True)
+    try:
+        app.mainloop()
+    finally:
+        shutdown_raster_worker()
