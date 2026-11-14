@@ -97,6 +97,8 @@ import pymupdf  # AGPL-3.0 — see module docstring; the 2nd of two blessed impo
 from . import tiling
 from .diagnostics import get_logger
 from .models import (
+    ACTION_BUCKET_LABELS,
+    ACTION_BUCKETS,
     ANNOTATION_COMPONENTS,
     PRIMARY_LEG_ID,
     REQUIRED_COMPONENTS,
@@ -106,6 +108,10 @@ from .models import (
     MarkupPlacement,
     MarkupReceipt,
     MarkupRunResult,
+    action_bucket,
+    bucket_is_ranked,
+    needs_verify,
+    on_sheet_instruction,
     reduced_trust_reason,
     TRUST_REASON_NO_QUOTE,
     TRUST_REASON_NO_TEXT,
@@ -165,8 +171,9 @@ _EVIDENCE_PREFIX = {
 # The bracket tags above belong to the popup comment, where a reviewer who
 # opens a markup wants the reason. Text an engineer reads at a glance (a cover
 # row, a callout box on the sheet) carries one signal instead: nothing when the
-# finding was confirmed, ``VERIFY:`` when it was not. Why it was not confirmed
-# is still said, in a sentence, further down the same comment.
+# finding was confirmed, ``VERIFY:`` when it was not (:func:`models.needs_verify`).
+# Why it was not confirmed is still said, in a sentence, further down the same
+# comment.
 _VERIFY_PREFIX = "VERIFY: "
 _VERIFY_SHEET_PREFIX = "VERIFY (whole sheet): "
 _SHEET_PREFIX = "WHOLE SHEET: "
@@ -506,6 +513,9 @@ def _units_for_finding(
             # and the reviewer needs the caveat on the mark that has no text
             # behind it.
             evidence_state=getattr(leg, "evidence_state", ""),
+            # One logical finding, one place on the to-do list: every leg sits
+            # in its parent's group and carries its instruction.
+            action=getattr(finding, "action", None),
         )
         lid = leg_identity(
             leg.source_id, leg.source_name, leg.page_index, leg.source_quote, i
@@ -601,39 +611,42 @@ def _is_unverified(finding: Finding) -> bool:
     return _status(finding) not in _TRUSTED
 
 
-def _needs_verify(finding: Finding) -> bool:
-    """Whether an engineer should confirm this finding before acting on it.
-
-    The one rule behind the ``VERIFY:`` prefix on a cover row and in a callout
-    box. True when the re-check did not confirm the finding, when its quote
-    could not be checked against the sheet's text, when a located finding has
-    nothing placing it on the sheet, and for a code finding whose drawing fact
-    was confirmed but whose code reference was not (the crop re-check cannot
-    read a code book — :func:`~drawing_analyzer.models.verified_drawing_fact_only`).
-    A ruled-out finding is never "verify": it is not an open item.
-    """
-    if _status(finding) == "REJECTED":
-        return False
-    if _is_unverified(finding) or reduced_trust_reason(finding):
-        return True
-    anchor = getattr(finding, "anchor", None)
-    if (anchor is None or anchor.rect_pdf is None) and _placement_kind(finding) != "SHEET":
-        return True
-    if verified_drawing_fact_only(finding):
-        citation = getattr(finding, "citation", None)
-        return getattr(citation, "status", "") != "CHECKED_SUPPORTS"
-    return False
-
-
 def _callout_prefix(finding: Finding, place: str, *, rejected: bool) -> str:
     """The lead-in of a callout box drawn on a sheet (``place`` as in
     :func:`_placement_kind`)."""
     if rejected:
         return _RULED_OUT_PREFIX
     whole_sheet = place == "SHEET"
-    if _needs_verify(finding):
+    if needs_verify(finding):
         return _VERIFY_SHEET_PREFIX if whole_sheet else _VERIFY_PREFIX
     return _SHEET_PREFIX if whole_sheet else ""
+
+
+def _subject(finding: Finding) -> str:
+    """The annotation Subject: the finding's to-do group, numbered so it sorts.
+
+    Bluebeam's Markups List sorts and filters on Subject, so this is what lets
+    a reviewer pull up "1 - Do this first" there (and dims the rest on the
+    sheet). Every part of a finding's markup carries the same Subject, so a
+    filter keeps the cloud, its tag and its instruction together.
+    """
+    if _status(finding) == "REJECTED":
+        return "Ruled out"
+    bucket = action_bucket(finding)
+    return f"{ACTION_BUCKETS.index(bucket) + 1} - {ACTION_BUCKET_LABELS[bucket]}"
+
+
+def _action_text(finding: Finding) -> str:
+    """What to do about a finding, in one line ("" when nobody said).
+
+    The reviewing channel's own sentence when it wrote one, else the
+    action-plan pass's instruction.
+    """
+    action = " ".join((getattr(finding, "recommended_action", "") or "").split())
+    if action:
+        return action
+    plan = getattr(finding, "action", None)
+    return " ".join(str(getattr(plan, "instruction", "") or "").split())
 
 
 def _color(finding: Finding) -> tuple[float, float, float]:
@@ -879,7 +892,7 @@ def _annot_content(
     """
     head = f"{finding.qc_id}: " if finding.qc_id else ""
     lines = [f"{head}{finding.text.strip()}"]
-    action = getattr(finding, "recommended_action", "").strip()
+    action = _action_text(finding)
     if action:
         lines.append(f"Action: {action}")
     quote = finding.source_quote.strip()
@@ -1598,7 +1611,7 @@ def _add_qc_tag(
         fontsize=_TAG_FONTSIZE, text_color=color, fill_color=(1, 1, 1),
         rotate=int(page.rotation or 0),
     )
-    annot.set_info(title=author, subject="QC tag", content=finding.qc_id)
+    annot.set_info(title=author, subject=_subject(finding), content=finding.qc_id)
     # No border_color: PyMuPDF rejects it on plain (non-rich) FreeText annots —
     # the severity-colored text itself is the tag's legend.
     _assign_layer(annot, finding, oc_layers)
@@ -1634,7 +1647,7 @@ def _add_cloud(
         pass
     annot.set_info(
         title=author,
-        subject=finding.category,
+        subject=_subject(finding),
         content=_annot_content(finding, unverified=unverified, rejected=rejected),
     )
     # Put the cloud on its severity layer before update() folds /OC into the /AP.
@@ -1710,7 +1723,7 @@ def _add_margin_callouts(
                 annot.set_border(width=1.0, dashes=[4, 3])
         except Exception:  # noqa: BLE001
             pass
-        annot.set_info(title=author, subject=finding.category, content=shown)
+        annot.set_info(title=author, subject=_subject(finding), content=shown)
         _assign_layer(annot, finding, oc_layers)
         annot.update()
         components.append(("callout", annot.xref))
@@ -1733,7 +1746,7 @@ def _add_margin_callouts(
                     line.set_line_ends(pymupdf.PDF_ANNOT_LE_NONE, pymupdf.PDF_ANNOT_LE_OPEN_ARROW)
                 except Exception:  # noqa: BLE001 - line-end styles vary by version
                     pass
-                line.set_info(title=author, subject="QC leader", content=finding.qc_id or "")
+                line.set_info(title=author, subject=_subject(finding), content=finding.qc_id or "")
                 _assign_layer(line, finding, oc_layers)   # leader shares the finding's tier
                 line.update()
                 components.append(("leader", line.xref))
@@ -1749,6 +1762,379 @@ def _add_margin_callouts(
 
 
 # --------------------------------------------------------------------------- #
+# On-sheet instructions and the sheet stamp
+#
+# A cloud says "look here"; the comment behind it says why. Neither is readable
+# at a glance, so where the fix is clear-cut the instruction itself is drawn
+# beside the cloud — a native callout (a FreeText with a leader), which Bluebeam
+# lists and edits like one of its own. Which findings qualify is not decided
+# here: :func:`models.on_sheet_instruction` is the whole rule, and it requires
+# the host's own confirmation of the finding as well as the model's claim.
+#
+# A box is placed only where the sheet is clear. It is tested, padded, against
+# an occupancy render of the page as it stands (linework, text, and the marks
+# already drawn) and against every cloud on the page; if no spot near the cloud
+# passes, there is no box and the finding keeps its comment. Covering part of a
+# drawing to say how to fix another part is not a trade this writer makes.
+#
+# The stamp is the sheet's legend: how many markups, that each has a comment,
+# and how many show their action. It is page content on its own layer rather
+# than an annotation, so it adds no row to the Markups List and can be switched
+# off with the layer.
+# --------------------------------------------------------------------------- #
+
+_INSTR_FONTSIZE = 12.0                  # a step above sheet notes: meant to be seen
+_INSTR_LINE_H = 14.5
+_INSTR_PAD = 4.0
+_INSTR_BORDER_W = 1.5
+# Box shapes to try, widest first: one long line reads best, but a dense sheet
+# often has room only for a narrower, taller box.
+_INSTR_TEXT_WIDTHS = (290.0, 200.0, 140.0)
+_INSTR_GAPS = (26.0, 64.0, 120.0, 200.0)   # how far from the cloud to look, nearest first
+_INSTR_KNEE = 10.0                      # the leader's horizontal run out of the box
+_PLACE_EDGE_MARGIN = 8.0
+_PLACE_CLEARANCE = 3.0                  # padding a candidate is tested with
+
+_STAMP_FONTSIZE = 8.0
+_STAMP_LINE_H = 10.5
+_STAMP_PAD = 5.0
+_STAMP_MAX_TEXT_W = 250.0
+_STAMP_INSETS = (16.0, 40.0, 80.0, 140.0)
+_SHEET_NOTES_LAYER = "QC markups - Sheet notes"
+
+
+def _wrap_lines(text: str, width: float, *, fontsize: float, fontname: str = "helv") -> list[str]:
+    """``text`` broken greedily at spaces into lines no wider than ``width``.
+
+    Measured with the same metrics the text is drawn with. A single word wider
+    than ``width`` keeps a line to itself rather than being split.
+    """
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}" if current else word
+        if current and pymupdf.get_text_length(trial, fontname=fontname, fontsize=fontsize) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _text_box_size(
+    lines: list[str], *, fontsize: float, line_h: float, pad: float, fontname: str = "helv",
+) -> "tuple[float, float]":
+    widest = max(
+        (pymupdf.get_text_length(ln, fontname=fontname, fontsize=fontsize) for ln in lines),
+        default=0.0,
+    )
+    # A little slack on the width, so the viewer's own wrapping of the same
+    # text cannot push a word onto an extra line the box has no room for.
+    return widest + 2.0 * pad + 8.0, len(lines) * line_h + 2.0 * pad
+
+
+def _is_clear(
+    box: "tuple[float, float, float, float]", page_w: float, page_h: float,
+    occupied: Any, taken: "list[tuple[float, float, float, float]]",
+) -> bool:
+    """Whether ``box`` (view space) is on the page and covers nothing."""
+    m = _PLACE_EDGE_MARGIN
+    if box[0] < m or box[1] < m or box[2] > page_w - m or box[3] > page_h - m:
+        return False
+    c = _PLACE_CLEARANCE
+    padded = (box[0] - c, box[1] - c, box[2] + c, box[3] + c)
+    return not _rect_overlaps_any(padded, taken) and not occupied(padded)
+
+
+def _place_near(
+    target: "tuple[float, float, float, float]",
+    shapes: "list[tuple[float, float]]",
+    page_w: float, page_h: float, occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+    words: "list[tuple[float, float, float, float]]",
+) -> "tuple[float, float, float, float] | None":
+    """A clear box beside ``target`` in one of ``shapes`` (w, h), or ``None``.
+
+    Nearest distance first; at each distance every shape, widest first, in the
+    eight positions around the target, the right-hand side first (where a note
+    is read next). A position counts only if its leader has a clear run too.
+    """
+    x0, y0, x1, y1 = target
+    xc, yc = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    for gap in _INSTR_GAPS:
+        for w, h in shapes:
+            for bx, by in (
+                (x1 + gap, yc - h / 2.0), (x1 + gap, y0 - gap - h), (x1 + gap, y1 + gap),
+                (xc - w / 2.0, y0 - gap - h), (xc - w / 2.0, y1 + gap),
+                (x0 - gap - w, yc - h / 2.0), (x0 - gap - w, y0 - gap - h),
+                (x0 - gap - w, y1 + gap),
+            ):
+                box = (bx, by, bx + w, by + h)
+                if not _is_clear(box, page_w, page_h, occupied, taken):
+                    continue
+                tip, knee, _start = _leader_points(box, target)
+                if _leader_is_clear(tip, knee, words, taken, target):
+                    return box
+    return None
+
+
+def _leader_is_clear(
+    tip: "tuple[float, float]", knee: "tuple[float, float]",
+    words: "list[tuple[float, float, float, float]]",
+    taken: "list[tuple[float, float, float, float]]",
+    target: "tuple[float, float, float, float]",
+) -> bool:
+    """Whether the leader's run from its knee to the target crosses no text
+    and no other markup.
+
+    A leader may cross linework — drafting leaders do — but not a label, and
+    not another finding's cloud or box (``taken``, minus its own target). The
+    box itself is held to the stricter rule: it covers no ink at all.
+    """
+    blockers = [r for r in taken if r != target] + words
+    for t in (0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9):
+        px = knee[0] + (tip[0] - knee[0]) * t
+        py = knee[1] + (tip[1] - knee[1]) * t
+        if _rect_overlaps_any((px - 2.0, py - 2.0, px + 2.0, py + 2.0), blockers):
+            return False
+    return True
+
+
+def _leader_points(
+    box: "tuple[float, float, float, float]", target: "tuple[float, float, float, float]",
+) -> "tuple[tuple[float, float], tuple[float, float], tuple[float, float]]":
+    """``(tip, knee, start)`` of a callout leader from ``box`` to ``target``.
+
+    The leader leaves the middle of the box edge that faces the target, runs
+    straight for a short knee, then goes to the nearest point of the target.
+    """
+    bx0, by0, bx1, by1 = box
+    tx0, ty0, tx1, ty1 = target
+    bxc, byc = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+    if bx0 >= tx1:
+        start, knee = (bx0, byc), (bx0 - _INSTR_KNEE, byc)
+    elif bx1 <= tx0:
+        start, knee = (bx1, byc), (bx1 + _INSTR_KNEE, byc)
+    elif by0 >= ty1:
+        start, knee = (bxc, by0), (bxc, by0 - _INSTR_KNEE)
+    else:
+        start, knee = (bxc, by1), (bxc, by1 + _INSTR_KNEE)
+    tip = (min(max(knee[0], tx0), tx1), min(max(knee[1], ty0), ty1))
+    return tip, knee, start
+
+
+def _add_instructions(
+    page: "pymupdf.Page",
+    items: "list[tuple[Finding, MarkupPlacement, str]]",
+    *,
+    author: str,
+    occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+    words: "list[tuple[float, float, float, float]] | None" = None,
+    oc_layers: "dict[str, int] | None" = None,
+) -> "dict[str, list[tuple[str, int]]]":
+    """Draw each ``(finding, placement, instruction)`` as a callout by its cloud.
+
+    Returns ``{placement_id: [("instruction", xref)]}`` for the ones that found
+    a clear spot. ``taken`` (view-space boxes this page must not cover) grows
+    with every box placed, so two instructions never overlap. One failed box
+    never drops another.
+    """
+    drawn: dict[str, list[tuple[str, int]]] = {}
+    page_w, page_h = page.rect.width, page.rect.height
+    rotate = int(page.rotation or 0)
+    for finding, placement, instruction in items:
+        try:
+            head = f"{finding.qc_id}: " if finding.qc_id else ""
+            wording = _base14_safe(head + instruction.upper())
+            layouts: dict[tuple[float, float], list[str]] = {}
+            for text_w in _INSTR_TEXT_WIDTHS:
+                wrapped = _wrap_lines(wording, text_w, fontsize=_INSTR_FONTSIZE)
+                layouts.setdefault(_text_box_size(
+                    wrapped, fontsize=_INSTR_FONTSIZE, line_h=_INSTR_LINE_H, pad=_INSTR_PAD,
+                ), wrapped)
+            target = tuple(float(v) for v in finding.anchor.rect_pdf)
+            box = _place_near(
+                target, list(layouts), page_w, page_h, occupied, taken, words or [],
+            )
+            if box is None:
+                continue
+            lines = layouts[(box[2] - box[0], box[3] - box[1])]
+            text = "\n".join(lines)
+            tip, knee, start = _leader_points(box, target)
+            annot = page.add_freetext_annot(
+                _derotate_rect(page, box), text,
+                fontsize=_INSTR_FONTSIZE, text_color=_color(finding), fill_color=(1, 1, 1),
+                border_width=_INSTR_BORDER_W, rotate=rotate,
+                callout=[_derotate_point(page, *pt) for pt in (tip, knee, start)],
+                line_end=pymupdf.PDF_ANNOT_LE_OPEN_ARROW,
+            )
+            # For FreeText /Contents IS the displayed text: hand back the same string.
+            annot.set_info(title=author, subject=_subject(finding), content=text)
+            _assign_layer(annot, finding, oc_layers)
+            annot.update()
+            taken.append(box)
+            drawn.setdefault(placement.placement_id, []).append(("instruction", annot.xref))
+        except Exception:  # noqa: BLE001 - the comment still carries the action
+            _log.warning("could not draw the instruction for finding %s", finding.id)
+    return drawn
+
+
+def _stamp_text(marks: int, shown: int, all_have_actions: bool) -> str:
+    """The sheet stamp's words. Says only what is true of this sheet."""
+    parts = [
+        f"AI DRAFT REVIEW - {marks} MARKUP{'' if marks == 1 else 'S'} ON THIS SHEET.",
+        "Every markup has a comment with a suggested action; open one to read it."
+        if all_have_actions else "Every markup has a comment; open one to read it.",
+    ]
+    if shown:
+        parts.append(
+            f"{shown} show{'s' if shown == 1 else ''} the required action on the sheet."
+        )
+    return " ".join(parts)
+
+
+def _place_stamp(
+    w: float, h: float, page_w: float, page_h: float, occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+) -> "tuple[float, float, float, float] | None":
+    """A clear spot for the stamp, out of the way: a corner first, bottom-left
+    before the rest, stepping in past the sheet border; then along the bottom
+    and top edges."""
+    for inset in _STAMP_INSETS:
+        for bx, by in (
+            (inset, page_h - inset - h), (inset, inset),
+            (page_w - inset - w, inset), (page_w - inset - w, page_h - inset - h),
+        ):
+            box = (bx, by, bx + w, by + h)
+            if _is_clear(box, page_w, page_h, occupied, taken):
+                return box
+    for inset in _STAMP_INSETS[:2]:
+        for by in (page_h - inset - h, inset):
+            bx = inset
+            while bx + w <= page_w - inset:
+                box = (bx, by, bx + w, by + h)
+                if _is_clear(box, page_w, page_h, occupied, taken):
+                    return box
+                bx += w / 2.0
+    return None
+
+
+def _add_sheet_stamp(
+    page: "pymupdf.Page", text: str, *, layer: int, occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+) -> bool:
+    """Draw the stamp on ``page`` as layered page content; ``False`` if no room."""
+    lines = _wrap_lines(_base14_safe(text), _STAMP_MAX_TEXT_W, fontsize=_STAMP_FONTSIZE)
+    w, h = _text_box_size(
+        lines, fontsize=_STAMP_FONTSIZE, line_h=_STAMP_LINE_H, pad=_STAMP_PAD,
+    )
+    box = _place_stamp(w, h, page.rect.width, page.rect.height, occupied, taken)
+    if box is None:
+        return False
+    page.draw_rect(
+        _derotate_rect(page, box), color=(0.35, 0.35, 0.35), fill=(1, 1, 1),
+        width=0.6, oc=layer,
+    )
+    inner = (box[0] + _STAMP_PAD, box[1] + _STAMP_PAD - 1.0,
+             box[2] - _STAMP_PAD, box[3] + _STAMP_LINE_H)   # room below: never clip a line
+    page.insert_textbox(
+        _derotate_rect(page, inner), "\n".join(lines),
+        fontsize=_STAMP_FONTSIZE, lineheight=_STAMP_LINE_H / _STAMP_FONTSIZE,
+        color=(0.2, 0.2, 0.2), rotate=int(page.rotation or 0), oc=layer,
+    )
+    taken.append(box)
+    return True
+
+
+def _add_instructions_and_stamps(
+    doc: "pymupdf.Document",
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    collected: "dict[str, list[tuple[str, int, int]]]",
+    *,
+    author: str,
+    oc_layers: "dict[str, int] | None",
+    sheet_meta: "dict[int, dict] | None" = None,
+) -> None:
+    """After the clouds and callouts: the instruction boxes, then each sheet's stamp.
+
+    Mutates ``collected`` with the ``instruction`` components it draws. Nothing
+    here is mandatory to any placement, so every failure is logged and skipped
+    (I-3): a sheet without a stamp or a finding without its box is still a
+    complete, correct markup.
+    """
+    finding_by_pid = {pl.placement_id: f for f, pl in pairs}
+    taken_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    wanted: dict[int, list[tuple[Finding, MarkupPlacement, str]]] = {}
+    for finding, placement in pairs:
+        if placement.expected != "CLOUD" or not collected.get(placement.placement_id):
+            continue
+        page_index = int(finding.page_index)
+        taken_by_page.setdefault(page_index, []).append(
+            tuple(float(v) for v in finding.anchor.rect_pdf)
+        )
+        instruction = on_sheet_instruction(finding)
+        if instruction:
+            wanted.setdefault(page_index, []).append((finding, placement, instruction))
+
+    samplers: dict[int, Any] = {}
+
+    def sampler(page_index: int) -> Any:
+        # Rendered on first use, i.e. with every cloud and callout already on
+        # the page; boxes drawn after that are tracked in ``taken_by_page``.
+        if page_index not in samplers:
+            samplers[page_index] = _page_occupancy(doc[page_index])
+        return samplers[page_index]
+
+    for page_index, items in sorted(wanted.items()):
+        items.sort(key=lambda it: (it[0].qc_id or "~", it[0].id))
+        try:
+            meta = (sheet_meta or {}).get(page_index) or {}
+            drawn = _add_instructions(
+                doc[page_index], items, author=author, oc_layers=oc_layers,
+                occupied=sampler(page_index), taken=taken_by_page[page_index],
+                words=[
+                    tuple(float(v) for v in word[:4]) for word in (meta.get("words") or [])
+                ],
+            )
+            for pid, comps in drawn.items():
+                collected.setdefault(pid, []).extend((c, x, page_index) for c, x in comps)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not add instructions on page %d", page_index)
+
+    marks: dict[int, set[str]] = {}
+    shown: dict[int, int] = {}
+    for pid, comps in collected.items():
+        for component, _xref, page_index in comps:
+            if component in ("cloud", "callout"):
+                marks.setdefault(page_index, set()).add(pid)
+            elif component == "instruction":
+                shown[page_index] = shown.get(page_index, 0) + 1
+    if not marks:
+        return
+    try:
+        layer = doc.add_ocg(_SHEET_NOTES_LAYER, on=True)
+    except Exception:  # noqa: BLE001 - no layer, no stamp; the markups stand
+        _log.warning("could not create the sheet-notes layer; sheets carry no stamp")
+        return
+    for page_index, pids in sorted(marks.items()):
+        try:
+            text = _stamp_text(
+                len(pids), shown.get(page_index, 0),
+                all(pid in finding_by_pid and _action_text(finding_by_pid[pid]) for pid in pids),
+            )
+            if not _add_sheet_stamp(
+                doc[page_index], text, layer=layer, occupied=sampler(page_index),
+                taken=taken_by_page.setdefault(page_index, []),
+            ):
+                _log.info("no clear spot for the sheet stamp on page %d", page_index)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not stamp page %d", page_index)
+
+
+# --------------------------------------------------------------------------- #
 # Index + appendix pages
 # --------------------------------------------------------------------------- #
 
@@ -1756,15 +2142,20 @@ def _add_margin_callouts(
 def _what_to_do(finding: Finding) -> str:
     """One cover-page line for a finding: the action first, then what is wrong.
 
-    The action leads because the row is a to-do item; the finding text follows
-    so the row still says what the problem is when the action alone would not
-    ("Coordinate with structural"). A finding that was not confirmed starts
-    with ``VERIFY:`` (:func:`_needs_verify`) — the page's only status signal.
+    The action leads because the row is a to-do item — the action-plan pass's
+    short instruction when there is one, else the reviewing channel's own
+    sentence. The finding text follows so the row still says what the problem
+    is when the action alone would not ("Coordinate with structural"). A
+    finding that was not confirmed starts with ``VERIFY:``
+    (:func:`models.needs_verify`) — the page's only status signal.
     """
     text = " ".join((finding.text or "").split())
-    action = " ".join((getattr(finding, "recommended_action", "") or "").split())
+    plan = getattr(finding, "action", None)
+    action = " ".join(str(getattr(plan, "instruction", "") or "").split()) or " ".join(
+        (getattr(finding, "recommended_action", "") or "").split()
+    )
     line = f"{action} - {text}" if action and text else (action or text)
-    return (_VERIFY_PREFIX if _needs_verify(finding) else "") + line
+    return (_VERIFY_PREFIX if needs_verify(finding) else "") + line
 
 
 # Severity triage rank for the reviewed-PDF index (§18.7, DA-025): high, then
@@ -1873,14 +2264,33 @@ def _index_rows(
 ) -> "list[tuple[str, Any, bool]]":
     """The uniform index row stream, shared by the page count and the writer.
 
-    ``("heading", label, False)`` and ``("note", text, False)`` rows carry no
-    link; ``index_only`` marks the
+    The open findings are listed in the three to-do groups, in
+    :data:`~drawing_analyzer.models.ACTION_BUCKETS` order, each under a
+    ``("bucket", label, False)`` row; a group with nothing in it is not shown.
+    When the action-plan pass did not rank a finding its group is its
+    severity's, and the page says so in one line rather than passing a
+    fallback off as a judgment. ``("bucket", …)``, ``("heading", …)`` and
+    ``("note", …)`` rows carry no link; ``index_only`` marks the
     rows whose sole artifact is this index row (so reconciliation must find them).
     One builder, so the page count cannot disagree with what is written (P7
     item 34: the count has to be known *before* any page is inserted, because
     inserting at the front renumbers every link target).
     """
-    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
+    rows: list[tuple[str, Any, bool]] = []
+    unranked = {fp[1].finding_id for fp in inked if not bucket_is_ranked(fp[0])}
+    if unranked:
+        listed = {fp[1].finding_id for fp in inked}
+        rows.append(("note", (
+            "Grouped by severity." if len(unranked) == len(listed)
+            else f"{len(unranked)} of {len(listed)} findings are grouped by severity."
+        ), False))
+    for bucket in ACTION_BUCKETS:
+        group = [fp for fp in inked if action_bucket(fp[0]) == bucket]
+        if not group:
+            continue
+        count = len({fp[1].finding_id for fp in group})     # a leg is not a finding
+        rows.append(("bucket", f"{ACTION_BUCKET_LABELS[bucket]} ({count})", False))
+        rows.extend(("entry", fp, False) for fp in group)
     if rejected:
         rows.append(("heading", f"Ruled out ({len(rejected)})", False))
         rows.extend(("rejected", fp, False) for fp in rejected)
@@ -1965,9 +2375,12 @@ def _insert_index_pages(
         index_only_rows: list[str] = []
         y = _INDEX_TOP + 4
         for kind, payload, index_only in batch:
-            if kind == "heading":
-                page.insert_text((36, y), str(payload), fontsize=9, fontname="hebo",
-                                 color=(0.3, 0.3, 0.3))
+            if kind in ("heading", "bucket"):
+                # A to-do group is the page's structure; the two trailing
+                # sections (ruled out, not marked) are quieter.
+                size, shade = (10, 0.1) if kind == "bucket" else (9, 0.3)
+                page.insert_text((36, y), str(payload), fontsize=size, fontname="hebo",
+                                 color=(shade, shade, shade))
                 y += _INDEX_ROW_H
                 continue
             if kind == "note":
@@ -2125,7 +2538,7 @@ def _insert_review_notes_page(
                     text_color=(_REJECTED_COLOR if rejected else _color(finding)),
                     fill_color=(1.0, 1.0, 0.92),
                 )
-                annot.set_info(title=author, subject="AI review note", content=shown)
+                annot.set_info(title=author, subject=_subject(finding), content=shown)
                 _assign_layer(annot, finding, oc_layers)
                 annot.update()
                 collected.setdefault(placement.placement_id, []).append(
@@ -2403,8 +2816,9 @@ def _set_findings_outline(
 ) -> None:
     """Write a ``QC Findings`` bookmark outline into ``doc`` (Phase: HTML↔PDF links).
 
-    One child bookmark per finding whose primary mark was actually drawn — in
-    ``QC-###`` order — whose destination is the page that mark **landed on**
+    One bookmark per finding whose primary mark was actually drawn, filed under
+    its to-do group as on the cover page and in ``QC-###`` order within it,
+    whose destination is the page that mark **landed on**
     (``final_page_by_pid``, keyed by placement id: the source page for an
     on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
     that overflowed there), so a bookmark always points at the mark, the same
@@ -2425,7 +2839,7 @@ def _set_findings_outline(
     page_count = doc.page_count
     mark_xref_by_pid = mark_xref_by_pid or {}
     seen: set[str] = set()
-    entries: list[tuple[Finding, int, "int | None"]] = []
+    entries: list[tuple[Finding, int, "int | None", str]] = []
     for finding, placement in pairs:
         # One bookmark per finding, at its own anchor — not per cross-sheet leg
         # or margin/index placement (those share the finding's qc_id).
@@ -2443,34 +2857,58 @@ def _set_findings_outline(
         if not (0 <= final_page < page_count):
             continue
         seen.add(finding.id)
-        entries.append((finding, final_page, mark_xref_by_pid.get(placement.placement_id)))
+        kind = (
+            "gated" if placement.expected == "GATED_INDEX"
+            else "rejected" if _status(finding) == "REJECTED" else "open"
+        )
+        entries.append(
+            (finding, final_page, mark_xref_by_pid.get(placement.placement_id), kind)
+        )
     if not entries:
         return
     entries.sort(key=lambda e: (e[0].qc_id or "~", e[0].id))
 
     parent_page = 1 if n_index > 0 else entries[0][1] + 1     # index page, else first mark
     qc_toc: list = [[1, f"QC Findings ({len(entries)})", parent_page]]
-    for finding, final_page, _xref in entries:
-        qc = finding.qc_id or "QC-?"
-        sheet = (finding.sheet_id or "").strip()
-        text = " ".join((finding.text or "").split())
-        if len(text) > 60:
-            text = text[:57].rstrip() + "…"
-        title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
-        qc_toc.append([2, title, final_page + 1])
+    # Grouped as the cover page is: one folder per to-do group, then a folder
+    # for anything drawn but not an open item (a ruled-out finding inked grey,
+    # or a finding listed without a mark).
+    groups: "list[tuple[str, list]]" = [
+        (ACTION_BUCKET_LABELS[bucket], [
+            e for e in entries
+            if e[3] == "open" and action_bucket(e[0]) == bucket
+        ])
+        for bucket in ACTION_BUCKETS
+    ]
+    groups.append(("Ruled out", [e for e in entries if e[3] == "rejected"]))
+    groups.append(("Not marked on the sheets", [e for e in entries if e[3] == "gated"]))
+    leaves: "list[tuple[int, Finding, int, int | None]]" = []   # (toc index, …)
+    for label, members in groups:
+        if not members:
+            continue
+        qc_toc.append([2, f"{label} ({len(members)})", members[0][1] + 1])
+        for finding, final_page, mark_xref, _kind in members:
+            qc = finding.qc_id or "QC-?"
+            sheet = (finding.sheet_id or "").strip()
+            text = _what_to_do(finding)
+            if len(text) > 70:
+                text = text[:67].rstrip() + "…"
+            title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
+            leaves.append((len(qc_toc), finding, final_page, mark_xref))
+            qc_toc.append([3, title, final_page + 1])
     # Append after the source PDF's own outline (get_toc(simple=False) round-
     # trips through set_toc), so existing sheet bookmarks survive the review copy.
     existing = doc.get_toc(simple=False) or []
     doc.set_toc(existing + qc_toc)
 
-    # The finding bookmarks are the last ``len(entries)`` outline items, in the
-    # order written. A failure here leaves that bookmark a plain page jump.
-    outline_xrefs = doc.get_outline_xrefs()[-len(entries):]
-    for (finding, final_page, mark_xref), item_xref in zip(entries, outline_xrefs):
+    # Our items are the last ``len(qc_toc)`` outline objects, in the order
+    # written. A failure here leaves that bookmark a plain page jump.
+    outline_xrefs = doc.get_outline_xrefs()[-len(qc_toc):]
+    for toc_index, finding, final_page, mark_xref in leaves:
         try:
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
             dest = _mark_dest(doc, final_page, mark_xref=mark_xref, view_rect=rect)
-            doc.xref_set_key(item_xref, "A", f"<</S/GoTo/D{dest}>>")
+            doc.xref_set_key(outline_xrefs[toc_index], "A", f"<</S/GoTo/D{dest}>>")
         except Exception:  # noqa: BLE001 - a coarser bookmark, never a lost one
             _log.debug("could not set a zoom destination for bookmark %s", finding.qc_id)
 
@@ -2564,6 +3002,16 @@ def _annotate_units(
                 overflow.extend(page_overflow)
             except Exception:  # noqa: BLE001 - callouts must not sink the file
                 _log.warning("could not add margin callouts on page %d", page_index)
+
+        # With every cloud and callout on its sheet: the instruction boxes that
+        # have a clear spot beside their cloud, then each marked sheet's stamp.
+        try:
+            _add_instructions_and_stamps(
+                doc, pairs, collected, author=author, oc_layers=oc_layers,
+                sheet_meta=sheet_meta,
+            )
+        except Exception:  # noqa: BLE001 - never sinks the file
+            _log.warning("could not add instructions / sheet stamps for %s", src.name)
 
         # Generated pages are built in this order — appendix, review notes, then
         # the index inserted at the FRONT last (P7 item 34). The index is last
@@ -3291,9 +3739,7 @@ def write_set_review_notes_pdf(
                         box, shown, fontsize=8,
                         text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
                     )
-                    annot.set_info(
-                        title=author, subject="set-level review note", content=shown
-                    )
+                    annot.set_info(title=author, subject=_subject(finding), content=shown)
                     _assign_layer(annot, finding, oc_layers)
                     annot.update()
                     collected.setdefault(placement.placement_id, []).append(

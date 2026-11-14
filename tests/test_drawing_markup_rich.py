@@ -99,9 +99,13 @@ def test_clear_band_falls_back_without_words():
 
 from drawing_analyzer.annotate import (  # noqa: E402
     _annot_content,
-    _needs_verify,
     _truncate_at_word,
     _what_to_do,
+)
+from drawing_analyzer.models import (  # noqa: E402
+    ACTION_BUCKET_LABELS,
+    ActionItem,
+    needs_verify,
 )
 
 
@@ -208,7 +212,7 @@ def test_needs_verify_is_the_one_cover_page_signal(status, cat, citation, rect, 
            quote="Q", hint=hint)
     if citation:
         f.citation = Citation(status=citation)
-    assert _needs_verify(f) is expected
+    assert needs_verify(f) is expected
     assert _what_to_do(f).startswith("VERIFY: ") is expected
 
 
@@ -977,7 +981,9 @@ def test_popup_carries_the_lean_template(tmp_path):
     try:
         square = next(a for a in doc[1].annots() if a.type[1] == "Square")
         assert square.info["title"] == DEFAULT_AUTHOR
-        assert square.info["subject"] == "code"          # the finding's category
+        # The Subject is the finding's to-do group, so the Markups List can
+        # sort and filter by it; unranked, a medium finding is "do this later".
+        assert square.info["subject"].endswith(ACTION_BUCKET_LABELS["LATER"])
         content = square.info.get("content", "")
         assert content.startswith("QC-001: clearance issue")
         assert "Action: Confirm the clearance with the mechanical engineer." in content
@@ -1246,7 +1252,7 @@ def test_overflow_review_note_bookmark_targets_the_notes_page(tmp_path):
     try:
         notes_pno = next(p for p in range(doc.page_count)
                          if "AI REVIEW NOTES" in doc[p].get_text().upper())
-        child_pages = {t[2] for t in doc.get_toc(simple=False) if t[0] == 2}
+        child_pages = {t[2] for t in doc.get_toc(simple=False) if t[0] == 3}
     finally:
         doc.close()
 
@@ -1654,3 +1660,140 @@ def test_band_order_is_deterministic():
         shuffled = list(words)
         random.Random(seed).shuffle(shuffled)
         assert _clear_bands(shuffled, _BAND_W, _BAND_H) == first
+
+
+# --------------------------------------------------------------------------- #
+# The to-do groups, on-sheet instructions and the sheet stamp
+# --------------------------------------------------------------------------- #
+
+
+def _ranked(text, bucket, *, instruction="Fix it", clear=False, **kw):
+    f = _f(text, source="M-101.pdf", **kw)
+    f.action = ActionItem(bucket=bucket, instruction=instruction, clear_fix=clear)
+    return f
+
+
+def test_cover_page_and_bookmarks_file_findings_under_their_to_do_groups(tmp_path):
+    src = _pdf(tmp_path)
+    # Ranked against their severity on purpose: the group is the action plan's
+    # answer, not a restatement of severity.
+    later = _ranked("ranked later", "LATER", sev="high", rect=[10, 10, 60, 30],
+                    cat="conflict", quote="q-later")
+    first = _ranked("ranked first", "FIRST", sev="low", rect=[10, 50, 60, 70],
+                    cat="conflict", quote="q-first")
+    if_time = _ranked("ranked last", "IF_TIME", sev="high", rect=[10, 90, 60, 110],
+                      cat="conflict", quote="q-last")
+    findings = [later, first, if_time]
+    assign_qc_ids(findings)
+    out = tmp_path / "r.pdf"
+    annotate_pdf(src, findings, out)
+
+    def cover_order(path):
+        doc = pymupdf.open(str(path))
+        try:
+            cover = doc[0].get_text()
+            toc = [t[1] for t in doc.get_toc() if t[0] in (2, 3)]
+        finally:
+            doc.close()
+        return cover, toc
+
+    cover, toc = cover_order(out)
+    labels = [ACTION_BUCKET_LABELS[b] for b in ("FIRST", "LATER", "IF_TIME")]
+    expected = [labels[0], first.qc_id, labels[1], later.qc_id, labels[2], if_time.qc_id]
+    positions = [cover.index(token) for token in expected]
+    assert positions == sorted(positions), cover
+    # The bookmarks are filed the same way, in the same order.
+    assert [next(tok for tok in expected if tok in title) for title in toc] == expected
+    assert "severity" not in cover.split("What to do")[1]      # every finding was ranked
+
+    # A finding the pass did not rank is grouped by its severity, and the page
+    # says a fallback was used rather than passing it off as a judgment.
+    unranked = _f("never ranked", source="M-101.pdf", sev="high", rect=[10, 130, 60, 150],
+                  cat="conflict", quote="q-unranked")
+    assign_qc_ids([*findings, unranked])
+    annotate_pdf(src, [*findings, unranked], tmp_path / "r2.pdf")
+    cover, _toc = cover_order(tmp_path / "r2.pdf")
+    assert labels[0] in cover and cover.index(labels[0]) < cover.index(unranked.qc_id) < cover.index(labels[1])
+    assert "severity" in cover.split("What to do")[1]
+
+
+def _busy_pdf(tmp_path, *, dense: bool, rotate: int = 0):
+    """One sheet with a label to cloud; ``dense`` rules the whole sheet so that
+    no clear spot for a note exists anywhere."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((300, 300), "TOTAL DEMAND 1250 GPM", fontsize=10)
+    if dense:
+        shape = page.new_shape()
+        for x in range(10, 792, 24):
+            shape.draw_line((x, 0), (x, 612))
+        for y in range(10, 612, 24):
+            shape.draw_line((0, y), (792, y))
+        shape.finish(color=(0, 0, 0), width=0.8)
+        shape.commit()
+    if rotate:
+        page.set_rotation(rotate)
+    doc.new_page(width=792, height=612)             # a sheet with no finding
+    path = tmp_path / "M-101.pdf"
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("dense, status, rotate, drawn", [
+    (False, "DETERMINISTIC", 0, True),
+    # The same on a rotated sheet: the box and its leader are laid out in the
+    # view the reader sees, then moved into the page's own space.
+    (False, "DETERMINISTIC", 90, True),
+    # Nothing clear near the cloud: no box. The comment still carries the action.
+    (True, "DETERMINISTIC", 0, False),
+    # Clear sheet, but the finding was not confirmed: the model's "clear fix"
+    # does not put an instruction on a drawing.
+    (False, "UNCERTAIN", 0, False),
+], ids=["clear_sheet", "rotated_sheet", "dense_sheet", "unconfirmed"])
+def test_instruction_is_drawn_only_for_a_confirmed_finding_and_only_in_clear_space(
+        tmp_path, dense, status, rotate, drawn):
+    from drawing_analyzer.annotate import _view_rect_to_user
+    from tests.fixtures.pdf_links import (
+        annot_user_rects, callout_text_boxes, contains, overlaps,
+    )
+
+    src = _busy_pdf(tmp_path, dense=dense, rotate=rotate)
+    cloud = [296.0, 288.0, 420.0, 306.0]
+    f = _ranked("total does not add up", "FIRST", instruction="Correct the total to 1400 GPM",
+                clear=True, rect=cloud, status=status, cat="coordination",
+                quote="TOTAL DEMAND 1250 GPM")
+    assign_qc_ids([f])
+    out = tmp_path / "r.pdf"
+    res = annotate_pdf(src, [f], out, include_unverified=True)
+    assert res.coverage_status == "COMPLETE"       # an instruction is never mandatory
+    refs = [ref.split(":")[0] for ref in res.receipts[0].annotation_refs]
+    assert ("instruction" in refs) is drawn and "cloud" in refs
+
+    doc = pymupdf.open(str(out))
+    try:
+        sheet, empty_sheet = doc[1], doc[2]
+        wording = [
+            a.info["content"].replace("\n", " ") for a in sheet.annots()
+            if "FreeTextCallout" in doc.xref_object(a.xref, compressed=True)
+        ]
+        boxes = callout_text_boxes(doc, sheet)
+        (cloud_rect,) = annot_user_rects(doc, sheet)
+        page_box = _view_rect_to_user(sheet, (0, 0, sheet.rect.width, sheet.rect.height))
+        label = sheet.search_for("TOTAL DEMAND 1250 GPM")
+        label_box = _view_rect_to_user(sheet, tuple(label[0])) if label else None
+        sheet_text, empty_text = sheet.get_text(), empty_sheet.get_text()
+    finally:
+        doc.close()
+    assert len(boxes) == (1 if drawn else 0)
+    if drawn:
+        assert wording == [f"{f.qc_id}: CORRECT THE TOTAL TO 1400 GPM"]
+        # The words sit on the sheet, clear of the cloud they point at and of
+        # the drawing's own label (raw user space, so rotation cannot hide it).
+        assert contains(page_box, boxes[0])
+        assert not overlaps(boxes[0], cloud_rect)
+        assert label_box is None or not overlaps(boxes[0], label_box)
+    # The sheet's stamp counts what is on it; a sheet with no markup has none,
+    # and neither does a sheet with no clear spot to put one.
+    assert ("1 MARKUP" in sheet_text) is (not dense) and "MARKUP" not in empty_text
+    assert ("1 shows" in sheet_text) is drawn

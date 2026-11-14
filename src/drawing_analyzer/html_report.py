@@ -177,6 +177,7 @@ from .core.api_config import (
 )
 from .core.pricing import price_for
 from .models import (
+    ACTION_BUCKET_LABELS,
     TRUST_REASON_NO_QUOTE,
     TRUST_REASON_NO_TEXT,
     TRUST_REASON_NOT_FOUND,
@@ -943,6 +944,22 @@ def _finding_row_html(
         text_cell += (
             f'<div class="finding-action">Action: {html.escape(action)}</div>'
         )
+    # The action plan: which to-do group the reviewed PDF's cover page files
+    # this finding under, and its one-line instruction when it differs from
+    # the reviewing channel's own action sentence above.
+    plan = getattr(f, "action", None)
+    bucket = str(getattr(plan, "bucket", "") or "")
+    if bucket in ACTION_BUCKET_LABELS and status != "REJECTED":
+        text_cell = (
+            f'<span class="priority-chip" data-priority="{_esc_attr(bucket)}">'
+            f"{html.escape(ACTION_BUCKET_LABELS[bucket])}</span> " + text_cell
+        )
+        instruction = str(getattr(plan, "instruction", "") or "").strip()
+        if instruction and instruction != action:
+            text_cell += (
+                '<div class="finding-action">To do: '
+                f"{html.escape(instruction)}</div>"
+            )
     located = getattr(f, "located_elsewhere", None)
     if located is not None:
         # The absence cross-check found what this absence reported missing.
@@ -2347,6 +2364,11 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
   vertical-align:middle; margin-left:4px;
 }
 .finding-action{margin-top:3px; font-weight:600; color:#2f5fd0}
+.priority-chip{display:inline-block; padding:0 6px; margin-right:2px; border-radius:9px;
+  font-size:11px; font-weight:700; white-space:nowrap; border:1px solid currentColor}
+.priority-chip[data-priority="FIRST"]{color:#b3261e}
+.priority-chip[data-priority="LATER"]{color:#b25c00}
+.priority-chip[data-priority="IF_TIME"]{color:#2f5fd0}
 /* Finding status chips */
 .fchip{
   display:inline-block; font-size:11px; font-weight:600; padding:2px 8px;

@@ -126,6 +126,8 @@ STAGE_STORY: dict[str, str] = {
                      "crops, a text search or the whole sheet before it decides.",
     "citation": "Looks up each cited code section on the web and checks the drawing's "
                 "claim against the source.",
+    "action_plan": "Sorts the finished findings into do first, do later and if time "
+                   "allows, and writes each a one-line instruction for the cover page.",
     "markup": "Draws the findings on a copy of the PDF, then reopens the file and proves "
               "every mark is really there.",
 }

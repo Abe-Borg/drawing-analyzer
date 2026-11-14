@@ -555,7 +555,7 @@ Two **QC review** checkboxes sit beside the focus:
 - **QC Markups** — the **full QC stack** (DA-010). Checking it runs the
   entire stack: synthesis, **two critique reads per sheet**, cross-sheet QC, the
   deterministic auditors, prose harvest, anchoring, the absence cross-check,
-  verification, citation checks, markup, and coverage reconciliation — then produces a **marked-up PDF + findings
+  verification, citation checks, the [action plan](#action-plan), markup, and coverage reconciliation — then produces a **marked-up PDF + findings
   CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)). By
   default **every ledger entry gets ink except the ones the verifier proved wrong**
   ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified findings
@@ -685,7 +685,7 @@ ctx = extract_drawing_context(
     # One product switch turns on the exhaustive stack (DA-010): synthesis, two
     # critique reads/sheet, cross-sheet QC, the deterministic auditors, prose
     # harvest, anchoring, the absence cross-check, verification, citation checks,
-    # markup, and coverage.
+    # the action plan, markup, and coverage.
     qc_markups=True,
     profiles=["my-office-checklist"], # optional user checklists (added to the model plan)
     markup_verified_only=False,       # opt-in conservative ink gate (§18 default: ink all but REJECTED)
@@ -697,6 +697,7 @@ ctx = extract_drawing_context(
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
     #   synthesize=False, identity=False, review_plan=False, absence_check=False,
+    #   action_plan=False,
     # governing_editions="NFPA 13 2025; IBC 2024" (or a list of entries) names
     # the code editions that govern when the drawings state the wrong one (see
     # Set identity below); load_ahj_atlas(path) reads them from an AHJ Atlas
@@ -1765,6 +1766,73 @@ stage at `PARTIAL`. Complete replies are cached on the set's text and the
 absences sent, and a cached hit is re-checked against the sheet text on every
 read.
 
+## Action plan
+
+Every earlier stage rates a finding by *severity*. The engineer who opens the
+reviewed PDF needs a different answer: what do I do first, and what exactly do
+I do. The action plan is the last paid step of a full QC run. It reads the
+finished findings — after anchoring, verification and the citation check, so it
+knows which ones were confirmed — and gives each one:
+
+- a **group**: *Do this first* (leaving it would cause rework, a failed plan
+  check, a safety or code problem, or it blocks another discipline), *Do this
+  later* (real, but contained), or *If time allows* (clarity, polish, a
+  low-stakes question, an item already shown elsewhere in the set). Severity
+  is the starting point, not the answer: the group is a judgment about
+  consequence, so a confirmed medium finding can outrank an unconfirmed high
+  one;
+- a one-line imperative **instruction**, at most about a dozen words;
+- whether the fix is **clear-cut** — settled by the finding itself, with no
+  decision left to make.
+
+It runs with **QC Markups** (`action_plan=False` turns it off as a debug
+override), as one text-only call per 80 findings on Sonnet 5.5 at medium
+effort (`DRAWING_ANALYZER_ACTION_PLAN_MODEL`). A finding the re-check ruled out
+is not on the to-do list and is not sent.
+
+**What the host does with the answer.** The group is taken as given. The
+instruction and the "clear-cut" claim are checked:
+
+1. **No new numbers or names.** An instruction may use only the numbers and
+   the lettered identifiers (sheet numbers, tags, detail marks) that appear in
+   the finding itself — its text, action, quote, cross-sheet legs and code
+   references. `Correct the total to 1500 GPM` on a finding that says 1400 is
+   discarded, and so is `Remove the reference to FP-501` on a finding about
+   `M-501`: identifiers are compared whole, not by their digits. The model
+   never calculates and never supplies a size, a tag or a sheet number.
+2. **One line.** An over-long instruction is discarded, not cut into something
+   the model did not write.
+3. **No hedging.** `Confirm…`, `Verify…`, `Coordinate…`, `…should…` can still
+   be a row's instruction, but such a line is never treated as clear-cut. A
+   hedging verb counts only as the verb of a clause, so *Add a check valve at
+   the FDC* is not hedged by its noun.
+
+**What reaches the sheet.** The model's "clear-cut" claim is necessary and never
+sufficient. An instruction is drawn beside its cloud only when all of these
+hold, and they are the host's facts, not the model's:
+
+- the finding was confirmed on re-check (`VERIFIED`) or computed from the
+  sheet's own text (`DETERMINISTIC`);
+- it was placed by its own quote found in the sheet's text, not by a tile
+  guess, and its evidence was not reduced-trust;
+- it is not a *question*;
+- for a *code* finding, the citation check supports the reference — the crop
+  re-check confirms what the drawing shows, not what the code says;
+- it is not an absence the cross-check found elsewhere in the set.
+
+The reason for the asymmetry: a wrong cloud asks someone to look; a wrong
+instruction tells someone to change the drawing. Expect a minority of findings
+to qualify. Every other finding keeps its instruction on the cover page and in
+its comment.
+
+**If the pass fails or skips a finding**, that finding is grouped by severity
+(high → first, medium → later, everything else → if time allows) and the cover
+page says so in one line. The stage is recorded as `PARTIAL` or `FAILED` in
+the run log, but it never lowers `qc_status`: it changes how findings are
+presented, never whether one was found. Complete replies are cached
+(`stage=action_plan`) on the exact findings sent, and a cached reply goes
+through the same checks as a live one.
+
 ## Verification pass
 
 Coverage proposes; precision disposes. Before any finding is clouded onto an
@@ -1941,8 +2009,12 @@ paths never appear in any exported artifact.
   `VERIFY (whole sheet):`) for a sheet-level one, nothing otherwise. The reason
   is still there, as a sentence in the same box.
 - **Index page(s).** Each reviewed PDF opens with **"AI DRAFT REVIEW - FINDINGS
-  INDEX"** — the cover page an engineer works from. Three columns: **ID**,
-  **Sheet**, and **What to do** (the recommended action, then the finding). The
+  INDEX"** — the cover page an engineer works from. Findings are listed in
+  three groups, **Do this first**, **Do this later** and **If time allows**
+  (see [Action plan](#action-plan); a group with nothing in it is not shown),
+  highest severity first within each. Three columns: **ID**, **Sheet**, and
+  **What to do** (the action plan's one-line instruction, or failing that the
+  reviewer's own recommended action, then the finding). The
   ID is drawn in the severity color, and the only status signal is a `VERIFY:`
   prefix on a finding that was not confirmed — one whose re-check was
   inconclusive or did not run, whose quote could not be checked against the
@@ -1957,9 +2029,33 @@ paths never appear in any exported artifact.
   stray dot. A finding the re-check ruled out is not listed; because QC numbers
   are assigned before the re-check, the page ends with one line naming the
   numbers that are missing for that reason.
-- **Bookmarks.** A **QC Findings** group in the bookmarks panel, one entry per
-  marked finding, each zooming onto its mark exactly as its cover row does. Any
-  bookmarks the source PDF already had are kept.
+- **Bookmarks.** A **QC Findings** group in the bookmarks panel, with one
+  folder per to-do group and one entry per marked finding, each zooming onto
+  its mark exactly as its cover row does. Any bookmarks the source PDF already
+  had are kept.
+- **Subject = the to-do group.** Every part of a finding's markup (cloud, tag,
+  callout, instruction) carries the Subject `1 - Do this first`,
+  `2 - Do this later` or `3 - If time allows`, so Bluebeam's Markups List can
+  sort and filter by it; filtering the list also dims everything else on the
+  sheet.
+- **Required actions on the sheet.** Where the fix is clear-cut, the
+  instruction is drawn beside its cloud as a native callout, in the severity
+  color and upper case: `QC-014: CORRECT THE TOTAL DEMAND TO 1400 GPM`. Which
+  findings qualify is the host's decision, not the model's
+  ([Action plan](#action-plan)). The box goes in clear space only — tested
+  against a render of the sheet as marked up, so it covers no linework, text
+  or other markup — in the nearest of eight positions around the cloud, trying
+  a wide box before a narrow one. Its leader may cross a line, as drafting
+  leaders do, but not a label or another finding's markup. With no clear spot
+  within about three inches there is no box, and the action stays in the
+  markup's comment.
+- **Sheet stamp.** Each marked-up sheet carries one small stamp in clear space,
+  out of the way (a corner first): *AI DRAFT REVIEW - 14 MARKUPS ON THIS SHEET.
+  Every markup has a comment with a suggested action; open one to read it. 5
+  show the required action on the sheet.* It says only what is true of that
+  sheet. It is page content on its own layer, **QC markups - Sheet notes**, not
+  an annotation: it adds no row to the Markups List and can be switched off
+  with the layer. A sheet with no clear spot gets no stamp.
 - **Popups are exhaustive**: the finding text, the verbatim quote, the
   cross-sheet pointer (dual-anchored conflicts cite each other by QC number),
   verification status + verifier note, code refs plus the
@@ -2031,8 +2127,10 @@ which by design has nothing there to find again.
 
 Every finding — inked or not — is also written to **`findings.csv`**, one row per
 finding with every field flattened (`qc_id` first; provenance in the `sources`
-column; citation columns, then the [absence cross-check](#absence-cross-check)'s
-three `located_*` columns, at the end), UTF-8 with a BOM and CRLF line endings so
+column; citation columns, the [absence cross-check](#absence-cross-check)'s
+three `located_*` columns, `checklist_items`, and the
+[action plan](#action-plan)'s `priority`, `instruction` and
+`instruction_on_sheet` at the end), UTF-8 with a BOM and CRLF line endings so
 Excel on Windows opens it cleanly. Model/drawing-controlled text cells are
 **formula-injection safe** (Phase 26B, DA-031): a cell starting with `=`, `+`,
 `-`, `@`, a tab, or a carriage return — even behind leading whitespace — is
@@ -2670,6 +2768,7 @@ quality decision.
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Haiku 5.5 | Prose-harvest structuring model (one small call per straggler, at medium effort on Haiku 5.5; existing model overrides retain low effort). |
 | `DRAWING_ANALYZER_ABSENCE_CHECK_MODEL` | Haiku 5.5 | [Absence cross-check](#absence-cross-check) model, text-only, at medium effort: one call per 25 sheet-level absences. Every hit it reports is re-checked by the host before it changes anything. |
+| `DRAWING_ANALYZER_ACTION_PLAN_MODEL` | Sonnet 5.5 | [Action plan](#action-plan) model, text-only, at medium effort: one call per 80 findings. It ranks and words; the host decides which instructions may be drawn on a sheet. |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5.5 | The HTML report's in-browser **Ask AI** assistant (billed to the reader's key). Needs adaptive thinking plus the web-search **and web-fetch** server tools; a model without web fetch (such as Opus 5) degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |

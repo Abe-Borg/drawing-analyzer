@@ -69,3 +69,32 @@ def contains(outer, inner, tol: float = 0.5) -> bool:
         outer[0] <= inner[0] + tol and outer[1] <= inner[1] + tol
         and outer[2] >= inner[2] - tol and outer[3] >= inner[3] - tol
     )
+
+
+def callout_text_boxes(doc, page) -> list:
+    """The text box of each FreeText **callout** on ``page``, in user space.
+
+    A callout's ``/Rect`` also spans its leader, so it always touches the thing
+    it points at; the box the words sit in is ``/Rect`` inset by ``/RD``
+    (written by MuPDF as left, bottom, right, top differences).
+    """
+    kind, value = doc.xref_get_key(page.xref, "Annots")
+    if kind == "xref":
+        value = doc.xref_object(int(value.split()[0]), compressed=True)
+    out = []
+    for xref in (int(n) for n in re.findall(r"(\d+) 0 R", value or "")):
+        obj = doc.xref_object(xref, compressed=True)
+        if "FreeTextCallout" not in obj:
+            continue
+        rect = _RECT.search(obj)
+        rd = re.search(rf"/RD\s*\[\s*{_NUM}\s+{_NUM}\s+{_NUM}\s+{_NUM}", obj)
+        if rect and rd:
+            left, bottom, right, top = _rect(rect)
+            d = [float(v) for v in rd.groups()]
+            out.append((left + d[0], bottom + d[1], right - d[2], top - d[3]))
+    return out
+
+
+def overlaps(a, b) -> bool:
+    """Whether rects ``a`` and ``b`` (both l, b, r, t) share any area."""
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]

@@ -939,8 +939,31 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     statuses = {s.stage: s.status for s in ctx.stage_results}
     for stage in ("identity", "review_plan", "critique", "cross_qc", "synthesis",
                   "auditors", "prose_harvest", "edition_audit", "verification",
-                  "investigation", "citation", "absence_check", "markup"):
+                  "investigation", "citation", "absence_check", "action_plan",
+                  "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
+    # The action plan ranked every open finding by the reply's own rule
+    # (confirmed -> FIRST, else LATER), which severity alone would not produce,
+    # and under its own usage family. The ruled-out finding was never sent.
+    from drawing_analyzer.models import bucket_is_ranked, needs_verify, on_sheet_instruction
+
+    open_findings = [f for f in ctx.all_findings if f.verification.status != "REJECTED"]
+    assert open_findings and all(bucket_is_ranked(f) for f in open_findings)
+    assert all(
+        f.action.bucket == ("LATER" if needs_verify(f) else "FIRST") for f in open_findings
+    )
+    assert {f.action.bucket for f in open_findings} == {"FIRST", "LATER"}
+    assert _one(ctx.all_findings, quote=G.Q_F5).action is None
+    assert G.Q_F5 not in "\n".join(oracle.client.action_plan_request_texts)
+    assert "action_plan" in {r.stage_family for r in ctx.run_usage.records}
+    # An instruction reaches a sheet only for a finding the host confirmed, and
+    # only as an optional extra on that finding's own cloud.
+    with_box = {
+        r.placement.finding_id for r in ctx.markup_run.receipts
+        if any(ref.startswith("instruction:") for ref in r.annotation_refs)
+    }
+    allowed = {f.id for f in open_findings if on_sheet_instruction(f)}
+    assert with_box and with_box <= allowed
     # The two prose-harvested absences on M-101 were checked against the set's
     # text layers; nothing shows them, so neither is lowered or relocated.
     absence_texts = "\n".join(oracle.client.absence_request_texts)

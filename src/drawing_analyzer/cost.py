@@ -825,6 +825,13 @@ _ASSUMED_ABSENCE_TEXT_CHARS_PER_SHEET = 6_000
 _ABSENCE_CHARS_PER_TOKEN = 3.5
 _ASSUMED_ABSENCE_OUTPUT_TOKENS = 2_000            # per request
 _ABSENCE_FINDINGS_FRACTION = 0.15
+# Action plan: every open finding is sent once as a few short lines and answered
+# with a bucket and a one-line instruction, in requests of up to 80 findings.
+# Each request also carries the prompt, and bills its thinking as output.
+_ASSUMED_ACTION_PLAN_INPUT_TOKENS_PER_FINDING = 180
+_ASSUMED_ACTION_PLAN_OUTPUT_TOKENS_PER_FINDING = 60
+_ASSUMED_ACTION_PLAN_REQUEST_INPUT_TOKENS = 900
+_ASSUMED_ACTION_PLAN_REQUEST_OUTPUT_TOKENS = 2_000
 _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
 # The verdict itself is ~150 tokens, but verification now runs adaptive thinking
 # at medium effort and thinking bills at the OUTPUT rate — so an estimate built
@@ -940,6 +947,7 @@ class StageModels:
     verification: str
     investigation: str
     absence_check: str = ""
+    action_plan: str = ""
 
     @property
     def distinct(self) -> list[str]:
@@ -949,6 +957,7 @@ class StageModels:
             self.digest, self.critique, self.identity, self.review_plan,
             self.synthesis, self.focus, self.cross_qc, self.harvest,
             self.absence_check, self.citation, self.verification, self.investigation,
+            self.action_plan,
         ):
             if m and m not in seen:
                 seen.append(m)
@@ -970,6 +979,7 @@ def resolve_stage_models(
     threaded parameter rather than an env-var resolver.
     """
     from .absence_check import absence_check_model
+    from .action_plan import action_plan_model
     from .citation_check import citation_model
     from .critique import critique_model
     from .cross_qc import cross_qc_model
@@ -994,6 +1004,7 @@ def resolve_stage_models(
         verification=verification_model or default_verify_model(),
         investigation=investigation_model(),
         absence_check=absence_check_model(),
+        action_plan=action_plan_model(),
     )
 
 
@@ -1413,6 +1424,34 @@ def estimate_exhaustive_run_cost(
         family="absence_check", items=absence_high, items_low=absence_low,
     ))
 
+    # Action plan — one short text pass over the final findings, last of the
+    # paid stages. Small beside the vision reads, but quoted like the rest so
+    # the estimate and the live projection both account for it.
+    from .action_plan import _MAX_FINDINGS_PER_REQUEST as _ACTION_PLAN_CHUNK
+
+    action_model = stage_models.action_plan or stage_models.citation
+
+    def _action_plan_tokens(findings_per_sheet: float) -> tuple[int, int, int]:
+        findings = max(0, round(sheet_count * findings_per_sheet))
+        requests = math.ceil(findings / _ACTION_PLAN_CHUNK)
+        return (
+            requests,
+            findings * _ASSUMED_ACTION_PLAN_INPUT_TOKENS_PER_FINDING
+            + requests * _ASSUMED_ACTION_PLAN_REQUEST_INPUT_TOKENS,
+            findings * _ASSUMED_ACTION_PLAN_OUTPUT_TOKENS_PER_FINDING
+            + requests * _ASSUMED_ACTION_PLAN_REQUEST_OUTPUT_TOKENS,
+        )
+
+    plan_low_n, plan_low_in, plan_low_out = _action_plan_tokens(_FINDINGS_PER_SHEET_LOW)
+    plan_high_n, plan_high_in, plan_high_out = _action_plan_tokens(_FINDINGS_PER_SHEET_HIGH)
+    components.append(_component(
+        "Action plan", plan_high_in, plan_high_out, model=action_model, batch=False,
+        input_tokens_low=plan_low_in, output_tokens_low=plan_low_out,
+        note=f"sorts the findings into what to do first, with "
+             f"{friendly_model_name(action_model)}",
+        family="action_plan", items=plan_high_n, items_low=plan_low_n,
+    ))
+
     # Verification & citation scale with volume — quoted as a low–high band below.
     def _verify(findings: float) -> CostComponent:
         n = max(0, round(findings))
@@ -1561,8 +1600,8 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         f"model review plan, {est.critique_runs} critique read(s) per sheet, "
         "cross-sheet QC, "
         "deterministic auditors, prose harvest, the absence cross-check, "
-        "verification, the uncertain-finding investigation loop, and citation "
-        "checks.",
+        "verification, the uncertain-finding investigation loop, citation "
+        "checks, and the action plan.",
         "",
         _basis_line(est.shape_aware, est.unmeasured_pages),
         _OUTPUT_BAND_NOTE,

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from drawing_analyzer.absence_check import ABSENCE_CHECK_SYSTEM_PROMPT
+from drawing_analyzer.action_plan import ACTION_PLAN_SYSTEM_PROMPT
 from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT
 from drawing_analyzer.cross_qc import (
@@ -474,6 +475,7 @@ class ScriptedQCClient(BetaClientMixin):
         self.plan_request_texts: list[str] = []
         self.investigate_calls = 0
         self.absence_request_texts: list[str] = []
+        self.action_plan_request_texts: list[str] = []
         # (request text, image bytes, whether a tool call was permitted) per turn.
         self.investigate_requests: list[tuple[str, list[bytes], bool]] = []
 
@@ -522,6 +524,8 @@ class ScriptedQCClient(BetaClientMixin):
             return self._investigate(kw, text)
         if system == ABSENCE_CHECK_SYSTEM_PROMPT:
             return self._absence(text)
+        if system == ACTION_PLAN_SYSTEM_PROMPT:
+            return self._action_plan(text)
         return _msg("ok", 1, 1)
 
     # -- per-stage behaviors ------------------------------------------------ #
@@ -647,6 +651,26 @@ class ScriptedQCClient(BetaClientMixin):
             for handle in re.findall(r"^\[(A\d+)\] ", text, re.MULTILINE)
         ]
         return _msg(_fenced({"results": results}), 300, 30)
+
+    def _action_plan(self, text: str) -> FakeMessage:
+        # Ranked by what the request says about each finding, on a rule severity
+        # alone cannot reproduce: a finding the re-check confirmed is FIRST with
+        # a clear fix, everything else is LATER and not clear. The instruction
+        # carries no number, so the host's "no new numbers" check keeps it.
+        self.action_plan_request_texts.append(text)
+        if self._sabotage == "action_plan":
+            return _msg("I would rather not sort these, sorry.", 200, 20)
+        results = []
+        for handle, confirmed in re.findall(
+            r"^\[(F\d+)\] .*confirmed by re-check: (yes|no)$", text, re.MULTILINE
+        ):
+            yes = confirmed == "yes"
+            results.append({
+                "finding": handle, "bucket": "FIRST" if yes else "LATER",
+                "instruction": "Correct the item shown here" if yes else "Look into this item",
+                "clear_fix": yes,
+            })
+        return _msg(_fenced({"results": results}), 400, 60)
 
     def _identity(self, text: str) -> FakeMessage:
         self.identity_calls += 1

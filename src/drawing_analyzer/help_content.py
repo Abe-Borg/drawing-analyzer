@@ -994,6 +994,7 @@ absence check  (1 call/25)      Anthropic paid
 verify         (1 call/finding) Anthropic paid
 investigate    (<=40, by size)  Anthropic paid
 citation check (per code ref)   Anthropic paid
+action plan    (1 call/80)      Anthropic paid
 draw markups, reopen, reconcile your PC   free
 report, exports, run manifest   your PC   free
 """
@@ -1391,6 +1392,33 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "cached against the content of the whole set — so a warm re-run replays "
                 "the same evidence with no API calls, and any edit to a drawing throws the "
                 "cached answer away."
+            ),
+        ),
+        _section(
+            "Findings become a to-do list",
+            _para(
+                "After every check has run, one text-only call per 80 findings sorts "
+                "them into three groups - do this first, do this later, if time allows - "
+                "and writes each a one-line instruction. The reviewed PDF's cover page, "
+                "its bookmarks and the Markups List's Subject column all use those groups."
+            ),
+            _bullet(
+                "The instruction is drawn on the sheet, beside its cloud, only when the "
+                "AI calls the fix clear-cut AND the finding was confirmed on re-check "
+                "(or computed from the sheet's own text), its quote was found on the "
+                "sheet, it is not a question, and any code reference checked out."
+            ),
+            _bullet(
+                "An instruction may not contain a number, size or sheet number that is "
+                "not in the finding itself; one that does is discarded."
+            ),
+            _bullet(
+                "A box is placed only in clear space. If there is none near the cloud, "
+                "there is no box and the action stays in the markup's comment."
+            ),
+            _bullet(
+                "If the call fails, findings are grouped by severity and the cover page "
+                "says so. It never changes whether a finding is reported."
             ),
         ),
         _section(

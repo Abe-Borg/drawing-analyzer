@@ -56,6 +56,8 @@ Module layout::
                       set's text layers (text-only; host-grounded hits)
     verify.py         per-finding crop verification pass
     citation_check.py web-search check of cited code sections
+    action_plan.py    final findings -> to-do groups + one-line instructions
+                      (text-only; the host decides what may be drawn on a sheet)
     annotate.py       reviewed-PDF markup writer + reopen/reconcile receipts
                       (artifact-backed coverage, DA-007; PyMuPDF importer 2 of 2)
     run_journal.py    per-run event journal -> sanitized run.log (secrets

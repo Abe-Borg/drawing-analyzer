@@ -2829,6 +2829,74 @@ def _run_qc_stages(
                 _log.warning("citation check failed: %s", exc)
     _finish_stage(stage_results, journal, citation_stage)
 
+    # --- action plan: sort the finished findings into the cover page's three
+    # groups and give each a one-line instruction. Runs last of the paid stages
+    # so it sees every verdict, and only on a markup run: the reviewed PDF is
+    # what it is for. ``expected=False``: it changes how findings are presented,
+    # never whether one was found, so a failed pass is a warning (the cover page
+    # groups by severity and says so) and never lowers ``qc_status``.
+    action_stage = StageResult(stage="action_plan", expected=False)
+    if config.run_action_plan and qc_markups:
+        from .action_plan import (
+            action_plan_model,
+            apply_severity_fallback,
+            is_open_finding,
+            plan_actions,
+        )
+
+        open_findings = [f for f in entries if is_open_finding(f)]
+        if not open_findings:
+            action_stage.status = "SKIPPED_VALID"
+        else:
+            cancellation.check()
+            if progress is not None:
+                progress(total, total, "Sorting findings into a to-do list")
+            _emit("STAGE_START", stage="action_plan", findings=len(open_findings))
+            try:
+                pres = plan_actions(open_findings, client=client, cache=cache)
+                if pres.requests:
+                    _record_usage(
+                        run_usage, family="action_plan", instance="action_plan",
+                        model=action_plan_model(),
+                        input_tokens=pres.input_tokens, output_tokens=pres.output_tokens,
+                        request_usage=pres.request_usage,
+                        terminal_status="PARTIAL" if pres.partial else "COMPLETE",
+                    )
+                if pres.cached_requests:
+                    _record_usage(
+                        run_usage, family="action_plan", instance="action_plan_cache",
+                        model=action_plan_model(), transport="CACHE",
+                        cache_hit=True, parent="action_plan",
+                        terminal_status="PARTIAL" if pres.partial else "COMPLETE",
+                    )
+                action_stage.calls_planned = pres.requests + pres.failed_requests
+                action_stage.calls_succeeded = pres.requests
+                action_stage.calls_failed = pres.failed_requests
+                action_stage.items_in = pres.findings
+                action_stage.items_out = pres.ranked
+                if pres.dropped_instructions:
+                    action_stage.warnings.append(
+                        f"{pres.dropped_instructions} instruction(s) discarded: too "
+                        "long, or naming a number the finding does not"
+                    )
+                if pres.partial:
+                    if pres.error:
+                        action_stage.errors.append(str(pres.error))
+                    action_stage.warnings.append(
+                        f"{pres.unranked} finding(s) grouped by severity instead"
+                    )
+                    action_stage.status = "PARTIAL"
+                else:
+                    action_stage.status = "COMPLETE"
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                action_stage.status = "FAILED"
+                action_stage.errors.append(str(exc))
+                _log.warning("action plan failed: %s", exc)
+            # Whatever the pass did or did not answer, every open finding
+            # leaves here with a group.
+            apply_severity_fallback(open_findings)
+    _finish_stage(stage_results, journal, action_stage)
+
     # The last stop point: once markup writing starts, the run finishes — its
     # paid work is all done, and stopping then would only discard it.
     cancellation.check()
@@ -3083,6 +3151,7 @@ def extract_drawing_context(
     review_plan: bool | None = None,
     investigate: bool | None = None,
     absence_check: bool | None = None,
+    action_plan: bool | None = None,
     governing_editions: "str | list[str] | None" = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
@@ -3344,6 +3413,7 @@ def extract_drawing_context(
         review_plan=review_plan,
         investigate=investigate,
         absence_check=absence_check,
+        action_plan=action_plan,
         governing_editions=governing_editions,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
