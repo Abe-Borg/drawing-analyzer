@@ -147,6 +147,84 @@ def test_render_sheet_suppresses_blank_tiles():
     assert rs.overview.png_bytes
 
 
+def _corner_text_pdf(path: Path) -> Path:
+    pymupdf = pytest.importorskip("pymupdf")
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=792, height=612)
+        page.insert_text((40, 40), "M-101 NORTH")
+        page.draw_line((40, 60), (300, 200))
+        doc.save(path)
+    return path
+
+
+@pytest.mark.parametrize("worker", ["spawned", "raising", "broken"])
+def test_raster_worker_output_is_byte_identical_to_in_process(tmp_path, monkeypatch, worker):
+    """The GUI rasterizes in a spawned process; nothing it produces may differ.
+
+    A worker that fails (cannot start, raises, or dies) falls back to the
+    in-process render, and a pool that keeps dying is given up after a bound.
+    """
+    pytest.importorskip("pymupdf")
+    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
+
+    from drawing_analyzer import render
+
+    pdf = _corner_text_pdf(tmp_path / "set.pdf")
+    crops = [("k", 0, [30, 20, 320, 220], 200)]
+
+    def outputs():
+        sheets = list(render.iter_rendered_sheets([pdf], rows=2, cols=2))
+        tiles = [
+            (s.overview.png_bytes, s.omitted_tiles,
+             [(t.row, t.col, t.png_bytes, t.width_px, t.height_px) for t in s.tiles])
+            for s in sheets
+        ]
+        return tiles, list(render.iter_region_crops(pdf, crops))
+
+    expected = outputs()
+    assert expected[0][0][1]          # the grid really had blank tiles to suppress
+    rendered: list[str] = []
+
+    class _Dead:
+        def result(self):
+            raise BrokenProcessPool("worker died")
+
+    if worker == "spawned":
+        class Pool(ProcessPoolExecutor):
+            def submit(self, fn, *args, **kwargs):
+                if fn.__name__ == "_raster_worker_render":
+                    rendered.append(worker)
+                return super().submit(fn, *args, **kwargs)
+    else:
+        class Pool:
+            def __init__(self, **kwargs):
+                pass
+
+            def submit(self, fn, *args, **kwargs):
+                if fn.__name__ != "_raster_worker_render":
+                    return _Dead()
+                rendered.append(worker)
+                if worker == "raising":
+                    raise RuntimeError("worker could not take the job")
+                return _Dead()
+
+            def shutdown(self, **kwargs):
+                pass
+
+    monkeypatch.setattr(render, "_RASTER_POOL_EXECUTOR", Pool)
+    render.enable_raster_worker()
+    try:
+        assert outputs() == expected
+    finally:
+        render.shutdown_raster_worker()
+    # Overview + four tiles + one crop, unless a dying pool is given up on.
+    clips = 1 + 4 + 1
+    assert len(rendered) == (
+        render._RASTER_MAX_POOL_FAILURES if worker == "broken" else clips
+    )
+
+
 def test_render_sheet_near_blank_is_off_by_default(monkeypatch):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.render import render_sheet

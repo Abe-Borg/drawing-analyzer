@@ -427,7 +427,9 @@ map lives in `src/drawing_analyzer/__init__.py`.
   `help_content.INPUT_HELP`; each has a "?" that opens `_open_input_help`, one
   popup at a time) right above the *Loaded files* list (`_file_groups` is the
   data, `_refresh_files_panel` the widgets; call it on every input change,
-  never from `_refresh_summary`, which fires per keystroke). Drawings are
+  never from `_refresh_summary`; focus-box typing goes through
+  `_refresh_summary_soon`, which waits for a pause, and the sheet list comes
+  from `_sheet_refs`, cached by `sources_fingerprint`). Drawings are
   added only from the drop zone. The bottom rows, progress line and Analyze row are packed
   `side="bottom", after=` the footer so a short window clips the log and
   sections, never the actions. `CTkScrollableFrame`'s vertical scrollbar
@@ -1024,6 +1026,16 @@ consume ledger entries and nothing else.
   text.
 - PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
   the API calls.
+- **PyMuPDF holds the GIL** for the whole of `get_pixmap` and `tobytes("png")`,
+  so a render on a worker thread freezes the GUI's Tk thread. The GUI calls
+  `render.enable_raster_worker()` (one spawned process; `_rasterize` is the one
+  pixel path for tiles, overviews and `render_region`) and
+  `annotate.isolate_writes_from_caller(True)`. The worker must stay
+  byte-identical (same file, page, clip and zoom); any failure falls back
+  in-process, a dying pool is dropped after `_RASTER_MAX_POOL_FAILURES`, and a
+  patched `get_pixmap` / `tobytes` / `open` keeps the in-process path. Render
+  batches end with `_release_raster_worker_docs()` so the worker never holds a
+  source file open. Off by default for every other caller.
 - **A GOTO destination is a third coordinate space.** A destination is default
   user space; `add_*_annot()` and `insert_text()` take the un-rotated
   CropBox-relative space. `_derotate_point` / `_derotate_rect` are annotation
