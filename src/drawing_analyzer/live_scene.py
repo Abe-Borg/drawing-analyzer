@@ -39,7 +39,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple
 
 from .live_view import (
     FINDING_BUCKETS,
@@ -375,6 +375,11 @@ class LiveScene:
         self._tips: list[tuple[float, float, float, float, list]] = []
         self._wrapped: dict[Any, list[str]] = {}
         self._scale = 1.0
+        # Clickable regions a view registered on the last frame (add_hit), and
+        # the Plan tab's checklist picks (live_tabs.ChecklistPicks).
+        self._hits: list[tuple] = []        # (x0, y0, x1, y1, action, menu, pointer)
+        self.picks = live_tabs.ChecklistPicks()
+        self.hot = False        # the pointer is over something clickable
 
     # -- tabs --------------------------------------------------------------- #
 
@@ -383,18 +388,47 @@ class LiveScene:
         if tab not in live_tabs.TAB_KEYS or tab == self.tab:
             return False
         self.tab = tab
+        self.picks.menu = None
+        self._hits = []
         return True
 
     def click(self, x: float, y: float) -> bool:
-        """A click at canvas ``(x, y)``: switches tab when it lands on one."""
+        """A click at canvas ``(x, y)``; ``True`` when it switched the tab.
+
+        A tab under it is shown. Otherwise the topmost region a view registered
+        on the last frame acts (``add_hit``). While a menu is open only the
+        menu's own regions act; a click anywhere else just closes it.
+        """
         for x0, y0, x1, y1, key in self._tab_hits:
             if x0 <= x <= x1 and y0 <= y <= y1:
+                self.picks.menu = None
                 return self.set_tab(key)
+        menu_open = self.picks.menu is not None
+        for x0, y0, x1, y1, action, menu, _pointer in reversed(self._hits):
+            if menu_open and not menu:
+                continue
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                action()
+                return False
+        self.picks.menu = None
         return False
+
+    def add_hit(self, x0: float, y0: float, x1: float, y1: float,
+                action: Callable[[], None], *, menu: bool = False,
+                pointer: bool = True) -> None:
+        """Register a clickable region for this frame; the last one registered
+        wins where regions overlap. ``menu``: part of an open menu.
+        ``pointer=False``: a region that only swallows clicks (no hand cursor)."""
+        self._hits.append((x0, y0, x1, y1, action, menu, pointer))
+
+    def take_request(self) -> Any:
+        """A request a click left for the host (save or copy checks), once."""
+        return self.picks.take_request()
 
     def wheel(self, steps: float) -> None:
         """Scroll the showing view by ``steps`` notches (positive = up)."""
         tab = self.tab
+        self.picks.menu = None              # a menu does not scroll with its row
         limit = self._scroll_max.get(tab, 0.0)
         cur = min(max(self.scroll.get(tab, 0.0), 0.0), limit)
         new = min(max(cur - float(steps) * 42.0 * self._scale, 0.0), limit)
@@ -409,6 +443,7 @@ class LiveScene:
         self.follow.clear()
         self._tab_seen.clear()
         self._wrapped.clear()
+        self.picks.clear()
 
     def scroll_offset(self, tab: str, content: float, view: float, dt: float,
                       *, follow: "float | None" = None) -> float:
@@ -482,7 +517,7 @@ class LiveScene:
         bottom_bottom = ticker_y - 14 * s
 
         self._hud(out, model, m, w - m, 6 * s, s, t, dt)
-        self._node_hits, self._cell_hits, self._tips = [], None, []
+        self._node_hits, self._cell_hits, self._tips, self._hits = [], None, [], []
         # The tab strip sits under the HUD: the board, and the four insight
         # views (live_tabs.py) that share its space. A panel too short to fit
         # the strip above the track and a row of cells shows the board alone.
@@ -500,7 +535,22 @@ class LiveScene:
             self._board_view(out, model, m, w, h, body_top, bottom_bottom, s, t, dt)
         self._ticker(out, model, m, w - m, ticker_y, s, t)
         self._tooltip(out, model, w, h, s, t)
+        self.hot = self._pointer_hot()
         return out
+
+    def _pointer_hot(self) -> bool:
+        if self.hover is None:
+            return False
+        hx, hy = self.hover
+        if any(x0 <= hx <= x1 and y0 <= hy <= y1 for x0, y0, x1, y1, _k in self._tab_hits):
+            return True
+        menu_open = self.picks.menu is not None
+        for x0, y0, x1, y1, _a, menu, pointer in reversed(self._hits):
+            if menu_open and not menu:
+                continue
+            if x0 <= hx <= x1 and y0 <= hy <= y1:
+                return pointer
+        return False
 
     def _board_view(self, out, model, m, w, h, top, bottom_bottom, s, t, dt) -> None:
         """The board tab: the pipeline track, the sheet board and telemetry."""

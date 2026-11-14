@@ -276,7 +276,8 @@ by the **Live view | Log** toggle on its first row:
     (`U1.3`, `M2.7`). As each sheet's critique comes back, every item's meter
     fills in: flagged, unclear, reported met, not applicable or unanswered,
     counted in sheets. Hover an item for its full text and counts. A standard
-    run writes no checklist, and the tab says so.
+    run writes no checklist, and the tab says so. **Keeping checks** — see
+    *Saving checks from the Plan tab* below.
   - **Findings** — the path from report to proof, as four steps that light up
     as the run reaches them: **reported by the reads** (first read, critique
     reads, cross-sheet), **in the ledger** (after duplicate reports are
@@ -288,6 +289,50 @@ by the **Live view | Log** toggle on its first row:
 - **Log** — the timestamped activity log, as before. While the board is
   showing, warnings and errors logged behind it are counted beside the toggle
   (*● 2 warnings in the log*); click it to jump to the log.
+
+**Saving checks from the Plan tab.** The model writes a fresh review plan for
+every set. When it writes a check worth keeping, you can make it one of your
+own checklist items so later runs apply it on every set it fits, whether or not
+the model thinks of it again:
+
+- **Tick checks.** Every check of the model's plan has a box. The box on a
+  plan's heading row (*MODEL'S PLAN · Fire protection*) ticks the whole plan;
+  **Select all** at the top ticks every check, and turns into **Deselect all**
+  once everything is ticked. Then press **Save N selected…**.
+- **Or click one check** (anywhere on the row but its box) for its menu: the
+  whole text of the check, how this run answered it, and **Save checklist
+  item…**, **Add to selection** and **Copy check text**. A click anywhere else
+  closes the menu.
+- Your own checklist items have a bookmark instead of a box: they are already
+  saved. Their menu only copies.
+
+The **Save** dialog puts the checks either in **a new checklist** (you name it)
+or **adds them to one already in your profiles folder**. **Applies to** is the
+sheet-number prefixes the checklist is suggested for, prefilled from the
+sheets the plan was written for (a fire-protection plan on `FP-` sheets
+suggests `FP`). Remove a prefix with its **×**, or type one and press Enter.
+With no prefix the checklist applies to every sheet, but you have to tick it
+under *Review profiles* yourself. The dialog shows the checks it will write and
+the file it will write to, and it warns you about two things:
+
+- **Repeats are skipped.** A check whose text is already in your checklist
+  (case, spacing and a trailing full stop ignored) is not written twice. The
+  dialog names where it already is (*M1.6 is already in your checklist (U1.2)*).
+- **Code citations are saved as written**, edition included (*NFPA 13 2025*).
+  Re-check them before you rely on the checklist for a set that adopts a
+  different edition.
+
+After the save, the checks show **saved · *checklist name*** in green, a
+skipped one says *already in your checklist (U1.2)*, the ticker confirms the
+save, and the checklist appears under **QC review → Review profiles**, ticked
+when it fits the loaded set. The file is an ordinary checklist (see
+[Review profiles](#review-profiles)): open it in any text editor to reword,
+reorder or delete items. A new checklist never overwrites an existing file; it
+takes the next free name (`data-center-fp-2.md`). Adding to an existing
+checklist leaves its lines as they were, adds the new checks at the end, bumps
+a whole-number `version`, sets `date` to today and keeps the file's own line
+endings. Nothing is saved until you press **Save**, and saving is local: no
+API call.
 
 **Turning the visuals off.** Pick **Log** and the board stops drawing
 entirely; collapse the *Activity* header and nothing is drawn either (during a
@@ -1484,6 +1529,12 @@ and from your own — **`~/.drawing_analyzer/profiles/`** (override with
 `DRAWING_ANALYZER_PROFILES_DIR`), where your file wins on a name collision.
 Bump `version` (or just edit — the content hash changes either way) to re-run
 the critique against the new checklist.
+
+You can also build these files from the model's own review plans without
+writing them by hand: on the Live view's **Plan** tab, tick the checks worth
+keeping and press **Save** (see *Saving checks from the Plan tab* under
+[Live view](#live-view--watch-the-run)). The checks are written in this format,
+into a new file or at the end of an existing one.
 
 ## Cross-sheet QC
 

@@ -738,6 +738,29 @@ class ChecklistPlan:
     def for_key(self, key: Any) -> SheetChecklist:
         return self.for_scope(self._scopes.get(key))
 
+    def sheet_prefixes(self, profile_name: str) -> tuple[str, ...]:
+        """The sheet-number prefixes the named checklist was aimed at, sorted.
+
+        A person's checklist carries its own (``disciplines``). A model plan is
+        aimed by discipline, so its prefixes are those of the sheets the
+        identity stage classified under that discipline and whose own number
+        was read (``FP-101`` → ``"fp"``). ``()`` when nothing narrows it: an
+        unscoped run, a ``general`` plan, or no sheet number read. Used to
+        suggest where a check saved from this run should apply next time.
+        """
+        profile = next((p for p in self.profiles if p.name == profile_name), None)
+        if profile is None:
+            return ()
+        if not is_model_plan(profile):
+            return tuple(profile.disciplines)
+        tags = set(profile.disciplines)
+        if not tags or _GENERAL_DISCIPLINE in tags:
+            return ()
+        return tuple(sorted({
+            scope.token for scope in self._scopes.values()
+            if scope.token and scope.discipline in tags
+        }))
+
     def for_ref(self, ref: Any) -> SheetChecklist:
         from .models import sheet_ref_key
 

@@ -305,6 +305,13 @@ def test_scoping_leaves_ids_and_other_sheets_keys_untouched():
     assert cp.for_key(("s.pdf", 1)).ids == ("U2.1", "M1.1")
     assert cp.for_key(("s.pdf", 2)).ids == ("U2.1", "M1.1")
     assert cp.for_key(("unknown.pdf", 0)).ids == ("U1.1", "U2.1", "M1.1")  # unscoped
+    # Where each checklist was aimed, as sheet prefixes (the Plan tab offers
+    # them when its checks are kept): a person's by its own tags, a plan by
+    # the sheets classified under its discipline; nothing when nothing narrows.
+    assert cp.sheet_prefixes("fp") == ("fp",)
+    assert cp.sheet_prefixes(plan.name) == ("m",)
+    assert cp.sheet_prefixes("office") == ()
+    assert P.ChecklistPlan([plan]).sheet_prefixes(plan.name) == ()
     # Editing the fire-protection checklist re-keys only the sheet that got it.
     edited = P.ChecklistPlan(
         [P.Profile(name="fp", title="fp", disciplines=("fp",), items=("PUMP check",)),

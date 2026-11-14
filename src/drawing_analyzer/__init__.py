@@ -38,6 +38,9 @@ Module layout::
                       (ChecklistPlan) and the injected checklist block
     checklist_matrix.py  checklist results: per-sheet answers + final findings
                       -> item x sheet report (pure; no model call)
+    checklist_save.py checks picked on the Live view's Plan tab -> a new or
+                      existing checklist file in the profiles folder (atomic,
+                      repeats skipped; no model call)
     ledger.py         the per-run findings ledger every QC channel feeds (Part III)
     auditors/         deterministic zero-API auditors (references, arithmetic,
                       naming, title-block, sheet-index)

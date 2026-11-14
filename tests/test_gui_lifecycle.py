@@ -940,3 +940,34 @@ def test_live_view_choice_is_remembered_beside_other_preferences(tmp_path):
     assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is True
     assert preferences.get_str(prefs, preferences.LIVE_TAB) == "findings"
     assert steps == [1.0, -2.0, 1.0, -3.0, 0.0]
+
+
+def test_checks_kept_from_the_plan_tab_are_marked_logged_and_listed(tmp_path):
+    from drawing_analyzer import checklist_save as cs
+    from drawing_analyzer.live_tabs import CopyRequest
+
+    plan = cs.save_new("Data center FP", [
+        cs.PickedCheck("M1.1", "Each data hall states its preaction type"),
+        cs.PickedCheck("M1.2", "Hangers are braced for the seismic design category"),
+        cs.PickedCheck("M1.3", "hangers are braced for the seismic design category."),
+    ], known=[("U1.1", "Each data hall states its preaction type")], directory=tmp_path)
+    with _gui_module() as (gui, _tk):
+        marked, said, logged, reloaded, clip = [], [], [], [], []
+        stub = types.SimpleNamespace(
+            _live=types.SimpleNamespace(
+                mark_saved=lambda ids, label, held, message="": marked.append(
+                    (ids, label, held, message)),
+                announce=lambda text, level="good": said.append(text)),
+            _log=lambda m, **k: logged.append((m, k.get("level"))),
+            _reload_profile_panel=lambda: reloaded.append(True),
+            clipboard_clear=clip.clear, clipboard_append=clip.append,
+        )
+        gui.DrawingAnalyzerApp._on_checks_saved(stub, plan)
+        gui.DrawingAnalyzerApp._on_live_request(stub, CopyRequest("M1.5", "Obstruction rules"))
+    ids, label, held, message = marked[0]
+    # The kept check is tagged with its checklist; the skipped ones say where
+    # their text already was (the person's own U1.1, the M1.2 picked with it).
+    assert (ids, label, held) == (["M1.2"], plan.name, {"M1.1": "U1.1", "M1.3": "M1.2"})
+    assert logged == [(f"{message} ({plan.path.name} in your profiles folder)", "success")]
+    assert reloaded == [True]                    # the Review profiles list re-reads the folder
+    assert clip == ["Obstruction rules"] and said == ["Copied M1.5 to the clipboard"]

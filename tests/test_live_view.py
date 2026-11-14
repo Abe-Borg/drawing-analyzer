@@ -318,6 +318,9 @@ class _FakeCanvas:
         self.stack.append(iid)
         self.calls.append("tag_raise")
 
+    def configure(self, **opts):
+        self.cursor = opts.get("cursor", getattr(self, "cursor", ""))
+
     def winfo_width(self):
         return self.w
 
@@ -776,6 +779,103 @@ def test_clicking_a_tab_shows_it_and_a_short_panel_keeps_the_board():
     prims = scene.build(panel.model, 800, 170, clock.t)
     assert scene._tab_hits == []
     assert sum(1 for p in prims if p.key.startswith("c") and p.key[1:].isdigit()) == 6
+
+
+def _middle(prims, key):
+    p = next(p for p in prims if p.key == key)
+    if p.kind == "text":
+        return p.coords[0] + 4, p.coords[1]
+    xs, ys = p.coords[0::2], p.coords[1::2]
+    return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+
+def _row(prims, item_id: str) -> str:
+    """The slot key (``ck3``) the Plan tab drew ``item_id`` in."""
+    return next(p.key[:-3] for p in prims if p.key.startswith("ck") and p.key.endswith("_id")
+                and dict(p.opts)["text"] == item_id)
+
+
+def test_checks_from_the_models_plan_are_picked_and_handed_over_to_be_saved():
+    from dataclasses import replace
+
+    from drawing_analyzer.live_tabs import CopyRequest, SaveRequest
+    from drawing_analyzer.profiles import ChecklistPlan, SheetScope
+
+    r = _insight_run(items=3)
+    office, model_plan = r.plan.profiles
+    model_plan = replace(model_plan, disciplines=("fire-protection",))
+    r.monitor.publish("checklist", ChecklistPlan([office, model_plan], {
+        ("a", 0): SheetScope("fp", "fire-protection"), ("a", 1): SheetScope("f", "fire-protection"),
+        ("a", 2): SheetScope("m", "mechanical")}))
+    r.model.poll(r.monitor)
+    canvas, sched = _FakeCanvas(980, 420), _Scheduler()
+    asked: list = []
+    panel = LivePanel(canvas, schedule=sched.schedule, cancel=lambda h: None, clock=r.clock,
+                      on_request=asked.append, tab="plan")
+    panel.model = r.model
+    picks = panel.scene.picks
+    frame = lambda: panel.scene.build(r.model, 980, 420, r.clock.t)   # noqa: E731
+
+    def click(key: str) -> None:
+        panel.click(*_middle(frame(), key))
+
+    # Select all takes the model's checks only: a person's own are already kept.
+    click("pk_all")
+    assert picks.selected == {"M1.1", "M1.2", "M1.3"}
+    click("pk_all")                                       # Deselect all
+    assert picks.selected == set() and asked == []
+    prims = frame()
+    group = next(p.key[:-3] for p in prims if p.key.endswith("_id")
+                 and dict(p.opts)["text"] == "MODEL'S PLAN")
+    click(f"{group}_cb")                                   # the whole plan
+    click(f"{_row(frame(), 'M1.2')}_cb")                   # ...less one
+    click(f"{_row(frame(), 'U1.1')}_cb")                   # a person's own: no box to tick
+    assert picks.selected == {"M1.1", "M1.3"} and picks.menu == "U1.1"
+    click("ck_cap_t")                                     # anywhere else closes the menu
+    assert picks.menu is None
+    click("pk_save")
+    save = asked.pop()
+    assert isinstance(save, SaveRequest)
+    assert [(c.id, c.text, c.prefixes) for c in save.checks] == [
+        ("M1.1", model_plan.items[0], ("f", "fp")), ("M1.3", model_plan.items[2], ("f", "fp"))]
+    assert save.known == tuple((f"U1.{i + 1}", t) for i, t in enumerate(office.items))
+    assert save.codes == ("NFPA 13 2025",)               # adopted, and named by the checks
+
+    # A click on a row (not its box) opens its menu and picks nothing. While it
+    # is open a click elsewhere only closes it.
+    click(f"{_row(frame(), 'M1.2')}_t")
+    assert picks.menu == "M1.2" and "pm_bg" in {p.key for p in frame()}
+    click(f"{_row(frame(), 'M1.2')}_cb")
+    assert picks.menu is None and picks.selected == {"M1.1", "M1.3"}
+    click(f"{_row(frame(), 'M1.2')}_t")
+    click("pm_save_t")
+    assert [c.id for c in asked.pop().checks] == ["M1.2"] and picks.menu is None
+    click(f"{_row(frame(), 'M1.2')}_t")
+    click("pm_copy_t")
+    assert asked.pop() == CopyRequest("M1.2", model_plan.items[1])
+
+    # The host saved two and skipped one as already kept: those rows say so,
+    # leave the selection and can no longer be picked; their menu only copies.
+    panel.mark_saved(["M1.1"], "office-fp", {"M1.3": "U1.2"}, message="Saved 1 check")
+    prims = frame()
+    tags = {dict(p.opts)["text"] for p in prims if p.key.endswith("_tag")}
+    assert {"saved · office-fp", "already in your checklist (U1.2)"} <= tags
+    assert picks.selected == set() and r.model.ticker[-1].text == "Saved 1 check"
+    click("pk_all")
+    assert picks.selected == {"M1.2"}
+    click(f"{_row(frame(), 'M1.1')}_t")
+    assert {"pm_copy_t"} == {p.key for p in frame() if p.key in ("pm_save_t", "pm_copy_t")}
+    panel.scroll(-1)                                      # a menu does not ride the wheel
+    assert picks.menu is None
+
+    # The pointer becomes a hand over anything clickable.
+    panel.hover(*_middle(frame(), "pk_save"))
+    for _ in range(3):
+        sched.run_next()
+    assert canvas.cursor == "hand2"
+
+    panel.begin()                                         # a new run starts clean
+    assert not (picks.selected or picks.saved or picks.held)
 
 
 def test_a_new_run_brings_every_view_back_to_following():

@@ -20,7 +20,12 @@ file list, a run starting).
 The canvas carries five tabs (the board, and the *Story*, *Thinking*, *Plan*
 and *Findings* views of :mod:`live_tabs`). The host forwards a click and the
 mouse wheel (:meth:`LivePanel.click`, :meth:`LivePanel.scroll`); ``on_tab`` is
-told when the showing tab changes, so the host can remember it.
+told when the showing tab changes, so the host can remember it. The Plan tab's
+checklist can be picked from; a click that asks to save checks or copy one
+hands ``on_request`` a :class:`~drawing_analyzer.live_tabs.SaveRequest` or
+:class:`~drawing_analyzer.live_tabs.CopyRequest`, and the host reports a save
+back with :meth:`LivePanel.mark_saved`. The canvas cursor becomes a hand over
+anything clickable.
 """
 from __future__ import annotations
 
@@ -58,6 +63,7 @@ class LivePanel:
         visible: Callable[[], bool] = lambda: True,
         on_summary: "Callable[[], None] | None" = None,
         on_tab: "Callable[[str], None] | None" = None,
+        on_request: "Callable[[Any], None] | None" = None,
         tab: str = "",
         scale: float = 1.0,
         enabled: bool = True,
@@ -75,6 +81,8 @@ class LivePanel:
         self._visible = visible
         self._on_summary = on_summary
         self._on_tab = on_tab
+        self._on_request = on_request
+        self._hot = False
         if tab:
             self.scene.set_tab(tab)
         self._clock = clock
@@ -118,9 +126,12 @@ class LivePanel:
         self.kick()
 
     def click(self, x: float, y: float) -> None:
-        """A click on the canvas: a tab under it becomes the showing view."""
+        """A click on the canvas: a tab under it becomes the showing view; on
+        the Plan tab it picks checks, opens a check's menu or asks to save."""
+        request = None
         try:
             changed = self.scene.click(float(x), float(y))
+            request = self.scene.take_request()
         except Exception:  # noqa: BLE001 - the panel is decoration
             changed = False
         if changed and self._on_tab is not None:
@@ -128,6 +139,25 @@ class LivePanel:
                 self._on_tab(self.scene.tab)
             except Exception:  # noqa: BLE001 - a host that cannot remember it
                 pass
+        self.kick()
+        if request is not None and self._on_request is not None:
+            try:
+                self._on_request(request)
+            except Exception:  # noqa: BLE001 - a host that cannot act on it
+                _log.exception("live view request failed")
+
+    def mark_saved(self, ids: Any, label: str, held: "dict | None" = None,
+                   message: str = "") -> None:
+        """The host saved checks: tag them ``saved · label``; ``held`` (id ->
+        where) were skipped as already kept. ``message`` goes on the ticker."""
+        self._guard(self.scene.picks.mark_saved, ids, label, held)
+        if message:
+            self._guard(self.model.announce, message)
+        self.kick()
+
+    def announce(self, message: str, level: str = "good") -> None:
+        """A line from the host on the ticker."""
+        self._guard(self.model.announce, message, level)
         self.kick()
 
     def scroll(self, steps: float) -> None:
@@ -195,6 +225,12 @@ class LivePanel:
         started = time.perf_counter()
         prims = self.scene.build(self.model, w, h, self._clock(), scale=self.scale)
         self.painter.paint(prims)
+        if self.scene.hot != self._hot:
+            self._hot = self.scene.hot
+            try:
+                self.canvas.configure(cursor="hand2" if self._hot else "")
+            except Exception:  # noqa: BLE001 - a canvas without cursors
+                pass
         self.last_frame_ms = (time.perf_counter() - started) * 1000.0
         return self.last_frame_ms
 

@@ -400,6 +400,15 @@ _HOW_TO_USE = HelpDocument(
                 "the findings by verification status. Hover a cell or a stage for detail."
             ),
             _bullet(
+                "Keeping the model's checks — on the Live view's Plan tab, tick checks from "
+                "the model's review plan (or Select all, or a plan's heading row) and press "
+                "Save selected…, or click one check and choose Save checklist item…. They "
+                "go into a new checklist in your profiles folder, or are added to one "
+                "already there, and later runs apply them like any checklist of yours. A "
+                "check already in your checklist is skipped, and code citations are saved "
+                "as written, edition included."
+            ),
+            _bullet(
                 "Log — the timestamped progress and per-sheet diagnostics. Pick Log on the "
                 "Activity toggle to turn the visuals off (the choice is remembered); while "
                 "the board is showing, warnings logged behind it are counted beside the "
