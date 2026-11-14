@@ -296,23 +296,33 @@ def _appended(raw: str, adding: tuple[PickedCheck, ...], newline: str, today: st
 def _write(path: Path, text: str, *, replace: bool) -> None:
     """Write ``text`` to ``path`` through a temp file in the same folder.
 
-    ``replace=False`` refuses to overwrite: ``FileExistsError`` if ``path``
-    appeared since it was chosen.
+    ``replace=False`` refuses to overwrite, atomically: the finished temp file
+    is hard-linked into place, which fails with ``FileExistsError`` if
+    ``path`` exists, however recently it appeared (two windows saving the
+    same name at once). A folder that has no hard links (FAT, some network
+    shares) gets an exclusive create instead, which refuses the same way.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    data = text.encode("utf-8")
     fd, tmp = tempfile.mkstemp(prefix=".saving-", suffix=".md.tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as fh:
-            fh.write(text.encode("utf-8"))
-        if not replace and path.exists():
-            raise FileExistsError(str(path))
-        os.replace(tmp, path)
-    except BaseException:
+            fh.write(data)
+        if replace:
+            os.replace(tmp, path)
+            return
         try:
-            os.unlink(tmp)
+            os.link(tmp, path)
+        except FileExistsError:
+            raise
+        except OSError:
+            with open(path, "xb") as fh:
+                fh.write(data)
+    finally:
+        try:
+            os.unlink(tmp)            # moved by os.replace, or a link to drop
         except OSError:
             pass
-        raise
 
 
 def save_new(

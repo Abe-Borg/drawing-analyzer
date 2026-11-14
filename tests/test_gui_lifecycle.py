@@ -971,3 +971,23 @@ def test_checks_kept_from_the_plan_tab_are_marked_logged_and_listed(tmp_path):
     assert logged == [(f"{message} ({plan.path.name} in your profiles folder)", "success")]
     assert reloaded == [True]                    # the Review profiles list re-reads the folder
     assert clip == ["Obstruction rules"] and said == ["Copied M1.5 to the clipboard"]
+
+    # Saved mid-run: the profile list is re-read at once, but the suggestion
+    # that ticks a matching checklist waits for the run to end (the preflight
+    # never runs while busy), and then runs once.
+    with _gui_module() as (gui, _tk):
+        suggested, built = [], []
+        app = types.SimpleNamespace(
+            _profile_holder=types.SimpleNamespace(winfo_children=lambda: []),
+            _profile_vars={}, _build_profile_panel=built.append,
+            _pdfs=[tmp_path / "FP-101.pdf"], _busy=True, _suggest_after_busy=False,
+            _refresh_profile_suggestions=lambda: suggested.append(True),
+        )
+        gui.DrawingAnalyzerApp._reload_profile_panel(app)
+        assert built and suggested == []
+        gui._resume_deferred_suggestions(app)              # still busy
+        assert suggested == []
+        app._busy = False
+        gui._resume_deferred_suggestions(app)
+        gui._resume_deferred_suggestions(app)
+    assert suggested == [True]

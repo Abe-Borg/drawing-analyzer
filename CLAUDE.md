@@ -494,8 +494,11 @@ map lives in `src/drawing_analyzer/__init__.py`.
   (the profile list lives in `_profile_holder`). Prefill prefixes come from
   `ChecklistPlan.sheet_prefixes` → `LiveCheckGroup.prefixes`. Writes: plan
   first, re-plan against the disk at Save (`save_new` / `save_append`),
-  temp file + `os.replace`, never overwrite a new file (next free name and
-  profile name). Repeats compare `normalize_check` (case-folded, whitespace
+  temp file + `os.replace` to append; a new file lands by `os.link` (atomic
+  refusal; exclusive create where links are unsupported) and a taken name
+  retries at the next free file and profile name. A save while `_busy`
+  defers the profile suggestion (`_suggest_after_busy`); every place busy
+  ends calls `_resume_deferred_suggestions`. Repeats compare `normalize_check` (case-folded, whitespace
   collapsed, trailing punctuation off) against the target file, the run's own
   user items, and earlier picks. Appending keeps the file's lines and line
   endings; only an integer `version` and `date` in its header change.

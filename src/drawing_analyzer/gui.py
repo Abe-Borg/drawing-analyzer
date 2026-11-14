@@ -358,6 +358,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx: DrawingContext | None = None
         self._busy = False
         self._export_busy = False
+        # A checklist saved from the Plan tab while busy (mid-run) is offered
+        # to the loaded set once the work ends (_resume_deferred_suggestions).
+        self._suggest_after_busy = False
         # The running analysis's kill switch (Stop button, and quitting mid-run);
         # None while no analysis runs. See drawing_analyzer.cancellation.
         self._run_cancel: CancelToken | None = None
@@ -1595,6 +1598,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _end_extraction(self) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._set_inputs_editable(True)
         self.analyze_btn.configure(state="normal")
         self.clear_btn.configure(state="normal")
@@ -2293,7 +2297,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             if name in previous:
                 var.set(previous[name])
         if self._pdfs:
-            self._refresh_profile_suggestions()
+            if self._busy:
+                # The preflight never runs mid-run; ask again when it ends.
+                self._suggest_after_busy = True
+            else:
+                self._refresh_profile_suggestions()
 
     def _remember_live_view(self, on: bool) -> None:
         """Turn the visuals on/off and keep the choice for the next launch."""
@@ -3255,6 +3263,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_cancelled(self) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._end_run_controls()
         live = getattr(self, "_live", None)
         if live is not None:
@@ -3293,6 +3302,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._ctx = ctx
         live = getattr(self, "_live", None)
         if live is not None:
@@ -3560,6 +3570,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _on_error(self, message: str) -> None:
         self._busy = False
+        _resume_deferred_suggestions(self)
         self._end_run_controls()
         live = getattr(self, "_live", None)
         if live is not None:
@@ -4487,6 +4498,18 @@ def _ask_cost_confirmation(parent, title: str, prompt: str) -> tuple[bool, bool]
     win.after(150, grab)
     parent.wait_window(win)
     return result["proceed"], result["proceed"] and bool(dont_show.get())
+
+
+def _resume_deferred_suggestions(app) -> None:
+    """Offer a checklist saved while the app was busy to the loaded set now.
+
+    Called wherever busy ends; a no-op unless a save asked for it (and on the
+    stub apps the handler tests drive, which never set the flag).
+    """
+    if getattr(app, "_suggest_after_busy", False) and not getattr(app, "_busy", True):
+        app._suggest_after_busy = False
+        if getattr(app, "_pdfs", None):
+            app._refresh_profile_suggestions()
 
 
 def _display_path(path: Path) -> str:

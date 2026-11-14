@@ -1,7 +1,9 @@
 """Keeping checks from a run's checklist as the user's own checklist files."""
 from __future__ import annotations
 
+import os
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -53,6 +55,24 @@ def test_a_new_checklist_loads_as_a_profile_and_never_overwrites_another(tmp_pat
     with pytest.raises(ValueError):
         cs.save_new("Again", picked[2:3], known=known, directory=tmp_path, today=DAY)
     assert len(list(tmp_path.iterdir())) == 2
+
+    # Another window saves the same name at the very instant this file lands:
+    # the write refuses that file and the save lands on the next free name.
+    raced = tmp_path / "raced.md"
+
+    def lands_after_the_other_window(real):
+        def call(src, dst, *args, **kwargs):
+            if Path(dst) == raced and not raced.exists():
+                raced.write_text("the other window's checklist\n", encoding="utf-8")
+            return real(src, dst, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(cs.os, "link", lands_after_the_other_window(os.link))
+    monkeypatch.setattr(cs.os, "replace", lands_after_the_other_window(os.replace))
+    third = cs.save_new("Raced", picked[:1], directory=tmp_path, today=DAY)
+    assert raced.read_text(encoding="utf-8") == "the other window's checklist\n"
+    assert third.path == tmp_path / "raced-2.md" and third.path.exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".saving-")]
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])

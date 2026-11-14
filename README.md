@@ -325,10 +325,12 @@ the file it will write to, and it warns you about two things:
 After the save, the checks show **saved · *checklist name*** in green, a
 skipped one says *already in your checklist (U1.2)*, the ticker confirms the
 save, and the checklist appears under **QC review → Review profiles**, ticked
-when it fits the loaded set. The file is an ordinary checklist (see
+when it fits the loaded set (if you save while a run is working, that happens
+when the run ends). The file is an ordinary checklist (see
 [Review profiles](#review-profiles)): open it in any text editor to reword,
-reorder or delete items. A new checklist never overwrites an existing file; it
-takes the next free name (`data-center-fp-2.md`). Adding to an existing
+reorder or delete items. A new checklist never overwrites an existing file, even
+one another window saves at the same moment; it takes the next free name
+(`data-center-fp-2.md`). Adding to an existing
 checklist leaves its lines as they were, adds the new checks at the end, bumps
 a whole-number `version`, sets `date` to today and keeps the file's own line
 endings. Nothing is saved until you press **Save**, and saving is local: no
