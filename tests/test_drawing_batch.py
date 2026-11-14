@@ -1315,6 +1315,26 @@ def test_empty_at_max_tokens_stops_retrying_once_the_ceiling_is_reached():
     assert raised["max_tokens"] == batch_digest.MAX_TOKENS_RETRY_CEILING
 
 
+@pytest.mark.parametrize("message, resent", [
+    ("thinking.display: Extra inputs are not permitted", True),
+    ("max_tokens: must be at least 1", False),
+])
+def test_only_a_rejection_of_the_display_only_field_makes_a_rejected_item_retryable(
+        message, resent):
+    """A rejected request is permanent: resubmitting it fails the same way.
+    The one exception is an item refused for ``thinking.display``, which the
+    submit attached for the live view and the resubmission leaves off, so the
+    sheet's own request (``params``, which never carried it) is sent again."""
+    from drawing_analyzer.batch_digest import _Slot, _item_retry_params
+
+    sheet = _make_sheet(0)
+    slot = _Slot(index=0, ref=sheet.ref, image_estimate=0)
+    params = {"model": OPUS, "max_tokens": 1000, "thinking": {"type": "adaptive"}}
+    result = {"type": "errored", "error": {"type": "error", "error": {
+        "type": "invalid_request_error", "message": message}}}
+    assert (_item_retry_params(slot, result, None, params=params) is params) is resent
+
+
 # --------------------------------------------------------------------------- #
 # Cleanup (post-batch file deletion)
 # --------------------------------------------------------------------------- #

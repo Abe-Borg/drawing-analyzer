@@ -205,8 +205,14 @@ looking like the click did nothing.
 The **Activity** section near the bottom of the window has two views, switched
 by the **Live view | Log** toggle on its first row:
 
-- **Live view** (the default) — an animated board of the run as it happens,
-  drawn on a dark blueprint grid:
+- **Live view** (the default) — an animated view of the run as it happens,
+  drawn on a dark blueprint grid. Under its header is a row of five tabs —
+  **Board | Story | Thinking | Plan | Findings** — described below. Click a
+  tab to show it; the mouse wheel scrolls its lists. A dot beside a tab's name
+  means something new arrived there since you last looked, and the number is
+  how much it holds (reasoning summaries, checklist items, findings). The tab
+  you were on is remembered. The header and the ticker stay up on every tab.
+  The **Board** tab is the animated board:
   - **Header** — a pulsing **LIVE** pill (then *COMPLETE* / *PARTIAL* /
     *STOPPED* / *FAILED*), the elapsed clock, the stages running right now
     with their progress (`▸ Read 34/120`), and the live figures: tokens per
@@ -240,6 +246,45 @@ by the **Live view | Log** toggle on its first row:
   Before a run the board previews the loaded set and the stages the current QC
   options would run (tick *QC Markups* and the track grows the QC stages).
   After a run the final board stays up until you load a different set.
+
+  The other four tabs say what the run is doing and why:
+  - **Story** — the pipeline as a timeline. Every stage has one plain sentence
+    saying what it does (*"Pins each finding to its spot on the PDF by finding
+    its quote in the sheet's text layer. A quote that cannot be found is a
+    warning sign."*). The stage running now opens up to show its live progress
+    (*"40 critique read(s) back · 4 still out"*) and its recipe: the model, the
+    effort level, the thinking mode, whether it went through the half-price
+    batch queue, and its calls, tokens and spend so far. Finished stages show
+    their outcome and time; a stage's warning replaces its description. Beside
+    the timeline, **Where the spend goes** is a bar per stage, and **Insights**
+    are a few computed observations: how many sheets the cache served free,
+    what one sheet read costs in tokens, which stage dominates the spend, how
+    many duplicate reports the ledger merged, how often the API pushed back.
+    Before a run it is a preview of the stages your options will run.
+  - **Thinking** — the model's own reasoning, call by call. Each entry names
+    the stage, the sheet (or finding, or code reference) and the model, then
+    shows the reasoning summary as it streams in; the right-hand column lists
+    the calls in flight and whether each is still thinking or already writing
+    its answer. The feed follows the newest entry until you scroll up to read
+    something, and resumes when you scroll back to the end. See *What the
+    Thinking tab is* below.
+  - **Plan** — what the set was identified as (project and set type, where it
+    sits, language and units, its disciplines, and the code editions it
+    adopts, with an edition you set marked *set by you* and one that is only
+    mentioned marked as such), and the **review checklist**: your own
+    checklists and the plans the model wrote, item by item with their ids
+    (`U1.3`, `M2.7`). As each sheet's critique comes back, every item's meter
+    fills in: flagged, unclear, reported met, not applicable or unanswered,
+    counted in sheets. Hover an item for its full text and counts. A standard
+    run writes no checklist, and the tab says so.
+  - **Findings** — the path from report to proof, as four steps that light up
+    as the run reaches them: **reported by the reads** (first read, critique
+    reads, cross-sheet), **in the ledger** (after duplicate reports are
+    merged), **placed on the sheet** (exact quote / close match / tile only /
+    not placed) and **re-checked** (verified / uncertain / not checked /
+    rejected). Under it, every finding in the ledger: severity, `QC-###`,
+    sheet, text and its current status, updating as verdicts land. Hover a row
+    for the whole finding, who reported it and how it was placed.
 - **Log** — the timestamped activity log, as before. While the board is
   showing, warnings and errors logged behind it are counted beside the toggle
   (*● 2 warnings in the log*); click it to jump to the log.
@@ -250,6 +295,24 @@ run the collapsed header still shows a one-line summary, e.g. *Activity —
 Critique · 48/48 sheets · ≈$12.40*, refreshed once a second). The choice is
 remembered across launches (`gui_preferences.json` in the app's config folder,
 the same file as the full-QC confirmation choice).
+
+**What the Thinking tab is.** The API can return a readable *summary* of a
+model's reasoning with each reply. It is a summary written by the API, not the
+raw chain of thought, which no setting returns. A run started from the GUI
+asks for these summaries (`thinking: {"type": "adaptive", "display":
+"summarized"}`); they change nothing about what the model thinks, what it
+answers or what the run costs, and no cache key depends on them, so a cached
+sheet is still a cache hit. Real-time calls stream their summary as it is
+written. Batch reads report theirs when the batch's results come back, and a
+sheet served from the cache makes no call and has none. Some calls return no
+summary at all; the tab counts those. **The summaries are shown on this screen
+only.** They are held in memory for the run and are never written to the
+export folder, `run.log`, the diagnostics folder or the cache. Set
+`DRAWING_ANALYZER_SHOW_THINKING=0` to stop asking for them. The setting can
+never cost a sheet read: a request refused for it is sent again without it, a
+batch item refused for it is resubmitted without it, and a batch that has no
+resubmission (the critique's) asks only a model that has already accepted the
+setting in this session. A refusal turns it off for the rest of the session.
 
 **What it shows, and what it cannot change.** The board is a read-only window
 onto the run's own records: the pipeline hands a
@@ -616,6 +679,20 @@ per-stage and per-sheet state, call/token counters, a live spend estimate and a
 ticker of notable events. `live_scene.LiveScene` + `CanvasPainter` render that
 model onto any Tk-like canvas, and `live_panel.LivePanel` is the GUI's
 self-pacing driver. All three are toolkit-free and never raise into the run.
+
+The same model feeds the insight tabs. As the run goes it publishes its own
+objects to the monitor by name (`monitor.facts()`): `identity` (the
+`SetIdentity`), `checklist` (the `ChecklistPlan`) and `checklist_answers` (the
+dict the critique fills per sheet), `digests`, `critique_findings`,
+`cross_findings` and `ledger` (the findings ledger). They are references to
+the run's live objects: read them, never write them. The model re-reads them
+twice a second into `model.identity`, `model.checklist`, `model.ledger_findings`
+and the `model.ledger_by` counts. Passing a monitor also makes the run collect
+the models' reasoning summaries (`ctx.resource_pressure.thoughts`, a
+`thought_stream.ThoughtStream`; `model.thoughts` holds copies) unless
+`DRAWING_ANALYZER_SHOW_THINKING=0`. A run with no monitor sends exactly the
+requests it always sent. `live_tabs` holds the four insight views, and
+`LiveScene.set_tab` / `click` / `wheel` are the host's inputs.
 
 Live spend is a `drawing_analyzer.live_spend.SpendMonitor`:
 
@@ -2514,6 +2591,7 @@ quality decision.
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_REFUSAL_FALLBACK` | on | Real-time Opus 5.5 / Sonnet 5.5 calls opt into the server-side refusal fallback. Set `0`/`false` to let a refusal return as one (see [Did another model answer?](#did-another-model-answer-refusal-fallback)). |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
+| `DRAWING_ANALYZER_SHOW_THINKING` | on | Whether a run with a live view (`monitor=`; every GUI run) asks the models for reasoning summaries for the Live view's *Thinking* tab. `0`/`off` sends the requests without `thinking.display`. Display only: the summaries are never exported, logged or cached, and no cache key depends on the setting. |
 | `DRAWING_ANALYZER_RESOURCE_SAMPLE_SECONDS` | `5` | Cadence of the host sampler behind the run's resource-starvation record (scheduling lag, CPU, memory, disk; see [Was the run starved of resources?](#was-the-run-starved-of-resources)). Clamped to 1–300; `0`/`off` disables the sampler, while API retries and exhausted agent budgets are still recorded. |
 | `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |
 | `DRAWING_ANALYZER_UPDATE_URL` | GitHub releases `latest.json` | Override the update-manifest URL (testing, or self-hosting a fork's releases). |

@@ -2,8 +2,8 @@
 
 Holds user choices that should survive a restart but are not secrets and not
 run inputs — whether the full-QC cost confirmation is shown, whether the
-Activity section shows the Live view board or the log, and the budget cap.
-Every
+Activity section shows the Live view board or the log, which of the Live
+view's tabs was showing, and the budget cap. Every
 read tolerates a missing, unreadable, or corrupt file (it reads as "no
 preference set"), and every write is best-effort: a preference that cannot be
 saved must never block a run.
@@ -29,6 +29,9 @@ BUDGET_CAP_AMOUNT = "budget_cap_amount"
 # Whether the Activity section shows the Live view board (True, the default)
 # or the log. The Live view | Log toggle sets it.
 LIVE_VIEW = "live_view"
+# Which of the Live view's tabs was showing last (``board`` / ``story`` /
+# ``mind`` / ``plan`` / ``findings``); an unknown value shows the board.
+LIVE_TAB = "live_tab"
 
 
 def default_preferences_path() -> Path:

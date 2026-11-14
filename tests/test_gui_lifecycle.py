@@ -931,6 +931,12 @@ def test_live_view_choice_is_remembered_beside_other_preferences(tmp_path):
         stub = types.SimpleNamespace(
             _prefs_path=prefs, _live=types.SimpleNamespace(set_enabled=toggled.append))
         gui.DrawingAnalyzerApp._remember_live_view(stub, False)
+        # The Live view's showing tab is kept the same way, and a click's wheel
+        # delta is read as notches on either platform's convention.
+        gui.DrawingAnalyzerApp._remember_live_tab(stub, "findings")
+        steps = [gui._wheel_steps(d) for d in (120, -240, 1, -9, 0)]
     assert toggled == [False]
     assert preferences.get_bool(prefs, preferences.LIVE_VIEW, True) is False
     assert preferences.get_bool(prefs, preferences.SKIP_FULL_QC_CONFIRM) is True
+    assert preferences.get_str(prefs, preferences.LIVE_TAB) == "findings"
+    assert steps == [1.0, -2.0, 1.0, -3.0, 0.0]

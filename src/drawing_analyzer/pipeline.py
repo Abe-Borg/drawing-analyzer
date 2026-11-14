@@ -67,6 +67,7 @@ from .render import (
     inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets,
 )
 from .live_view import notify_monitor
+from . import thought_stream
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import (
     EST_BYTES_PER_SHEET,
@@ -1188,6 +1189,8 @@ def _digest_sheets_via_batch(
         on_status=on_status,
         focus=focus,
         specs_text=specs_text,
+        # The collect below resubmits rejected items (``retry_failed_items``).
+        resubmits_rejected_items=True,
         level1_keys=level1_keys,
         recovery_state=recovery_state,
         on_log=on_log,
@@ -2046,6 +2049,7 @@ def _run_qc_stages(
     journal: Any = None,
     set_identity: Any = None,
     cache: Any = None,
+    monitor: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -2093,6 +2097,8 @@ def _run_qc_stages(
             journal.emit(event_code, **kw)
 
     ledger = Ledger()
+    # The live view's Findings tab reads the ledger as it fills (read-only).
+    notify_monitor(monitor, "publish", "ledger", ledger)
     work_dir = qc_work_dir
     audit_stats: dict = {}
     prose_accounting: dict = {}
@@ -3402,6 +3408,12 @@ def extract_drawing_context(
     pressure = resource_pressure.current() or resource_pressure.ResourcePressure()
     pressure.attach_journal(journal)
     pressure.start_host_monitor(_resource_watch_paths(qc_work_dir, cache))
+    # A run with a live view asks the models for readable reasoning summaries
+    # and collects them for its Thinking tab: display only, never exported, and
+    # cache-neutral (:mod:`~drawing_analyzer.thought_stream`). A run without a
+    # monitor sends exactly the requests it always sent.
+    if monitor is not None and thought_stream.show_thinking_enabled():
+        pressure.thoughts = thought_stream.ThoughtStream()
     # Live view (GUI): hand the host the run's own recorders. Read-only for the
     # host and never fatal here (notify_monitor swallows everything).
     notify_monitor(
@@ -3927,6 +3939,7 @@ def extract_drawing_context(
             level="INFO" if sd.ok else "WARNING", **sheet_fields,
         )
     ok_sheets = sum(1 for s in sheets if s.ok)
+    notify_monitor(monitor, "publish", "digests", sheets)
     # §3.3 — the digest was the one stage with no StageResult, so a sheet it
     # failed to read reached ctx.errors and the journal but never
     # ``roll_up_qc_status``: an exhaustive run could report COMPLETE over a
@@ -4118,6 +4131,7 @@ def extract_drawing_context(
         set_identity_obj = apply_governing_editions(
             set_identity_obj, config.governing_editions,
         )
+    notify_monitor(monitor, "publish", "identity", set_identity_obj)
 
     if stage_executor is not None and config.run_cross_qc:
         if progress is not None:
@@ -4274,6 +4288,10 @@ def extract_drawing_context(
         except Exception as exc:  # noqa: BLE001 - additive; the checklist still applies
             _log.warning("checklist scoping failed; applying it to every sheet: %s", exc)
             checklist_plan = ChecklistPlan(all_profiles)
+    # The live view's Plan tab: the checklist as injected, and the answers
+    # dict the critique fills one sheet at a time (read-only for the host).
+    notify_monitor(monitor, "publish", "checklist", checklist_plan)
+    notify_monitor(monitor, "publish", "checklist_answers", checklist_answers)
     profile_stage = StageResult(stage="profiles", expected=config.run_critique)
     if config.run_critique:
         profile_stage.items_in = requested_count
@@ -4327,6 +4345,7 @@ def extract_drawing_context(
             )
             numeric_claims.extend(c_claims)
             critique_stage.items_out = len(critique_findings)
+            notify_monitor(monitor, "publish", "critique_findings", critique_findings)
             if critique_degraded:
                 # §3.3 (Phase 27 gauntlet regression): an incomplete critique read —
                 # one of a sheet's two self-consistency reads failed/parsed
@@ -4388,6 +4407,7 @@ def extract_drawing_context(
                 )
             )
             cross_findings = cross_res.findings
+            notify_monitor(monitor, "publish", "cross_findings", cross_findings)
             numeric_claims.extend(cross_res.claims)
             # WP-02 §7.2: retain the discard counters before ``cross_res`` goes
             # out of scope — they are the whole point of the instrumented run,
@@ -4666,6 +4686,7 @@ def extract_drawing_context(
         journal=journal,
         set_identity=set_identity_obj,
         cache=cache,
+        monitor=monitor,
     )
     stage_results.extend(qc.stage_results)
 

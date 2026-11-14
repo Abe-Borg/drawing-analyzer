@@ -73,9 +73,14 @@ Module layout::
                       that stops the run through the kill switch
     live_view.py      RunMonitor (extract_drawing_context(monitor=)) + the
                       LiveRunModel reducer behind the GUI's Live view
-    live_scene.py     the Live view's animated scene (draw primitives) and the
-                      diffing CanvasPainter (toolkit-free)
+    live_scene.py     the Live view's animated scene (draw primitives), its
+                      tab strip, and the diffing CanvasPainter (toolkit-free)
+    live_tabs.py      the Live view's insight tabs: Story (what each stage
+                      does and why), Thinking, Plan (identity + checklist) and
+                      Findings (report -> ledger -> placed -> re-checked)
     live_panel.py     the GUI-side Live view driver: self-pacing frame loop
+    thought_stream.py the models' reasoning summaries for the Thinking tab:
+                      in-memory and display-only, never exported or cached
     tile_artifacts.py opt-in tile dump: render-time PNG staging + the mirrored
                       per-tile notes builders (no PyMuPDF import)
     export.py         folder export: findings.csv/json, sheet text, evidence,

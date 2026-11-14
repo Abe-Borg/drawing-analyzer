@@ -26,6 +26,13 @@ The panel, top to bottom:
 * **Ticker** — the latest notable event, typed out.
 
 Hovering a cell or a node shows a tooltip (the host passes the pointer).
+
+Under the HUD sits a **tab strip**. The board above is the first tab; the
+others (*Story*, *Thinking*, *Plan*, *Findings*) are built by
+:mod:`~drawing_analyzer.live_tabs` into the same space. The scene keeps which
+tab is showing, each view's scroll offset, and the hover regions a view
+registers for tooltips; :meth:`LiveScene.click` and :meth:`LiveScene.wheel`
+are the host's two inputs.
 """
 from __future__ import annotations
 
@@ -110,6 +117,7 @@ SHEET_STATE_TEXT = {
 }
 
 TWO_PI = 2.0 * math.pi
+TIP_LINES = 10              # the most lines a tooltip shows
 
 
 # --------------------------------------------------------------------------- #
@@ -356,6 +364,81 @@ class LiveScene:
         self._node_hits: list[tuple[float, float, float, Any]] = []
         self._cell_hits: "tuple[BoardLayout, int] | None" = None
         self._shimmer_steps = 32
+        # The tabs (live_tabs.py): which view is showing, each scrolling
+        # view's offset, and whether it still follows its newest content.
+        self.tab = "board"
+        self.scroll: dict[str, float] = {}
+        self.follow: dict[str, bool] = {}
+        self._scroll_max: dict[str, float] = {}
+        self._tab_hits: list[tuple[float, float, float, float, str]] = []
+        self._tab_seen: dict[str, float] = {}
+        self._tips: list[tuple[float, float, float, float, list]] = []
+        self._wrapped: dict[Any, list[str]] = {}
+        self._scale = 1.0
+
+    # -- tabs --------------------------------------------------------------- #
+
+    def set_tab(self, tab: str) -> bool:
+        """Show ``tab``; ``False`` if it is unknown or already showing."""
+        if tab not in live_tabs.TAB_KEYS or tab == self.tab:
+            return False
+        self.tab = tab
+        return True
+
+    def click(self, x: float, y: float) -> bool:
+        """A click at canvas ``(x, y)``: switches tab when it lands on one."""
+        for x0, y0, x1, y1, key in self._tab_hits:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return self.set_tab(key)
+        return False
+
+    def wheel(self, steps: float) -> None:
+        """Scroll the showing view by ``steps`` notches (positive = up)."""
+        tab = self.tab
+        limit = self._scroll_max.get(tab, 0.0)
+        cur = min(max(self.scroll.get(tab, 0.0), 0.0), limit)
+        new = min(max(cur - float(steps) * 42.0 * self._scale, 0.0), limit)
+        self.scroll[tab] = new
+        # Scrolling away stops a view following its newest content; reaching
+        # the end again (the Thinking feed) resumes it.
+        self.follow[tab] = tab == live_tabs.TAB_MIND and new >= limit - 1.0
+
+    def reset_views(self) -> None:
+        """A new run: every view follows its newest content again."""
+        self.scroll.clear()
+        self.follow.clear()
+        self._tab_seen.clear()
+        self._wrapped.clear()
+
+    def scroll_offset(self, tab: str, content: float, view: float, dt: float,
+                      *, follow: "float | None" = None) -> float:
+        """The eased scroll offset of ``tab`` for this frame.
+
+        ``follow`` is where the view wants to be while the user has not
+        scrolled it (the newest thought, the active stage); ``None`` leaves
+        the offset where the user put it.
+        """
+        limit = max(0.0, content - view)
+        self._scroll_max[tab] = limit
+        if follow is not None and self.follow.get(tab, True):
+            target = min(max(follow, 0.0), limit)
+        else:
+            target = min(max(self.scroll.get(tab, 0.0), 0.0), limit)
+        self.scroll[tab] = target
+        return self._ease(f"scroll_{tab}", target, dt, rate=14.0)
+
+    def wrap(self, key: Any, value: str, cols: int) -> list[str]:
+        """``value`` wrapped to ``cols`` characters (memoized by ``key``)."""
+        hit = self._wrapped.get(key)
+        if hit is None:
+            if len(self._wrapped) > 800:
+                self._wrapped.clear()
+            hit = self._wrapped[key] = live_tabs.wrap_text(value, cols)
+        return hit
+
+    def add_tip(self, x0: float, y0: float, x1: float, y1: float, lines: list) -> None:
+        """Register a hover region whose tooltip is ``lines``."""
+        self._tips.append((x0, y0, x1, y1, lines))
 
     def _moving(self) -> None:
         """Mark this frame as carrying fast motion."""
@@ -387,22 +470,45 @@ class LiveScene:
         self.animating = model.phase == PHASE_RUNNING
         self.fast = False
         s = max(0.5, float(scale))
+        self._scale = s
         w, h = max(40.0, float(width)), max(40.0, float(height))
         out: list[Prim] = []
         self._background(out, w, h, s)
 
         m = 12 * s
         hud_h = 44 * s
-        track_top, track_h = hud_h + 4 * s, 58 * s
-        bottom_top = track_top + track_h + 8 * s
+        tabs_h = 22 * s
         ticker_y = h - 11 * s
         bottom_bottom = ticker_y - 14 * s
 
         self._hud(out, model, m, w - m, 6 * s, s, t, dt)
+        self._node_hits, self._cell_hits, self._tips = [], None, []
+        # The tab strip sits under the HUD: the board, and the four insight
+        # views (live_tabs.py) that share its space. A panel too short to fit
+        # the strip above the track and a row of cells shows the board alone.
+        tabbed = h >= 192 * s
+        if tabbed:
+            live_tabs.tab_strip(self, out, model, m, w - m, hud_h + tabs_h / 2.0, s, t, dt)
+        else:
+            self._tab_hits = []
+        body_top = hud_h + (tabs_h if tabbed else 0.0) + 4 * s
+        view = live_tabs.VIEWS.get(self.tab) if tabbed else None
+        if view is not None:
+            if bottom_bottom - body_top >= 40 * s:
+                view(self, out, model, m, body_top, w - m, bottom_bottom, s, t, dt)
+        else:
+            self._board_view(out, model, m, w, h, body_top, bottom_bottom, s, t, dt)
+        self._ticker(out, model, m, w - m, ticker_y, s, t)
+        self._tooltip(out, model, w, h, s, t)
+        return out
+
+    def _board_view(self, out, model, m, w, h, top, bottom_bottom, s, t, dt) -> None:
+        """The board tab: the pipeline track, the sheet board and telemetry."""
+        track_top, track_h = top, 58 * s
+        bottom_top = track_top + track_h + 8 * s
         # A short panel (another section expanded above it) sheds whole rows
         # rather than overlapping them: first the board + telemetry, then the
         # track. The HUD and the ticker always stay.
-        self._node_hits, self._cell_hits = [], None
         if h >= track_top + track_h + 8 * s:
             self._track(out, model, m + 14 * s, w - m - 14 * s, track_top + 28 * s, s, t)
         if bottom_bottom - bottom_top >= 30 * s:
@@ -412,9 +518,6 @@ class LiveScene:
             if split:
                 self._telemetry(out, model, board_right + 10 * s, bottom_top, w - m,
                                 bottom_bottom, s, t, dt)
-        self._ticker(out, model, m, w - m, ticker_y, s, t)
-        self._tooltip(out, model, w, h, s, t)
-        return out
 
     # -- background --------------------------------------------------------- #
 
@@ -1059,12 +1162,20 @@ class LiveScene:
                         if st.note:
                             lines.append(st.note[:70])
                         break
+            if not lines:
+                # A view's own hover regions (live_tabs.py): the last one
+                # registered wins, long lines are wrapped to fit the box.
+                for tx0, ty0, tx1, ty1, tip in reversed(self._tips):
+                    if tx0 <= hx <= tx1 and ty0 <= hy <= ty1:
+                        for ln in tip:
+                            lines.extend(self.wrap(("tip", ln), ln, 64)[:5] or [""])
+                        break
         if not lines:
             out.append(poly("tip_box", (0, 0, 0, 0, 0, 0), fill=""))
-            for i in range(5):
+            for i in range(TIP_LINES):
                 out.append(text(f"tip_l{i}", -100, -100, "", fill=BG, size=9))
             return
-        lines = lines[:5]
+        lines = lines[:TIP_LINES]
         size = 10 * s
         pad = 8 * s
         lh = 15 * s
@@ -1077,7 +1188,7 @@ class LiveScene:
         by = max(4 * s, by)
         out.append(poly("tip_box", rounded_rect_points(bx, by, bx + bw, by + bh, 6 * s),
                         fill="#0F2038", outline=ACCENT, width=1, smooth=True))
-        for i in range(5):
+        for i in range(TIP_LINES):
             if i < len(lines):
                 out.append(text(f"tip_l{i}", bx + pad, by + pad + i * lh + 5 * s, lines[i],
                                 fill=INK if i == 0 else INK_DIM, size=size,
@@ -1184,3 +1295,7 @@ class CanvasPainter:
             except Exception:  # noqa: BLE001 - a destroyed canvas has nothing to clear
                 pass
         self._items.clear()
+
+
+# The insight tabs build on the primitives above, so this import comes last.
+from . import live_tabs  # noqa: E402

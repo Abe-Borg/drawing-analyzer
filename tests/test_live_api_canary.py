@@ -17,6 +17,8 @@ fixtures only):
   call and the verifier's one-crop verdict (one canary per stage gate);
 - the pinned server-side web-search tool type is still accepted and the
   citation parser handles a real tool-result stream;
+- ``thinking.display: "summarized"`` (the Live view's Thinking tab) is still
+  accepted by every stage model;
 - the Files API upload → consume → delete lifecycle works and cleans up; and
 - a live run's exported ``run.log`` / ``run_manifest.json`` contain no key.
 
@@ -135,6 +137,48 @@ def test_live_identity_call(tmp_path):
     assert res.input_tokens > 0 and res.output_tokens > 0
     print(f"\n[canary] identity model: {res.model_used}; "
           f"disciplines: {list(res.identity.disciplines)}")
+
+
+def test_live_reasoning_summaries_are_accepted_by_every_stage_model():
+    """``thinking.display: "summarized"`` (the Live view's Thinking tab) is
+    accepted on a real-time request by each model the stages run on.
+
+    The hermetic suite proves the request is built and that a rejection
+    self-heals; only the live service can say the field is still accepted. A
+    rejection would not fail a run (the feature latches off), so the canary
+    asserts the latch did **not** flip. Whether a summary comes back for so
+    small a prompt is the model's choice and is printed, not asserted.
+    """
+    from drawing_analyzer import call_telemetry, resource_pressure
+    from drawing_analyzer.core import api_config
+    from drawing_analyzer.thought_stream import ThoughtStream
+
+    models = sorted({
+        api_config.REVIEW_MODEL_DEFAULT, api_config.VERIFICATION_MODEL_DEFAULT,
+        api_config.MODEL_SONNET_5_5, api_config.MODEL_HAIKU_5_5,
+    })
+    pressure = resource_pressure.ResourcePressure()
+    pressure.thoughts = ThoughtStream()
+    previous = resource_pressure.activate(pressure)
+    try:
+        client = _live_client()
+        for model in models:
+            kwargs = api_config.apply_thinking_config({
+                "model": model, "max_tokens": 2000,
+                "messages": [{"role": "user", "content":
+                              "A pipe schedule lists 1,500 gpm; the one-line diagram lists "
+                              "1,250 gpm. In one sentence, which sheet should be checked?"}],
+            }, model=model, phase=api_config.PHASE_REVIEW)
+            with call_telemetry.scope("digest", model):
+                message = api_config.call_with_refusal_fallback(
+                    client, kwargs, model=model, method="stream")
+            assert message.stop_reason in ("end_turn", "max_tokens"), message.stop_reason
+            assert api_config._thinking_display_available, f"{model} rejected thinking.display"
+    finally:
+        resource_pressure.deactivate(pressure, previous)
+    assert pressure.thoughts.seen == len(models)
+    print(f"\n[canary] reasoning summaries: {pressure.thoughts.with_text}/{len(models)} "
+          f"call(s) returned text; models: {models}")
 
 
 def test_live_citation_web_search_tool_accepted():
