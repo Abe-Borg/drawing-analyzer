@@ -94,6 +94,7 @@ from typing import Any, Iterable, Iterator
 
 import pymupdf  # AGPL-3.0 — see module docstring; the 2nd of two blessed importers.
 
+from . import markup_scripts as scripts
 from . import tiling
 from .diagnostics import get_logger
 from .models import (
@@ -275,8 +276,10 @@ _INDEX_PAGE_W, _INDEX_PAGE_H = 612.0, 792.0
 # Widths are DERIVED from the next column's edge so a row's text can be fitted to
 # the space it actually has (item 32) — one definition shared by the header row
 # and the data rows, so the two cannot drift apart.
-_INDEX_COL_X = (36.0, 95.0, 170.0)
-_INDEX_COL_LABELS = ("ID", "Sheet", "What to do")
+_INDEX_COL_X = (36.0, 95.0, 170.0, 548.0)
+#: The last column holds each row's Done box; its header is drawn only in an
+#: interactive file, where the box exists.
+_INDEX_COL_LABELS = ("ID", "Sheet", "What to do", "Done")
 _INDEX_COL_RIGHT = 578.0            # _INDEX_PAGE_W - 34pt right margin
 _INDEX_COL_GUTTER = 4.0             # keep a column off its neighbour's first glyph
 _INDEX_COL_W = tuple(
@@ -288,6 +291,11 @@ _INDEX_SUBTITLE = (
     "Click a row to jump to its markup.  "
     "Red = high, orange = medium, blue = low or a question."
 )
+_INDEX_SUBTITLE_INTERACTIVE = (
+    "Click a row to see its markup on its own. Tick Done when it is fixed.  "
+    "Red = high, orange = medium, blue = low or a question."
+)
+_INDEX_SHOW_ALL = "Show all markups"
 _INDEX_TOP = 90.0
 _INDEX_ROW_H = 14.0
 _INDEX_BOTTOM_MARGIN = 40.0
@@ -382,6 +390,7 @@ class _ReviewedPdfJob:
     sheet_meta: dict[int, dict] | None
     audit_stats: dict | None
     include_appendix: bool
+    interactive: bool = False
 
 
 @dataclass
@@ -1494,14 +1503,16 @@ def _page_annot_xrefs(doc: "pymupdf.Document", page: "pymupdf.Page") -> "set[int
 
 def _insert_goto_link(
     doc: "pymupdf.Document", page: "pymupdf.Page", from_rect: "pymupdf.Rect",
-    target_page: int, dest: str,
+    target_page: int, dest: str, *, then: "int | None" = None,
 ) -> None:
     """A link on ``page`` over ``from_rect`` that jumps to ``dest``.
 
     ``insert_link`` creates the annotation (and maps ``from_rect`` into the
     page's own space); the destination it wrote is then replaced with ``dest``.
-    If the new object cannot be identified the link stays a plain jump to the
-    target page — a coarser link, never a missing one.
+    ``then`` is the xref of an action to run after the jump (``/Next``) — the
+    jump stays first, so a viewer that will not run the second action still
+    arrives at the mark. If the new object cannot be identified the link stays
+    a plain jump to the target page — a coarser link, never a missing one.
     """
     before = _page_annot_xrefs(doc, page)
     page.insert_link({
@@ -1510,9 +1521,31 @@ def _insert_goto_link(
     })
     new = _page_annot_xrefs(doc, page) - before
     if len(new) == 1:
-        doc.xref_set_key(new.pop(), "A", f"<</S/GoTo/D{dest}>>")
+        follow = f"/Next {int(then)} 0 R" if then else ""
+        doc.xref_set_key(new.pop(), "A", f"<</S/GoTo/D{dest}{follow}>>")
     else:
         _log.debug("could not identify a new link on page %d; left as a page jump", page.number)
+
+
+def _insert_action_link(
+    doc: "pymupdf.Document", page: "pymupdf.Page", from_rect: "pymupdf.Rect",
+    action: int, *, oc: "int | None" = None,
+) -> None:
+    """A link on ``page`` over ``from_rect`` (the page's own space) that runs the
+    action object ``action``. ``oc`` puts the link on a layer, so it is live
+    only while what it sits on is showing."""
+    before = _page_annot_xrefs(doc, page)
+    page.insert_link({
+        "kind": pymupdf.LINK_GOTO, "from": from_rect, "page": int(page.number),
+        "to": pymupdf.Point(0, 0), "zoom": 0,
+    })
+    new = _page_annot_xrefs(doc, page) - before
+    if len(new) != 1:
+        raise RuntimeError("could not identify the new link")
+    xref = new.pop()
+    doc.xref_set_key(xref, "A", f"{int(action)} 0 R")
+    if oc:
+        doc.xref_set_key(xref, "OC", f"{int(oc)} 0 R")
 
 
 # --------------------------------------------------------------------------- #
@@ -1563,15 +1596,24 @@ def _create_severity_layers(
 def _assign_layer(
     annot: "pymupdf.Annot", finding: Finding, oc_layers: "dict[str, int] | None"
 ) -> None:
-    """Put ``annot`` on its finding's severity layer (a no-op without layers).
+    """Put ``annot`` on its finding's layer (a no-op without layers).
+
+    That is the severity layer, or — in an interactive file — the membership
+    that needs **both** the severity layer and the finding's own layer on, so
+    the Layers panel's severity switches keep working while a cover-page click
+    can hide every other finding (:class:`_MarkupLayers`).
 
     Call **before** ``annot.update()`` so the ``/OC`` reference is folded into the
     appearance stream the viewer builds. Non-fatal (I-3): a failure leaves the
     annot unlayered — visible, just not filterable — never a dropped mark.
     """
-    if not oc_layers:
+    if oc_layers is None:
         return
     xref = oc_layers.get(_severity_layer_tier(finding))
+    if isinstance(oc_layers, _MarkupLayers):
+        own = oc_layers.for_finding(finding)
+        if own is not None:
+            xref = own.markup
     if not xref:
         return
     try:
@@ -1581,8 +1623,382 @@ def _assign_layer(
 
 
 # --------------------------------------------------------------------------- #
+# Interactive layers: isolate a finding, mark a finding done.
+#
+# The rule — which layer is on when — lives in :mod:`markup_scripts`, with the
+# reasons. This is the PDF side of it, and every mechanism here was tried in
+# Bluebeam Revu before it was built on:
+#
+# * a markup's ``/OC`` is a *membership* (OCMD, ``/P /AllOn``) of its severity
+#   layer and its finding's own layer, so the Layers panel's three severity
+#   switches still work and a script can hide one finding;
+# * the finding layers are left out of the layer list (``/Order``), so the panel
+#   shows the three severity layers and not three hundred more;
+# * the grey "done" copy and the "showing this one only" note are **page
+#   content** on layers that start off. Annotations on a layer that starts off
+#   were shown anyway, and a second annotation is a second Markups List row;
+# * a Done box is a checkbox field: its value is saved with the file, which
+#   layer visibility is not, so the script that applies the ticks also runs
+#   when the document opens;
+# * a link jumps first and runs its script second (``/Next``), so a viewer that
+#   runs no scripts still navigates.
+#
+# All of it is additive (I-3). A finding whose layers cannot be made is drawn
+# on its severity layer exactly as in a non-interactive file.
+# --------------------------------------------------------------------------- #
+
+_DONE_BOX_PT = 10.0
+_DONE_GREY = (0.55, 0.55, 0.55)
+_NOTE_RED = (0.78, 0.10, 0.10)
+_NOTE_FONTSIZE = 9.0
+_NOTE_LINE_H = 11.0
+_NOTE_TEXT_W = 190.0
+_LINK_BLUE = (0.10, 0.30, 0.70)
+
+
+def _pdf_literal(text: str) -> str:
+    """``text`` as the body of a PDF literal string, on one line."""
+    return (
+        text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        .replace("\r", "").replace("\n", "\\n")
+    )
+
+
+def _locate_key(doc: "pymupdf.Document", xref: int, path: "list[str]") -> "tuple[int, str]":
+    """``(object, key path within it)`` addressing ``path`` from object ``xref``,
+    following any indirect reference met on the way to the last key."""
+    prefix: list[str] = []
+    for key in path[:-1]:
+        kind, value = doc.xref_get_key(xref, "/".join(prefix + [key]))
+        if kind == "xref":
+            xref, prefix = int(value.split()[0]), []
+        else:
+            prefix.append(key)
+    return xref, "/".join(prefix + [path[-1]])
+
+
+def _edit_ref_array(
+    doc: "pymupdf.Document", path: "list[str]", *, remove: "set[int]", append: str = "",
+) -> bool:
+    """Drop the references in ``remove`` from the catalog array at ``path`` and
+    add ``append`` at its end. ``False`` when there is no such array."""
+    xref, key = _locate_key(doc, doc.pdf_catalog(), path)
+    kind, value = doc.xref_get_key(xref, key)
+    target = None
+    if kind == "xref":                       # the array is its own object
+        target = int(value.split()[0])
+        value = doc.xref_object(target, compressed=True)
+    elif kind != "array":
+        return False
+    for ref in remove:
+        value = re.sub(rf"(?<!\d){int(ref)} 0 R", "", value)
+    value = value.rstrip()
+    if not value.endswith("]"):
+        return False
+    value = f"{value[:-1]} {append}]" if append else value
+    if target is not None:
+        doc.update_object(target, value)
+    else:
+        doc.xref_set_key(xref, key, value)
+    return True
+
+
+@dataclass
+class _FindingLayers:
+    """One finding's layers (xrefs). ``markup`` is what its annotations carry."""
+
+    qc_id: str
+    live: int
+    done: int
+    only: int
+    markup: int           # OCMD: severity layer AND live layer
+    box: int              # OCMD: live layer OR done layer (where its Done box shows)
+    isolate_action: int   # the script that isolates this finding
+
+
+class _MarkupLayers(dict):
+    """The severity layers (``{tier: xref}``, as before) and, in an interactive
+    file, each finding's own layers, its Done field and the shared scripts.
+
+    A ``dict`` so every helper that takes ``oc_layers`` keeps working on it.
+    Finding layers are made on first use, in drawing order, which is
+    deterministic (I-7).
+    """
+
+    def __init__(self, doc: "pymupdf.Document", severity: "dict[str, int]", *,
+                 interactive: bool) -> None:
+        super().__init__(severity)
+        self.doc = doc
+        self.interactive = bool(interactive)
+        self.findings: dict[str, "_FindingLayers | None"] = {}
+        self._done_kids: dict[str, list[int]] = {}
+        self._actions: dict[str, int] = {}
+
+    def _action(self, isolate: "str | None") -> int:
+        """The action object running the sync script for ``isolate`` (shared)."""
+        key = "\x00keep" if isolate is None else isolate
+        if key not in self._actions:
+            xref = self.doc.get_new_xref()
+            script = _pdf_literal(scripts.sync_script(isolate))
+            self.doc.update_object(xref, f"<</S/JavaScript/JS({script})>>")
+            self._actions[key] = xref
+        return self._actions[key]
+
+    @property
+    def show_all_action(self) -> int:
+        return self._action("")
+
+    @property
+    def sync_action(self) -> int:
+        """Re-apply the ticks, keeping whatever is isolated (a Done box's click,
+        and the document's open)."""
+        return self._action(None)
+
+    def for_finding(self, finding: Finding) -> "_FindingLayers | None":
+        """This finding's layers, made on first call; ``None`` when the file is
+        not interactive, the finding has no usable QC number, or the viewer
+        objects could not be made (it is then drawn as a plain markup)."""
+        qc_id = str(getattr(finding, "qc_id", "") or "")
+        if not self.interactive or not scripts.is_safe_id(qc_id):
+            return None
+        if qc_id not in self.findings:
+            try:
+                doc = self.doc
+                live = doc.add_ocg(scripts.live_layer_name(qc_id), on=True)
+                done = doc.add_ocg(scripts.done_layer_name(qc_id), on=False)
+                only = doc.add_ocg(scripts.only_layer_name(qc_id), on=False)
+                severity = self.get(_severity_layer_tier(finding))
+                markup = (
+                    doc.set_ocmd(ocgs=[severity, live], policy="AllOn") if severity else live
+                )
+                box = doc.set_ocmd(ocgs=[live, done], policy="AnyOn")
+                self.findings[qc_id] = _FindingLayers(
+                    qc_id, live, done, only, markup, box, self._action(qc_id),
+                )
+            except Exception:  # noqa: BLE001 - drawn as a plain markup instead
+                _log.warning("could not create the layers for %s; it stays a plain markup", qc_id)
+                self.findings[qc_id] = None
+        return self.findings[qc_id]
+
+    def add_done_box(
+        self, page: "pymupdf.Page", own: _FindingLayers, rect: "pymupdf.Rect",
+        *, on_layer: bool,
+    ) -> None:
+        """One more box for ``own``'s Done field, at ``rect`` (the page's own
+        space). Every box of a finding is the same field, so ticking one ticks
+        them all. ``on_layer`` hides the box with the finding it belongs to."""
+        doc = self.doc
+        before = _page_annot_xrefs(doc, page)
+        widget = pymupdf.Widget()
+        widget.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
+        widget.field_name = f"da_tmp_{len(before)}_{own.qc_id}_{len(self._done_kids.get(own.qc_id, []))}"
+        widget.rect = rect
+        widget.field_value = False
+        widget.border_width = 0.8
+        widget.border_color = (0.25, 0.25, 0.25)
+        widget.fill_color = (1, 1, 1)
+        page.add_widget(widget)
+        new = _page_annot_xrefs(doc, page) - before
+        if len(new) != 1:
+            raise RuntimeError("could not identify the new Done box")
+        xref = new.pop()
+        doc.xref_set_key(xref, "A", f"{self.sync_action} 0 R")
+        if on_layer:
+            doc.xref_set_key(xref, "OC", f"{own.box} 0 R")
+        self._done_kids.setdefault(own.qc_id, []).append(xref)
+
+    def finalize(self) -> None:
+        """Wire up what the pieces need as a whole: one field per finding over
+        its boxes, the open script, and the layer list. Call once, last."""
+        if not self.interactive or not any(self.findings.values()):
+            return
+        doc = self.doc
+        # One checkbox FIELD per finding; its boxes become that field's widgets.
+        kids_all: set[int] = set()
+        parents: list[int] = []
+        for qc_id, kids in self._done_kids.items():
+            parent = doc.get_new_xref()
+            name = _pdf_literal(scripts.done_field_name(qc_id))
+            tip = _pdf_literal(f"Mark {qc_id} done")
+            doc.update_object(
+                parent,
+                f"<</FT/Btn/T({name})/TU({tip})/V/{scripts.FIELD_OFF}"
+                f"/Kids[{' '.join(f'{k} 0 R' for k in kids)}]>>",
+            )
+            for kid in kids:
+                for key in ("T", "FT", "V", "Ff", "TU"):
+                    doc.xref_set_key(kid, key, "null")
+                doc.xref_set_key(kid, "Parent", f"{parent} 0 R")
+            kids_all.update(kids)
+            parents.append(parent)
+        if parents:
+            _edit_ref_array(
+                doc, ["AcroForm", "Fields"], remove=kids_all,
+                append=" ".join(f"{p} 0 R" for p in parents),
+            )
+        # Layer visibility is not saved with the file; the ticks are. Re-apply
+        # them whenever the document opens. A drawing that already carries
+        # document scripts keeps them: ours is then simply not installed, and
+        # the layers catch up on the reader's first click instead.
+        catalog = doc.pdf_catalog()
+        names_xref, names_key = _locate_key(doc, catalog, ["Names", "JavaScript"])
+        if doc.xref_get_key(names_xref, names_key)[0] == "null":
+            doc.xref_set_key(
+                names_xref, names_key, f"<</Names[(da_sync) {self.sync_action} 0 R]>>",
+            )
+        else:
+            _log.info("the source PDF has its own document scripts; none added")
+        # Keep the finding layers out of the Layers panel.
+        ours: set[int] = set()
+        for own in self.findings.values():
+            if own is not None:
+                ours.update((own.live, own.done, own.only))
+        _edit_ref_array(doc, ["OCProperties", "D", "Order"], remove=ours)
+
+
+def _cloud_outline_points(
+    rect: "tuple[float, float, float, float]", *, step: float = 11.0, bump: float = 3.5,
+) -> "list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]]":
+    """A revision-cloud outline for ``rect`` as ``(start, control, end)`` arcs,
+    going round clockwise with every arc bulging outwards."""
+    x0, y0, x1, y1 = rect
+    arcs = []
+    for (ax, ay), (bx, by), (nx, ny) in (
+        ((x0, y0), (x1, y0), (0.0, -1.0)), ((x1, y0), (x1, y1), (1.0, 0.0)),
+        ((x1, y1), (x0, y1), (0.0, 1.0)), ((x0, y1), (x0, y0), (-1.0, 0.0)),
+    ):
+        length = abs(bx - ax) + abs(by - ay)
+        count = max(1, int(round(length / step)))
+        for i in range(count):
+            sx, sy = ax + (bx - ax) * i / count, ay + (by - ay) * i / count
+            ex, ey = ax + (bx - ax) * (i + 1) / count, ay + (by - ay) * (i + 1) / count
+            arcs.append((
+                (sx, sy),
+                ((sx + ex) / 2.0 + nx * bump * 2.0, (sy + ey) / 2.0 + ny * bump * 2.0),
+                (ex, ey),
+            ))
+    return arcs
+
+
+def _add_done_copy(
+    page: "pymupdf.Page", finding: Finding, mark: "tuple[float, float, float, float]",
+    own: _FindingLayers, *, cloud: bool,
+) -> None:
+    """The grey stand-in a done finding is shown as: its outline and
+    ``QC-### DONE``, as page content on the finding's *done* layer."""
+    shape = page.new_shape()
+    if cloud:
+        for start, control, end in _cloud_outline_points(mark):
+            shape.draw_curve(
+                _derotate_point(page, *start), _derotate_point(page, *control),
+                _derotate_point(page, *end),
+            )
+    else:
+        shape.draw_rect(_derotate_rect(page, mark))
+    shape.finish(color=_DONE_GREY, width=1.2, closePath=False, oc=own.done)
+    shape.commit()
+    label = _base14_safe(f"{own.qc_id} DONE")
+    tag = _tag_view_rect(page, mark, label) if cloud else (
+        mark[0] + 3.0, mark[1] + 2.0, mark[0] + 6.0 * len(label) + 12.0, mark[1] + 14.0,
+    )
+    page.insert_textbox(
+        _derotate_rect(page, (tag[0], tag[1], tag[2] + 20.0, tag[3] + 4.0)), label,
+        fontsize=_TAG_FONTSIZE, color=_DONE_GREY, rotate=int(page.rotation or 0),
+        oc=own.done,
+    )
+
+
+def _add_isolation_note(
+    page: "pymupdf.Page", mark: "tuple[float, float, float, float]",
+    own: _FindingLayers, layers: _MarkupLayers, *, occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+) -> None:
+    """The note that appears beside a finding while it is isolated, and takes
+    the reader back: page content plus a link, both on its *only* layer.
+
+    Hiding markups is safe only if the reader is told, where they are looking,
+    that it happened. So unlike an instruction box this note is always placed:
+    in clear space near the mark when there is some, otherwise directly under
+    it. It is on screen only while the reader has asked to see one finding on
+    its own, and it goes away with one click.
+    """
+    lines = _wrap_lines(
+        f"SHOWING {own.qc_id} ONLY. Other markups are hidden. CLICK HERE TO SHOW ALL.",
+        _NOTE_TEXT_W, fontsize=_NOTE_FONTSIZE,
+    )
+    w, h = _text_box_size(lines, fontsize=_NOTE_FONTSIZE, line_h=_NOTE_LINE_H, pad=4.0)
+    page_w, page_h = page.rect.width, page.rect.height
+    box = _place_near(mark, [(w, h)], page_w, page_h, occupied, taken, [], leader=False)
+    if box is None:
+        m = _PLACE_EDGE_MARGIN
+        bx = min(max(mark[0], m), max(m, page_w - m - w))
+        by = min(max(mark[3] + 6.0, m), max(m, page_h - m - h))
+        box = (bx, by, bx + w, by + h)
+    page_rect = _derotate_rect(page, box)
+    page.draw_rect(page_rect, color=_NOTE_RED, fill=(1.0, 0.94, 0.94), width=1.2, oc=own.only)
+    page.insert_textbox(
+        _derotate_rect(page, (box[0] + 4.0, box[1] + 3.0, box[2] - 4.0, box[3] + _NOTE_LINE_H)),
+        "\n".join(lines), fontsize=_NOTE_FONTSIZE, lineheight=_NOTE_LINE_H / _NOTE_FONTSIZE,
+        color=_NOTE_RED, rotate=int(page.rotation or 0), oc=own.only,
+    )
+    _insert_action_link(page.parent, page, page_rect, layers.show_all_action, oc=own.only)
+
+
+def _add_interactive_parts(
+    page: "pymupdf.Page", finding: Finding, mark: "tuple[float, float, float, float]",
+    layers: _MarkupLayers, *, cloud: bool, occupied: Any,
+    taken: "list[tuple[float, float, float, float]]",
+) -> None:
+    """Everything a drawn mark needs to be isolated and marked done: its grey
+    copy, its isolation note and a Done box beside it. Each is independent, so
+    one that cannot be drawn does not cost the others."""
+    own = layers.for_finding(finding)
+    if own is None:
+        return
+    try:
+        _add_isolation_note(page, mark, own, layers, occupied=occupied, taken=taken)
+    except Exception:  # noqa: BLE001
+        _log.warning("could not draw the isolation note for %s", own.qc_id)
+    if _status(finding) == "REJECTED":
+        return          # inked grey on request: it can be isolated, but is not a to-do
+    try:
+        _add_done_copy(page, finding, mark, own, cloud=cloud)
+    except Exception:  # noqa: BLE001
+        _log.warning("could not draw the done copy for %s", own.qc_id)
+    try:
+        if cloud:
+            tag = _tag_view_rect(page, mark, own.qc_id)
+            bx, by = tag[2] + 4.0, tag[1] + 1.0
+        else:
+            bx, by = mark[2] + 4.0, mark[1]
+        bx = min(bx, page.rect.width - _DONE_BOX_PT - 2.0)
+        by = max(2.0, min(by, page.rect.height - _DONE_BOX_PT - 2.0))
+        layers.add_done_box(
+            page, own,
+            _derotate_rect(page, (bx, by, bx + _DONE_BOX_PT, by + _DONE_BOX_PT)),
+            on_layer=True,
+        )
+    except Exception:  # noqa: BLE001
+        _log.warning("could not add the Done box for %s", own.qc_id)
+
+
+# --------------------------------------------------------------------------- #
 # Drawing (each helper returns how many annots it added)
 # --------------------------------------------------------------------------- #
+
+
+def _tag_view_rect(
+    page: "pymupdf.Page", view_rect: Any, qc_id: str,
+) -> "tuple[float, float, float, float]":
+    """Where a mark's QC tag sits (view space): above its top-left corner, or
+    below the mark when there is no room above."""
+    vx0, vy0, _vx1, vy1 = (float(v) for v in view_rect)
+    tag_w = 6.0 * len(qc_id) + 8.0
+    x0 = max(2.0, min(vx0, page.rect.width - tag_w - 2.0))
+    y0 = vy0 - _TAG_HEIGHT - 2.0
+    if y0 < 2.0:
+        y0 = min(vy1 + 2.0, page.rect.height - _TAG_HEIGHT - 2.0)
+    return x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT
 
 
 def _add_qc_tag(
@@ -1600,12 +2016,7 @@ def _add_qc_tag(
     if not finding.qc_id:
         return None
     color = _color(finding)
-    tag_w = 6.0 * len(finding.qc_id) + 8.0
-    x0 = max(2.0, min(view_rect.x0, page.rect.width - tag_w - 2.0))
-    y0 = view_rect.y0 - _TAG_HEIGHT - 2.0
-    if y0 < 2.0:
-        y0 = min(view_rect.y1 + 2.0, page.rect.height - _TAG_HEIGHT - 2.0)
-    tag_rect = _derotate_rect(page, (x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT))
+    tag_rect = _derotate_rect(page, _tag_view_rect(page, view_rect, finding.qc_id))
     annot = page.add_freetext_annot(
         tag_rect, finding.qc_id,
         fontsize=_TAG_FONTSIZE, text_color=color, fill_color=(1, 1, 1),
@@ -1669,8 +2080,12 @@ def _add_margin_callouts(
     meta: dict | None,
     author: str,
     oc_layers: "dict[str, int] | None" = None,
+    boxes_out: "dict[str, tuple[float, float, float, float]] | None" = None,
 ) -> "tuple[dict[str, list[tuple[str, int]]], list[tuple[Finding, MarkupPlacement]]]":
     """Rect-less findings as FreeText boxes packed into visually-clear bands.
+
+    ``boxes_out``, when given, receives each placed box's view-space rectangle
+    by placement id.
 
     Boxes are packed by :func:`_pack_callouts` so every one is validated clear of
     the retained words, the occupancy mask (piping/symbols/raster), and its
@@ -1689,6 +2104,8 @@ def _add_margin_callouts(
     occupied = _page_occupancy(page)
     placed, overflow = _pack_callouts(pairs, words, page_w, page_h, occupied)
     placed_boxes = [box for _f, _pl, box in placed]
+    if boxes_out is not None:
+        boxes_out.update({pl.placement_id: tuple(box) for _f, pl, box in placed})
 
     for finding, placement, box_t in placed:
         box = pymupdf.Rect(*box_t)                    # PAGE_VIEW_V2 space
@@ -1854,12 +2271,15 @@ def _place_near(
     page_w: float, page_h: float, occupied: Any,
     taken: "list[tuple[float, float, float, float]]",
     words: "list[tuple[float, float, float, float]]",
+    *,
+    leader: bool = True,
 ) -> "tuple[float, float, float, float] | None":
     """A clear box beside ``target`` in one of ``shapes`` (w, h), or ``None``.
 
     Nearest distance first; at each distance every shape, widest first, in the
     eight positions around the target, the right-hand side first (where a note
-    is read next). A position counts only if its leader has a clear run too.
+    is read next). A position counts only if its leader has a clear run too
+    (``leader=False`` for a box that has none).
     """
     x0, y0, x1, y1 = target
     xc, yc = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -1874,6 +2294,8 @@ def _place_near(
                 box = (bx, by, bx + w, by + h)
                 if not _is_clear(box, page_w, page_h, occupied, taken):
                     continue
+                if not leader:
+                    return box
                 tip, knee, _start = _leader_points(box, target)
                 if _leader_is_clear(tip, knee, words, taken, target):
                     return box
@@ -1982,7 +2404,9 @@ def _add_instructions(
     return drawn
 
 
-def _stamp_text(marks: int, shown: int, all_have_actions: bool) -> str:
+def _stamp_text(
+    marks: int, shown: int, all_have_actions: bool, *, interactive: bool = False,
+) -> str:
     """The sheet stamp's words. Says only what is true of this sheet."""
     parts = [
         f"AI DRAFT REVIEW - {marks} MARKUP{'' if marks == 1 else 'S'} ON THIS SHEET.",
@@ -1992,6 +2416,11 @@ def _stamp_text(marks: int, shown: int, all_have_actions: bool) -> str:
     if shown:
         parts.append(
             f"{shown} show{'s' if shown == 1 else ''} the required action on the sheet."
+        )
+    if interactive:
+        parts.append(
+            "Tick the box beside a markup when it is fixed. "
+            "CLICK HERE TO SHOW ALL MARKUPS."
         )
     return " ".join(parts)
 
@@ -2025,8 +2454,13 @@ def _place_stamp(
 def _add_sheet_stamp(
     page: "pymupdf.Page", text: str, *, layer: int, occupied: Any,
     taken: "list[tuple[float, float, float, float]]",
+    show_all_action: "int | None" = None,
 ) -> bool:
-    """Draw the stamp on ``page`` as layered page content; ``False`` if no room."""
+    """Draw the stamp on ``page`` as layered page content; ``False`` if no room.
+
+    ``show_all_action`` makes the whole stamp a link that shows every markup
+    again — the way back that is on the sheet however the reader got there.
+    """
     lines = _wrap_lines(_base14_safe(text), _STAMP_MAX_TEXT_W, fontsize=_STAMP_FONTSIZE)
     w, h = _text_box_size(
         lines, fontsize=_STAMP_FONTSIZE, line_h=_STAMP_LINE_H, pad=_STAMP_PAD,
@@ -2046,6 +2480,13 @@ def _add_sheet_stamp(
         color=(0.2, 0.2, 0.2), rotate=int(page.rotation or 0), oc=layer,
     )
     taken.append(box)
+    if show_all_action:
+        try:
+            _insert_action_link(
+                page.parent, page, _derotate_rect(page, box), show_all_action, oc=layer,
+            )
+        except Exception:  # noqa: BLE001 - the stamp still reads; the cover has the link too
+            _log.debug("could not link the sheet stamp on page %d", page.number)
     return True
 
 
@@ -2057,8 +2498,10 @@ def _add_instructions_and_stamps(
     author: str,
     oc_layers: "dict[str, int] | None",
     sheet_meta: "dict[int, dict] | None" = None,
+    callout_boxes: "dict[str, tuple[float, float, float, float]] | None" = None,
 ) -> None:
-    """After the clouds and callouts: the instruction boxes, then each sheet's stamp.
+    """After the clouds and callouts: the instruction boxes, the interactive
+    parts of each mark (an interactive file only), then each sheet's stamp.
 
     Mutates ``collected`` with the ``instruction`` components it draws. Nothing
     here is mandatory to any placement, so every failure is logged and skipped
@@ -2104,6 +2547,30 @@ def _add_instructions_and_stamps(
         except Exception:  # noqa: BLE001
             _log.warning("could not add instructions on page %d", page_index)
 
+    # An interactive file: each mark's grey copy, isolation note and Done box.
+    # After the instructions, so a note never takes the spot an instruction
+    # could have had.
+    interactive = isinstance(oc_layers, _MarkupLayers) and oc_layers.interactive
+    if interactive:
+        for finding, placement in pairs:
+            if not collected.get(placement.placement_id):
+                continue
+            page_index = int(finding.page_index)
+            if placement.expected == "CLOUD":
+                mark = tuple(float(v) for v in finding.anchor.rect_pdf)
+            else:
+                mark = (callout_boxes or {}).get(placement.placement_id)
+            if mark is None:
+                continue
+            try:
+                _add_interactive_parts(
+                    doc[page_index], finding, mark, oc_layers,
+                    cloud=placement.expected == "CLOUD", occupied=sampler(page_index),
+                    taken=taken_by_page.setdefault(page_index, []),
+                )
+            except Exception:  # noqa: BLE001
+                _log.warning("could not add interactive parts for %s", finding.qc_id)
+
     marks: dict[int, set[str]] = {}
     shown: dict[int, int] = {}
     for pid, comps in collected.items():
@@ -2124,10 +2591,12 @@ def _add_instructions_and_stamps(
             text = _stamp_text(
                 len(pids), shown.get(page_index, 0),
                 all(pid in finding_by_pid and _action_text(finding_by_pid[pid]) for pid in pids),
+                interactive=interactive,
             )
             if not _add_sheet_stamp(
                 doc[page_index], text, layer=layer, occupied=sampler(page_index),
                 taken=taken_by_page.setdefault(page_index, []),
+                show_all_action=oc_layers.show_all_action if interactive else None,
             ):
                 _log.info("no clear spot for the sheet stamp on page %d", page_index)
         except Exception:  # noqa: BLE001
@@ -2319,8 +2788,13 @@ def _insert_index_pages(
     run_id: str,
     marks: "dict[str, tuple[int, int]] | None" = None,
     omitted: "list[str] | None" = None,
+    layers: "_MarkupLayers | None" = None,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
+
+    In an interactive file (``layers``) a row's link also isolates its finding
+    after the jump, the row carries the finding's Done box and greys out with
+    it, and every page has a *Show all markups* link.
 
     Every finding row carries a GOTO link that zooms onto its markup
     (:func:`_mark_dest`). ``marks`` maps a placement id to ``(page, xref)`` —
@@ -2356,14 +2830,33 @@ def _insert_index_pages(
         page = doc[i]
         title = INDEX_PAGE_LABEL + (f"  (page {i + 1}/{n_pages})" if n_pages > 1 else "")
         page.insert_text((36, 42), title, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
+        interactive = layers is not None and layers.interactive
         page.insert_text(
             (36, 60),
-            _fit_text(_INDEX_SUBTITLE, _INDEX_COL_RIGHT - 36.0, fontsize=8),
+            _fit_text(
+                _INDEX_SUBTITLE_INTERACTIVE if interactive else _INDEX_SUBTITLE,
+                _INDEX_COL_RIGHT - 36.0, fontsize=8,
+            ),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
+        if interactive:
+            # The way back from an isolated markup, on every index page.
+            try:
+                width = pymupdf.get_text_length(_INDEX_SHOW_ALL, fontname="helv", fontsize=9)
+                x0 = _INDEX_COL_RIGHT - width
+                page.insert_text((x0, 42), _INDEX_SHOW_ALL, fontsize=9, color=_LINK_BLUE)
+                page.draw_line((x0, 44), (_INDEX_COL_RIGHT, 44), color=_LINK_BLUE, width=0.5)
+                _insert_action_link(
+                    doc, page, pymupdf.Rect(x0 - 3, 31, _INDEX_COL_RIGHT + 3, 47),
+                    layers.show_all_action,
+                )
+            except Exception:  # noqa: BLE001 - each sheet's stamp and note link back too
+                _log.debug("could not add the show-all link to index page %d", i)
         # Column headers.
         y = _INDEX_TOP - 8
         for x, label in zip(_INDEX_COL_X, _INDEX_COL_LABELS):
+            if x == _INDEX_COL_X[-1] and not interactive:
+                continue
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
         batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
@@ -2419,14 +2912,38 @@ def _insert_index_pages(
                 mark_page if mark_page is not None else finding.page_index
             ) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+            # A drawn finding's own layers; a listed-only (gated) row has none.
+            own = (
+                layers.for_finding(finding)
+                if layers is not None and mark_xref is not None else None
+            )
             if 0 <= target_page < doc.page_count:
                 row_top = y - 9
+                # The link stops short of the Done column, so a click on the
+                # box is never a click on the row.
                 _insert_goto_link(
                     doc, page,
-                    pymupdf.Rect(34, row_top, _INDEX_PAGE_W - 34, y + 3),
+                    pymupdf.Rect(34, row_top, _INDEX_COL_X[-1] - _INDEX_COL_GUTTER, y + 3),
                     target_page,
                     _mark_dest(doc, target_page, mark_xref=mark_xref, view_rect=rect),
+                    then=own.isolate_action if own is not None else None,
                 )
+                if own is not None and _status(finding) != "REJECTED":
+                    try:
+                        # Greyed out with its finding: a veil over the row, on
+                        # the finding's done layer.
+                        page.draw_rect(
+                            pymupdf.Rect(34, row_top, _INDEX_COL_X[-1] - _INDEX_COL_GUTTER, y + 3),
+                            color=None, fill=(1, 1, 1), fill_opacity=0.72, oc=own.done,
+                        )
+                        box_x = _INDEX_COL_X[-1] + 6.0
+                        layers.add_done_box(
+                            page, own,
+                            pymupdf.Rect(box_x, y - 8.5, box_x + _DONE_BOX_PT, y + 1.5),
+                            on_layer=False,
+                        )
+                    except Exception:  # noqa: BLE001 - the row and its link stand
+                        _log.warning("could not add the Done box for %s", own.qc_id)
                 if index_only:
                     index_only_rows.append(
                         f"{placement.placement_id}@{target_page}@{int(round(row_top))}"
@@ -2924,9 +3441,14 @@ def _annotate_units(
     index_pages: bool = True,
     audit_stats: dict | None = None,
     include_appendix: bool = False,
+    interactive: bool = False,
 ) -> list[MarkupReceipt]:
     """Draw every ``(finding, placement)`` pair onto a copy of ``pdf_path``, stamp
     each component, save, then reopen and reconcile → one receipt per placement.
+
+    ``interactive`` adds what lets a reader isolate a finding and mark it done
+    from inside the viewer (:class:`_MarkupLayers`). It adds layers, form
+    fields and scripts; no placement depends on any of it.
 
     Opens the *original* read-only and saves a **new** file (``out_path`` must
     differ from the source), so the source is never modified. Every drawn
@@ -2957,7 +3479,11 @@ def _annotate_units(
             for f, pl in pairs
             if pl.expected in ("CLOUD", "MARGIN", "REVIEW_NOTES")
         }
-        oc_layers = _create_severity_layers(doc, tiers_present) if tiers_present else {}
+        oc_layers = _MarkupLayers(
+            doc, _create_severity_layers(doc, tiers_present) if tiers_present else {},
+            interactive=interactive,
+        )
+        callout_boxes: dict[str, tuple[float, float, float, float]] = {}
         callouts_by_page: dict[int, list[tuple[Finding, MarkupPlacement]]] = {}
         for finding, placement in pairs:
             kind = placement.expected
@@ -2993,7 +3519,7 @@ def _annotate_units(
                 drawn, page_overflow = _add_margin_callouts(
                     doc[page_index], group,
                     meta=(sheet_meta or {}).get(page_index), author=author,
-                    oc_layers=oc_layers,
+                    oc_layers=oc_layers, boxes_out=callout_boxes,
                 )
                 for pid, comps in drawn.items():
                     collected.setdefault(pid, []).extend(
@@ -3008,7 +3534,7 @@ def _annotate_units(
         try:
             _add_instructions_and_stamps(
                 doc, pairs, collected, author=author, oc_layers=oc_layers,
-                sheet_meta=sheet_meta,
+                sheet_meta=sheet_meta, callout_boxes=callout_boxes,
             )
         except Exception:  # noqa: BLE001 - never sinks the file
             _log.warning("could not add instructions / sheet stamps for %s", src.name)
@@ -3064,6 +3590,30 @@ def _annotate_units(
                 )
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
                 _log.warning("could not build the review-notes page for %s", src.name)
+        if interactive and notes_collected:
+            # A callout that overflowed to the notes page is isolated and marked
+            # done there, like any other mark.
+            finding_by_pid = {pl.placement_id: f for f, pl in pairs}
+            note_boxes: dict[int, list[tuple[str, tuple[float, float, float, float]]]] = {}
+            for pid, comps in notes_collected.items():
+                for component, xref, pno in comps:
+                    user = _annot_user_rect(doc, xref) if component == "callout" else None
+                    if user is not None:
+                        height = float(doc[pno].rect.height)   # a generated, unrotated page
+                        note_boxes.setdefault(pno, []).append(
+                            (pid, (user[0], height - user[3], user[2], height - user[1]))
+                        )
+            for pno, boxes in sorted(note_boxes.items()):
+                taken = [box for _pid, box in boxes]
+                occupied = _page_occupancy(doc[pno])
+                for pid, box in boxes:
+                    try:
+                        _add_interactive_parts(
+                            doc[pno], finding_by_pid[pid], box, oc_layers,
+                            cloud=False, occupied=occupied, taken=taken,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _log.warning("could not add interactive parts to a review note")
 
         # Where each placement's mark actually sits — its page before the
         # front-insert shift, and the annotation itself, whose /Rect is what a
@@ -3082,6 +3632,7 @@ def _annotate_units(
             try:
                 inserted = _insert_index_pages(
                     doc, *index_groups, run_id=run_id, marks=marks, omitted=omitted,
+                    layers=oc_layers if interactive else None,
                 )
                 if inserted != n_index:      # planned vs written must agree
                     _log.warning(
@@ -3128,6 +3679,11 @@ def _annotate_units(
         except Exception:  # noqa: BLE001
             _log.warning("could not build the findings bookmark outline for %s", src.name)
 
+        try:
+            oc_layers.finalize()
+        except Exception:  # noqa: BLE001 - the markups are all there; only less interactive
+            _log.warning("could not finish the interactive layers for %s", src.name)
+
         out.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out), garbage=3, deflate=True)
     finally:
@@ -3148,6 +3704,7 @@ def _execute_reviewed_pdf_job(job: _ReviewedPdfJob) -> _ReviewedPdfOutcome:
             sheet_meta=job.sheet_meta,
             audit_stats=job.audit_stats,
             include_appendix=job.include_appendix,
+            interactive=job.interactive,
         )
         return _ReviewedPdfOutcome(receipts=receipts)
     except Exception as exc:  # noqa: BLE001 - source failures are non-fatal
@@ -3349,6 +3906,7 @@ def annotate_pdf(
     audit_stats: dict | None = None,
     include_appendix: bool = False,
     artifact_run_id: str | None = None,
+    interactive: bool = False,
 ) -> MarkupRunResult:
     """Write a ``_reviewed`` copy of ``pdf_path`` with each finding drawn + proven.
 
@@ -3380,7 +3938,7 @@ def annotate_pdf(
     receipts = _annotate_units(
         pdf_path, pairs, out_path, run_id=run_id, author=author,
         sheet_meta=sheet_meta, index_pages=index_pages, audit_stats=audit_stats,
-        include_appendix=include_appendix,
+        include_appendix=include_appendix, interactive=interactive,
     )
     return _result_from_receipts(receipts, [pl for _, pl in pairs], [Path(out_path)])
 
@@ -3421,8 +3979,14 @@ def write_reviewed_pdfs(
     artifact_run_id: str | None = None,
     skip_source_ids: "set[str] | None" = None,
     max_workers: int | None = None,
+    interactive: bool = False,
 ) -> MarkupRunResult:
     """Write one ``<stem>_reviewed.pdf`` per source with QC content, receipt-backed.
+
+    ``interactive`` makes each reviewed PDF one its reader can work in: a
+    cover-page click isolates a finding, and a Done box greys it out
+    (:mod:`drawing_analyzer.markup_scripts`). It adds layers, form fields and
+    scripts to the file, so it is the caller's choice; the pipeline turns it on.
 
     Findings are matched to a source PDF by the host-owned ``source_id``
     (DA-001), so two inputs that share a basename each receive **only their own**
@@ -3572,6 +4136,7 @@ def write_reviewed_pdfs(
             sheet_meta=sheet_meta or None,
             audit_stats=audit_stats,
             include_appendix=include_appendix,
+            interactive=bool(interactive),
         ))
 
     outcomes = _run_reviewed_pdf_jobs(jobs, max_workers=max_workers)

@@ -1395,6 +1395,30 @@ RUNTIME_TRANSPARENCY = HelpDocument(
             ),
         ),
         _section(
+            "Working in the reviewed PDF",
+            _para(
+                "Open the reviewed PDF in Bluebeam Revu. The cover page is the to-do "
+                "list. Click a row to jump to its markup and see it on its own: the "
+                "other markups are hidden and a red note beside it says so. Click the "
+                "note, the sheet's stamp, or Show all markups on the cover page to "
+                "bring everything back."
+            ),
+            _bullet(
+                "Tick a finding's Done box - on its cover row or beside its markup, "
+                "they are the same box - and its markup turns into a grey copy marked "
+                "DONE. Untick it to bring the markup back. Ticks are saved with the "
+                "file."
+            ),
+            _bullet(
+                "Hiding is never saved: reopening the file always shows every markup."
+            ),
+            _bullet(
+                "This uses a small script inside the PDF. If your office does not "
+                "allow scripts in PDFs, set DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0 to "
+                "get the same markups without the clicking and the boxes."
+            ),
+        ),
+        _section(
             "Findings become a to-do list",
             _para(
                 "After every check has run, one text-only call per 80 findings sorts "

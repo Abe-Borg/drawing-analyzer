@@ -767,6 +767,36 @@ consume ledger entries and nothing else.
   question, not `located_elsewhere`). Do not loosen it from the prompt side.
   `to_dict` writes `action` only when set. A new estimate component
   (`family="action_plan"`) keeps the live-spend forecast non-empty.
+- **Interactive reviewed PDFs** (`markup_scripts.py` + `annotate._MarkupLayers`):
+  the pipeline writes them (`_interactive_markups_enabled`,
+  `DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0` turns it off); the library writer's
+  `interactive=` defaults to **off**, which is why the writer's own tests see
+  plain files. Each drawn finding with a safe QC number (`is_safe_id` — the id
+  is spliced into a layer name, a field name and a script) gets three layers:
+  live, done, only. `markup_scripts.layer_states` is the rule and
+  `sync_script` is the same rule in JavaScript; `tests/test_markup_scripts.py`
+  runs the script under Node against the Python (skipped only where Node is
+  missing). Change one, change both. Every mechanism was checked in Bluebeam
+  Revu before use, and these are the ones that held: a markup's `/OC` is an
+  **OCMD** (`/AllOn` of severity layer + live layer; MuPDF's renderer ignores
+  an OCMD on an annotation, poppler honors it); finding layers are removed
+  from `/Order` so the panel does not list them; the grey copy and the
+  isolation note are **page content** on layers that start OFF (an annotation
+  on an OFF layer was shown anyway, and `/Toggle` misbehaved); a Done box is a
+  checkbox **field** whose widgets (cover row + beside each mark) are `/Kids`
+  of one parent, with a shared `/A` running `sync_script(None)`; the same
+  action is the document-open script (`/Names /JavaScript`), because layer
+  state is not saved and field values are; a cover row is `GoTo` then
+  `/Next` the finding's isolate action. Scripts are inline literal strings in
+  shared action objects — not streams, not a document-level function. Never
+  put a drawn finding's control on a layer it cannot be reached from: the
+  isolation note is always placed (clear space, else under the mark), since
+  hiding markups without saying so is the one unacceptable outcome.
+  `finalize()` edits `/AcroForm /Fields`, `/Names` and `/Order` in place
+  (`_edit_ref_array` / `_locate_key` follow indirect refs) so a source PDF's
+  own layers, fields and scripts survive; a source with its own document
+  scripts keeps them and gets no open script. `page.get_text()` skips text on
+  an OFF layer, so tests read it with `/OFF` cleared.
 - **Disposition:** `anchor.py` maps a quote to a PDF rect: EXACT / FUZZY / TILE
   / UNANCHORED (UNANCHORED is the hallucination signal). Both fuzzy tiers carry
   the numeric veto: each digit-bearing token must sit at its own position in

@@ -2056,6 +2056,20 @@ paths never appear in any exported artifact.
   sheet. It is page content on its own layer, **QC markups - Sheet notes**, not
   an annotation: it adds no row to the Markups List and can be switched off
   with the layer. A sheet with no clear spot gets no stamp.
+- **See one markup on its own.** Clicking a cover-page row jumps to the markup
+  and hides every other markup, so it can be read without its neighbours. A
+  red note appears beside it — *SHOWING QC-014 ONLY. Other markups are hidden.
+  CLICK HERE TO SHOW ALL.* — and one click on it brings everything back. So do
+  *Show all markups* on the cover page and a click on any sheet's stamp.
+  Bookmarks jump without hiding anything. Reopening the file always shows
+  every markup.
+- **Done boxes.** Each finding has a **Done** box on its cover-page row and a
+  small one beside its markup; they are the same box, so ticking either ticks
+  both. A done finding's markup is replaced by a grey copy marked
+  `QC-014 DONE`, and its cover row greys out, so the cover page shows progress
+  at a glance. Unticking brings the markup back. Ticks are saved with the PDF.
+  See [Working in the reviewed PDF](#working-in-the-reviewed-pdf) for how it
+  is built and what it depends on.
 - **Popups are exhaustive**: the finding text, the verbatim quote, the
   cross-sheet pointer (dual-anchored conflicts cite each other by QC number),
   verification status + verifier note, code refs plus the
@@ -2066,6 +2080,54 @@ paths never appear in any exported artifact.
   a final **"checked and consistent"** page listing what the deterministic
   auditors verified *clean* — numeric relationships that checked out, references
   that resolved — the balance column of a real review.
+
+### Working in the reviewed PDF
+
+A reviewed PDF written by a pipeline run is **interactive**: its reader can
+isolate a finding and mark findings done from inside the viewer, with nothing
+installed. Both are layer visibility, driven by a small script the PDF carries.
+
+- **Three layers per drawn finding**, named from its QC number: its markup, its
+  grey *done* copy, and its *showing this one only* note. They are left out of
+  the Layers panel, which still lists the three severity layers and the sheet
+  notes. A markup's visibility is a membership of **both** its severity layer
+  and its own layer, so the panel's severity switches keep working.
+- **The grey copy and the note are page content**, not annotations: they add no
+  row to the Markups List.
+- **A Done box is a form checkbox.** Its value is saved with the file. Layer
+  visibility is not saved by Bluebeam, so the script that applies the ticks
+  also runs when the document opens.
+- **The rule** — which layer is on when — is
+  [`markup_scripts.layer_states`](src/drawing_analyzer/markup_scripts.py): a
+  finding is shown when nothing is isolated or it is the isolated one; a shown
+  finding is its markup, or its grey copy if it is done. The JavaScript in the
+  PDF is the same rule, and a test runs the two against each other.
+- **A link jumps first and runs its script second**, so in a viewer that runs
+  no scripts the cover page still navigates; the Done boxes then tick without
+  greying anything.
+
+What it depends on, and what was checked by hand in **Bluebeam Revu**: layer
+memberships on markups, layers hidden from the panel, page content on layers
+that start off, checkbox fields with a script, a script when the document
+opens, and no security prompt for any of it. Not checked: other viewers. A
+browser's PDF viewer is likely to show the boxes and ignore the scripts.
+
+Things to know:
+
+- While a finding is done, its grey copy is not clickable. Its comment is still
+  in the Markups List, and unticking the box brings the markup back.
+- Isolation is never saved: a reopened file shows every markup.
+- A drawing that already carries document-level scripts keeps them; the
+  open-time script is then not added, and the layers catch up with the ticks on
+  the reader's first click instead.
+- The file contains JavaScript and form fields. If your mail filter or PDF
+  policy objects to scripts in a PDF, set
+  `DRAWING_ANALYZER_INTERACTIVE_MARKUPS=0` to write plain reviewed PDFs: the
+  same markups, cover page, instructions and stamps, with no per-finding
+  layers, no boxes and no scripts.
+
+The library writer (`write_reviewed_pdfs` / `annotate_pdf`) takes
+`interactive=` and defaults to **off**; the pipeline turns it on.
 
 ### Gating — all findings get ink (Part III, §18)
 
@@ -2775,6 +2837,7 @@ quality decision.
 | `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Each fetch pulls at most 4k tokens of clause text and nearby context into the request. Rides the verdict-cache key. |
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
+| `DRAWING_ANALYZER_INTERACTIVE_MARKUPS` | on | `0` writes plain reviewed PDFs with no per-finding layers, Done boxes or scripts (see [Working in the reviewed PDF](#working-in-the-reviewed-pdf)). |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
 | `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Haiku 5.5, one flat finding object whose schema mirrors the prompt's field list. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |

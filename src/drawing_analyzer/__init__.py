@@ -60,6 +60,8 @@ Module layout::
                       (text-only; the host decides what may be drawn on a sheet)
     annotate.py       reviewed-PDF markup writer + reopen/reconcile receipts
                       (artifact-backed coverage, DA-007; PyMuPDF importer 2 of 2)
+    markup_scripts.py the reviewed PDF's isolate / done rule: layer names, the
+                      rule in Python, and the same rule as the PDF's script
     run_journal.py    per-run event journal -> sanitized run.log (secrets
                       redacted + paths scrubbed at emit time; DA-024)
     resource_pressure.py  per-run resource-starvation record: API throttling
