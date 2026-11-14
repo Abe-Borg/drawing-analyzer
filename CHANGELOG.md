@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-13
+
 ### Added
 
 - **Live view in the GUI.** The activity area is now the **Activity** section
@@ -42,7 +44,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Budget cap** (*Stop the run at $*, `SpendMonitor(budget=...)`): stops the
   run through the kill switch when its spend reaches the amount. The cap can
   be changed or turned off while the run works, and is remembered between
-  sessions.
+  sessions. Work already submitted can still be billed, so the final cost can
+  exceed the cap.
 - `drawing_analyzer.live_spend.SpendMonitor` / `SpendSnapshot`
   (`extract_drawing_context(spend=...)`) and `cost.spend_forecast(estimate)`
   for library callers. `CancelToken.cancel(reason)` records why a run was
@@ -52,6 +55,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The GUI opens taller when the screen has room (up to 880 px, measured in the
   toolkit's scaled units so a 125–150% display is not overshot).
+- The full QC cost confirmation offers **Don't show this again**, remembered
+  between sessions. **Confirm estimated cost before each full QC run** turns
+  it back on; skipped confirmations still log the estimate.
+- Fast mode no longer logs a batch-discount hint when batch processing is off.
 
 ## [1.13.0] - 2026-11-13
 
