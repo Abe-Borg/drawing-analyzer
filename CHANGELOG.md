@@ -6,6 +6,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Keep the model's checks as your own checklist.** On the Live view's Plan
+  tab, tick checks from the model's review plan (one at a time, a whole plan
+  from its heading row, or Select all) and press Save selected…, or click a
+  check for its menu: its full text, how the run answered it, Save checklist
+  item…, Add to selection and Copy check text. The save dialog writes the
+  checks to a new checklist in your profiles folder or adds them to one that
+  is already there. It pre-fills the sheet prefixes the plan was aimed at,
+  skips a check whose text you already have and says where it is, and warns
+  that code citations are saved with their edition. A new file never
+  overwrites another, even one saved at the same moment from another window.
+  After a save, the rows are tagged as saved and the checklist is listed
+  under Review profiles. It is ticked when it fits the loaded set, or when the
+  run ends if you saved during one. Saving is local and makes no API call.
+
 ### Fixed
 
 - **The window no longer lags while the Live view animates.** When a read

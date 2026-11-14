@@ -491,6 +491,29 @@ map lives in `src/drawing_analyzer/__init__.py`.
   `INSIGHT_REFRESH_SECONDS` (unthrottled in `finish` / `stop`), each reader in
   its own `try` so one odd object blanks one tab. A new stage needs a sentence
   in `live_tabs.STAGE_STORY`.
+- **Keeping checks** (Plan tab → `checklist_save.py`): `LiveScene.picks`
+  (`live_tabs.ChecklistPicks`) is display state only, cleared by
+  `reset_views`. Only `origin == "model"` items are pickable; saved/held ids
+  are not. A view registers click regions per frame with `scene.add_hit`
+  (topmost wins; `menu=True` regions alone act while a check's menu is open,
+  any other click just closes it; the wheel and a tab switch close it too).
+  Every row slot emits the same keys in every state (`_hidden` placeholders),
+  so a toggle redraws instead of recreating. A click that needs the host
+  leaves `SaveRequest` / `CopyRequest` on `picks.request`; `LivePanel.click`
+  takes it and calls `on_request` **after** `kick()`. The GUI answers with
+  `_save_checks_dialog` (non-blocking toplevel) and reports back through
+  `LivePanel.mark_saved(ids, label, held)`, then `_reload_profile_panel`
+  (the profile list lives in `_profile_holder`). Prefill prefixes come from
+  `ChecklistPlan.sheet_prefixes` → `LiveCheckGroup.prefixes`. Writes: plan
+  first, re-plan against the disk at Save (`save_new` / `save_append`),
+  temp file + `os.replace` to append; a new file lands by `os.link` (atomic
+  refusal; exclusive create where links are unsupported) and a taken name
+  retries at the next free file and profile name. A save while `_busy`
+  defers the profile suggestion (`_suggest_after_busy`); every place busy
+  ends calls `_resume_deferred_suggestions`. Repeats compare `normalize_check` (case-folded, whitespace
+  collapsed, trailing punctuation off) against the target file, the run's own
+  user items, and earlier picks. Appending keeps the file's lines and line
+  endings; only an integer `version` and `date` in its header change.
 - **Reasoning summaries** (`thought_stream.py`): a run with a monitor (and
   `DRAWING_ANALYZER_SHOW_THINKING` not `0`) puts a `ThoughtStream` on
   `ResourcePressure.thoughts`, so workers reach it through `worker_binding()`.
