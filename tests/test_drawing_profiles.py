@@ -312,6 +312,17 @@ def test_scoping_leaves_ids_and_other_sheets_keys_untouched():
     )
     assert cp.for_key(("s.pdf", 0)).key != edited.for_key(("s.pdf", 0)).key
     assert cp.for_key(("s.pdf", 1)).key == edited.for_key(("s.pdf", 1)).key
+    # Two uploads can share a file name (and so a profile name); each keeps
+    # its own items and its own scope.
+    twins = P.ChecklistPlan([
+        P.Profile(name="upload:checklist.md", title="checklist.md",
+                  disciplines=("fp",), items=("pump check",)),
+        P.Profile(name="upload:checklist.md", title="checklist.md",
+                  disciplines=("e",), items=("panel check",)),
+    ], scopes)
+    assert twins.for_key(("s.pdf", 0)).ids == ("U1.1",)
+    assert twins.for_key(("s.pdf", 1)).ids == ("U2.1",)
+    assert twins.for_key(("s.pdf", 2)).ids == ()
     # Narrowing an uploaded checklist to a prefix is a scope change only.
     scoped = P.scoped_to(office, " F ; fp ")
     assert scoped.disciplines == ("f", "fp") and scoped.items == office.items

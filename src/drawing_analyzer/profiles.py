@@ -554,25 +554,35 @@ class ChecklistItem:
     number: int           # 1-based position within its profile
 
 
-def checklist_items(profiles: Iterable[Profile]) -> list[ChecklistItem]:
-    """Every non-blank item across ``profiles``, in order, with its id."""
-    out: list[ChecklistItem] = []
+def _items_per_profile(profiles: Iterable[Profile]) -> list[list[ChecklistItem]]:
+    """Each selected profile's items, parallel to ``profiles``.
+
+    Grouped by **position in the selection**, never by name: two uploaded
+    checklists can share a file name (``fire/checklist.md`` and
+    ``electrical/checklist.md``) and still be two checklists with two scopes.
+    """
+    out: list[list[ChecklistItem]] = []
     counters = {"user": 0, "model": 0}
     for profile in profiles or []:
         origin = "model" if is_model_plan(profile) else "user"
         counters[origin] += 1
         prefix = f"{'M' if origin == 'model' else 'U'}{counters[origin]}"
-        number = 0
+        items: list[ChecklistItem] = []
         for raw in profile.items:
             text = (raw or "").strip()
             if not text:
                 continue
-            number += 1
-            out.append(ChecklistItem(
-                id=f"{prefix}.{number}", text=text, profile=profile.name,
-                title=profile.title, origin=origin, number=number,
+            items.append(ChecklistItem(
+                id=f"{prefix}.{len(items) + 1}", text=text, profile=profile.name,
+                title=profile.title, origin=origin, number=len(items) + 1,
             ))
+        out.append(items)
     return out
+
+
+def checklist_items(profiles: Iterable[Profile]) -> list[ChecklistItem]:
+    """Every non-blank item across ``profiles``, in order, with its id."""
+    return [item for items in _items_per_profile(profiles) for item in items]
 
 
 _ITEM_ID_RE = re.compile(r"^[UM]\d{1,3}\.\d{1,4}$")
@@ -698,15 +708,14 @@ class ChecklistPlan:
 
     def __init__(self, profiles: Iterable[Profile] | None = None, scopes: Any = None):
         self.profiles: list[Profile] = list(profiles or [])
-        self.items: list[ChecklistItem] = checklist_items(self.profiles)
+        self._per_profile = _items_per_profile(self.profiles)
+        self.items: list[ChecklistItem] = [
+            item for items in self._per_profile for item in items
+        ]
         self._scopes: dict = dict(scopes or {})
         self._model_slugs = frozenset(
             tag for p in self.profiles if is_model_plan(p) for tag in p.disciplines
         )
-        by_profile: dict[str, list[ChecklistItem]] = {}
-        for item in self.items:
-            by_profile.setdefault(item.profile, []).append(item)
-        self._by_profile = by_profile
         self._memo: dict = {}
 
     def __bool__(self) -> bool:
@@ -718,16 +727,11 @@ class ChecklistPlan:
 
     def for_scope(self, scope: SheetScope | None) -> SheetChecklist:
         if scope not in self._memo:
-            seen: set[str] = set()
             items: list[ChecklistItem] = []
-            for profile in self.profiles:
-                # Two profiles sharing a name share their items' ids' owner;
-                # each is still emitted once, in selection order.
-                if profile.name in seen:
-                    continue
-                seen.add(profile.name)
+            # Each selected profile is scoped on its own, by position.
+            for profile, own in zip(self.profiles, self._per_profile):
                 if profile_applies(profile, scope, model_slugs=self._model_slugs):
-                    items.extend(self._by_profile.get(profile.name, ()))
+                    items.extend(own)
             self._memo[scope] = SheetChecklist(tuple(items))
         return self._memo[scope]
 
